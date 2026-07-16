@@ -1,9 +1,8 @@
 # Installs the latest CodeContext release to ~/.codecontext/bin (Windows).
-# Usage: irm https://raw.githubusercontent.com/OWNER/code-context/main/scripts/install.ps1 | iex
+# Usage: irm https://raw.githubusercontent.com/ben-parker/code-context/main/scripts/install.ps1 | iex
 $ErrorActionPreference = 'Stop'
 
-# Replace OWNER once the GitHub repository exists.
-$repo = 'OWNER/code-context'
+$repo = 'ben-parker/code-context'
 # The release matrix currently publishes win-x64 only; on ARM64 the x64 binary runs
 # through Windows x64 emulation. Revisit if a win-arm64 artifact is added to the matrix.
 $rid = 'win-x64'

@@ -1,10 +1,9 @@
 #!/usr/bin/env sh
 # Installs the latest CodeContext release to ~/.codecontext/bin (Linux/macOS).
-# Usage: curl -fsSL https://raw.githubusercontent.com/OWNER/code-context/main/scripts/install.sh | sh
+# Usage: curl -fsSL https://raw.githubusercontent.com/ben-parker/code-context/main/scripts/install.sh | sh
 set -eu
 
-# Replace OWNER once the GitHub repository exists.
-repo='OWNER/code-context'
+repo='ben-parker/code-context'
 codecontext_home="$HOME/.codecontext"
 install_dir="$codecontext_home/bin"
 
