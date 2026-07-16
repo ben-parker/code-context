@@ -182,6 +182,21 @@ public class InMemoryNodeRepositoryTests
     }
 
     [Fact]
+    public async Task PublicIdentifier_IsIndexedSeparatelyAndMustBeUnique()
+    {
+        var first = CreateTestNode("internal-1", "Run", "Method");
+        first.Identifier = "csharp:Example.Service.Run(int)";
+        await _repository.UpsertAsync(first);
+
+        Assert.Same(first, await _repository.GetByIdentifierAsync(first.Identifier));
+        Assert.Null(await _repository.GetByIdentifierAsync("internal-1"));
+
+        var duplicate = CreateTestNode("internal-2", "Run", "Method");
+        duplicate.Identifier = first.Identifier;
+        await Assert.ThrowsAsync<InvalidDataException>(() => _repository.UpsertAsync(duplicate));
+    }
+
+    [Fact]
     public async Task UpsertAsync_WithExistingNode_UpdatesNode()
     {
         // Arrange

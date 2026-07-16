@@ -69,6 +69,25 @@ public class CSharpWorkerAnalyzerTests : IDisposable
         Assert.Equal("CodeContext.Core.Tests.TestFiles", methodNode.Namespace);
         Assert.Equal("public", methodNode.Visibility);
         Assert.Equal("MyMethod()", methodNode.Signature);
+        Assert.Equal("csharp:CodeContext.Core.Tests.TestFiles.TestClass.MyMethod()", methodNode.Identifier);
+    }
+
+    [Fact]
+    public void Analyze_EmitsUniqueIdentifiersAndMethodFamilyEdges()
+    {
+        var result = Analyze(("Family.cs", """
+            public interface IBase<T> { void Work(T value); }
+            public interface IDerived : IBase<int> { }
+            public class First : IDerived { public void Work(int value) { } }
+            public class Second : IDerived { void IBase<int>.Work(int value) { } }
+            public class Base { public virtual void Run(int value) { } }
+            public class Derived : Base { public override void Run(int value) { } }
+            """));
+
+        Assert.All(result.Nodes, node => Assert.False(string.IsNullOrWhiteSpace(node.Identifier)));
+        Assert.Equal(result.Nodes.Count, result.Nodes.Select(node => node.Identifier).Distinct().Count());
+        Assert.True(result.Edges.Count(edge => edge.Kind == "IMPLEMENTS_MEMBER") >= 2);
+        Assert.Contains(result.Edges, edge => edge.Kind == "OVERRIDES_MEMBER");
     }
 
     [Fact]

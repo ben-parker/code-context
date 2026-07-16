@@ -6,6 +6,7 @@ namespace CodeContext.Core.Repositories
     public interface ICodeNodeRepository
     {
         Task<CodeNode?> GetByIdAsync(string id);
+        Task<CodeNode?> GetByIdentifierAsync(string identifier);
         Task<List<CodeNode>> FindByNameAsync(string name, string? type = null, bool exact = false);
         Task<List<CodeNode>> GetAllAsync();
         Task UpsertAsync(CodeNode node);

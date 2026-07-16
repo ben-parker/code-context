@@ -421,6 +421,7 @@ function analyzeFile(workspace, workspaceId, program, checker, fileName, diagnos
     const root = workspace.rootPath;
     const fileRel = relPath(root, fileName);
     const graphPrefix = `typescript:${encodeURIComponent(workspaceId)}:`;
+    const publicIdentifier = qualified => `typescript:${fileRel}#${qualified}`;
 
     const nodeId = qualified => `${graphPrefix}${fileRel}#${qualified}`;
 
@@ -454,6 +455,7 @@ function analyzeFile(workspace, workspaceId, program, checker, fileName, diagnos
         const end = sourceFile.getLineAndCharacterOfPosition(tsNode.getEnd());
         const node = {
             id: nodeId(qualifiedNameOf(tsNode, sourceFile) || name),
+            identifier: publicIdentifier(qualifiedNameOf(tsNode, sourceFile) || name),
             name,
             kind,
             language: 'typescript',
@@ -476,6 +478,7 @@ function analyzeFile(workspace, workspaceId, program, checker, fileName, diagnos
     // traversal discarded otherwise correctly resolved top-level invocations.
     nodes.push({
         id: `${graphPrefix}${fileRel}`,
+        identifier: `typescript:${fileRel}`,
         name: fileRel,
         kind: 'Module',
         language: 'typescript',
@@ -532,6 +535,33 @@ function analyzeFile(workspace, workspaceId, program, checker, fileName, diagnos
                 const targetId = targetDecl ? idOfDeclaration(targetDecl) : typeName;
                 addEdge(declared.id, targetId, edgeKind,
                     targetDecl ? { targetName: typeName } : { targetName: typeName, unresolved: 'true' });
+
+                if (!targetDecl) continue;
+                const memberEdgeKind = heritage.token === ts.SyntaxKind.ExtendsKeyword
+                    ? 'OVERRIDES_MEMBER'
+                    : 'IMPLEMENTS_MEMBER';
+                const targetType = checker.getTypeAtLocation(typeRef);
+                for (const member of declNode.members ?? []) {
+                    if ((!ts.isMethodDeclaration(member) && !ts.isMethodSignature(member)) || !member.name) continue;
+                    const memberName = member.name.getText(sourceFile);
+                    const inherited = targetType.getProperty(memberName);
+                    const candidates = (inherited?.declarations ?? []).filter(inheritedDecl =>
+                        (ts.isMethodDeclaration(inheritedDecl) || ts.isMethodSignature(inheritedDecl))
+                        && workspace.hasFile(inheritedDecl.getSourceFile().fileName));
+                    const exactOverloads = candidates.filter(inheritedDecl =>
+                        parameterKey(inheritedDecl, inheritedDecl.getSourceFile())
+                        === parameterKey(member, sourceFile));
+                    // An instantiated generic member can have a different source-text
+                    // parameter key (T versus number). A single candidate is still
+                    // unambiguous; overloaded families require an exact key.
+                    const matched = exactOverloads.length > 0
+                        ? exactOverloads
+                        : candidates.length === 1 ? candidates : [];
+                    for (const inheritedDecl of matched) {
+                        addEdge(nodeId(qualifiedNameOf(member, sourceFile)), idOfDeclaration(inheritedDecl), memberEdgeKind,
+                            { targetName: memberName });
+                    }
+                }
             }
         }
     };

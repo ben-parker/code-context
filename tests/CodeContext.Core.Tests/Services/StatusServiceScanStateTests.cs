@@ -24,18 +24,20 @@ namespace CodeContext.Core.Tests.Services
         private readonly List<ILanguageParser> _parsers = new() { new StubCSharpParser() };
         private readonly ParserSessionRegistry _sessionRegistry = new();
 
-        private StatusService CreateService(IApiMetrics? apiMetrics = null)
+        private StatusService CreateService(
+            IApiMetrics? apiMetrics = null, ApplicationStartTime? applicationStartTime = null,
+            List<FileMetadata>? files = null)
         {
             _nodeRepository.GetAllAsync().Returns(new List<CodeNode>());
             _edgeRepository.GetAllAsync().Returns(new List<CodeEdge>());
-            _fileMetadataRepository.GetAllAsync().Returns(new List<FileMetadata>());
+            _fileMetadataRepository.GetAllAsync().Returns(files ?? new List<FileMetadata>());
             _fileMetadataRepository.GetCountByStatusAsync(Arg.Any<FileProcessingStatus>()).Returns(0);
 
             var options = Options.Create(new CodeContextOptions { RootPath = "/tmp/repo" });
             return new StatusService(
                 _nodeRepository, _edgeRepository, _fileMetadataRepository,
                 _repositoryFactory, _parsers, options, _scanState, _sessionRegistry,
-                apiMetrics ?? new ApiMetrics());
+                apiMetrics ?? new ApiMetrics(), applicationStartTime: applicationStartTime);
         }
 
         [Fact]
@@ -58,14 +60,29 @@ namespace CodeContext.Core.Tests.Services
 
             Assert.False(string.IsNullOrWhiteSpace(status.System.Version));
             Assert.False(string.IsNullOrWhiteSpace(status.System.InformationalVersion));
-            Assert.Equal(2, status.Api.ContractVersion);
+            Assert.Equal(1, status.Api.ContractVersion);
 
             var json = JsonSerializer.Serialize(status, CodeContextJsonContext.Default.StatusResponseDto);
             using var document = JsonDocument.Parse(json);
             Assert.Equal(
                 status.System.InformationalVersion,
                 document.RootElement.GetProperty("system").GetProperty("informationalVersion").GetString());
-            Assert.Equal(2, document.RootElement.GetProperty("api").GetProperty("contractVersion").GetInt32());
+            Assert.Equal(1, document.RootElement.GetProperty("api").GetProperty("contractVersion").GetInt32());
+        }
+
+        [Fact]
+        public async Task GetStatusAsync_UsesHostStartTimeBeforeFirstScan()
+        {
+            var started = DateTimeOffset.UtcNow.AddMinutes(-2);
+            var scanned = DateTime.UtcNow.AddMinutes(-1);
+            var status = await CreateService(
+                applicationStartTime: new ApplicationStartTime(started),
+                files: [new FileMetadata { FilePath = "/tmp/repo/A.cs", LastScanned = scanned }])
+                .GetStatusAsync();
+
+            Assert.Equal(started, DateTimeOffset.Parse(status.System.StartedAt));
+            Assert.True(DateTimeOffset.Parse(status.System.StartedAt) < DateTimeOffset.Parse(status.Indexing.LastScanAt!));
+            Assert.StartsWith("2m", status.System.Uptime);
         }
 
         [Fact]

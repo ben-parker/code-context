@@ -197,6 +197,7 @@ public sealed class AnalysisDeltaApplier : IAnalysisDeltaSink
         return new CodeNode
         {
             Id = node.Id,
+            Identifier = node.Identifier,
             Name = node.Name,
             Type = node.Kind,
             Language = node.Language,

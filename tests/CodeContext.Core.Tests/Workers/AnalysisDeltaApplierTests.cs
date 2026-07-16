@@ -34,7 +34,7 @@ public class AnalysisDeltaApplierTests
             Nodes: nodes, Edges: [], IsLastForRequest: isLastForRequest);
 
     private static ProtocolNode Node(string id, string file)
-        => new(id, id, "class", "fake", file);
+        => new(id, id, id, "class", "fake", file);
 
     [Fact]
     public async Task Apply_CommitsNodesWithOwnershipMetadata()

@@ -169,9 +169,10 @@
     },
     "node": {
       "type": "object",
-      "required": ["id", "name", "kind", "language"],
+      "required": ["id", "identifier", "name", "kind", "language"],
       "properties": {
         "id": { "type": "string", "description": "Stable id namespaced by language and parser/workspace ownership, e.g. 'csharp:ws-1:MyNs.MyClass'." },
+        "identifier": { "type": "string", "description": "Stable repository-wide public identity, independent of workspace and reindexing." },
         "name": { "type": "string" },
         "kind": { "type": "string", "description": "Versioned string ('class', 'method', ...), not a closed enum." },
         "language": { "type": "string" },

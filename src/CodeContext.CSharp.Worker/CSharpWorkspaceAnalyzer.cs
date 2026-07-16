@@ -294,6 +294,8 @@ public sealed class CSharpWorkspaceAnalyzer
         }
 
         private string NodeId(ISymbol symbol) => _idPrefix + symbol.ToDisplayString();
+        private static string PublicIdentifier(ISymbol symbol)
+            => "csharp:" + symbol.ToDisplayString();
 
         private ProtocolNode BuildNode(
             ISymbol symbol,
@@ -305,6 +307,7 @@ public sealed class CSharpWorkspaceAnalyzer
             var span = syntax.GetLocation().GetLineSpan();
             return new ProtocolNode(
                 Id: NodeId(symbol),
+                Identifier: PublicIdentifier(symbol),
                 Name: symbol.Name,
                 Kind: kind,
                 Language: "csharp",
@@ -380,6 +383,32 @@ public sealed class CSharpWorkspaceAnalyzer
                     ? new Dictionary<string, string> { ["isTest"] = "true" }
                     : null;
                 _nodes.Add(BuildNode(symbol, node, "Method", signature, metadata));
+
+                if (symbol.OverriddenMethod is { } overridden)
+                    AddEdge(NodeId(symbol), NodeId(NormalizeMethod(overridden)), "OVERRIDES_MEMBER");
+
+                var implementedMembers = new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default);
+                foreach (var implemented in symbol.ExplicitInterfaceImplementations)
+                    implementedMembers.Add(NormalizeMethod(implemented));
+
+                if (symbol.ContainingType is { } containingType)
+                {
+                    foreach (var @interface in containingType.AllInterfaces)
+                    {
+                        foreach (var member in @interface.GetMembers().OfType<IMethodSymbol>())
+                        {
+                            if (containingType.FindImplementationForInterfaceMember(member) is IMethodSymbol implementation
+                                && SymbolEqualityComparer.Default.Equals(
+                                    NormalizeMethod(implementation), NormalizeMethod(symbol)))
+                            {
+                                implementedMembers.Add(NormalizeMethod(member));
+                            }
+                        }
+                    }
+                }
+
+                foreach (var implemented in implementedMembers)
+                    AddEdge(NodeId(symbol), NodeId(implemented), "IMPLEMENTS_MEMBER");
             }
             base.VisitMethodDeclaration(node);
         }

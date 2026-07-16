@@ -43,7 +43,10 @@ public static class ProgramHelpers
         });
     }
 
-    public static void ConfigureCoreServices(IServiceCollection services, string rootPath, bool isProduction, int port = 7890, int idleTimeoutMinutes = 120, string? instanceId = null)
+    public static void ConfigureCoreServices(
+        IServiceCollection services, string rootPath, bool isProduction, int port = 7890,
+        int idleTimeoutMinutes = 120, string? instanceId = null,
+        ApplicationStartTime? applicationStartTime = null)
     {
         using var loggerFactory = LoggerFactory.Create(loggingBuilder =>
         {
@@ -57,6 +60,7 @@ public static class ProgramHelpers
 
         // Configure services
         services.AddLogging(options => options.AddConsole());
+        services.AddSingleton(applicationStartTime ?? new ApplicationStartTime(DateTimeOffset.UtcNow));
 
         services.Configure<CodeContextOptions>(options =>
         {
@@ -127,7 +131,7 @@ internal sealed class ParameterDescriptionTransformer : IOpenApiOperationTransfo
 {
     private static readonly Dictionary<string, string> ParameterDescriptions = new()
     {
-        ["identifier"] = "Name or file path to search for",
+        ["identifier"] = "Canonical returned identifier, name, or repository-relative/absolute file path",
         ["type"] = "Filter by type (Class, Method, Interface, Property, etc.)",
         ["depth"] = "How many relationship levels to traverse (0-10)",
         ["includeTests"] = "Whether to include test-related information",
@@ -138,8 +142,9 @@ internal sealed class ParameterDescriptionTransformer : IOpenApiOperationTransfo
         ["maxMatches"] = "Maximum ambiguous candidate summaries to return (1-50)",
         ["maxRelationships"] = "Maximum entries returned per relationship list (1-100)",
         ["maxCallSites"] = "Maximum locations returned per aggregated relationship (0-100)",
+        ["maxTestFiles"] = "Maximum test files returned; zero is count-only (0-100)",
+        ["maxTestMethods"] = "Maximum test methods returned per file; zero is count-only (0-100)",
         ["expandAmbiguous"] = "Expand bounded ambiguous matches instead of returning summaries",
-        ["qualifiedIdentifier"] = "Stable qualified identity from an ambiguous summary",
         ["containingType"] = "Filter members by containing type",
         ["namespace"] = "Filter by exact namespace or module",
         ["signature"] = "Filter by exact signature",
@@ -192,7 +197,31 @@ internal sealed class OpenApiDocumentTransformer : IOpenApiDocumentTransformer
             }
         };
 
+        // Minimal APIs keep only one schema when several .Produces<T>(200) calls use
+        // the same status code. Endpoints expose full view temporarily as a 206 schema
+        // anchor; fold that generated schema into the actual 200 union.
+        AddFullViewAlternative(document, "/api/context/complete", OperationType.Get);
+        AddFullViewAlternative(document, "/api/context/multi", OperationType.Post);
         await Task.CompletedTask;
+    }
+
+    private static void AddFullViewAlternative(
+        OpenApiDocument document, string path, OperationType operationType)
+    {
+        if (!document.Paths.TryGetValue(path, out var pathItem)
+            || !pathItem.Operations.TryGetValue(operationType, out var operation)
+            || !operation.Responses.TryGetValue("200", out var response)
+            || !operation.Responses.TryGetValue("206", out var fullResponse)
+            || response.Content is null
+            || fullResponse.Content is null
+            || !response.Content.TryGetValue("application/json", out var compactMedia)
+            || !fullResponse.Content.TryGetValue("application/json", out var fullMedia)
+            || compactMedia.Schema is not { } current
+            || fullMedia.Schema is not { } full)
+            return;
+
+        compactMedia.Schema = new OpenApiSchema { OneOf = [current, full] };
+        operation.Responses.Remove("206");
     }
 }
 
@@ -206,7 +235,9 @@ internal sealed class CodeNodeArraySchemaTransformer : IOpenApiSchemaTransformer
         // Fix ContextRelationships arrays
         if (context.JsonPropertyInfo?.Name == "usedBy" ||
             context.JsonPropertyInfo?.Name == "relatedItems" ||
-            context.JsonPropertyInfo?.Name == "uses")
+            context.JsonPropertyInfo?.Name == "uses" ||
+            context.JsonPropertyInfo?.Name == "methodFamilyMembers" ||
+            context.JsonPropertyInfo?.Name == "staticallyBoundTargets")
         {
             if (schema.Type == "array" && schema.Items != null && !schema.Items.Properties.Any())
             {

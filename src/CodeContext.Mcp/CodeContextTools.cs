@@ -12,7 +12,7 @@ public sealed class CodeContextTools
     [McpServerTool, Description("Get comprehensive context for a code identifier. Returns relationships, dependencies, tests, and metrics.")]
     public static async Task<string> GetContext(
         IContextService contextService,
-        [Description("Name or file path to search for")] string identifier,
+        [Description("Canonical returned identifier, symbol name, or file path")] string identifier,
         [Description("Filter by type (Class, Method, Interface, Property, etc.)")] string? type = null,
         [Description("How many relationship levels to traverse (0-10)")] int depth = 1,
         [Description("Whether to include test-related information")] bool includeTests = false,
@@ -23,8 +23,9 @@ public sealed class CodeContextTools
         [Description("Maximum ambiguous candidates returned")] int maxMatches = 5,
         [Description("Maximum entries returned per relationship list")] int maxRelationships = 10,
         [Description("Maximum source locations returned per aggregated relationship; zero is count-only")] int maxCallSites = 3,
+        [Description("Maximum test files returned; zero is count-only")] int maxTestFiles = 5,
+        [Description("Maximum test methods returned per file; zero is count-only")] int maxTestMethods = 5,
         [Description("Expand bounded ambiguous matches instead of returning summaries")] bool expandAmbiguous = false,
-        [Description("Stable qualified identity returned by an ambiguous summary")] string? qualifiedIdentifier = null,
         [Description("Filter members by their containing type")] string? containingType = null,
         [Description("Filter by exact namespace or module")] string? @namespace = null,
         [Description("Filter by exact signature")] string? signature = null,
@@ -37,7 +38,7 @@ public sealed class CodeContextTools
             {
                 var full = await contextService.GetCompleteContextAsync(
                     identifier, type, depth, includeTests, includeContent, exact ?? false,
-                    includeRelated, includeMetrics, qualifiedIdentifier, containingType,
+                    includeRelated, includeMetrics, maxTestFiles, maxTestMethods, containingType,
                     @namespace, signature, sourceFile);
                 return JsonSerializer.Serialize(full, CodeContextJsonContext.Default.CompleteContextResponse);
             }
@@ -45,7 +46,7 @@ public sealed class CodeContextTools
             var compact = await contextService.GetCompactContextAsync(
                 identifier, type, depth, includeTests, includeContent, exact,
                 includeRelated, includeMetrics, maxMatches, maxRelationships, expandAmbiguous,
-                maxCallSites, qualifiedIdentifier, containingType, @namespace, signature, sourceFile);
+                maxCallSites, maxTestFiles, maxTestMethods, containingType, @namespace, signature, sourceFile);
             return JsonSerializer.Serialize(
                 compact, CodeContextJsonContext.Default.CompactContextResponse);
         }
@@ -61,7 +62,7 @@ public sealed class CodeContextTools
                     {
                         identifier, type, depth, includeTests, includeContent, exact,
                         includeRelated, includeMetrics, maxMatches, maxRelationships,
-                        maxCallSites, expandAmbiguous, qualifiedIdentifier, containingType,
+                        maxCallSites, maxTestFiles, maxTestMethods, expandAmbiguous, containingType,
                         @namespace, signature, sourceFile, view
                     }
                 }
@@ -80,8 +81,9 @@ public sealed class CodeContextTools
         [Description("Exact matching; omit for exact-first fallback")] bool? exact = null,
         [Description("Maximum entries returned per relationship list")] int maxRelationships = 3,
         [Description("Maximum source locations per aggregated relationship")] int maxCallSites = 3,
+        [Description("Maximum test files returned; zero is count-only")] int maxTestFiles = 5,
+        [Description("Maximum test methods per file; zero is count-only")] int maxTestMethods = 5,
         [Description("Expand bounded ambiguous matches")] bool expandAmbiguous = false,
-        [Description("Stable qualified identity filter")] string? qualifiedIdentifier = null,
         [Description("Containing type filter")] string? containingType = null,
         [Description("Exact namespace or module filter")] string? @namespace = null,
         [Description("Exact signature filter")] string? signature = null,
@@ -98,8 +100,9 @@ public sealed class CodeContextTools
             Exact = exact,
             MaxRelationships = maxRelationships,
             MaxCallSites = maxCallSites,
+            MaxTestFiles = maxTestFiles,
+            MaxTestMethods = maxTestMethods,
             ExpandAmbiguous = expandAmbiguous,
-            QualifiedIdentifier = qualifiedIdentifier,
             ContainingType = containingType,
             Namespace = @namespace,
             Signature = signature,

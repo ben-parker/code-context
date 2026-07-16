@@ -126,8 +126,8 @@ try {
     if ([string]::IsNullOrWhiteSpace([string]$status.system.informationalVersion)) {
         throw 'Published status omitted system.informationalVersion.'
     }
-    if ([int]$status.api.contractVersion -ne 2) {
-        throw "Published status reported contractVersion '$($status.api.contractVersion)' instead of 2."
+    if ([int]$status.api.contractVersion -ne 1) {
+        throw "Published status reported contractVersion '$($status.api.contractVersion)' instead of 1."
     }
     $reportedInstanceId = [string]$status.system.instanceId
     if ([string]::IsNullOrWhiteSpace($reportedInstanceId)) {

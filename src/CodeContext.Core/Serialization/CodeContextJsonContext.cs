@@ -23,7 +23,8 @@ public record NodeDto(
     [property: JsonPropertyName("parameters")] string? Parameters,
     [property: JsonPropertyName("modifiers")] string? Modifiers,
     [property: JsonPropertyName("metrics")] string? Metrics,
-    [property: JsonPropertyName("metadata")] IReadOnlyDictionary<string, string>? Metadata
+    [property: JsonPropertyName("metadata")] IReadOnlyDictionary<string, string>? Metadata,
+    [property: JsonPropertyName("identifier")] string? Identifier = null
 );
 
 // Extended node DTOs for special cases
@@ -241,7 +242,8 @@ public record NativeSyntaxTreeRequestDto(
     [property: JsonPropertyName("filePath")] string FilePath,
     [property: JsonPropertyName("start")] int? Start = null,
     [property: JsonPropertyName("length")] int? Length = null,
-    [property: JsonPropertyName("maxDepth")] int MaxDepth = 8
+    [property: JsonPropertyName("maxDepth")] int MaxDepth = 2,
+    [property: JsonPropertyName("view")] string View = "compact"
 );
 
 // Source generation for AOT - include all types used in serialization

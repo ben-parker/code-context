@@ -108,6 +108,27 @@ namespace Mixed { public class Service { public string Run() => ""ok""; } }");
     }
 
     [Fact]
+    public async Task ExplicitHeritageEmitsMemberFamiliesButStructuralCompatibilityDoesNot()
+    {
+        await WriteFileAsync("family.ts", """
+            export interface IService { run(): void; }
+            export class Implementation implements IService { run(): void { } }
+            export class StructuralOnly { run(): void { } }
+            """);
+        await _pipeline.GraphUpdateService.PerformInitialScanAsync(_tempDir, null, CancellationToken.None);
+
+        var nodes = await _pipeline.RepositoryFactory.CreateNodeRepository().GetAllAsync();
+        Assert.All(nodes.Where(node => node.Language == "typescript"),
+            node => Assert.False(string.IsNullOrWhiteSpace(node.Identifier)));
+        var edges = await _pipeline.RepositoryFactory.CreateEdgeRepository().GetAllAsync();
+        var memberEdge = Assert.Single(edges, edge => edge.Type == "IMPLEMENTS_MEMBER");
+        Assert.Contains("#Implementation.run()", memberEdge.SourceId);
+        Assert.Contains("#IService.run()", memberEdge.TargetId);
+        Assert.DoesNotContain(edges, edge => edge.Type == "IMPLEMENTS_MEMBER"
+            && edge.SourceId!.Contains("StructuralOnly", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task TopLevelInvocation_HasARealModuleScopeCaller()
     {
         await WriteFileAsync("entry.ts",

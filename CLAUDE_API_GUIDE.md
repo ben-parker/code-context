@@ -32,7 +32,7 @@ Check if the API is healthy and see indexing statistics.
 Get comprehensive information about any code construct (class, method, interface, etc.).
 
 **Parameters:**
-- `identifier`: Name or file path to search for
+- `identifier`: Returned canonical identifier, name, or file path
 - `type`: Filter by type (Class, Method, Interface, etc.) - optional
 - `depth`: Relationship traversal depth (default: 1)
 - `includeTests`: Include test information (default: false)
@@ -43,6 +43,9 @@ Get comprehensive information about any code construct (class, method, interface
 - `includeMetrics`: Include heuristic metrics (default: false)
 - `maxMatches`: Ambiguous candidate cap (default: 5)
 - `maxRelationships`: Per-relationship cap (default: 10)
+- `maxCallSites`: Per-caller location cap (default: 3; zero is count-only)
+- `maxTestFiles`: Test-file cap (default: 5; zero is count-only)
+- `maxTestMethods`: Test-method cap per file (default: 5; zero is count-only)
 - `expandAmbiguous`: Expand capped ambiguous matches instead of summaries (default: false)
 
 **Examples:**
@@ -59,15 +62,16 @@ Get comprehensive information about any code construct (class, method, interface
 # Get deep relationships
 ./api-proxy.sh "context/complete?identifier=IRepository&depth=3" | jq
 
-# Request the legacy comprehensive response explicitly
+# Request parser/debug-oriented details explicitly
 ./api-proxy.sh "context/complete?identifier=ContextService&type=Class&view=full&includeTests=true&includeRelated=true&includeMetrics=true" | jq
 ```
 
-Ambiguous compact queries return ranked symbol summaries and facet/count information
-without expanding every match. Narrow by `type` or identifier to expand one match.
+Ambiguous compact queries return ranked symbol summaries with canonical identifiers.
+Pass a returned `target.identifier` back unchanged to select it.
 
 ### 3. `/api/context/multi` (POST)
 Get context for multiple identifiers in one request.
+This reduces HTTP round trips; it does not compress response tokens.
 Multi-context defaults to three entries per relationship list; raise
 `maxRelationships` explicitly when a wider batch is worth the response cost.
 

@@ -4,6 +4,8 @@ namespace CodeContext.Core
     public class CodeNode
     {
         public string? Id { get; set; }
+        /// <summary>Parser-owned, stable public identity. Unlike Id, this round-trips across reindexing.</summary>
+        public string Identifier { get; set; } = string.Empty;
         public string? Name { get; set; }
         public string? Type { get; set; }
         public string? FilePath { get; set; }

@@ -40,8 +40,8 @@ public class FileDependencyTests
         var inbound = await service.GetCompleteContextAsync(
             "Target", depth: 1, includeTests: false, includeRelated: false, includeMetrics: false);
 
-        Assert.Equal(["src/Target.cs"], Assert.Single(outbound.Matches).Relationships.Dependencies);
-        Assert.Equal(["src/Source.cs"], Assert.Single(inbound.Matches).Relationships.DependedBy);
+        Assert.Equal(["src/Target.cs"], Assert.Single(outbound.Matches).Relationships.FileDependencies);
+        Assert.Equal(["src/Source.cs"], Assert.Single(inbound.Matches).Relationships.FileDependents);
     }
 
     [Fact]
@@ -70,7 +70,7 @@ public class FileDependencyTests
         var result = await CreateService(root).GetCompleteContextAsync(
             "Source", depth: 1, includeTests: false, includeRelated: false, includeMetrics: false);
 
-        Assert.Empty(Assert.Single(result.Matches).Relationships.Dependencies);
+        Assert.Empty(Assert.Single(result.Matches).Relationships.FileDependencies);
     }
 
     [Fact]
@@ -102,8 +102,9 @@ public class FileDependencyTests
         var relationships = Assert.Single((await CreateService(root).GetCompleteContextAsync(
             "Target", depth: 1, includeTests: false, includeRelated: false, includeMetrics: false)).Matches).Relationships;
 
-        Assert.Equal(["src/A.cs", "src/B.cs", "src/C.cs"], relationships.Dependencies);
-        Assert.Equal(["src/X.cs", "src/Z.cs"], relationships.DependedBy);
+        Assert.Equal(["src/A.cs", "src/B.cs", "src/C.cs"], relationships.FileDependencies);
+        Assert.Equal(["src/X.cs", "src/Z.cs"], relationships.FileDependents);
+        Assert.DoesNotContain(relationships.Uses, node => node.Name == "C");
     }
 
     [Fact]
@@ -125,14 +126,14 @@ public class FileDependencyTests
         var relationships = Assert.Single((await CreateService(root).GetCompactContextAsync(
             "Target", maxRelationships: 2)).Matches).Relationships!;
 
-        Assert.Equal(3, relationships.DependenciesCount);
-        Assert.Equal(2, relationships.DependenciesReturnedCount);
-        Assert.Equal(2, relationships.Dependencies!.Count);
-        Assert.True(relationships.DependenciesTruncated);
-        Assert.Equal(4, relationships.DependedByCount);
-        Assert.Equal(2, relationships.DependedByReturnedCount);
-        Assert.Equal(2, relationships.DependedBy!.Count);
-        Assert.True(relationships.DependedByTruncated);
+        Assert.Equal(3, relationships.FileDependenciesCount);
+        Assert.Equal(2, relationships.FileDependenciesReturnedCount);
+        Assert.Equal(2, relationships.FileDependencies!.Count);
+        Assert.True(relationships.FileDependenciesTruncated);
+        Assert.Equal(4, relationships.FileDependentsCount);
+        Assert.Equal(2, relationships.FileDependentsReturnedCount);
+        Assert.Equal(2, relationships.FileDependents!.Count);
+        Assert.True(relationships.FileDependentsTruncated);
         Assert.True(relationships.Truncated);
     }
 

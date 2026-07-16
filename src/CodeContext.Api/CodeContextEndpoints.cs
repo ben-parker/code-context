@@ -3,6 +3,8 @@ using CodeContext.Core.Serialization;
 using CodeContext.Core.Services;
 using CodeContext.Core.Workers;
 using CodeContext.Parser.Protocol;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace CodeContext.Api.Endpoints;
 
@@ -39,8 +41,9 @@ public static class CodeContextEndpoints
             int maxMatches = 5,
             int maxRelationships = 10,
             int maxCallSites = 3,
+            int maxTestFiles = 5,
+            int maxTestMethods = 5,
             bool expandAmbiguous = false,
-            string? qualifiedIdentifier = null,
             string? containingType = null,
             string? @namespace = null,
             string? signature = null,
@@ -54,7 +57,7 @@ public static class CodeContextEndpoints
                 {
                     var full = await contextService.GetCompleteContextAsync(
                         identifier, type, depth, includeTests, includeContent, exact ?? false,
-                        includeRelated, includeMetrics, qualifiedIdentifier, containingType,
+                        includeRelated, includeMetrics, maxTestFiles, maxTestMethods, containingType,
                         @namespace, signature, sourceFile);
                     return Results.Ok(full);
                 }
@@ -62,7 +65,7 @@ public static class CodeContextEndpoints
                 var compact = await contextService.GetCompactContextAsync(
                     identifier, type, depth, includeTests, includeContent, exact,
                     includeRelated, includeMetrics, maxMatches, maxRelationships, expandAmbiguous,
-                    maxCallSites, qualifiedIdentifier, containingType, @namespace, signature, sourceFile);
+                    maxCallSites, maxTestFiles, maxTestMethods, containingType, @namespace, signature, sourceFile);
                 return Results.Ok(compact);
             }
             catch (Exception ex)
@@ -77,7 +80,7 @@ public static class CodeContextEndpoints
                         {
                             identifier, type, depth, includeTests, includeContent, exact,
                             includeRelated, includeMetrics, maxMatches, maxRelationships,
-                            maxCallSites, expandAmbiguous, qualifiedIdentifier, containingType,
+                            maxCallSites, maxTestFiles, maxTestMethods, expandAmbiguous, containingType,
                             @namespace, signature, sourceFile, view
                         }
                     }
@@ -90,7 +93,9 @@ public static class CodeContextEndpoints
                         "Without 'type' parameter, searches across all entity types and returns best match or multiple matches. " +
                         "With 'type' parameter, searches only within specified type. " +
                         "Returns array of matches to handle ambiguity.")
-        .Produces<CompleteContextResponse>(StatusCodes.Status200OK)
+        // 206 is a schema-generation anchor; the document transformer folds it into
+        // the v1 200-response union and removes the synthetic response.
+        .Produces<CompleteContextResponse>(StatusCodes.Status206PartialContent)
         .Produces<CompactContextResponse>(StatusCodes.Status200OK)
         .Produces(StatusCodes.Status400BadRequest);
 
@@ -123,10 +128,10 @@ public static class CodeContextEndpoints
         })
         .WithName("GetMultipleContext")
         .WithSummary("Get context for multiple identifiers")
-        .WithDescription("Returns complete context information for multiple code constructs in a single request. " +
-                        "Useful for batch operations and reducing HTTP round-trips.")
+        .WithDescription("Returns context for multiple code constructs as a round-trip optimization. " +
+                        "It reduces HTTP requests, not response-token size.")
         .Accepts<MultiContextRequest>("application/json")
-        .Produces<List<CompleteContextResponse>>(StatusCodes.Status200OK)
+        .Produces<List<CompleteContextResponse>>(StatusCodes.Status206PartialContent)
         .Produces<List<CompactContextResponse>>(StatusCodes.Status200OK)
         .Produces(StatusCodes.Status400BadRequest);
 
@@ -199,7 +204,15 @@ public static class CodeContextEndpoints
             {
                 var result = await workers.GetNativeSyntaxTreeAsync(
                     request.FilePath, request.Start, request.Length, request.MaxDepth, ct);
-                return Results.Ok(result);
+                var view = request.View.ToLowerInvariant();
+                if (view == "full") return Results.Ok(result with { View = "full" });
+                if (view != "compact")
+                    throw new ArgumentException("view must be 'compact' or 'full'.", nameof(request.View));
+                return Results.Ok(result with
+                {
+                    Tree = CompactNativeTree(result.Tree),
+                    View = "compact"
+                });
             }
             catch (NotSupportedException ex)
             {
@@ -287,6 +300,60 @@ public static class CodeContextEndpoints
         .Produces(StatusCodes.Status403Forbidden);
 
         return app;
+    }
+
+    private static JsonElement CompactNativeTree(JsonElement tree)
+        => JsonSerializer.SerializeToElement(CompactNativeNode(tree));
+
+    private static JsonObject CompactNativeNode(JsonElement node)
+    {
+        var compact = new JsonObject
+        {
+            ["kind"] = node.TryGetProperty("kind", out var kind) ? kind.GetString() : "Unknown",
+        };
+        if (TryGetCompactSpan(node, out var start, out var length))
+            compact["span"] = new JsonArray(start, length);
+        if (node.TryGetProperty("text", out var text)) compact["text"] = text.GetString();
+        else if (node.TryGetProperty("valueText", out var valueText) && valueText.GetString() is { Length: > 0 } value)
+            compact["text"] = value;
+
+        CopyTrueMarker(node, compact, "childrenTruncated");
+        CopyTrueMarker(node, compact, "textTruncated");
+        CopyTrueMarker(node, compact, "isMissing");
+        if (node.TryGetProperty("children", out var children) && children.ValueKind == JsonValueKind.Array)
+        {
+            var array = new JsonArray();
+            foreach (var child in children.EnumerateArray()) array.Add(CompactNativeNode(child));
+            compact["children"] = array;
+        }
+        return compact;
+    }
+
+    private static bool TryGetCompactSpan(JsonElement node, out int start, out int length)
+    {
+        if (node.TryGetProperty("span", out var span)
+            && span.TryGetProperty("start", out var spanStart)
+            && span.TryGetProperty("length", out var spanLength))
+        {
+            start = spanStart.GetInt32();
+            length = spanLength.GetInt32();
+            return true;
+        }
+        if (node.TryGetProperty("start", out var tsStart)
+            && node.TryGetProperty("end", out var tsEnd))
+        {
+            start = tsStart.GetInt32();
+            length = tsEnd.GetInt32() - start;
+            return true;
+        }
+        start = length = 0;
+        return false;
+    }
+
+    private static void CopyTrueMarker(JsonElement source, JsonObject target, string name)
+    {
+        if (source.TryGetProperty(name, out var marker) && marker.ValueKind == JsonValueKind.True)
+            target[name] = true;
     }
 
     private static ContextResponseView ParseView(string? view)

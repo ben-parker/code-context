@@ -16,6 +16,7 @@ namespace CodeContext.Core.Repositories.InMemory
         private sealed class GraphState
         {
             public ConcurrentDictionary<string, CodeNode> Nodes { get; } = new();
+            public ConcurrentDictionary<string, string> Identifiers { get; } = new(StringComparer.Ordinal);
             public ConcurrentDictionary<string, CodeEdge> Edges { get; } = new();
         }
 
@@ -33,6 +34,7 @@ namespace CodeContext.Core.Repositories.InMemory
         private long _cachedStatisticsVersion = -1;
 
         public ConcurrentDictionary<string, CodeNode> Nodes => _state.Nodes;
+        public ConcurrentDictionary<string, string> Identifiers => _state.Identifiers;
         public ConcurrentDictionary<string, CodeEdge> Edges => _state.Edges;
         public CodeGraph? CurrentGraph { get; set; }
 
@@ -166,6 +168,7 @@ namespace CodeContext.Core.Repositories.InMemory
                         continue;
                     }
                     next.Nodes.TryAdd(node.Id, node);
+                    AddIdentifier(next, node);
                 }
 
                 if (removedNodeIds.Count == 0) return 0;
@@ -248,6 +251,7 @@ namespace CodeContext.Core.Repositories.InMemory
                     else
                     {
                         next.Nodes.TryAdd(node.Id, node);
+                        AddIdentifier(next, node);
                     }
                 }
             }
@@ -256,6 +260,7 @@ namespace CodeContext.Core.Repositories.InMemory
             {
                 if (node.Id is null) continue;
                 next.Nodes[node.Id] = node;
+                AddIdentifier(next, node);
             }
 
             if (replacesScope is not null)
@@ -281,6 +286,26 @@ namespace CodeContext.Core.Repositories.InMemory
             }
 
             return next;
+        }
+
+        private static void AddIdentifier(GraphState state, CodeNode node)
+        {
+            if (string.IsNullOrEmpty(node.Identifier))
+                node.Identifier = DeriveLegacyIdentifier(node) ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(node.Identifier) || string.IsNullOrEmpty(node.Id)) return;
+            if (!state.Identifiers.TryAdd(node.Identifier, node.Id)
+                && state.Identifiers[node.Identifier] != node.Id)
+            {
+                throw new InvalidDataException($"Duplicate public symbol identifier '{node.Identifier}'.");
+            }
+        }
+
+        internal static string? DeriveLegacyIdentifier(CodeNode node)
+        {
+            if (string.IsNullOrEmpty(node.Id)) return null;
+            var first = node.Id.IndexOf(':');
+            var second = first < 0 ? -1 : node.Id.IndexOf(':', first + 1);
+            return second >= 0 && second + 1 < node.Id.Length ? node.Id[(second + 1)..] : node.Id;
         }
     }
 }

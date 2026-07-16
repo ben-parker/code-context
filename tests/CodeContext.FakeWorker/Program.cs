@@ -192,10 +192,10 @@ internal sealed class WorkerState(string behavior, string? markerPath)
             var stem = Path.GetFileNameWithoutExtension(file);
             var classId = $"{ParserId}:{workspaceId}:{stem}.Class";
             var methodId = $"{ParserId}:{workspaceId}:{stem}.Class.Method";
-            nodes.Add(new ProtocolNode(classId, $"{stem}Class", "class", "fake", file,
+            nodes.Add(new ProtocolNode(classId, $"fake:{stem}.Class", $"{stem}Class", "class", "fake", file,
                 StartLine: 1, EndLine: 10, StartColumn: 1, EndColumn: 1,
                 Metadata: new Dictionary<string, string> { ["gen"] = generation.ToString() }));
-            nodes.Add(new ProtocolNode(methodId, $"{stem}Method", "method", "fake", file,
+            nodes.Add(new ProtocolNode(methodId, $"fake:{stem}.Class.Method", $"{stem}Method", "method", "fake", file,
                 StartLine: 2, EndLine: 5, StartColumn: 1, EndColumn: 1));
             edges.Add(new ProtocolEdge($"{classId}->contains->{methodId}", classId, methodId, "contains"));
         }

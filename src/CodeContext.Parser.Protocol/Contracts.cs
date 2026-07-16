@@ -116,7 +116,8 @@ public sealed record NativeSyntaxTreeResult(
     [property: JsonPropertyName("filePath")] string FilePath,
     [property: JsonPropertyName("format")] string Format,
     [property: JsonPropertyName("tree")] System.Text.Json.JsonElement Tree,
-    [property: JsonPropertyName("truncated")] bool Truncated);
+    [property: JsonPropertyName("truncated")] bool Truncated,
+    [property: JsonPropertyName("view")] string View = "full");
 
 /// <summary>
 /// A normalized graph node. Stored spans are canonical zero-based, end-exclusive;
@@ -127,6 +128,7 @@ public sealed record NativeSyntaxTreeResult(
 /// </summary>
 public sealed record ProtocolNode(
     [property: JsonPropertyName("id")] string Id,
+    [property: JsonPropertyName("identifier")] string Identifier,
     [property: JsonPropertyName("name")] string Name,
     [property: JsonPropertyName("kind")] string Kind,
     [property: JsonPropertyName("language")] string Language,

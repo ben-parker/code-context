@@ -74,6 +74,7 @@ namespace CodeContext.Core.Repositories.InMemory
             var nodes = nodeDtos.Select(dto => new CodeNode
             {
                 Id = dto.Id,
+                Identifier = dto.Identifier ?? string.Empty,
                 Name = dto.Name,
                 Type = dto.Type,
                 Language = dto.Language,

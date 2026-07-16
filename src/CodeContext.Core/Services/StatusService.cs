@@ -20,7 +20,7 @@ public class StatusService : IStatusService
     private readonly IParserSessionRegistry _sessionRegistry;
     private readonly IApiMetrics _apiMetrics;
     private readonly IRepositoryFileSelector? _fileSelector;
-    private static readonly DateTime _startTime = DateTime.UtcNow;
+    private readonly DateTimeOffset _startTime;
 
     public StatusService(
         ICodeNodeRepository nodeRepository,
@@ -32,7 +32,8 @@ public class StatusService : IStatusService
         IScanStateService scanState,
         IParserSessionRegistry sessionRegistry,
         IApiMetrics apiMetrics,
-        IRepositoryFileSelector? fileSelector = null)
+        IRepositoryFileSelector? fileSelector = null,
+        ApplicationStartTime? applicationStartTime = null)
     {
         _nodeRepository = nodeRepository;
         _edgeRepository = edgeRepository;
@@ -44,6 +45,7 @@ public class StatusService : IStatusService
         _sessionRegistry = sessionRegistry;
         _apiMetrics = apiMetrics;
         _fileSelector = fileSelector;
+        _startTime = (applicationStartTime ?? new ApplicationStartTime(DateTimeOffset.UtcNow)).Value;
     }
 
     public async Task<StatusResponseDto> GetStatusAsync()
@@ -164,7 +166,7 @@ public class StatusService : IStatusService
 
     private SystemStatusDto GetSystemStatus()
     {
-        var uptime = DateTime.UtcNow - _startTime;
+        var uptime = DateTimeOffset.UtcNow - _startTime;
         var assembly = Assembly.GetExecutingAssembly();
         var version = assembly.GetName().Version?.ToString() ?? "1.0.0";
         var informationalVersion = assembly
@@ -337,7 +339,7 @@ public class StatusService : IStatusService
             RequestCount: checked((int)Math.Min(metrics.RequestCount, int.MaxValue)),
             AverageResponseTime: metrics.AverageResponseTime.TotalMilliseconds
                 .ToString("0.##", CultureInfo.InvariantCulture) + "ms",
-            ContractVersion: 2
+            ContractVersion: 1
         );
     }
 

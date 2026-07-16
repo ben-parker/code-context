@@ -11,7 +11,7 @@
   },
   "servers": [
     {
-      "url": "http://localhost:7890",
+      "url": "http://localhost:7999",
       "description": "Local CodeContext server"
     }
   ],
@@ -50,7 +50,7 @@
           {
             "name": "identifier",
             "in": "query",
-            "description": "Name or file path to search for",
+            "description": "Canonical returned identifier, name, or repository-relative/absolute file path",
             "required": true,
             "schema": {
               "type": "string"
@@ -151,21 +151,32 @@
             }
           },
           {
+            "name": "maxTestFiles",
+            "in": "query",
+            "description": "Maximum test files returned; zero is count-only (0-100)",
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "default": 5
+            }
+          },
+          {
+            "name": "maxTestMethods",
+            "in": "query",
+            "description": "Maximum test methods returned per file; zero is count-only (0-100)",
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "default": 5
+            }
+          },
+          {
             "name": "expandAmbiguous",
             "in": "query",
             "description": "Expand bounded ambiguous matches instead of returning summaries",
             "schema": {
               "type": "boolean",
               "default": false
-            }
-          },
-          {
-            "name": "qualifiedIdentifier",
-            "in": "query",
-            "description": "Stable qualified identity from an ambiguous summary",
-            "schema": {
-              "type": "string",
-              "default": null
             }
           },
           {
@@ -220,7 +231,14 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/CompactContextResponse"
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/CompactContextResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/CompleteContextResponse"
+                    }
+                  ]
                 }
               }
             }
@@ -237,7 +255,7 @@
           "codecontext"
         ],
         "summary": "Get context for multiple identifiers",
-        "description": "Returns complete context information for multiple code constructs in a single request. Useful for batch operations and reducing HTTP round-trips.",
+        "description": "Returns context for multiple code constructs as a round-trip optimization. It reduces HTTP requests, not response-token size.",
         "operationId": "GetMultipleContext",
         "requestBody": {
           "content": {
@@ -255,10 +273,20 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/CompactContextResponse"
-                  }
+                  "oneOf": [
+                    {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/CompactContextResponse"
+                      }
+                    },
+                    {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/CompleteContextResponse"
+                      }
+                    }
+                  ]
                 }
               }
             }
@@ -465,6 +493,85 @@
           }
         }
       },
+      "CodeNode": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "nullable": true
+          },
+          "identifier": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string",
+            "nullable": true
+          },
+          "type": {
+            "type": "string",
+            "nullable": true
+          },
+          "filePath": {
+            "type": "string",
+            "nullable": true
+          },
+          "startLine": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "endLine": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "startCol": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "endCol": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "namespace": {
+            "type": "string",
+            "nullable": true
+          },
+          "visibility": {
+            "type": "string",
+            "nullable": true
+          },
+          "signature": {
+            "type": "string",
+            "nullable": true
+          },
+          "language": {
+            "type": "string",
+            "nullable": true
+          },
+          "returnType": {
+            "type": "string",
+            "nullable": true
+          },
+          "parameters": {
+            "type": "string",
+            "nullable": true
+          },
+          "modifiers": {
+            "type": "string",
+            "nullable": true
+          },
+          "metrics": {
+            "type": "string",
+            "nullable": true
+          },
+          "metadata": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "nullable": true
+          }
+        }
+      },
       "CompactCodeNode": {
         "type": "object",
         "properties": {
@@ -528,8 +635,14 @@
             },
             "nullable": true
           },
-          "qualifiedIdentifier": {
-            "type": "string",
+          "identifier": {
+            "type": "string"
+          },
+          "bindings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
             "nullable": true
           }
         }
@@ -547,7 +660,7 @@
             "$ref": "#/components/schemas/CompactTesting"
           },
           "metrics": {
-            "$ref": "#/components/schemas/ContextMetrics"
+            "$ref": "#/components/schemas/ContextMetrics2"
           },
           "content": {
             "type": "string",
@@ -699,44 +812,44 @@
           "transitiveUsedByTruncated": {
             "type": "boolean"
           },
-          "dependencies": {
+          "fileDependencies": {
             "type": "array",
             "items": {
               "type": "string"
             },
             "nullable": true
           },
-          "dependenciesCount": {
+          "fileDependenciesCount": {
             "type": "integer",
             "format": "int32",
             "nullable": true
           },
-          "dependenciesReturnedCount": {
+          "fileDependenciesReturnedCount": {
             "type": "integer",
             "format": "int32",
             "nullable": true
           },
-          "dependenciesTruncated": {
+          "fileDependenciesTruncated": {
             "type": "boolean"
           },
-          "dependedBy": {
+          "fileDependents": {
             "type": "array",
             "items": {
               "type": "string"
             },
             "nullable": true
           },
-          "dependedByCount": {
+          "fileDependentsCount": {
             "type": "integer",
             "format": "int32",
             "nullable": true
           },
-          "dependedByReturnedCount": {
+          "fileDependentsReturnedCount": {
             "type": "integer",
             "format": "int32",
             "nullable": true
           },
-          "dependedByTruncated": {
+          "fileDependentsTruncated": {
             "type": "boolean"
           },
           "relatedItems": {
@@ -775,6 +888,10 @@
             "type": "integer",
             "format": "int32"
           },
+          "testMethodsReturnedCount": {
+            "type": "integer",
+            "format": "int32"
+          },
           "testMethods": {
             "type": "array",
             "items": {
@@ -786,6 +903,9 @@
             "items": {
               "type": "string"
             }
+          },
+          "testMethodsTruncated": {
+            "type": "boolean"
           }
         }
       },
@@ -814,19 +934,80 @@
             "type": "integer",
             "format": "int32"
           },
+          "testFilesReturnedCount": {
+            "type": "integer",
+            "format": "int32"
+          },
           "testFiles": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/CompactTestFile"
             }
           },
-          "truncated": {
+          "testFilesTruncated": {
             "type": "boolean"
           }
         },
         "nullable": true
       },
+      "CompleteContextResponse": {
+        "type": "object",
+        "properties": {
+          "matches": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ContextMatch"
+            }
+          },
+          "disambiguationHint": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "ContextMatch": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "$ref": "#/components/schemas/CodeNode"
+          },
+          "relationships": {
+            "$ref": "#/components/schemas/ContextRelationships"
+          },
+          "testing": {
+            "$ref": "#/components/schemas/ContextTesting"
+          },
+          "metrics": {
+            "$ref": "#/components/schemas/ContextMetrics"
+          },
+          "content": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
       "ContextMetrics": {
+        "type": "object",
+        "properties": {
+          "complexity": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "linesOfCode": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "dependencyCount": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "dependentCount": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "ContextMetrics2": {
         "type": "object",
         "properties": {
           "complexity": {
@@ -848,11 +1029,126 @@
         },
         "nullable": true
       },
+      "ContextRelationships": {
+        "type": "object",
+        "properties": {
+          "uses": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CodeNode"
+            }
+          },
+          "usedBy": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CodeNode"
+            }
+          },
+          "transitiveUses": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ContextTransitiveRelationship"
+            }
+          },
+          "transitiveUsedBy": {
+            "type": "array",
+            "items": { }
+          },
+          "fileDependencies": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "fileDependents": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "methodFamilyMembers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CodeNode"
+            }
+          },
+          "staticallyBoundTargets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CodeNode"
+            }
+          },
+          "relatedItems": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CodeNode"
+            }
+          }
+        }
+      },
       "ContextResponseView": {
         "enum": [
           "Compact",
           "Full"
         ]
+      },
+      "ContextTesting": {
+        "type": "object",
+        "properties": {
+          "testFiles": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TestFileInfo"
+            }
+          },
+          "isTested": {
+            "type": "boolean"
+          },
+          "directlyTested": {
+            "type": "boolean"
+          },
+          "testReferenceCount": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "testImplementerCount": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "heuristicMatchCount": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "testFileCount": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "testFilesReturnedCount": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "testFilesTruncated": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ContextTransitiveRelationship": {
+        "type": "object",
+        "properties": {
+          "node": {
+            "$ref": "#/components/schemas/CodeNode"
+          },
+          "distance": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "relationPath": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
       },
       "DatabaseStatusDto": {
         "required": [
@@ -1022,12 +1318,16 @@
             "type": "integer",
             "format": "int32"
           },
+          "maxTestFiles": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "maxTestMethods": {
+            "type": "integer",
+            "format": "int32"
+          },
           "expandAmbiguous": {
             "type": "boolean"
-          },
-          "qualifiedIdentifier": {
-            "type": "string",
-            "nullable": true
           },
           "containingType": {
             "type": "string",
@@ -1077,7 +1377,11 @@
           "maxDepth": {
             "type": "integer",
             "format": "int32",
-            "default": 8
+            "default": 2
+          },
+          "view": {
+            "type": "string",
+            "default": "compact"
           }
         }
       },
@@ -1113,6 +1417,10 @@
           },
           "truncated": {
             "type": "boolean"
+          },
+          "view": {
+            "type": "string",
+            "default": "full"
           }
         }
       },
@@ -1323,6 +1631,42 @@
             "type": "string",
             "default": null,
             "nullable": true
+          }
+        }
+      },
+      "TestFileInfo": {
+        "type": "object",
+        "properties": {
+          "filePath": {
+            "type": "string"
+          },
+          "testMethods": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CodeNode"
+            }
+          },
+          "testCount": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "testMethodsReturnedCount": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "testMethodsTruncated": {
+            "type": "boolean"
+          },
+          "coverage": {
+            "type": "number",
+            "format": "double",
+            "nullable": true
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         }
       },

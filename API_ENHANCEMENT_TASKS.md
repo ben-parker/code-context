@@ -85,7 +85,7 @@ Working on enhancing the `/api/context/complete` endpoint to provide more valuab
 Using `curl "http://localhost:7890/api/context/complete?identifier=CSharpParser&type=Class"`:
 
 - ✅ **Content Snippets**: Working correctly with `includeContent=true`
-- ❌ **Relationships**: All arrays empty (`uses`, `usedBy`, `dependencies`, `dependedBy`)
+- ❌ **Relationships**: All arrays empty (`uses`, `usedBy`, `fileDependencies`, `fileDependents`)
 - ✅ **Related Items**: Working correctly (shows related classes/methods)
 - ❌ **Test Methods**: Found test files but `testMethods` arrays empty
 

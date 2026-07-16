@@ -35,7 +35,8 @@ namespace CodeContext.Core.Services
             bool exact = false,
             bool includeRelated = true,
             bool includeMetrics = true,
-            string? qualifiedIdentifier = null,
+            int maxTestFiles = 5,
+            int maxTestMethods = 5,
             string? containingType = null,
             string? @namespace = null,
             string? signature = null,
@@ -46,10 +47,11 @@ namespace CodeContext.Core.Services
                 throw new ArgumentOutOfRangeException(
                     nameof(depth), depth, "Relationship depth must be between 0 and 10.");
             }
+            ValidateTestBounds(maxTestFiles, maxTestMethods);
 
             var response = new CompleteContextResponse();
             var (candidates, isFilePath) = await FindCandidatesAsync(
-                identifier, type, exact, qualifiedIdentifier, containingType, @namespace, signature, sourceFile);
+                identifier, type, exact, containingType, @namespace, signature, sourceFile);
 
             if (candidates.Count == 0)
             {
@@ -68,6 +70,7 @@ namespace CodeContext.Core.Services
             {
                 var contextMatch = await BuildContextMatchAsync(
                     candidate, depth, includeTests, includeContent, includeRelated, includeMetrics);
+                if (includeTests) ApplyTestLimits(contextMatch.Testing, maxTestFiles, maxTestMethods);
                 response.Matches.Add(contextMatch);
             }
 
@@ -87,26 +90,36 @@ namespace CodeContext.Core.Services
             int maxRelationships = 10,
             bool expandAmbiguous = false,
             int maxCallSites = 3,
-            string? qualifiedIdentifier = null,
+            int maxTestFiles = 5,
+            int maxTestMethods = 5,
             string? containingType = null,
             string? @namespace = null,
             string? signature = null,
             string? sourceFile = null)
         {
-            ValidateQueryBounds(depth, maxMatches, maxRelationships, maxCallSites);
+            ValidateQueryBounds(depth, maxMatches, maxRelationships, maxCallSites, maxTestFiles, maxTestMethods);
 
             List<CodeNode> candidates;
             bool isFilePath;
             string matchMode;
             var substringSearchSkipped = false;
-            if (exact is null && !IsFilePath(identifier))
+            var identity = await _nodeRepository.GetByIdentifierAsync(identifier);
+            if (identity is not null)
+            {
+                candidates = CandidateMatchesFilters(identity, type, containingType, @namespace, signature, sourceFile)
+                    ? [identity]
+                    : [];
+                isFilePath = false;
+                matchMode = "identity";
+            }
+            else if (exact is null && !IsFilePath(identifier))
             {
                 (candidates, isFilePath) = await FindCandidatesAsync(
-                    identifier, type, exact: true, qualifiedIdentifier, containingType, @namespace, signature, sourceFile);
+                    identifier, type, exact: true, containingType, @namespace, signature, sourceFile);
                 if (candidates.Count == 0)
                 {
                     (candidates, isFilePath) = await FindCandidatesAsync(
-                        identifier, type, exact: false, qualifiedIdentifier, containingType, @namespace, signature, sourceFile);
+                        identifier, type, exact: false, containingType, @namespace, signature, sourceFile);
                     matchMode = "substring";
                 }
                 else
@@ -118,7 +131,7 @@ namespace CodeContext.Core.Services
             else
             {
                 (candidates, isFilePath) = await FindCandidatesAsync(
-                    identifier, type, exact ?? false, qualifiedIdentifier, containingType, @namespace, signature, sourceFile);
+                    identifier, type, exact ?? false, containingType, @namespace, signature, sourceFile);
                 matchMode = isFilePath ? "filePath" : exact == true ? "exact" : "substring";
             }
 
@@ -144,7 +157,7 @@ namespace CodeContext.Core.Services
                     ? "File contains multiple symbols. Specify 'type' or a symbol name to expand one."
                     : BuildDisambiguationHint(candidates);
                 response.Matches = candidates.Take(maxMatches)
-                    .Select(candidate => new CompactContextMatch { Target = ToCompactNode(candidate, includeQualifiedIdentity: true) })
+                    .Select(candidate => new CompactContextMatch { Target = ToCompactNode(candidate) })
                     .ToList();
             }
             else
@@ -155,7 +168,7 @@ namespace CodeContext.Core.Services
                         candidate, depth, includeTests, includeContent, includeRelated, includeMetrics);
                     response.Matches.Add(await ToCompactMatchAsync(
                         match, includeTests, includeRelated, includeMetrics, maxRelationships,
-                        maxCallSites, response.Ambiguous));
+                        maxCallSites, maxTestFiles, maxTestMethods));
                 }
             }
 
@@ -179,7 +192,8 @@ namespace CodeContext.Core.Services
                     exact: request.Exact ?? false,
                     includeRelated: request.IncludeRelated,
                     includeMetrics: request.IncludeMetrics,
-                    qualifiedIdentifier: request.QualifiedIdentifier,
+                    maxTestFiles: request.MaxTestFiles,
+                    maxTestMethods: request.MaxTestMethods,
                     containingType: request.ContainingType,
                     @namespace: request.Namespace,
                     signature: request.Signature,
@@ -209,7 +223,8 @@ namespace CodeContext.Core.Services
                     maxRelationships: request.MaxRelationships,
                     expandAmbiguous: request.ExpandAmbiguous,
                     maxCallSites: request.MaxCallSites,
-                    qualifiedIdentifier: request.QualifiedIdentifier,
+                    maxTestFiles: request.MaxTestFiles,
+                    maxTestMethods: request.MaxTestMethods,
                     containingType: request.ContainingType,
                     @namespace: request.Namespace,
                     signature: request.Signature,
@@ -223,29 +238,38 @@ namespace CodeContext.Core.Services
             string identifier,
             string? type,
             bool exact,
-            string? qualifiedIdentifier = null,
             string? containingType = null,
             string? @namespace = null,
             string? signature = null,
             string? sourceFile = null)
         {
+            var identity = await _nodeRepository.GetByIdentifierAsync(identifier);
+            if (identity is not null)
+                return (CandidateMatchesFilters(identity, type, containingType, @namespace, signature, sourceFile)
+                    ? [identity] : [], false);
+
             var isFilePath = IsFilePath(identifier);
             var candidates = isFilePath
                 ? await FindNodesByFilePathAsync(identifier, type)
                 : await _nodeRepository.FindByNameAsync(identifier, type, exact);
-            candidates = candidates.Where(candidate =>
-                    (qualifiedIdentifier is null || string.Equals(
-                        GetQualifiedIdentifier(candidate), qualifiedIdentifier, StringComparison.OrdinalIgnoreCase))
-                    && (containingType is null || string.Equals(
-                        GetContainingType(candidate), containingType, StringComparison.OrdinalIgnoreCase))
-                    && (@namespace is null || string.Equals(candidate.Namespace, @namespace, StringComparison.OrdinalIgnoreCase))
-                    && (signature is null || string.Equals(candidate.Signature, signature, StringComparison.OrdinalIgnoreCase))
-                    && (sourceFile is null || FilePathMatches(candidate.FilePath, sourceFile)))
-                .ToList();
+            candidates = candidates.Where(candidate => CandidateMatchesFilters(
+                candidate, type, containingType, @namespace, signature, sourceFile)).ToList();
             return (candidates, isFilePath);
         }
 
-        private static void ValidateQueryBounds(int depth, int maxMatches, int maxRelationships, int maxCallSites)
+        private static bool CandidateMatchesFilters(
+            CodeNode candidate, string? type, string? containingType, string? @namespace,
+            string? signature, string? sourceFile)
+            => (type is null || string.Equals(candidate.Type, type, StringComparison.OrdinalIgnoreCase))
+                && (containingType is null || string.Equals(
+                    GetContainingType(candidate), containingType, StringComparison.OrdinalIgnoreCase))
+                && (@namespace is null || string.Equals(candidate.Namespace, @namespace, StringComparison.OrdinalIgnoreCase))
+                && (signature is null || string.Equals(candidate.Signature, signature, StringComparison.OrdinalIgnoreCase))
+                && (sourceFile is null || FilePathMatches(candidate.FilePath, sourceFile));
+
+        private static void ValidateQueryBounds(
+            int depth, int maxMatches, int maxRelationships, int maxCallSites,
+            int maxTestFiles, int maxTestMethods)
         {
             if (depth is < 0 or > 10)
             {
@@ -267,6 +291,35 @@ namespace CodeContext.Core.Services
                 throw new ArgumentOutOfRangeException(
                     nameof(maxCallSites), maxCallSites, "maxCallSites must be between 0 and 100.");
             }
+            if (maxTestFiles is < 0 or > 100)
+                throw new ArgumentOutOfRangeException(nameof(maxTestFiles), maxTestFiles, "maxTestFiles must be between 0 and 100.");
+            if (maxTestMethods is < 0 or > 100)
+                throw new ArgumentOutOfRangeException(nameof(maxTestMethods), maxTestMethods, "maxTestMethods must be between 0 and 100.");
+        }
+
+        private static void ValidateTestBounds(int maxTestFiles, int maxTestMethods)
+        {
+            if (maxTestFiles is < 0 or > 100)
+                throw new ArgumentOutOfRangeException(nameof(maxTestFiles), maxTestFiles, "maxTestFiles must be between 0 and 100.");
+            if (maxTestMethods is < 0 or > 100)
+                throw new ArgumentOutOfRangeException(nameof(maxTestMethods), maxTestMethods, "maxTestMethods must be between 0 and 100.");
+        }
+
+        private static void ApplyTestLimits(ContextTesting testing, int maxTestFiles, int maxTestMethods)
+        {
+            testing.TestFileCount = testing.TestFiles.Count;
+            testing.TestFilesTruncated = testing.TestFiles.Count > maxTestFiles;
+            foreach (var file in testing.TestFiles)
+            {
+                file.TestCount = file.TestMethods.Count;
+                file.TestMethodsReturnedCount = Math.Min(file.TestMethods.Count, maxTestMethods);
+                file.TestMethodsTruncated = file.TestMethods.Count > maxTestMethods;
+                file.TestMethods = file.TestMethods.OrderBy(method => method.StartLine).Take(maxTestMethods).ToList();
+            }
+            testing.TestFiles = testing.TestFiles
+                .OrderBy(file => file.FilePath, StringComparer.OrdinalIgnoreCase)
+                .Take(maxTestFiles).ToList();
+            testing.TestFilesReturnedCount = testing.TestFiles.Count;
         }
 
         private static IOrderedEnumerable<CodeNode> RankCandidates(
@@ -309,7 +362,8 @@ namespace CodeContext.Core.Services
             bool includeMetrics,
             int maxRelationships,
             int maxCallSites,
-            bool includeQualifiedIdentity)
+            int maxTestFiles,
+            int maxTestMethods)
         {
             var relationships = match.Relationships;
             var usedByNodes = await FilterCompactUsedByAsync(match.Target, relationships.UsedBy);
@@ -350,23 +404,23 @@ namespace CodeContext.Core.Services
                 compactRelationships.TransitiveUsedByTruncated = relationships.TransitiveUsedBy.Count > maxRelationships;
                 compactRelationships.Truncated |= compactRelationships.TransitiveUsedByTruncated;
             }
-            if (relationships.Dependencies.Count > 0)
+            if (relationships.FileDependencies.Count > 0)
             {
-                compactRelationships.Dependencies = relationships.Dependencies
+                compactRelationships.FileDependencies = relationships.FileDependencies
                     .Take(maxRelationships).Select(ToDisplayPath).ToList();
-                compactRelationships.DependenciesCount = relationships.Dependencies.Count;
-                compactRelationships.DependenciesReturnedCount = compactRelationships.Dependencies.Count;
-                compactRelationships.DependenciesTruncated = relationships.Dependencies.Count > maxRelationships;
-                compactRelationships.Truncated |= compactRelationships.DependenciesTruncated;
+                compactRelationships.FileDependenciesCount = relationships.FileDependencies.Count;
+                compactRelationships.FileDependenciesReturnedCount = compactRelationships.FileDependencies.Count;
+                compactRelationships.FileDependenciesTruncated = relationships.FileDependencies.Count > maxRelationships;
+                compactRelationships.Truncated |= compactRelationships.FileDependenciesTruncated;
             }
-            if (relationships.DependedBy.Count > 0)
+            if (relationships.FileDependents.Count > 0)
             {
-                compactRelationships.DependedBy = relationships.DependedBy
+                compactRelationships.FileDependents = relationships.FileDependents
                     .Take(maxRelationships).Select(ToDisplayPath).ToList();
-                compactRelationships.DependedByCount = relationships.DependedBy.Count;
-                compactRelationships.DependedByReturnedCount = compactRelationships.DependedBy.Count;
-                compactRelationships.DependedByTruncated = relationships.DependedBy.Count > maxRelationships;
-                compactRelationships.Truncated |= compactRelationships.DependedByTruncated;
+                compactRelationships.FileDependentsCount = relationships.FileDependents.Count;
+                compactRelationships.FileDependentsReturnedCount = compactRelationships.FileDependents.Count;
+                compactRelationships.FileDependentsTruncated = relationships.FileDependents.Count > maxRelationships;
+                compactRelationships.Truncated |= compactRelationships.FileDependentsTruncated;
             }
 
             if (includeRelated)
@@ -381,7 +435,7 @@ namespace CodeContext.Core.Services
 
             var compact = new CompactContextMatch
             {
-                Target = ToCompactNode(match.Target, includeQualifiedIdentity),
+                Target = ToCompactNode(match.Target),
                 Relationships = compactRelationships,
                 Metrics = includeMetrics ? match.Metrics : null,
                 Content = match.Content
@@ -397,17 +451,23 @@ namespace CodeContext.Core.Services
                     TestImplementerCount = match.Testing.TestImplementerCount,
                     HeuristicMatchCount = match.Testing.HeuristicMatchCount,
                     TestFileCount = match.Testing.TestFiles.Count,
-                    TestFiles = match.Testing.TestFiles.Take(maxRelationships)
+                    TestFilesReturnedCount = Math.Min(match.Testing.TestFiles.Count, maxTestFiles),
+                    TestFiles = match.Testing.TestFiles
+                        .OrderBy(file => file.FilePath, StringComparer.OrdinalIgnoreCase)
+                        .Take(maxTestFiles)
                         .Select(file => new CompactTestFile
                         {
                             File = ToDisplayPath(file.FilePath),
                             TestCount = file.TestCount,
-                            TestMethods = file.TestMethods.Take(maxRelationships)
+                            TestMethodsReturnedCount = Math.Min(file.TestMethods.Count, maxTestMethods),
+                            TestMethods = file.TestMethods
+                                .OrderBy(method => method.StartLine)
+                                .Take(maxTestMethods)
                                 .Select(node => ToCompactNode(node)).ToList(),
-                            Evidence = file.Evidence
+                            Evidence = file.Evidence,
+                            TestMethodsTruncated = file.TestMethods.Count > maxTestMethods
                         }).ToList(),
-                    Truncated = match.Testing.TestFiles.Count > maxRelationships ||
-                        match.Testing.TestFiles.Any(file => file.TestMethods.Count > maxRelationships)
+                    TestFilesTruncated = match.Testing.TestFiles.Count > maxTestFiles
                 };
             }
 
@@ -429,11 +489,41 @@ namespace CodeContext.Core.Services
             int maxRelationships,
             int maxCallSites)
         {
-            var directEdges = string.IsNullOrEmpty(target.Id)
-                ? new List<CodeEdge>()
-                : outgoing
-                    ? await _edgeRepository.GetBySourceIdAsync(target.Id)
-                    : await _edgeRepository.GetByTargetIdAsync(target.Id);
+            var family = !outgoing && !string.IsNullOrEmpty(target.Id)
+                && string.Equals(target.Type, "Method", StringComparison.OrdinalIgnoreCase)
+                    ? await GetMethodFamilyAsync(target.Id, target)
+                    : new Dictionary<string, CodeNode>(StringComparer.Ordinal);
+            var bindingByTarget = new Dictionary<string, string>(StringComparer.Ordinal);
+            if (family.Count > 0)
+            {
+                foreach (var familyId in family.Keys)
+                {
+                    var familyEdges = (await _edgeRepository.GetBySourceIdAsync(familyId))
+                        .Concat(await _edgeRepository.GetByTargetIdAsync(familyId))
+                        .Where(edge => edge.Type is not null && MethodFamilyEdgeKinds.Contains(edge.Type));
+                    var label = "exact";
+                    foreach (var edge in familyEdges)
+                    {
+                        if (edge.Type == "IMPLEMENTS_MEMBER")
+                            label = edge.TargetId == familyId ? "interface" : "implementation";
+                        else if (edge.Type == "OVERRIDES_MEMBER")
+                            label = edge.TargetId == familyId ? "base" : "implementation";
+                        if (label is "interface" or "base") break;
+                    }
+                    bindingByTarget[familyId] = label;
+                }
+            }
+
+            List<CodeEdge> directEdges;
+            if (string.IsNullOrEmpty(target.Id)) directEdges = [];
+            else if (outgoing) directEdges = await _edgeRepository.GetBySourceIdAsync(target.Id);
+            else if (family.Count > 0)
+            {
+                directEdges = [];
+                foreach (var familyId in family.Keys)
+                    directEdges.AddRange(await _edgeRepository.GetByTargetIdAsync(familyId));
+            }
+            else directEdges = await _edgeRepository.GetByTargetIdAsync(target.Id);
             var edgesByNode = (directEdges ?? new List<CodeEdge>())
                 .Where(IsUsageEdge)
                 .Where(edge => !string.IsNullOrEmpty(outgoing ? edge.TargetId : edge.SourceId))
@@ -464,6 +554,16 @@ namespace CodeContext.Core.Services
                         .OrderBy(RelationshipRank)
                         .ToList();
                     compact.Occurrences = item.Edges.Count;
+                    if (!outgoing && family.Count > 0)
+                    {
+                        compact.Bindings = item.Edges
+                            .Select(edge => edge.TargetId is not null
+                                ? bindingByTarget.GetValueOrDefault(edge.TargetId, "exact")
+                                : "exact")
+                            .Distinct(StringComparer.Ordinal)
+                            .Order(StringComparer.Ordinal)
+                            .ToList();
+                    }
                     var allLines = item.Edges
                         .Select(edge => edge.Metadata?.GetValueOrDefault("line"))
                         .Where(line => int.TryParse(line, out _))
@@ -488,7 +588,7 @@ namespace CodeContext.Core.Services
             return compact;
         }
 
-        private CompactCodeNode ToCompactNode(CodeNode node, bool includeQualifiedIdentity = false)
+        private CompactCodeNode ToCompactNode(CodeNode node)
             => new()
             {
                 Name = node.Name,
@@ -496,7 +596,7 @@ namespace CodeContext.Core.Services
                 File = string.IsNullOrEmpty(node.FilePath) ? null : ToDisplayPath(node.FilePath),
                 Line = node.StartLine + 1,
                 Signature = Truncate(NormalizeCompactSignature(node.Signature), 160),
-                QualifiedIdentifier = includeQualifiedIdentity ? GetQualifiedIdentifier(node) : null
+                Identifier = PublicIdentifier(node)
             };
 
         private string ToDisplayPath(string path)
@@ -524,11 +624,12 @@ namespace CodeContext.Core.Services
         {
             var first = candidates.FirstOrDefault();
             if (first is null) return "Specify type, containingType, namespace, signature, or sourceFile.";
-            return $"Multiple matches found. Refine with qualifiedIdentifier='{GetQualifiedIdentifier(first)}' or use containingType, namespace, signature, or sourceFile.";
+            return $"Multiple matches found. Pass identifier='{PublicIdentifier(first)}' unchanged, or use containingType, namespace, signature, or sourceFile.";
         }
 
-        private static string GetQualifiedIdentifier(CodeNode node)
+        private static string PublicIdentifier(CodeNode node)
         {
+            if (!string.IsNullOrEmpty(node.Identifier)) return node.Identifier;
             if (!string.IsNullOrEmpty(node.Id))
             {
                 var firstSeparator = node.Id.IndexOf(':');
@@ -543,7 +644,7 @@ namespace CodeContext.Core.Services
 
         private static string? GetContainingType(CodeNode node)
         {
-            var qualified = GetQualifiedIdentifier(node);
+            var qualified = PublicIdentifier(node);
             var hash = qualified.LastIndexOf('#');
             var memberPortion = hash >= 0 ? qualified[(hash + 1)..] : qualified;
             var parameterStart = memberPortion.IndexOf('(');
@@ -600,6 +701,7 @@ namespace CodeContext.Core.Services
             bool includeRelated,
             bool includeMetrics)
         {
+            targetNode.Identifier = PublicIdentifier(targetNode);
             var match = new ContextMatch
             {
                 Target = targetNode
@@ -640,12 +742,19 @@ namespace CodeContext.Core.Services
             "HAS_METHOD", "HAS_PROPERTY", "HAS_FIELD", "CONTAINS",
         };
 
+        private static readonly HashSet<string> MethodFamilyEdgeKinds = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "IMPLEMENTS_MEMBER", "OVERRIDES_MEMBER",
+        };
+
         private static bool IsUsageEdge(CodeEdge edge)
-            => edge.Type is null || !ContainmentEdgeKinds.Contains(edge.Type);
+            => edge.Type is null || (!ContainmentEdgeKinds.Contains(edge.Type)
+                && !MethodFamilyEdgeKinds.Contains(edge.Type));
 
         private static readonly HashSet<string> SemanticFileRelationshipKinds = new(StringComparer.OrdinalIgnoreCase)
         {
             "CALLS", "MOCK_CALLS", "REFERENCES", "IMPLEMENTS", "INHERITS", "EXTENDS", "IMPORTS",
+            "IMPLEMENTS_MEMBER", "OVERRIDES_MEMBER",
         };
 
         private static bool IsSemanticFileRelationship(CodeEdge edge)
@@ -662,7 +771,21 @@ namespace CodeContext.Core.Services
                 return relationships;
 
             var uses = await TraverseRelationshipsAsync(targetNode.Id, depth, outgoing: true);
-            var usedBy = await TraverseRelationshipsAsync(targetNode.Id, depth, outgoing: false);
+            List<TraversedRelationship> usedBy;
+            if (string.Equals(targetNode.Type, "Method", StringComparison.OrdinalIgnoreCase))
+            {
+                var family = await GetMethodFamilyAsync(targetNode.Id, targetNode);
+                relationships.MethodFamilyMembers = family.Values
+                    .Where(node => node.Id != targetNode.Id)
+                    .OrderBy(node => node.Identifier, StringComparer.Ordinal)
+                    .ToList();
+                usedBy = await TraverseInboundFromFamilyAsync(family.Keys, depth);
+                relationships.StaticallyBoundTargets = await GetStaticallyBoundTargetsAsync(family);
+            }
+            else
+            {
+                usedBy = await TraverseRelationshipsAsync(targetNode.Id, depth, outgoing: false);
+            }
             relationships.Uses = uses.Where(item => item.Distance == 1).Select(item => item.Node).ToList();
             relationships.UsedBy = usedBy.Where(item => item.Distance == 1).Select(item => item.Node).ToList();
             relationships.TransitiveUses = uses.Where(item => item.Distance > 1)
@@ -679,8 +802,8 @@ namespace CodeContext.Core.Services
             // Get file-level dependencies
             if (!string.IsNullOrEmpty(targetNode.FilePath))
             {
-                relationships.Dependencies = await GetFileDependenciesAsync(targetNode.FilePath);
-                relationships.DependedBy = await GetFileDependentsAsync(targetNode.FilePath);
+                relationships.FileDependencies = await GetFileDependenciesAsync(targetNode.FilePath);
+                relationships.FileDependents = await GetFileDependentsAsync(targetNode.FilePath);
             }
 
             if (includeRelated)
@@ -693,6 +816,89 @@ namespace CodeContext.Core.Services
 
         private sealed record TraversedRelationship(
             CodeNode Node, int Distance, List<string> RelationPath);
+
+        private async Task<Dictionary<string, CodeNode>> GetMethodFamilyAsync(
+            string rootNodeId, CodeNode? rootFallback = null)
+        {
+            var family = new Dictionary<string, CodeNode>(StringComparer.Ordinal);
+            var root = await _nodeRepository.GetByIdAsync(rootNodeId) ?? rootFallback;
+            if (root is null) return family;
+            family[rootNodeId] = root;
+            var pending = new Queue<string>();
+            pending.Enqueue(rootNodeId);
+            while (pending.TryDequeue(out var current))
+            {
+                var edges = (await _edgeRepository.GetBySourceIdAsync(current))
+                    .Concat(await _edgeRepository.GetByTargetIdAsync(current))
+                    .Where(edge => edge.Type is not null && MethodFamilyEdgeKinds.Contains(edge.Type));
+                foreach (var edge in edges)
+                {
+                    var relatedId = edge.SourceId == current ? edge.TargetId : edge.SourceId;
+                    if (string.IsNullOrEmpty(relatedId) || family.ContainsKey(relatedId)) continue;
+                    var node = await _nodeRepository.GetByIdAsync(relatedId);
+                    if (node is null) continue;
+                    family[relatedId] = node;
+                    pending.Enqueue(relatedId);
+                }
+            }
+            return family;
+        }
+
+        private async Task<List<TraversedRelationship>> TraverseInboundFromFamilyAsync(
+            IReadOnlyCollection<string> familyIds, int depth)
+        {
+            if (depth == 0) return [];
+            var visited = new HashSet<string>(familyIds, StringComparer.Ordinal);
+            var result = new Dictionary<string, TraversedRelationship>(StringComparer.Ordinal);
+            var frontier = new List<(string NodeId, List<string> Path)>();
+
+            foreach (var familyId in familyIds)
+            {
+                foreach (var edge in (await _edgeRepository.GetByTargetIdAsync(familyId)).Where(IsUsageEdge))
+                {
+                    if (string.IsNullOrEmpty(edge.SourceId) || visited.Contains(edge.SourceId)) continue;
+                    var node = await _nodeRepository.GetByIdAsync(edge.SourceId);
+                    if (node is null) continue;
+                    var path = new List<string> { edge.Type ?? "USES" };
+                    if (!result.ContainsKey(edge.SourceId))
+                    {
+                        result[edge.SourceId] = new TraversedRelationship(node, 1, path);
+                        frontier.Add((edge.SourceId, path));
+                    }
+                }
+            }
+            foreach (var id in result.Keys) visited.Add(id);
+
+            for (var level = 1; level < depth && frontier.Count > 0; level++)
+            {
+                var next = new List<(string NodeId, List<string> Path)>();
+                foreach (var (current, currentPath) in frontier)
+                {
+                    foreach (var edge in (await _edgeRepository.GetByTargetIdAsync(current)).Where(IsUsageEdge))
+                    {
+                        if (string.IsNullOrEmpty(edge.SourceId) || !visited.Add(edge.SourceId)) continue;
+                        var node = await _nodeRepository.GetByIdAsync(edge.SourceId);
+                        if (node is null) continue;
+                        var path = new List<string>(currentPath) { edge.Type ?? "USES" };
+                        result[edge.SourceId] = new TraversedRelationship(node, level + 1, path);
+                        next.Add((edge.SourceId, path));
+                    }
+                }
+                frontier = next;
+            }
+            return result.Values.OrderBy(item => item.Distance).ThenBy(item => item.Node.Identifier).ToList();
+        }
+
+        private async Task<List<CodeNode>> GetStaticallyBoundTargetsAsync(
+            IReadOnlyDictionary<string, CodeNode> family)
+        {
+            var targets = new List<CodeNode>();
+            foreach (var (id, node) in family)
+            {
+                if ((await _edgeRepository.GetByTargetIdAsync(id)).Any(IsUsageEdge)) targets.Add(node);
+            }
+            return targets.OrderBy(node => node.Identifier, StringComparer.Ordinal).ToList();
+        }
 
         private async Task<List<TraversedRelationship>> TraverseRelationshipsAsync(
             string rootNodeId,
@@ -754,29 +960,38 @@ namespace CodeContext.Core.Services
 
             if (!string.IsNullOrEmpty(targetNode.Id))
             {
-                var incoming = (await _edgeRepository.GetByTargetIdAsync(targetNode.Id))
-                    .Where(IsUsageEdge).ToList();
-                foreach (var edge in incoming)
+                var family = string.Equals(targetNode.Type, "Method", StringComparison.OrdinalIgnoreCase)
+                    ? await GetMethodFamilyAsync(targetNode.Id, targetNode)
+                    : new Dictionary<string, CodeNode>(StringComparer.Ordinal) { [targetNode.Id] = targetNode };
+                foreach (var familyId in family.Keys)
                 {
-                    if (string.IsNullOrEmpty(edge.SourceId)) continue;
-                    var source = await _nodeRepository.GetByIdAsync(edge.SourceId);
-                    if (source?.FilePath is null || !IsTestPath(source.FilePath)) continue;
-                    AddEvidence(evidenceByFile, source.FilePath,
-                        edge.Type == "IMPLEMENTS" ? "testImplementer" : "testReference");
-                    if (edge.Type == "IMPLEMENTS") testImplementers.Add(edge.SourceId);
-                    else testReferenceNodes.Add(edge.SourceId);
-
-                    if (IsTestMethod(source) && edge.Type is "CALLS" or "MOCK_CALLS")
+                    foreach (var edge in (await _edgeRepository.GetByTargetIdAsync(familyId)).Where(IsUsageEdge))
                     {
-                        testing.DirectlyTested = true;
-                        AddEvidence(evidenceByFile, source.FilePath, "directCall");
-                        AddMethod(graphTestMethodsByFile, source.FilePath, source);
+                        if (string.IsNullOrEmpty(edge.SourceId)) continue;
+                        var source = await _nodeRepository.GetByIdAsync(edge.SourceId);
+                        if (source?.FilePath is null || !IsTestPath(source.FilePath)) continue;
+                        AddEvidence(evidenceByFile, source.FilePath,
+                            edge.Type == "IMPLEMENTS" ? "testImplementer" : "testReference");
+                        if (edge.Type == "IMPLEMENTS") testImplementers.Add(edge.SourceId);
+                        else testReferenceNodes.Add(edge.SourceId);
+
+                        if (IsTestMethod(source) && edge.Type is "CALLS" or "MOCK_CALLS")
+                        {
+                            var exactBinding = familyId == targetNode.Id;
+                            testing.DirectlyTested |= exactBinding;
+                            AddEvidence(evidenceByFile, source.FilePath,
+                                exactBinding ? "directCall" : "potentialDispatch");
+                            AddMethod(graphTestMethodsByFile, source.FilePath, source);
+                        }
                     }
                 }
 
                 // Reverse traversal identifies test methods that reach the target
                 // indirectly. This is static graph evidence, never runtime coverage.
-                foreach (var reached in await TraverseRelationshipsAsync(targetNode.Id, depth: 5, outgoing: false))
+                var reachedCallers = string.Equals(targetNode.Type, "Method", StringComparison.OrdinalIgnoreCase)
+                    ? await TraverseInboundFromFamilyAsync(family.Keys, depth: 5)
+                    : await TraverseRelationshipsAsync(targetNode.Id, depth: 5, outgoing: false);
+                foreach (var reached in reachedCallers)
                 {
                     var source = reached.Node;
                     if (source.FilePath is null || !IsTestPath(source.FilePath) || !IsTestMethod(source)) continue;

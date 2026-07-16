@@ -20,6 +20,16 @@ namespace CodeContext.Core.Repositories.InMemory
             return Task.FromResult(node);
         }
 
+        public Task<CodeNode?> GetByIdentifierAsync(string identifier)
+        {
+            if (_database.Identifiers.TryGetValue(identifier, out var id)
+                && _database.Nodes.TryGetValue(id, out var node))
+            {
+                return Task.FromResult<CodeNode?>(node);
+            }
+            return Task.FromResult<CodeNode?>(null);
+        }
+
         public Task<List<CodeNode>> FindByNameAsync(string name, string? type = null, bool exact = false)
         {
             if (name == null)
@@ -52,7 +62,25 @@ namespace CodeContext.Core.Repositories.InMemory
                 throw new ArgumentException("Node must have an Id", nameof(node));
             }
 
+            if (string.IsNullOrEmpty(node.Identifier))
+                node.Identifier = InMemoryDatabase.DeriveLegacyIdentifier(node) ?? string.Empty;
+            _database.Nodes.TryGetValue(node.Id, out var existingNode);
+            if (!string.IsNullOrWhiteSpace(node.Identifier))
+            {
+                if (!_database.Identifiers.TryAdd(node.Identifier, node.Id)
+                    && _database.Identifiers[node.Identifier] != node.Id)
+                {
+                    throw new InvalidDataException($"Duplicate public symbol identifier '{node.Identifier}'.");
+                }
+            }
             _database.Nodes.AddOrUpdate(node.Id, node, (key, existing) => node);
+            if (existingNode?.Identifier is { Length: > 0 } previousIdentifier
+                && previousIdentifier != node.Identifier
+                && _database.Identifiers.TryGetValue(previousIdentifier, out var previousId)
+                && previousId == node.Id)
+            {
+                _database.Identifiers.TryRemove(previousIdentifier, out _);
+            }
             _database.NotifyMutation();
             return Task.CompletedTask;
         }
@@ -61,6 +89,8 @@ namespace CodeContext.Core.Repositories.InMemory
         {
             if (_database.Nodes.TryRemove(id, out _))
             {
+                foreach (var entry in _database.Identifiers.Where(entry => entry.Value == id).ToList())
+                    _database.Identifiers.TryRemove(entry.Key, out _);
                 _database.NotifyMutation();
             }
             return Task.CompletedTask;

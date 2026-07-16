@@ -384,8 +384,8 @@ namespace CodeContext.Core.Tests.Services
             var relationships = Assert.Single(result.Matches).Relationships;
             Assert.Empty(relationships.Uses);
             Assert.Empty(relationships.UsedBy);
-            Assert.Empty(relationships.Dependencies);
-            Assert.Empty(relationships.DependedBy);
+            Assert.Empty(relationships.FileDependencies);
+            Assert.Empty(relationships.FileDependents);
             Assert.Empty(relationships.RelatedItems);
             await _edgeRepository.DidNotReceive().GetBySourceIdAsync(Arg.Any<string>());
         }
@@ -767,27 +767,27 @@ namespace CodeContext.Core.Tests.Services
         }
 
         [Fact]
-        public async Task GetCompactContextAsync_QualifiedIdentifierSelectsOneAmbiguousMethod()
+        public async Task GetCompactContextAsync_ReturnedIdentifierSelectsOneAmbiguousMethod()
         {
             var declaration = new CodeNode
             {
-                Id = "csharp:default:Example.IService.Run()", Name = "Run", Type = "Method",
+                Id = "csharp:default:Example.IService.Run()", Identifier = "csharp:Example.IService.Run()", Name = "Run", Type = "Method",
                 Namespace = "Example", Signature = "Run()", FilePath = "C:/repo/IService.cs"
             };
             var implementation = new CodeNode
             {
-                Id = "csharp:default:Example.Service.Run()", Name = "Run", Type = "Method",
+                Id = "csharp:default:Example.Service.Run()", Identifier = "csharp:Example.Service.Run()", Name = "Run", Type = "Method",
                 Namespace = "Example", Signature = "Run()", FilePath = "C:/repo/Service.cs"
             };
             _nodeRepository.FindByNameAsync("Run", "Method", true).Returns([declaration, implementation]);
+            _nodeRepository.GetByIdentifierAsync(implementation.Identifier!).Returns(implementation);
 
             var ambiguous = await _contextService.GetCompactContextAsync("Run", "Method", depth: 0);
-            Assert.All(ambiguous.Matches, match => Assert.NotNull(match.Target.QualifiedIdentifier));
-            Assert.Contains("qualifiedIdentifier=", ambiguous.DisambiguationHint);
+            Assert.All(ambiguous.Matches, match => Assert.NotNull(match.Target.Identifier));
+            Assert.Contains("identifier=", ambiguous.DisambiguationHint);
 
             var selected = await _contextService.GetCompactContextAsync(
-                "Run", "Method", depth: 0,
-                qualifiedIdentifier: "Example.Service.Run()");
+                implementation.Identifier!, "Method", depth: 0);
             Assert.Equal("Service.cs", Path.GetFileName(Assert.Single(selected.Matches).Target.File));
         }
 

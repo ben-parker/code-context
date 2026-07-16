@@ -25,7 +25,8 @@ namespace CodeContext.Core.Services
             bool exact = false,
             bool includeRelated = true,
             bool includeMetrics = true,
-            string? qualifiedIdentifier = null,
+            int maxTestFiles = 5,
+            int maxTestMethods = 5,
             string? containingType = null,
             string? @namespace = null,
             string? signature = null,
@@ -44,7 +45,8 @@ namespace CodeContext.Core.Services
             int maxRelationships = 10,
             bool expandAmbiguous = false,
             int maxCallSites = 3,
-            string? qualifiedIdentifier = null,
+            int maxTestFiles = 5,
+            int maxTestMethods = 5,
             string? containingType = null,
             string? @namespace = null,
             string? signature = null,
@@ -114,7 +116,8 @@ namespace CodeContext.Core.Services
         public bool CallSitesTruncated { get; set; }
         public int? Distance { get; set; }
         public List<string>? RelationPath { get; set; }
-        public string? QualifiedIdentifier { get; set; }
+        public string Identifier { get; set; } = string.Empty;
+        public List<string>? Bindings { get; set; }
     }
 
     public class CompactRelationships
@@ -139,16 +142,16 @@ namespace CodeContext.Core.Services
         public int? TransitiveUsedByReturnedCount { get; set; }
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
         public bool TransitiveUsedByTruncated { get; set; }
-        public List<string>? Dependencies { get; set; }
-        public int? DependenciesCount { get; set; }
-        public int? DependenciesReturnedCount { get; set; }
+        public List<string>? FileDependencies { get; set; }
+        public int? FileDependenciesCount { get; set; }
+        public int? FileDependenciesReturnedCount { get; set; }
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
-        public bool DependenciesTruncated { get; set; }
-        public List<string>? DependedBy { get; set; }
-        public int? DependedByCount { get; set; }
-        public int? DependedByReturnedCount { get; set; }
+        public bool FileDependenciesTruncated { get; set; }
+        public List<string>? FileDependents { get; set; }
+        public int? FileDependentsCount { get; set; }
+        public int? FileDependentsReturnedCount { get; set; }
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
-        public bool DependedByTruncated { get; set; }
+        public bool FileDependentsTruncated { get; set; }
         public List<CompactCodeNode>? RelatedItems { get; set; }
         public int? RelatedItemsCount { get; set; }
         public int? RelatedItemsReturnedCount { get; set; }
@@ -167,17 +170,21 @@ namespace CodeContext.Core.Services
         public int TestImplementerCount { get; set; }
         public int HeuristicMatchCount { get; set; }
         public int TestFileCount { get; set; }
+        public int TestFilesReturnedCount { get; set; }
         public List<CompactTestFile> TestFiles { get; set; } = new();
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
-        public bool Truncated { get; set; }
+        public bool TestFilesTruncated { get; set; }
     }
 
     public class CompactTestFile
     {
         public string File { get; set; } = string.Empty;
         public int TestCount { get; set; }
+        public int TestMethodsReturnedCount { get; set; }
         public List<CompactCodeNode> TestMethods { get; set; } = new();
         public List<string> Evidence { get; set; } = new();
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+        public bool TestMethodsTruncated { get; set; }
     }
 
     /// <summary>
@@ -251,12 +258,18 @@ namespace CodeContext.Core.Services
         /// <summary>
         /// Resolved semantic relationships from this file to other repository files.
         /// </summary>
-        public List<string> Dependencies { get; set; } = new();
+        public List<string> FileDependencies { get; set; } = new();
 
         /// <summary>
         /// Repository files with resolved semantic relationships into this file.
         /// </summary>
-        public List<string> DependedBy { get; set; } = new();
+        public List<string> FileDependents { get; set; } = new();
+
+        /// <summary>Methods connected to the target through implementation or override declarations.</summary>
+        public List<CodeNode> MethodFamilyMembers { get; set; } = new();
+
+        /// <summary>Family declarations that have statically bound incoming calls.</summary>
+        public List<CodeNode> StaticallyBoundTargets { get; set; } = new();
 
         /// <summary>
         /// Heuristic same-file and same-namespace proximity; not dependency evidence.
@@ -289,6 +302,9 @@ namespace CodeContext.Core.Services
         public int TestReferenceCount { get; set; }
         public int TestImplementerCount { get; set; }
         public int HeuristicMatchCount { get; set; }
+        public int TestFileCount { get; set; }
+        public int TestFilesReturnedCount { get; set; }
+        public bool TestFilesTruncated { get; set; }
     }
 
     /// <summary>
@@ -310,6 +326,8 @@ namespace CodeContext.Core.Services
         /// Number of tests in this file
         /// </summary>
         public int TestCount { get; set; }
+        public int TestMethodsReturnedCount { get; set; }
+        public bool TestMethodsTruncated { get; set; }
 
         /// <summary>
         /// Coverage percentage (if available)
@@ -379,9 +397,12 @@ namespace CodeContext.Core.Services
 
         public int MaxCallSites { get; set; } = 3;
 
+        public int MaxTestFiles { get; set; } = 5;
+
+        public int MaxTestMethods { get; set; } = 5;
+
         public bool ExpandAmbiguous { get; set; }
 
-        public string? QualifiedIdentifier { get; set; }
         public string? ContainingType { get; set; }
         public string? Namespace { get; set; }
         public string? Signature { get; set; }

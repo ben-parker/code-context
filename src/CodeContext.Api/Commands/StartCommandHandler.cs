@@ -86,6 +86,7 @@ public static class StartCommandHandler
     private static async Task RunWebHostAsync(
         string rootPath, int port, StartSettings settings, IInstanceRegistry registry, CancellationToken ct)
     {
+        var applicationStartTime = new ApplicationStartTime(DateTimeOffset.UtcNow);
         RedirectOutputIfRequested(settings.LogFile);
 
         var instanceId = string.IsNullOrEmpty(settings.InstanceId)
@@ -95,7 +96,7 @@ public static class StartCommandHandler
         var builder = WebApplication.CreateBuilder();
         ProgramHelpers.ConfigureCoreServices(
             builder.Services, rootPath, builder.Environment.IsProduction(),
-            port, settings.IdleTimeoutMinutes, instanceId);
+            port, settings.IdleTimeoutMinutes, instanceId, applicationStartTime);
         ProgramHelpers.AddRestApi(builder.Services);
         builder.Services.AddSingleton<IdleTracker>();
         builder.Services.AddHostedService<IdleShutdownService>();
@@ -139,7 +140,7 @@ public static class StartCommandHandler
             Port = port,
             Pid = Environment.ProcessId,
             Backend = "inmemory",
-            StartedAt = DateTimeOffset.UtcNow,
+            StartedAt = applicationStartTime.Value,
             InstanceId = instanceId,
             ProcessStartTime = InstanceIdentity.TryGetProcessStartTime(Environment.ProcessId, out var ownStart)
                 ? ownStart

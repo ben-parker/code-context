@@ -1,120 +1,67 @@
 ---
 name: code-context
-description: Query a local CodeContext graph or a parser-native syntax tree. Use for callers, implementations, dependencies, blast radius, tests, cross-file relationships, ambiguous symbols, or exact syntax/token/nesting questions. Prefer text search for literals, configuration, comments, and distinctive one-off definitions.
+description: Query a local CodeContext graph or parser-native syntax tree for callers, implementations, dependencies, blast radius, tests, ambiguous symbols, or exact syntax.
 ---
 
 # CodeContext
 
-Use the normalized graph for semantic relationships across the repository. Use native
-syntax trees only after locating a file or symbol when exact parser structure matters.
+Use the normalized graph for semantic relationships. Prefer `rg` for literals,
+configuration, comments, and checking surprising results. Use native trees only for
+exact parser structure after locating the symbol or file.
 
 ## Connect
 
-Find the instance whose `rootPath` contains the working directory:
+Run `codecontext list --json` and choose the instance whose `rootPath` contains the
+working directory. If absent, run `codecontext start --detach --path <repo-root>`.
+Before trusting graph results, poll `http://localhost:<port>/api/status` until
+`indexing.status` is `ready`; confirm the instance ID, relevant parser is ready, and
+`api.contractVersion == 1`.
 
-```bash
-codecontext list --json
-```
-
-If none exists, start one at the repository root:
-
-```bash
-codecontext start --detach --path <repo-root>
-```
-
-Capture its `port` and `instanceId`. Poll `http://localhost:<port>/api/status` until
-`indexing.status` is `ready`; confirm `system.instanceId` matches. While status is
-`scanning`, empty results are inconclusive. If a parser is unavailable, do not infer
-that its files have no references.
-
-Check `api.contractVersion` before relying on response semantics. This skill requires
-contract version 2 or newer. A missing value means legacy contract version 1; if the
-value is absent or older than 2, recommend upgrading CodeContext and do not assume the
-relationship, truncation, signature, or match-mode guarantees described below.
-
-## Query the graph
+## Query
 
 ```bash
 curl -s "http://localhost:<port>/api/context/complete?identifier=OrderService"
 ```
 
-The defaults are agent-safe: compact output, exact-first matching with substring
-fallback, depth 1, tests/related items/metrics/content off, five ambiguous candidates,
-and ten entries per relationship list.
+`identifier` accepts a returned canonical `target.identifier`, a repository-relative
+or absolute file path, or a simple name. Returned identifiers round-trip unchanged
+through the same parameter and resolve before search. Simple names use exact-first,
+substring-fallback matching when `exact` is omitted; inspect `matchMode` and set
+`exact=false` to force broader discovery despite an exact hit. Refine with `type`,
+`containingType`, `namespace`, `signature`, or `sourceFile`; use `maxMatches` and
+`expandAmbiguous` for bounded ambiguity.
 
-Read every category's total count, returned count, and category-specific truncation
-flag. The shared `truncated` flag is only an OR summary across categories; it does not
-identify which list was capped. Absence from a capped list is not proof of absence.
-Relationship entries include relation kinds, occurrence counts, and up to three source
-lines. Direct relationships stay in `uses`/`usedBy`; nodes reached
-beyond one hop appear in bounded `transitiveUses`/`transitiveUsedBy` sections with a
-`distance` and shortest `relationPath`.
+Compact output defaults to depth one with tests, related items, metrics, and content
+off. Inspect each category's total, returned, and truncation fields before treating
+absence as meaningful. `maxRelationships`, `maxCallSites`,
+`maxTestFiles`, and `maxTestMethods` are independent. Zero requests count-only output
+for the corresponding call-site or test list.
 
-`dependencies` and `dependedBy` are resolved semantic cross-file graph evidence and
-are suitable for blast-radius analysis when indexing is ready and the relevant language
-parser is available and ready. They exclude namespace proximity and unresolved links.
-Do not treat an absent relationship as proof of independence while scanning is
-incomplete, a parser is unavailable or failed, or the language is unsupported.
+- `uses` is scoped to the selected symbol; implementations never borrow sibling
+  implementations' outgoing behavior.
+- Method `usedBy` unifies statically known interface, implementation, and override
+  callers. Callers are deduplicated, occurrences/sites aggregated, and `bindings`
+  identifies the statically called family role. This is potential dispatch evidence,
+  not runtime certainty.
+- `transitiveUses` and `transitiveUsedBy` contain nodes beyond distance one; unified
+  method callers seed inbound traversal.
+- `fileDependencies` and `fileDependents` aggregate resolved semantic edges crossing
+  the selected source file for every symbol in that file. They exclude unresolved,
+  same-file, and proximity-only relationships.
+- `relatedItems` is optional same-file/namespace proximity, not dependency evidence.
+  Test evidence is static graph evidence, not coverage.
 
-`relatedItems` is heuristic same-file/same-namespace proximity, not dependency
-evidence. Request it only with `includeRelated=true` when that proximity is useful.
+Use `depth=0` for cheap identity lookup and raise caps only when counts require it.
+`view=full` exposes parser/debug details, method-family members, and bound targets.
+`/api/context/multi` reduces HTTP round trips, not response tokens, and defaults
+`maxRelationships` to three.
 
-Refine progressively:
+For tokens, modifiers, nesting, or overload/accessor form, read
+[Native syntax trees](references/native-syntax.md).
 
-- `type=Class|Method|Interface|Property` narrows ambiguity.
-- `exact=true` disables substring fallback.
-- Inspect `matchMode`. When an omitted `exact` produces `matchMode=exact` and
-  `substringSearchSkipped=true`, retry with `exact=false` if broader discovery was the
-  intent.
-- `depth=0` returns the cheapest symbol result; increase depth only when transitive
-  relationships matter.
-- Ambiguous summaries include `qualifiedIdentifier`; pass it back directly, or filter
-  with `containingType`, `namespace`, `signature`, or `sourceFile`.
-- `expandAmbiguous=true` expands bounded matches when several summaries are relevant.
-- `includeTests=true` distinguishes direct calls, indirect static references, test
-  implementers/fakes, and naming heuristics. These are graph facts, not coverage.
-- `maxMatches` and `maxRelationships` raise explicit caps.
-- `maxCallSites` independently caps locations on an aggregated edge; use `0` for
-  count-only orientation and inspect `callSiteCount`/`callSitesTruncated`.
-- `includeMetrics=true` and `includeContent=true` are opt-in.
-- `view=full` is for compatibility or response debugging, not routine agent use.
+## Keep results trustworthy
 
-Ambiguous compact queries intentionally return summaries without relationships. Use a
-returned qualified identity or another facet filter to select one match in a single
-request; use bounded expansion only when several candidates matter. Repository-relative
-and absolute source paths are valid identifiers.
-
-Batch related symbols with one shared type filter:
-
-```bash
-curl -s -X POST "http://localhost:<port>/api/context/multi" \
-  -H "Content-Type: application/json" \
-  -d '{"identifiers":["OrderService","PaymentService"],"type":"Class","depth":1}'
-```
-
-Multi-context defaults to three entries per relationship list. Prefer several compact
-queries over one widened/full response when only some results need deeper inspection.
-
-## Escalate only for exact syntax
-
-For tokens, modifiers, nesting, accessor/overload form, or other parser-specific
-structure, read [Native syntax trees](references/native-syntax.md). Locate the symbol
-with the normalized graph first.
-
-## Keep the index trustworthy
-
-The watcher normally handles edits. After a branch switch or large external rewrite,
-`POST /api/index/refresh`, then wait until status is `ready` and its `operationId` is at
-least the returned operation ID. Leave instances running; idle shutdown handles cleanup.
-
-For an unexpected empty result, check readiness, parser status, spelling/type filters,
-and ignored directories before concluding that no relationship exists.
-
-Continue to prefer `rg` for literals, configuration, comments, release artifacts, and
-verification of surprising graph results.
-
-Project-local root and nested `.gitignore` files govern scans, refreshes, and watcher
-events. `.git/`, `.codecontext/`, configured runtime/build exclusions, inaccessible
-paths, system entries, and reparse points are mandatory safety exclusions and cannot be
-negated by project rules. Status reports the active ignore-source and ignored-path
-counts without returning rule bodies or paths.
+After a branch switch or large rewrite, `POST /api/index/refresh`, then wait for ready
+status with `operationId` at least the returned value. For unexpected empty results,
+check readiness, parser state, spelling/type filters, and ignore rules before concluding
+that no relationship exists.
