@@ -42,7 +42,7 @@ jobs:
           - rid: linux-x64
             os: ubuntu-latest
           - rid: osx-x64
-            os: macos-latest
+            os: macos-15-intel
           - rid: osx-arm64
             os: macos-latest
     runs-on: ${{ matrix.os }}
@@ -140,7 +140,7 @@ jobs:
             -p:Version="$VERSION" -o out/sdk
           npm test --prefix sdk/npm
           npm version "$VERSION" --prefix sdk/npm --no-git-tag-version
-          npm pack sdk/npm --pack-destination out/sdk
+          npm pack ./sdk/npm --pack-destination out/sdk
           python -m pip install build
           PYTHONPATH=sdk/python/src python -m unittest discover -s sdk/python/tests
           python -c "from pathlib import Path; p=Path('sdk/python/pyproject.toml'); p.write_text(p.read_text().replace('version = \"1.0.0\"', 'version = \"$VERSION\"'))"

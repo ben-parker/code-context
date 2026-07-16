@@ -117,6 +117,10 @@ try {
         Start-Sleep -Milliseconds 250
     }
     if ($null -eq $status -or $status.indexing.status -ne 'ready') {
+        if (Test-Path -LiteralPath $logFile -PathType Leaf) {
+            Write-Host 'Published host log:'
+            Get-Content -LiteralPath $logFile | Write-Host
+        }
         throw 'Published host did not report indexing.status=ready within two minutes.'
     }
     if ([string]::IsNullOrWhiteSpace([string]$status.system.informationalVersion)) {
