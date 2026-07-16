@@ -18,7 +18,6 @@
 
   <ItemGroup>
     <ProjectReference Include="..\CodeContext.Core\CodeContext.Core.csproj" />
-    <ProjectReference Include="..\CodeContext.Python.Kuzu\CodeContext.Python.Kuzu.csproj" />
     <ProjectReference Include="..\CodeContext.Mcp\CodeContext.Mcp.csproj" />
     <!-- Build-order dependency only: the worker is a separate process, never a host
          assembly reference. Its output is copied into workers/csharp/ below. -->

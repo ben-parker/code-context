@@ -146,7 +146,7 @@ public class StatusService : IStatusService
             return store.GetStatistics();
         }
 
-        // Fallback for backends without maintained counters (Kuzu, interim).
+        // Fallback for repository implementations without maintained counters.
         var allNodes = await _nodeRepository.GetAllAsync();
         var allEdges = await _edgeRepository.GetAllAsync();
 
@@ -209,12 +209,9 @@ public class StatusService : IStatusService
 
     private DatabaseStatusDto GetDatabaseStatus(FileMetadataAggregates files, GraphStatistics graph)
     {
-        var repositoryType = _repositoryFactory.GetType().Name switch
-        {
-            "KuzuRepositoryFactory" => "Kuzu",
-            "InMemoryRepositoryFactory" => "InMemory",
-            _ => "Unknown"
-        };
+        var repositoryType = _repositoryFactory is Repositories.InMemory.InMemoryRepositoryFactory
+            ? "InMemory"
+            : "Unknown";
 
         return new DatabaseStatusDto(
             FileCount: files.FileCount,

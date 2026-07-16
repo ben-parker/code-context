@@ -4,10 +4,8 @@ namespace CodeContext.Core.Workers;
 
 /// <summary>
 /// Receives streamed <see cref="AnalysisDelta"/> chunks from worker supervisors and
-/// commits completed requests into the active graph backend.
-/// <see cref="AnalysisDeltaApplier"/> is the atomic, generational implementation for
-/// the default in-memory store; <see cref="JsonReconcileDeltaSink"/> adapts deltas to
-/// the legacy JSON reconcile for backends without generation support (Kuzu, interim).
+/// commits completed requests into the active graph store.
+/// <see cref="AnalysisDeltaApplier"/> provides atomic, generational commits.
 /// </summary>
 public interface IAnalysisDeltaSink
 {

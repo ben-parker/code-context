@@ -20,7 +20,7 @@ jobs:
           node-version: '22.15.0'
       - name: Install TypeScript worker dependencies
         run: npm ci --prefix src/CodeContext.TypeScript.Worker
-      # Tests that depend on external tooling (Python/CSnakes provisioning, Node.js)
+      # Tests that depend on external tooling such as Node.js
       # carry the explicit ExternalTooling trait; see DEVELOPMENT.md for the quarantine
       # list and how to run them locally.
       - name: Run tests
@@ -77,8 +77,7 @@ jobs:
         run: |
           ls "out/${{ matrix.rid }}"
           # Language workers must ship under workers/<name>/ next to the host binary
-          # (the layout WorkerCatalog scans). The Kuzu/Python payload is an opt-in
-          # backend and is intentionally not a release requirement.
+          # (the layout WorkerCatalog scans).
           for required in \
             "workers/csharp/worker-manifest.json" \
             "workers/typescript/worker-manifest.json" \
@@ -118,26 +117,6 @@ jobs:
           path: codecontext-*.zip
           if-no-files-found: error
 
-  kuzu-integration:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '9.0.x'
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Provision pinned Kuzu environment
-        shell: pwsh
-        run: |
-          python -m venv src/CodeContext.Python.Kuzu/.venv
-          src/CodeContext.Python.Kuzu/.venv/Scripts/python -m pip install kuzu==0.10.1
-      - name: Run isolated Kuzu integration tests
-        run: >
-          dotnet test tests/CodeContext.Core.Tests/CodeContext.Core.Tests.csproj
-          --filter "Category=KuzuIntegration"
-
   sdk:
     needs: test
     runs-on: ubuntu-latest
@@ -173,7 +152,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [publish, sdk, kuzu-integration]
+    needs: [publish, sdk]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

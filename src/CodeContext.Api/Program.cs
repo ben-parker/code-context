@@ -2,7 +2,6 @@
 using System.CommandLine;
 using CodeContext.Api;
 using CodeContext.Api.Commands;
-using CodeContext.Core;
 
 namespace CodeContext.Api;
 
@@ -26,27 +25,6 @@ public class Program
         {
             Description = "Run as MCP server (stdio transport).",
             DefaultValueFactory = parseResult => false,
-        };
-
-        Option<BackendType> backendOption = new("--backend", ["--backend"])
-        {
-            Description = "Graph storage backend (inmemory or kuzu).",
-            DefaultValueFactory = parseResult =>
-                Enum.TryParse<BackendType>(
-                    Environment.GetEnvironmentVariable("CODECONTEXT_BACKEND"),
-                    ignoreCase: true, out var backend)
-                    ? backend
-                    : BackendType.InMemory,
-            CustomParser = result =>
-            {
-                var token = result.Tokens.Count > 0 ? result.Tokens[0].Value : string.Empty;
-                if (Enum.TryParse<BackendType>(token, ignoreCase: true, out var backend))
-                {
-                    return backend;
-                }
-                result.AddError($"Unknown backend '{token}'. Valid values: inmemory, kuzu.");
-                return BackendType.InMemory;
-            },
         };
 
         Option<bool> detachOption = new("--detach", ["--detach"])
@@ -100,7 +78,6 @@ public class Program
             pathOption,
             portOption,
             mcpOption,
-            backendOption,
             detachOption,
             idleTimeoutOption,
             logFileOption,
@@ -111,7 +88,6 @@ public class Program
                 new StartSettings(
                     parseResult.GetValue(pathOption)!,
                     parseResult.GetValue(portOption),
-                    parseResult.GetValue(backendOption),
                     parseResult.GetValue(mcpOption),
                     parseResult.GetValue(detachOption),
                     parseResult.GetValue(idleTimeoutOption),

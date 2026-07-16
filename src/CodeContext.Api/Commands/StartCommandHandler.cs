@@ -3,7 +3,6 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using CodeContext.Api.Lifecycle;
-using CodeContext.Core;
 using CodeContext.Core.Instances;
 using CodeContext.Core.Repositories;
 using CodeContext.Core.Services;
@@ -13,7 +12,6 @@ namespace CodeContext.Api.Commands;
 public record StartSettings(
     string Path,
     int? ExplicitPort,
-    BackendType Backend,
     bool Mcp,
     bool Detach,
     int IdleTimeoutMinutes,
@@ -33,7 +31,7 @@ public static class StartCommandHandler
 
         if (settings.Mcp)
         {
-            return await RunMcpAsync(rootPath, settings.Backend, ct);
+            return await RunMcpAsync(rootPath, ct);
         }
 
         // Serialize the external detached-start transaction (check registry → spawn →
@@ -97,7 +95,7 @@ public static class StartCommandHandler
         var builder = WebApplication.CreateBuilder();
         ProgramHelpers.ConfigureCoreServices(
             builder.Services, rootPath, builder.Environment.IsProduction(),
-            settings.Backend, port, settings.IdleTimeoutMinutes, instanceId);
+            port, settings.IdleTimeoutMinutes, instanceId);
         ProgramHelpers.AddRestApi(builder.Services);
         builder.Services.AddSingleton<IdleTracker>();
         builder.Services.AddHostedService<IdleShutdownService>();
@@ -140,7 +138,7 @@ public static class StartCommandHandler
             RootPath = rootPath,
             Port = port,
             Pid = Environment.ProcessId,
-            Backend = settings.Backend.ToString().ToLowerInvariant(),
+            Backend = "inmemory",
             StartedAt = DateTimeOffset.UtcNow,
             InstanceId = instanceId,
             ProcessStartTime = InstanceIdentity.TryGetProcessStartTime(Environment.ProcessId, out var ownStart)
@@ -207,8 +205,6 @@ public static class StartCommandHandler
         psi.ArgumentList.Add(rootPath);
         psi.ArgumentList.Add("--port");
         psi.ArgumentList.Add(port.ToString());
-        psi.ArgumentList.Add("--backend");
-        psi.ArgumentList.Add(settings.Backend.ToString().ToLowerInvariant());
         psi.ArgumentList.Add("--idle-timeout");
         psi.ArgumentList.Add(settings.IdleTimeoutMinutes.ToString());
         psi.ArgumentList.Add("--log-file");
@@ -260,7 +256,7 @@ public static class StartCommandHandler
             RootPath = rootPath,
             Port = port,
             Pid = child.Id,
-            Backend = settings.Backend.ToString().ToLowerInvariant(),
+            Backend = "inmemory",
             StartedAt = DateTimeOffset.UtcNow,
             InstanceId = instanceId,
             ProcessStartTime = InstanceIdentity.TryGetProcessStartTime(child.Id, out var childStart)
@@ -272,10 +268,10 @@ public static class StartCommandHandler
         return 0;
     }
 
-    private static async Task<int> RunMcpAsync(string rootPath, BackendType backend, CancellationToken ct)
+    private static async Task<int> RunMcpAsync(string rootPath, CancellationToken ct)
     {
         var builder = Host.CreateApplicationBuilder();
-        ProgramHelpers.ConfigureCoreServices(builder.Services, rootPath, builder.Environment.IsProduction(), backend);
+        ProgramHelpers.ConfigureCoreServices(builder.Services, rootPath, builder.Environment.IsProduction());
         Mcp.ProgramHelpers.AddMcpServer(builder.Services);
 
         var app = builder.Build();

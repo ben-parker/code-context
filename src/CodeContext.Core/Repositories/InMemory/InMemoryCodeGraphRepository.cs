@@ -59,8 +59,8 @@ namespace CodeContext.Core.Repositories.InMemory
         }
 
         /// <summary>
-        /// Legacy JSON reconcile, kept for the shared <see cref="ICodeGraphRepository"/>
-        /// contract (JSON is the Kuzu process boundary). The typed
+        /// JSON reconcile implementation for the shared <see cref="ICodeGraphRepository"/>
+        /// contract. The typed
         /// <see cref="TryCommitGenerationAsync"/> is the in-memory hot path; this shim only
         /// adapts and delegates.
         /// </summary>

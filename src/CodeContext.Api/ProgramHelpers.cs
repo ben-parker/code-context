@@ -1,11 +1,9 @@
 using CodeContext.Api.Endpoints;
 using CodeContext.Core;
 using CodeContext.Core.Repositories;
-using CodeContext.Core.Repositories.Kuzu;
 using CodeContext.Core.Serialization;
 using CodeContext.Core.Services;
 using CodeContext.Core.Workers;
-using CSnakes.Runtime;
 using Microsoft.AspNetCore.OpenApi;
 using Microsoft.Extensions.Logging;
 using Microsoft.OpenApi.Models;
@@ -45,7 +43,7 @@ public static class ProgramHelpers
         });
     }
 
-    public static void ConfigureCoreServices(IServiceCollection services, string rootPath, bool isProduction, BackendType backend = BackendType.InMemory, int port = 7890, int idleTimeoutMinutes = 120, string? instanceId = null)
+    public static void ConfigureCoreServices(IServiceCollection services, string rootPath, bool isProduction, int port = 7890, int idleTimeoutMinutes = 120, string? instanceId = null)
     {
         using var loggerFactory = LoggerFactory.Create(loggingBuilder =>
         {
@@ -64,7 +62,6 @@ public static class ProgramHelpers
         {
             options.RootPath = rootPath;
             options.InstanceId = instanceId ?? Guid.NewGuid().ToString("N");
-            options.Backend = backend;
             options.Port = port;
             options.IdleTimeoutMinutes = idleTimeoutMinutes;
         });
@@ -84,39 +81,15 @@ public static class ProgramHelpers
         services.AddSingleton<ScanStateService>();
         services.AddSingleton<IScanStateService>(sp => sp.GetRequiredService<ScanStateService>());
 
-        // Kuzu is the only backend that needs Python: keep all CSnakes provisioning
-        // inside this branch so the default (in-memory) path has zero Python dependency.
-        if (backend == BackendType.Kuzu)
-        {
-            var pythonBuilder = services.WithPython();
-
-            var home = GetPythonHome(rootPath, isProduction);
-            var venv = Path.Join(home, ".venv");
-
-            pythonBuilder
-                .WithHome(home)
-                .WithVirtualEnvironment(venv)
-                .WithPipInstaller("requirements.txt")
-                .FromRedistributable();
-
-            // with this, can inject IKuzuApi
-            services.AddSingleton(sp => sp.GetRequiredService<IPythonEnvironment>().KuzuApi());
-        }
-
-        services.AddCodeContextRepositories(backend);
+        services.AddCodeContextRepositories();
 
         // Language workers: discovered from workers/<name>/worker-manifest.json next
         // to the host binary. Streamed analysis deltas commit atomically through the
-        // generational store; the Kuzu backend falls back to its JSON reconcile
-        // boundary (whole-graph replacement, the pre-existing opt-in limitation).
+        // generational store.
         services.AddSingleton<IWorkerCatalog, WorkerCatalog>();
-        services.AddSingleton<IAnalysisDeltaSink>(sp =>
-        {
-            var graphRepository = sp.GetRequiredService<IRepositoryFactory>().CreateGraphRepository();
-            return graphRepository is IGenerationalGraphStore store
-                ? new AnalysisDeltaApplier(store, sp.GetRequiredService<ILogger<AnalysisDeltaApplier>>())
-                : new JsonReconcileDeltaSink(graphRepository, sp.GetRequiredService<ILogger<JsonReconcileDeltaSink>>());
-        });
+        services.AddSingleton<IAnalysisDeltaSink>(sp => new AnalysisDeltaApplier(
+            (IGenerationalGraphStore)sp.GetRequiredService<IRepositoryFactory>().CreateGraphRepository(),
+            sp.GetRequiredService<ILogger<AnalysisDeltaApplier>>()));
         services.AddSingleton<LanguageWorkerService>();
         services.AddSingleton<ILanguageWorkerService>(sp => sp.GetRequiredService<LanguageWorkerService>());
         services.AddHostedService(sp => sp.GetRequiredService<LanguageWorkerService>());
@@ -145,24 +118,6 @@ public static class ProgramHelpers
             .WithDescription("Returns the OpenAPI 3.0 specification for the CodeContext API");
     }
 
-    private static string GetPythonHome(string rootPath, bool isProduction)
-    {
-        if (isProduction) return AppContext.BaseDirectory;
-
-        if (Environment.CurrentDirectory.EndsWith("CodeContext.Api"))
-        {
-            return Path.Join("..", "CodeContext.Python.Kuzu");
-        }
-        else if (Environment.CurrentDirectory.Contains(Path.Join("bin", "Debug")))
-        {
-            // Development: Find Python project relative to CodeContext application location
-            return Path.GetFullPath(Path.Join(AppContext.BaseDirectory, "..", "..", "..", "CodeContext.Python.Kuzu"));
-        }
-        else
-        {
-            return Environment.CurrentDirectory;
-        }
-    }
 }
 
 /// <summary>

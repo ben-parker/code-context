@@ -1,10 +1,6 @@
-using CodeContext.Core;
 using CodeContext.Core.Repositories;
 using CodeContext.Core.Repositories.InMemory;
-using CodeContext.Core.Repositories.Kuzu;
-using CSnakes.Runtime;
 using Microsoft.Extensions.DependencyInjection;
-using NSubstitute;
 using Xunit;
 
 namespace CodeContext.Core.Tests.Repositories
@@ -19,11 +15,11 @@ namespace CodeContext.Core.Tests.Repositories
         }
 
         [Fact]
-        public void AddCodeContextRepositories_InMemory_ResolvesInMemoryFactory()
+        public void AddCodeContextRepositories_ResolvesInMemoryFactory()
         {
             var services = CreateBaseServices();
 
-            services.AddCodeContextRepositories(BackendType.InMemory);
+            services.AddCodeContextRepositories();
             using var provider = services.BuildServiceProvider();
 
             var factory = provider.GetRequiredService<IRepositoryFactory>();
@@ -31,13 +27,11 @@ namespace CodeContext.Core.Tests.Repositories
         }
 
         [Fact]
-        public void AddCodeContextRepositories_InMemory_ResolvesWithoutKuzuApiRegistered()
+        public void AddCodeContextRepositories_ResolvesRepositories()
         {
-            // The in-memory path must have zero Python/Kuzu dependency:
-            // no IKuzuApi (or IPythonEnvironment) is registered here, and resolution must still succeed.
             var services = CreateBaseServices();
 
-            services.AddCodeContextRepositories(BackendType.InMemory);
+            services.AddCodeContextRepositories();
             using var provider = services.BuildServiceProvider();
 
             var factory = provider.GetRequiredService<IRepositoryFactory>();
@@ -48,24 +42,11 @@ namespace CodeContext.Core.Tests.Repositories
         }
 
         [Fact]
-        public void AddCodeContextRepositories_Kuzu_ResolvesKuzuFactory()
-        {
-            var services = CreateBaseServices();
-            services.AddSingleton(Substitute.For<IKuzuApi>());
-
-            services.AddCodeContextRepositories(BackendType.Kuzu);
-            using var provider = services.BuildServiceProvider();
-
-            var factory = provider.GetRequiredService<IRepositoryFactory>();
-            Assert.IsType<KuzuRepositoryFactory>(factory);
-        }
-
-        [Fact]
         public void AddCodeContextRepositories_RegistersRepositoriesFromFactory()
         {
             var services = CreateBaseServices();
 
-            services.AddCodeContextRepositories(BackendType.InMemory);
+            services.AddCodeContextRepositories();
             using var provider = services.BuildServiceProvider();
 
             Assert.NotNull(provider.GetRequiredService<ICodeNodeRepository>());
@@ -74,11 +55,10 @@ namespace CodeContext.Core.Tests.Repositories
         }
 
         [Fact]
-        public void CodeContextOptions_DefaultsToInMemoryBackend()
+        public void CodeContextOptions_DefaultsPort()
         {
             var options = new CodeContextOptions();
 
-            Assert.Equal(BackendType.InMemory, options.Backend);
             Assert.Equal(7890, options.Port);
         }
     }

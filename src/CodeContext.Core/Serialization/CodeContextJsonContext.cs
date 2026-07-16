@@ -5,7 +5,7 @@ using CodeContext.Parser.Protocol;
 
 namespace CodeContext.Core.Serialization;
 
-// DTOs for JSON serialization matching Python kuzu_api.py structure
+// DTOs for the graph repository's JSON compatibility contract.
 public record NodeDto(
     [property: JsonPropertyName("id")] string? Id,
     [property: JsonPropertyName("name")] string? Name,
