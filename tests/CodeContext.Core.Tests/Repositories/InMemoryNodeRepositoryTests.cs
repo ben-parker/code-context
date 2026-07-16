@@ -106,6 +106,21 @@ public class InMemoryNodeRepositoryTests
     }
 
     [Fact]
+    public async Task FindByNameAsync_WithLowercaseTypeFilter_MatchesCaseInsensitively()
+    {
+        // Arrange
+        var methodNode = CreateTestNode("id1", "Parse", "Method");
+        _database.Nodes.TryAdd(methodNode.Id!, methodNode);
+
+        // Act
+        var result = await _repository.FindByNameAsync("Parse", type: "method", exact: true);
+
+        // Assert
+        Assert.Single(result);
+        Assert.Equal("Method", result.First().Type);
+    }
+
+    [Fact]
     public async Task FindByNameAsync_WithNullName_ReturnsEmptyList()
     {
         // Arrange

@@ -48,6 +48,7 @@ public static class CodeContextEndpoints
             string? @namespace = null,
             string? signature = null,
             string? sourceFile = null,
+            string? relation = null,
             string view = "compact") =>
         {
             try
@@ -55,6 +56,9 @@ public static class CodeContextEndpoints
                 var responseView = ParseView(view);
                 if (responseView == ContextResponseView.Full)
                 {
+                    if (!string.IsNullOrEmpty(relation))
+                        throw new ArgumentException(
+                            "relation is only supported for view=compact.", nameof(relation));
                     var full = await contextService.GetCompleteContextAsync(
                         identifier, type, depth, includeTests, includeContent, exact ?? false,
                         includeRelated, includeMetrics, maxTestFiles, maxTestMethods, containingType,
@@ -65,7 +69,8 @@ public static class CodeContextEndpoints
                 var compact = await contextService.GetCompactContextAsync(
                     identifier, type, depth, includeTests, includeContent, exact,
                     includeRelated, includeMetrics, maxMatches, maxRelationships, expandAmbiguous,
-                    maxCallSites, maxTestFiles, maxTestMethods, containingType, @namespace, signature, sourceFile);
+                    maxCallSites, maxTestFiles, maxTestMethods, containingType, @namespace, signature,
+                    sourceFile, relation);
                 return Results.Ok(compact);
             }
             catch (Exception ex)
@@ -81,7 +86,7 @@ public static class CodeContextEndpoints
                             identifier, type, depth, includeTests, includeContent, exact,
                             includeRelated, includeMetrics, maxMatches, maxRelationships,
                             maxCallSites, maxTestFiles, maxTestMethods, expandAmbiguous, containingType,
-                            @namespace, signature, sourceFile, view
+                            @namespace, signature, sourceFile, relation, view
                         }
                     }
                 });

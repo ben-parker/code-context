@@ -216,6 +216,15 @@
             }
           },
           {
+            "name": "relation",
+            "in": "query",
+            "description": "Compact view only: comma-separated, case-insensitive edge kinds that filter the 'uses' and 'usedBy' lists. Valid kinds: CALLS, MOCK_CALLS, REFERENCES, IMPLEMENTS, INHERITS, EXTENDS, IMPORTS, USES (USES matches null-typed edges). An unknown kind returns 400 listing the valid kinds; combining with view=full returns 400. When set, usesCount/usedByCount and the returned/truncated fields describe the filtered set (filtered-to-zero yields an empty list plus zero counts, distinct from an omitted section). transitiveUses/transitiveUsedBy, fileDependencies/fileDependents, and relatedItems are not filtered.",
+            "schema": {
+              "type": "string",
+              "default": null
+            }
+          },
+          {
             "name": "view",
             "in": "query",
             "description": "Response shape: compact (default) or full",
@@ -1349,7 +1358,8 @@
             "type": "array",
             "items": {
               "type": "string"
-            }
+            },
+            "description": "Compact view only: edge kinds applied as the 'relation' filter to each identifier's uses/usedBy lists (same valid kinds as the 'relation' query parameter on /api/context/complete). Empty means no filter; a non-empty value combined with view=full returns 400."
           }
         }
       },

@@ -44,7 +44,7 @@ namespace CodeContext.Core.Repositories.InMemory
             
             if (type != null)
             {
-                query = query.Where(n => n.Type == type);
+                query = query.Where(n => string.Equals(n.Type, type, StringComparison.OrdinalIgnoreCase));
             }
 
             return Task.FromResult(query.ToList());

@@ -613,6 +613,75 @@ namespace CodeContext.Core.Tests.Services
         }
 
         [Fact]
+        public async Task GetCompactContextAsync_TypeFilterExcludesAllMatches_HintListsAvailableTypes()
+        {
+            _nodeRepository.GetByIdentifierAsync("Parse").Returns((CodeNode?)null);
+            _nodeRepository.FindByNameAsync("Parse", "Enum", true).Returns([]);
+            _nodeRepository.FindByNameAsync("Parse", "Enum", false).Returns([]);
+            _nodeRepository.FindByNameAsync("Parse", null, false).Returns(new List<CodeNode>
+            {
+                new() { Id = "m1", Name = "Parse", Type = "Method" },
+                new() { Id = "m2", Name = "Parse", Type = "Method" },
+                new() { Id = "p1", Name = "Parse", Type = "Property" }
+            });
+
+            var result = await _contextService.GetCompactContextAsync("Parse", type: "Enum", depth: 0);
+
+            Assert.Equal(0, result.TotalMatches);
+            Assert.Empty(result.Matches);
+            Assert.Contains("Enum", result.DisambiguationHint);
+            Assert.Contains("Method (2)", result.DisambiguationHint);
+            Assert.Contains("Property (1)", result.DisambiguationHint);
+        }
+
+        [Fact]
+        public async Task GetCompactContextAsync_NoMatchesEvenUnfiltered_SaysIdentifierHasNoMatches()
+        {
+            _nodeRepository.GetByIdentifierAsync("Parse").Returns((CodeNode?)null);
+            _nodeRepository.FindByNameAsync("Parse", "Enum", true).Returns([]);
+            _nodeRepository.FindByNameAsync("Parse", "Enum", false).Returns([]);
+            _nodeRepository.FindByNameAsync("Parse", null, false).Returns([]);
+
+            var result = await _contextService.GetCompactContextAsync("Parse", type: "Enum", depth: 0);
+
+            Assert.Equal(0, result.TotalMatches);
+            Assert.Contains("No matches found", result.DisambiguationHint);
+            Assert.Contains("even without", result.DisambiguationHint);
+        }
+
+        [Fact]
+        public async Task GetCompleteContextAsync_TypeFilterExcludesAllMatches_HintListsAvailableTypes()
+        {
+            _nodeRepository.GetByIdentifierAsync("Parse").Returns((CodeNode?)null);
+            _nodeRepository.FindByNameAsync("Parse", "Enum", false).Returns([]);
+            _nodeRepository.FindByNameAsync("Parse", null, false).Returns(new List<CodeNode>
+            {
+                new() { Id = "m1", Name = "Parse", Type = "Method" },
+                new() { Id = "m2", Name = "Parse", Type = "Method" },
+                new() { Id = "p1", Name = "Parse", Type = "Property" }
+            });
+
+            var result = await _contextService.GetCompleteContextAsync("Parse", type: "Enum");
+
+            Assert.Empty(result.Matches);
+            Assert.Contains("Enum", result.DisambiguationHint);
+            Assert.Contains("Method (2)", result.DisambiguationHint);
+            Assert.Contains("Property (1)", result.DisambiguationHint);
+        }
+
+        [Fact]
+        public async Task GetCompactContextAsync_NoFilters_NoMatchHintUnchanged()
+        {
+            _nodeRepository.GetByIdentifierAsync("X").Returns((CodeNode?)null);
+            _nodeRepository.FindByNameAsync("X", null, true).Returns([]);
+            _nodeRepository.FindByNameAsync("X", null, false).Returns([]);
+
+            var result = await _contextService.GetCompactContextAsync("X", depth: 0);
+
+            Assert.Equal("No matches found for identifier 'X'", result.DisambiguationHint);
+        }
+
+        [Fact]
         public async Task GetCompactContextAsync_ExplicitExactAndSubstringReportRequestedModes()
         {
             var exactTarget = new CodeNode { Id = "exact", Name = "Target", Type = "Class" };
@@ -851,6 +920,129 @@ namespace CodeContext.Core.Tests.Services
             Assert.True(testing.IsTested);
             Assert.Contains(testing.TestFiles, file => file.Evidence.Contains("indirectReference"));
             Assert.Contains(testing.TestFiles, file => file.Evidence.Contains("testImplementer"));
+        }
+
+        [Theory]
+        [InlineData("")]
+        [InlineData("   ")]
+        [InlineData("\t")]
+        public async Task GetCompactContextAsync_WithEmptyOrWhitespaceIdentifier_ThrowsArgumentException(
+            string identifier)
+        {
+            var exception = await Assert.ThrowsAsync<ArgumentException>(
+                () => _contextService.GetCompactContextAsync(identifier));
+            Assert.Equal("identifier", exception.ParamName);
+        }
+
+        [Fact]
+        public async Task GetCompleteContextAsync_WithWhitespaceIdentifier_ThrowsArgumentException()
+        {
+            var exception = await Assert.ThrowsAsync<ArgumentException>(
+                () => _contextService.GetCompleteContextAsync("   "));
+            Assert.Equal("identifier", exception.ParamName);
+        }
+
+        [Fact]
+        public async Task GetMultipleCompactContextAsync_WithBlankIdentifierInList_Throws()
+        {
+            var request = new MultiContextRequest
+            {
+                Identifiers = new List<string> { "   " }
+            };
+
+            var exception = await Assert.ThrowsAsync<ArgumentException>(
+                () => _contextService.GetMultipleCompactContextAsync(request));
+            Assert.Equal("identifier", exception.ParamName);
+        }
+
+        [Fact]
+        public async Task GetCompactContextAsync_ManyAmbiguousMatches_HintReportsCountAndTypeNarrowing()
+        {
+            _nodeRepository.GetByIdentifierAsync("Parse").Returns((CodeNode?)null);
+            _nodeRepository.FindByNameAsync("Parse", null, true).Returns([]);
+            var candidates = new List<CodeNode>
+            {
+                new() { Id = "m1", Name = "Parse1", Type = "Method" },
+                new() { Id = "m2", Name = "Parse2", Type = "Method" },
+                new() { Id = "m3", Name = "Parse3", Type = "Method" },
+                new() { Id = "m4", Name = "Parse4", Type = "Method" },
+                new() { Id = "c1", Name = "Parse5", Type = "Class" },
+                new() { Id = "c2", Name = "Parse6", Type = "Class" },
+                new() { Id = "c3", Name = "Parse7", Type = "Class" }
+            };
+            _nodeRepository.FindByNameAsync("Parse", null, false).Returns(candidates);
+
+            var result = await _contextService.GetCompactContextAsync("Parse", depth: 0);
+
+            Assert.Equal("substring", result.MatchMode);
+            Assert.Contains("7 matches", result.DisambiguationHint);
+            Assert.Contains("type", result.DisambiguationHint);
+            Assert.DoesNotContain("unchanged", result.DisambiguationHint);
+            Assert.Contains("exact=true", result.DisambiguationHint);
+        }
+
+        [Fact]
+        public async Task GetCompactContextAsync_FewAmbiguousMatches_KeepsExactIdentifierHint()
+        {
+            _nodeRepository.GetByIdentifierAsync("Parse").Returns((CodeNode?)null);
+            _nodeRepository.FindByNameAsync("Parse", null, true).Returns(new List<CodeNode>
+            {
+                new() { Id = "m1", Name = "Parse", Type = "Method" },
+                new() { Id = "m2", Name = "Parse", Type = "Method" }
+            });
+
+            var result = await _contextService.GetCompactContextAsync("Parse", depth: 0);
+
+            Assert.Equal(2, result.TotalMatches);
+            Assert.Contains("Pass identifier=", result.DisambiguationHint);
+        }
+
+        [Fact]
+        public async Task GetCompleteContextAsync_ManyMatches_HintReportsCountAndTypeNarrowing()
+        {
+            _nodeRepository.GetByIdentifierAsync("Parse").Returns((CodeNode?)null);
+            var candidates = new List<CodeNode>
+            {
+                new() { Id = "m1", Name = "Parse1", Type = "Method" },
+                new() { Id = "m2", Name = "Parse2", Type = "Method" },
+                new() { Id = "m3", Name = "Parse3", Type = "Method" },
+                new() { Id = "m4", Name = "Parse4", Type = "Method" },
+                new() { Id = "c1", Name = "Parse5", Type = "Class" },
+                new() { Id = "c2", Name = "Parse6", Type = "Class" }
+            };
+            _nodeRepository.FindByNameAsync("Parse", null, false).Returns(candidates);
+            _edgeRepository.GetBySourceIdAsync(Arg.Any<string>()).Returns([]);
+            _edgeRepository.GetByTargetIdAsync(Arg.Any<string>()).Returns([]);
+            _nodeRepository.GetAllAsync().Returns(candidates);
+
+            var result = await _contextService.GetCompleteContextAsync("Parse", exact: false);
+
+            Assert.Equal(6, result.Matches.Count);
+            Assert.Contains("6 matches", result.DisambiguationHint);
+            Assert.Contains("type", result.DisambiguationHint);
+            Assert.Contains("exact=true", result.DisambiguationHint);
+        }
+
+        [Fact]
+        public async Task GetCompactContextAsync_ManyExactMatches_HintOmitsExactSuggestion()
+        {
+            _nodeRepository.GetByIdentifierAsync("Parse").Returns((CodeNode?)null);
+            var candidates = new List<CodeNode>
+            {
+                new() { Id = "m1", Name = "Parse", Type = "Method" },
+                new() { Id = "m2", Name = "Parse", Type = "Method" },
+                new() { Id = "m3", Name = "Parse", Type = "Method" },
+                new() { Id = "m4", Name = "Parse", Type = "Method" },
+                new() { Id = "c1", Name = "Parse", Type = "Class" },
+                new() { Id = "c2", Name = "Parse", Type = "Class" }
+            };
+            _nodeRepository.FindByNameAsync("Parse", null, true).Returns(candidates);
+
+            var result = await _contextService.GetCompactContextAsync("Parse", depth: 0);
+
+            Assert.Equal("exact", result.MatchMode);
+            Assert.Contains("6 matches", result.DisambiguationHint);
+            Assert.DoesNotContain("exact=true", result.DisambiguationHint);
         }
 
         private static CodeEdge Edge(string source, string target, string type) => new()

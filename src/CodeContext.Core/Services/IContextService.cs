@@ -50,7 +50,8 @@ namespace CodeContext.Core.Services
             string? containingType = null,
             string? @namespace = null,
             string? signature = null,
-            string? sourceFile = null);
+            string? sourceFile = null,
+            string? relation = null);
 
         /// <summary>
         /// Gets complete context for multiple identifiers
@@ -409,7 +410,10 @@ namespace CodeContext.Core.Services
         public string? SourceFile { get; set; }
 
         /// <summary>
-        /// Types of relationships to include
+        /// Relation kinds to filter uses/usedBy by, applied to every identifier (compact view only).
+        /// Valid kinds: CALLS, MOCK_CALLS, REFERENCES, IMPLEMENTS, INHERITS, EXTENDS, IMPORTS, USES.
+        /// Empty means no filter. Joined with ',' and passed as the <c>relation</c> filter to the
+        /// per-identifier compact lookup; a non-empty value with the full view is rejected.
         /// </summary>
         public List<string> RelationshipTypes { get; set; } = new();
     }

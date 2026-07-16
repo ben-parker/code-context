@@ -29,7 +29,11 @@ through the same parameter and resolve before search. Simple names use exact-fir
 substring-fallback matching when `exact` is omitted; inspect `matchMode` and set
 `exact=false` to force broader discovery despite an exact hit. Refine with `type`,
 `containingType`, `namespace`, `signature`, or `sourceFile`; use `maxMatches` and
-`expandAmbiguous` for bounded ambiguity.
+`expandAmbiguous` for bounded ambiguity. `relation=CALLS,MOCK_CALLS` (compact view
+only, case-insensitive; valid kinds CALLS, MOCK_CALLS, REFERENCES, IMPLEMENTS,
+INHERITS, EXTENDS, IMPORTS, USES) filters `uses`/`usedBy` to those edge kinds — an
+unknown kind is rejected with the valid list, and the count/truncation fields then
+describe the filtered set.
 
 Compact output defaults to depth one with tests, related items, metrics, and content
 off. Inspect each category's total, returned, and truncation fields before treating
@@ -49,7 +53,9 @@ for the corresponding call-site or test list.
   the selected source file for every symbol in that file. They exclude unresolved,
   same-file, and proximity-only relationships.
 - `relatedItems` is optional same-file/namespace proximity, not dependency evidence.
-  Test evidence is static graph evidence, not coverage.
+  Test evidence is static graph evidence, not coverage. `directlyTested` is true when a
+  test method statically calls the symbol or, for types, one of their members
+  (`memberCall` evidence).
 
 Use `depth=0` for cheap identity lookup and raise caps only when counts require it.
 `view=full` exposes parser/debug details, method-family members, and bound targets.

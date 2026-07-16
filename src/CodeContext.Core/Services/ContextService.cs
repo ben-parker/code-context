@@ -42,6 +42,7 @@ namespace CodeContext.Core.Services
             string? signature = null,
             string? sourceFile = null)
         {
+            ValidateIdentifier(identifier);
             if (depth is < 0 or > 10)
             {
                 throw new ArgumentOutOfRangeException(
@@ -55,14 +56,15 @@ namespace CodeContext.Core.Services
 
             if (candidates.Count == 0)
             {
-                response.DisambiguationHint = $"No matches found for identifier '{identifier}'";
+                response.DisambiguationHint = await BuildNoMatchHintAsync(
+                    identifier, exact, type, containingType, @namespace, signature, sourceFile);
                 return response;
             }
 
             // Handle ambiguity
             if (candidates.Count > 1 && !isFilePath)
             {
-                response.DisambiguationHint = BuildDisambiguationHint(candidates);
+                response.DisambiguationHint = BuildDisambiguationHint(candidates, substringMatch: !exact);
             }
 
             // Build context for each candidate
@@ -95,9 +97,12 @@ namespace CodeContext.Core.Services
             string? containingType = null,
             string? @namespace = null,
             string? signature = null,
-            string? sourceFile = null)
+            string? sourceFile = null,
+            string? relation = null)
         {
+            ValidateIdentifier(identifier);
             ValidateQueryBounds(depth, maxMatches, maxRelationships, maxCallSites, maxTestFiles, maxTestMethods);
+            var relationKinds = ParseRelationFilter(relation);
 
             List<CodeNode> candidates;
             bool isFilePath;
@@ -147,7 +152,8 @@ namespace CodeContext.Core.Services
 
             if (candidates.Count == 0)
             {
-                response.DisambiguationHint = $"No matches found for identifier '{identifier}'";
+                response.DisambiguationHint = await BuildNoMatchHintAsync(
+                    identifier, matchMode == "exact", type, containingType, @namespace, signature, sourceFile);
                 return response;
             }
 
@@ -155,7 +161,7 @@ namespace CodeContext.Core.Services
             {
                 response.DisambiguationHint = isFilePath
                     ? "File contains multiple symbols. Specify 'type' or a symbol name to expand one."
-                    : BuildDisambiguationHint(candidates);
+                    : BuildDisambiguationHint(candidates, substringMatch: matchMode == "substring");
                 response.Matches = candidates.Take(maxMatches)
                     .Select(candidate => new CompactContextMatch { Target = ToCompactNode(candidate) })
                     .ToList();
@@ -168,7 +174,7 @@ namespace CodeContext.Core.Services
                         candidate, depth, includeTests, includeContent, includeRelated, includeMetrics);
                     response.Matches.Add(await ToCompactMatchAsync(
                         match, includeTests, includeRelated, includeMetrics, maxRelationships,
-                        maxCallSites, maxTestFiles, maxTestMethods));
+                        maxCallSites, maxTestFiles, maxTestMethods, relationKinds));
                 }
             }
 
@@ -179,6 +185,12 @@ namespace CodeContext.Core.Services
 
         public async Task<List<CompleteContextResponse>> GetMultipleContextAsync(MultiContextRequest request)
         {
+            if (request.RelationshipTypes is { Count: > 0 })
+            {
+                throw new ArgumentException(
+                    "relation is only supported for view=compact.", nameof(request));
+            }
+
             var results = new List<CompleteContextResponse>();
 
             foreach (var identifier in request.Identifiers)
@@ -228,7 +240,10 @@ namespace CodeContext.Core.Services
                     containingType: request.ContainingType,
                     @namespace: request.Namespace,
                     signature: request.Signature,
-                    sourceFile: request.SourceFile));
+                    sourceFile: request.SourceFile,
+                    relation: request.RelationshipTypes is { Count: > 0 }
+                        ? string.Join(",", request.RelationshipTypes)
+                        : null));
             }
 
             return results;
@@ -266,6 +281,53 @@ namespace CodeContext.Core.Services
                 && (@namespace is null || string.Equals(candidate.Namespace, @namespace, StringComparison.OrdinalIgnoreCase))
                 && (signature is null || string.Equals(candidate.Signature, signature, StringComparison.OrdinalIgnoreCase))
                 && (sourceFile is null || FilePathMatches(candidate.FilePath, sourceFile));
+
+        /// <summary>
+        /// Relation kinds accepted by the <c>relation</c> uses/usedBy filter. Containment and
+        /// method-family kinds are deliberately excluded: they are structurally absent from
+        /// uses/usedBy, so accepting them would silently return zero. <c>USES</c> matches
+        /// null-typed edges (see <see cref="ToCompactRelatedNodesAsync"/>).
+        /// </summary>
+        private static readonly HashSet<string> FilterableRelationKinds = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "CALLS", "MOCK_CALLS", "REFERENCES", "IMPLEMENTS", "INHERITS", "EXTENDS", "IMPORTS", "USES",
+        };
+
+        /// <summary>
+        /// Parses the CSV <c>relation</c> filter. Null/empty/whitespace-only (or all-empty
+        /// tokens) yields null (no filter). An unrecognized token throws
+        /// <see cref="ArgumentException"/> naming the token and the full valid set.
+        /// </summary>
+        private static HashSet<string>? ParseRelationFilter(string? relation)
+        {
+            if (string.IsNullOrWhiteSpace(relation))
+                return null;
+
+            var kinds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var token in relation.Split(
+                ',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (!FilterableRelationKinds.Contains(token))
+                {
+                    throw new ArgumentException(
+                        $"Unknown relation '{token}'. Valid relation kinds: "
+                        + $"{string.Join(", ", FilterableRelationKinds)}.",
+                        nameof(relation));
+                }
+                kinds.Add(token);
+            }
+
+            return kinds.Count > 0 ? kinds : null;
+        }
+
+        private static void ValidateIdentifier(string identifier)
+        {
+            if (string.IsNullOrWhiteSpace(identifier))
+            {
+                throw new ArgumentException(
+                    "identifier must be a non-empty, non-whitespace string.", nameof(identifier));
+            }
+        }
 
         private static void ValidateQueryBounds(
             int depth, int maxMatches, int maxRelationships, int maxCallSites,
@@ -363,27 +425,33 @@ namespace CodeContext.Core.Services
             int maxRelationships,
             int maxCallSites,
             int maxTestFiles,
-            int maxTestMethods)
+            int maxTestMethods,
+            HashSet<string>? relationKinds = null)
         {
             var relationships = match.Relationships;
             var usedByNodes = await FilterCompactUsedByAsync(match.Target, relationships.UsedBy);
             var compactRelationships = new CompactRelationships();
             if (relationships.Uses.Count > 0)
             {
-                compactRelationships.Uses = await ToCompactRelatedNodesAsync(
-                    match.Target, relationships.Uses, outgoing: true, maxRelationships, maxCallSites);
-                compactRelationships.UsesCount = relationships.Uses.Count;
-                compactRelationships.UsesReturnedCount = compactRelationships.Uses.Count;
-                compactRelationships.UsesTruncated = relationships.Uses.Count > maxRelationships;
+                // Counts reflect the filtered total (pre-Take): a relation filter can drop
+                // whole nodes, so a filtered-to-zero section still emits [] + zero counts,
+                // distinguishing it from a section that was never populated.
+                var uses = await ToCompactRelatedNodesAsync(
+                    match.Target, relationships.Uses, outgoing: true, maxRelationships, maxCallSites, relationKinds);
+                compactRelationships.Uses = uses.Items;
+                compactRelationships.UsesCount = uses.TotalCount;
+                compactRelationships.UsesReturnedCount = uses.Items.Count;
+                compactRelationships.UsesTruncated = uses.TotalCount > maxRelationships;
                 compactRelationships.Truncated |= compactRelationships.UsesTruncated;
             }
             if (usedByNodes.Count > 0)
             {
-                compactRelationships.UsedBy = await ToCompactRelatedNodesAsync(
-                    match.Target, usedByNodes, outgoing: false, maxRelationships, maxCallSites);
-                compactRelationships.UsedByCount = usedByNodes.Count;
-                compactRelationships.UsedByReturnedCount = compactRelationships.UsedBy.Count;
-                compactRelationships.UsedByTruncated = usedByNodes.Count > maxRelationships;
+                var usedBy = await ToCompactRelatedNodesAsync(
+                    match.Target, usedByNodes, outgoing: false, maxRelationships, maxCallSites, relationKinds);
+                compactRelationships.UsedBy = usedBy.Items;
+                compactRelationships.UsedByCount = usedBy.TotalCount;
+                compactRelationships.UsedByReturnedCount = usedBy.Items.Count;
+                compactRelationships.UsedByTruncated = usedBy.TotalCount > maxRelationships;
                 compactRelationships.Truncated |= compactRelationships.UsedByTruncated;
             }
             if (relationships.TransitiveUses.Count > 0)
@@ -482,12 +550,15 @@ namespace CodeContext.Core.Services
             return usedBy;
         }
 
-        private async Task<List<CompactCodeNode>> ToCompactRelatedNodesAsync(
+        private readonly record struct CompactRelatedResult(List<CompactCodeNode> Items, int TotalCount);
+
+        private async Task<CompactRelatedResult> ToCompactRelatedNodesAsync(
             CodeNode target,
             IReadOnlyCollection<CodeNode> nodes,
             bool outgoing,
             int maxRelationships,
-            int maxCallSites)
+            int maxCallSites,
+            HashSet<string>? relationKinds = null)
         {
             var family = !outgoing && !string.IsNullOrEmpty(target.Id)
                 && string.Equals(target.Type, "Method", StringComparison.OrdinalIgnoreCase)
@@ -530,17 +601,28 @@ namespace CodeContext.Core.Services
                 .GroupBy(edge => outgoing ? edge.TargetId! : edge.SourceId!, StringComparer.Ordinal)
                 .ToDictionary(group => group.Key, group => group.ToList(), StringComparer.Ordinal);
 
-            return nodes
+            // Under a relation filter, keep only edges of the requested kinds (a null edge
+            // Type is treated as "USES") and drop nodes with no surviving edge. With no
+            // filter the projection is byte-identical to before: every node is kept, so the
+            // filtered total equals the raw node count.
+            var ranked = nodes
                 .Select(node =>
                 {
                     edgesByNode.TryGetValue(node.Id ?? string.Empty, out var edges);
-                    return (Node: node, Edges: edges ?? new List<CodeEdge>());
+                    var edgeList = edges ?? new List<CodeEdge>();
+                    if (relationKinds is not null)
+                        edgeList = edgeList.Where(edge => relationKinds.Contains(edge.Type ?? "USES")).ToList();
+                    return (Node: node, Edges: edgeList);
                 })
+                .Where(item => relationKinds is null || item.Edges.Count > 0)
                 .OrderBy(item => RelationshipRank(item.Edges))
                 .ThenBy(item => IsTestPath(item.Node.FilePath))
                 .ThenBy(item => TypeRank(item.Node.Type))
                 .ThenBy(item => item.Node.FilePath, StringComparer.OrdinalIgnoreCase)
                 .ThenBy(item => item.Node.StartLine)
+                .ToList();
+
+            var items = ranked
                 .Take(maxRelationships)
                 .Select(item =>
                 {
@@ -578,6 +660,8 @@ namespace CodeContext.Core.Services
                     return compact;
                 })
                 .ToList();
+
+            return new CompactRelatedResult(items, ranked.Count);
         }
 
         private CompactCodeNode ToCompactTransitiveNode(ContextTransitiveRelationship relationship)
@@ -620,11 +704,63 @@ namespace CodeContext.Core.Services
             return NormalizePath(path);
         }
 
-        private string BuildDisambiguationHint(IReadOnlyList<CodeNode> candidates)
+        private async Task<string> BuildNoMatchHintAsync(
+            string identifier,
+            bool exact,
+            string? type,
+            string? containingType,
+            string? @namespace,
+            string? signature,
+            string? sourceFile)
+        {
+            var appliedFilters = new List<string>();
+            if (type is not null) appliedFilters.Add($"type={type}");
+            if (containingType is not null) appliedFilters.Add($"containingType={containingType}");
+            if (@namespace is not null) appliedFilters.Add($"namespace={@namespace}");
+            if (signature is not null) appliedFilters.Add($"signature={signature}");
+            if (sourceFile is not null) appliedFilters.Add($"sourceFile={sourceFile}");
+
+            if (appliedFilters.Count == 0)
+                return $"No matches found for identifier '{identifier}'";
+
+            var (probe, _) = await FindCandidatesAsync(
+                identifier, type: null, exact, null, null, null, null);
+            if (probe.Count == 0)
+                return $"No matches found for identifier '{identifier}' — the identifier has no matches even without the applied filters.";
+
+            return $"No matches for '{identifier}' with the applied filters ({string.Join(", ", appliedFilters)}). "
+                + $"{probe.Count} match(es) exist without filters — types: {SummarizeTypes(probe, 5)}. Adjust or drop the filters.";
+        }
+
+        private static string SummarizeTypes(IEnumerable<CodeNode> nodes, int top)
+            => string.Join(", ", nodes
+                .GroupBy(node => node.Type ?? "Unknown", StringComparer.OrdinalIgnoreCase)
+                .OrderByDescending(group => group.Count())
+                .ThenBy(group => group.Key, StringComparer.OrdinalIgnoreCase)
+                .Take(top)
+                .Select(group => $"{group.Key} ({group.Count()})"));
+
+        private const int MaxIdentifierHintCandidates = 5;
+
+        /// <summary>
+        /// Upper bound on how many members of a non-Method target are probed for inbound
+        /// test calls (the <c>memberCall</c> evidence). Bounds the cost of the additive
+        /// member sweep on wide types; one level deep only (no recursion into nested types).
+        /// </summary>
+        private const int MaxMemberTestProbes = 200;
+
+        private string BuildDisambiguationHint(IReadOnlyList<CodeNode> candidates, bool substringMatch)
         {
             var first = candidates.FirstOrDefault();
             if (first is null) return "Specify type, containingType, namespace, signature, or sourceFile.";
-            return $"Multiple matches found. Pass identifier='{PublicIdentifier(first)}' unchanged, or use containingType, namespace, signature, or sourceFile.";
+            if (candidates.Count <= MaxIdentifierHintCandidates)
+                return $"Multiple matches found. Pass identifier='{PublicIdentifier(first)}' unchanged, or use containingType, namespace, signature, or sourceFile.";
+
+            var hint = $"{candidates.Count} matches found. Narrow with type ({SummarizeTypes(candidates, 3)}), "
+                + "containingType, namespace, signature, or sourceFile.";
+            if (substringMatch)
+                hint += " Or set exact=true to require an exact name.";
+            return hint;
         }
 
         private static string PublicIdentifier(CodeNode node)
@@ -986,6 +1122,15 @@ namespace CodeContext.Core.Services
                     }
                 }
 
+                // For type targets (class/interface/…), tests statically call the type's
+                // *members*, not the type node itself, so the family loop above never sets
+                // DirectlyTested. Sweep members one level deep for inbound test calls.
+                if (!string.Equals(targetNode.Type, "Method", StringComparison.OrdinalIgnoreCase))
+                {
+                    await ApplyMemberCallEvidenceAsync(
+                        targetNode, testing, evidenceByFile, graphTestMethodsByFile);
+                }
+
                 // Reverse traversal identifies test methods that reach the target
                 // indirectly. This is static graph evidence, never runtime coverage.
                 var reachedCallers = string.Equals(targetNode.Type, "Method", StringComparison.OrdinalIgnoreCase)
@@ -1034,6 +1179,48 @@ namespace CodeContext.Core.Services
                 || testing.HeuristicMatchCount > 0;
 
             return testing;
+        }
+
+        /// <summary>
+        /// Additive evidence path for non-Method targets: a class/interface is
+        /// <c>DirectlyTested</c> when a test method statically calls one of its members
+        /// (tests emit CALLS/MOCK_CALLS to member child nodes, never to the type node).
+        /// Members are discovered one containment level deep and capped at
+        /// <see cref="MaxMemberTestProbes"/>. Sources are intentionally NOT added to
+        /// <c>testReferenceNodes</c>/<c>testImplementers</c> so <c>TestReferenceCount</c>
+        /// keeps meaning "test symbols referencing the target itself".
+        /// </summary>
+        private async Task ApplyMemberCallEvidenceAsync(
+            CodeNode targetNode,
+            ContextTesting testing,
+            Dictionary<string, HashSet<string>> evidenceByFile,
+            Dictionary<string, List<CodeNode>> graphTestMethodsByFile)
+        {
+            if (string.IsNullOrEmpty(targetNode.Id)) return;
+
+            var memberIds = (await _edgeRepository.GetBySourceIdAsync(targetNode.Id))
+                .Where(edge => edge.Type is not null && ContainmentEdgeKinds.Contains(edge.Type))
+                .Select(edge => edge.TargetId)
+                .Where(id => !string.IsNullOrEmpty(id))
+                .Distinct(StringComparer.Ordinal)
+                .Take(MaxMemberTestProbes)
+                .ToList();
+
+            foreach (var memberId in memberIds)
+            {
+                foreach (var edge in (await _edgeRepository.GetByTargetIdAsync(memberId!))
+                    .Where(edge => edge.Type is "CALLS" or "MOCK_CALLS"))
+                {
+                    if (string.IsNullOrEmpty(edge.SourceId)) continue;
+                    var source = await _nodeRepository.GetByIdAsync(edge.SourceId);
+                    if (source?.FilePath is null || !IsTestPath(source.FilePath) || !IsTestMethod(source))
+                        continue;
+
+                    testing.DirectlyTested = true;
+                    AddEvidence(evidenceByFile, source.FilePath, "memberCall");
+                    AddMethod(graphTestMethodsByFile, source.FilePath, source);
+                }
+            }
         }
 
         private static void AddEvidence(

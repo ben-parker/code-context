@@ -102,6 +102,56 @@ public class CodeContextEndpointTests
             "Sample.cs", null, null, 2, Arg.Any<CancellationToken>());
     }
 
+    [Fact]
+    public async Task CompleteContext_ArgumentExceptionReturnsBadRequestContextError()
+    {
+        var service = Substitute.For<IContextService>();
+        service.GetCompactContextAsync(
+                "   ", null, 1, false, false, null, false, false, 5, 10, false)
+            .Returns<CompactContextResponse>(_ => throw new ArgumentException(
+                "identifier must be a non-empty, non-whitespace string.", "identifier"));
+        await using var app = await StartAppAsync(service);
+
+        var response = await app.GetTestClient().GetAsync("/api/context/complete?identifier=%20%20%20");
+        var json = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(System.Net.HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains("CONTEXT_ERROR", json);
+    }
+
+    [Fact]
+    public async Task CompleteContext_RelationParam_ForwardedToCompactService()
+    {
+        var service = Substitute.For<IContextService>();
+        service.GetCompactContextAsync(
+                "Target", null, 1, false, false, null, false, false, 5, 10, false,
+                3, 5, 5, null, null, null, null, "CALLS")
+            .Returns(new CompactContextResponse());
+        await using var app = await StartAppAsync(service);
+
+        var response = await app.GetTestClient().GetAsync(
+            "/api/context/complete?identifier=Target&relation=CALLS");
+
+        response.EnsureSuccessStatusCode();
+        await service.Received(1).GetCompactContextAsync(
+            "Target", null, 1, false, false, null, false, false, 5, 10, false,
+            3, 5, 5, null, null, null, null, "CALLS");
+    }
+
+    [Fact]
+    public async Task CompleteContext_RelationWithFullView_Returns400()
+    {
+        var service = Substitute.For<IContextService>();
+        await using var app = await StartAppAsync(service);
+
+        var response = await app.GetTestClient().GetAsync(
+            "/api/context/complete?identifier=Target&relation=CALLS&view=full");
+        var json = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(System.Net.HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains("CONTEXT_ERROR", json);
+    }
+
     private static async Task<WebApplication> StartAppAsync(
         IContextService service, ILanguageWorkerService? workers = null)
     {

@@ -175,6 +175,67 @@ public class CSharpWorkerAnalyzerTests : IDisposable
     }
 
     [Fact]
+    public void Analyze_ShouldCreateHasMethodEdgeFromClassToMethod()
+    {
+        var result = Analyze(("Foo.cs", "public class Foo { public void Bar() { } }"));
+
+        Assert.Contains(result.Edges, e =>
+            e.Kind == "HAS_METHOD"
+            && e.SourceId == Id("Foo")
+            && e.TargetId == Id("Foo.Bar()"));
+    }
+
+    [Fact]
+    public void Analyze_ShouldCreateHasMethodEdgeFromInterfaceToMethodMember()
+    {
+        var result = Analyze(("IFoo.cs", "public interface IFoo { void Bar(); }"));
+
+        Assert.Contains(result.Edges, e =>
+            e.Kind == "HAS_METHOD"
+            && e.SourceId == Id("IFoo")
+            && e.TargetId == Id("IFoo.Bar()"));
+    }
+
+    [Fact]
+    public void Analyze_ShouldCreateHasPropertyEdgeFromClassToProperty()
+    {
+        var result = Analyze(("Foo.cs", "public class Foo { public int Value { get; set; } }"));
+
+        Assert.Contains(result.Edges, e =>
+            e.Kind == "HAS_PROPERTY"
+            && e.SourceId == Id("Foo")
+            && e.TargetId == Id("Foo.Value"));
+    }
+
+    [Fact]
+    public void Analyze_NestedTypes_EachTypeOwnsItsOwnMembers()
+    {
+        var result = Analyze(("Nested.cs", """
+            public class Outer
+            {
+                public void OuterMethod() { }
+                public class Inner
+                {
+                    public void InnerMethod() { }
+                }
+            }
+            """));
+
+        Assert.Contains(result.Edges, e =>
+            e.Kind == "HAS_METHOD"
+            && e.SourceId == Id("Outer")
+            && e.TargetId == Id("Outer.OuterMethod()"));
+        Assert.Contains(result.Edges, e =>
+            e.Kind == "HAS_METHOD"
+            && e.SourceId == Id("Outer.Inner")
+            && e.TargetId == Id("Outer.Inner.InnerMethod()"));
+        Assert.DoesNotContain(result.Edges, e =>
+            e.Kind == "HAS_METHOD"
+            && e.SourceId == Id("Outer")
+            && e.TargetId == Id("Outer.Inner.InnerMethod()"));
+    }
+
+    [Fact]
     public void Analyze_ShouldCreateCrossFileImplementsEdge()
     {
         var result = Analyze(
@@ -288,7 +349,9 @@ public class CSharpWorkerAnalyzerTests : IDisposable
             }"));
 
         var target = Assert.Single(result.Nodes, node => node.Name == "Get" && node.Kind == "Method");
-        var calls = result.Edges.Where(edge => edge.TargetId == target.Id).ToList();
+        var calls = result.Edges
+            .Where(edge => edge.TargetId == target.Id && edge.Kind is "CALLS" or "MOCK_CALLS")
+            .ToList();
         Assert.Equal(3, calls.Count);
         Assert.All(calls, edge => Assert.Equal("MOCK_CALLS", edge.Kind));
         Assert.Single(calls.Select(edge => edge.TargetId).Distinct());

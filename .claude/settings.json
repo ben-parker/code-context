@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx vitest run*)",
+      "Bash(curl -s http://localhost*)",
+      "Bash(dotnet build*)",
+      "Bash(dotnet test*)",
+      "Bash(npx nuxt typecheck*)",
+      "Bash(npx nuxi typecheck*)",
+      "Bash(npm run build:local)",
+      "Bash(npm run dev)",
+      "Bash(npm run test:run*)",
+      "Bash(npm run build)",
+      "Bash(codecontext list*)",
+      "Bash(codecontext status*)"
+    ]
+  }
+}

@@ -334,6 +334,22 @@ public sealed class CSharpWorkspaceAnalyzer
                 Metadata: metadata));
         }
 
+        /// <summary>
+        /// Emits a containment edge (HAS_METHOD / HAS_PROPERTY / HAS_FIELD) from the
+        /// member's directly containing type to the member node, mirroring the
+        /// TypeScript worker's convention. The edge is only emitted when the containing
+        /// type itself produces a node (a class or interface declared in source), so we
+        /// never point at a node that was never created. <c>ContainingType</c> is the
+        /// direct declaring type, so nested members attach to their own type only.
+        /// </summary>
+        private void AddContainmentEdge(ISymbol member, string kind)
+        {
+            if (member.ContainingType is { } containingType && IsIndexedSourceType(containingType))
+            {
+                AddEdge(NodeId(containingType), NodeId(member), kind);
+            }
+        }
+
         public override void VisitClassDeclaration(ClassDeclarationSyntax node)
         {
             if (_semanticModel.GetDeclaredSymbol(node) is { } symbol)
@@ -383,6 +399,7 @@ public sealed class CSharpWorkspaceAnalyzer
                     ? new Dictionary<string, string> { ["isTest"] = "true" }
                     : null;
                 _nodes.Add(BuildNode(symbol, node, "Method", signature, metadata));
+                AddContainmentEdge(symbol, "HAS_METHOD");
 
                 if (symbol.OverriddenMethod is { } overridden)
                     AddEdge(NodeId(symbol), NodeId(NormalizeMethod(overridden)), "OVERRIDES_MEMBER");
@@ -418,6 +435,7 @@ public sealed class CSharpWorkspaceAnalyzer
             if (_semanticModel.GetDeclaredSymbol(node) is { } symbol)
             {
                 _nodes.Add(BuildNode(symbol, node, "Property", node.Identifier.ToString()));
+                AddContainmentEdge(symbol, "HAS_PROPERTY");
             }
             base.VisitPropertyDeclaration(node);
         }
