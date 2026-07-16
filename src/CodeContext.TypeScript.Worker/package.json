@@ -1,0 +1,10 @@
+{
+  "name": "codecontext-typescript-worker",
+  "version": "1.0.0",
+  "description": "Persistent TypeScript/JavaScript language worker for CodeContext (parser protocol over stdio)",
+  "private": true,
+  "main": "typescript-worker.js",
+  "dependencies": {
+    "typescript": "^5.7.2"
+  }
+}

@@ -1,0 +1,98 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- Disable AOT for testing -->
+    <PublishAot>false</PublishAot>
+    <!-- <RuntimeIdentifier>linux-x64</RuntimeIdentifier> -->
+    <!-- <IsAotCompatible>true</IsAotCompatible> -->
+    <AssemblyName>codecontext</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="9.0.6" />
+    <PackageReference Include="System.CommandLine" Version="2.0.0-beta5.25306.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\CodeContext.Core\CodeContext.Core.csproj" />
+    <ProjectReference Include="..\CodeContext.Python.Kuzu\CodeContext.Python.Kuzu.csproj" />
+    <ProjectReference Include="..\CodeContext.Mcp\CodeContext.Mcp.csproj" />
+    <!-- Build-order dependency only: the worker is a separate process, never a host
+         assembly reference. Its output is copied into workers/csharp/ below. -->
+    <ProjectReference Include="..\CodeContext.CSharp.Worker\CodeContext.CSharp.Worker.csproj"
+                      ReferenceOutputAssembly="false" Private="false"
+                      AdditionalProperties="PublishSingleFile=false;PublishAot=false;SelfContained=false" />
+  </ItemGroup>
+
+  <!-- Bundle workers (manifest + executable/script assets) under workers/<name>/
+       next to the host binary, the layout the WorkerCatalog scans at runtime.
+       Two copy targets are required: AfterTargets="Build" only reaches bin/, and
+       dotnet publish selects its own file set, so publish needs its own copy into
+       $(PublishDir) or released binaries ship with no workers at all. -->
+  <Target Name="_CollectLanguageWorkerFiles">
+    <PropertyGroup>
+      <CSharpWorkerOutDir>..\CodeContext.CSharp.Worker\bin\$(Configuration)\net9.0\</CSharpWorkerOutDir>
+      <CSharpWorkerOutDir Condition="'$(RuntimeIdentifier)' != '' and Exists('..\CodeContext.CSharp.Worker\bin\$(Configuration)\net9.0\$(RuntimeIdentifier)\')">..\CodeContext.CSharp.Worker\bin\$(Configuration)\net9.0\$(RuntimeIdentifier)\</CSharpWorkerOutDir>
+    </PropertyGroup>
+    <ItemGroup>
+      <CSharpWorkerFiles Include="$(CSharpWorkerOutDir)**\*" />
+      <!-- The TypeScript worker runs from source: script + manifest + package.json,
+           plus node_modules when "npm install" has been run there. -->
+      <TypeScriptWorkerFiles Include="..\CodeContext.TypeScript.Worker\**\*" Exclude="..\CodeContext.TypeScript.Worker\node_modules\.bin\**" />
+    </ItemGroup>
+  </Target>
+
+  <!-- The release host is self-contained, so its C# worker must be too. Keep the
+       Roslyn worker multi-file/JIT and copy its RID-specific publish output. -->
+  <Target Name="PublishCSharpWorkerForHost" Condition="'$(RuntimeIdentifier)' != ''">
+    <MSBuild Projects="..\CodeContext.CSharp.Worker\CodeContext.CSharp.Worker.csproj"
+             Targets="Publish"
+             RemoveProperties="PublishDir;PublishSingleFile;PublishAot;SelfContained"
+             Properties="Configuration=$(Configuration);RuntimeIdentifier=$(RuntimeIdentifier);SelfContained=true;PublishSingleFile=false;PublishAot=false;Version=$(Version)" />
+  </Target>
+
+  <Target Name="_CollectPublishLanguageWorkerFiles" DependsOnTargets="PublishCSharpWorkerForHost">
+    <Error Condition="'$(OS)' == 'Windows_NT' and !Exists('..\CodeContext.TypeScript.Worker\node.exe')"
+           Text="The bundled Node runtime is missing. Run scripts/prepare-node-worker-runtime.ps1 for $(RuntimeIdentifier) before publishing." />
+    <Error Condition="'$(OS)' != 'Windows_NT' and !Exists('..\CodeContext.TypeScript.Worker\node')"
+           Text="The bundled Node runtime is missing. Run scripts/prepare-node-worker-runtime.ps1 for $(RuntimeIdentifier) before publishing." />
+    <ItemGroup>
+      <CSharpWorkerPublishFiles Include="..\CodeContext.CSharp.Worker\bin\$(Configuration)\net9.0\$(RuntimeIdentifier)\publish\**\*" />
+      <TypeScriptWorkerPublishFiles Include="..\CodeContext.TypeScript.Worker\**\*"
+                                    Exclude="..\CodeContext.TypeScript.Worker\node_modules\.bin\**" />
+      <ProtocolFiles Include="..\CodeContext.Parser.Protocol\protocol\**\*" />
+      <SkillFiles Include="..\..\skill\**\*" />
+    </ItemGroup>
+  </Target>
+
+  <Target Name="CopyLanguageWorkers" AfterTargets="Build" DependsOnTargets="_CollectLanguageWorkerFiles">
+    <Copy SourceFiles="@(CSharpWorkerFiles)"
+          DestinationFiles="@(CSharpWorkerFiles->'$(OutDir)workers\csharp\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(TypeScriptWorkerFiles)"
+          DestinationFiles="@(TypeScriptWorkerFiles->'$(OutDir)workers\typescript\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+  <Target Name="CopyLanguageWorkersOnPublish" AfterTargets="Publish" DependsOnTargets="_CollectPublishLanguageWorkerFiles">
+    <Copy SourceFiles="@(CSharpWorkerPublishFiles)"
+          DestinationFiles="@(CSharpWorkerPublishFiles->'$(PublishDir)workers\csharp\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(TypeScriptWorkerPublishFiles)"
+          DestinationFiles="@(TypeScriptWorkerPublishFiles->'$(PublishDir)workers\typescript\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(ProtocolFiles)"
+          DestinationFiles="@(ProtocolFiles->'$(PublishDir)protocol\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(SkillFiles)"
+          DestinationFiles="@(SkillFiles->'$(PublishDir)skill\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+<ItemGroup>
+  <PackageReference Include="Microsoft.Net.Compilers.Toolset" Version="4.14.0" PrivateAssets="all" />
+</ItemGroup>
+</Project>

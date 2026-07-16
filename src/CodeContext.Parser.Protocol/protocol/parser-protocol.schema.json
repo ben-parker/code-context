@@ -1,0 +1,277 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://codecontext.dev/schemas/parser-protocol/v1",
+  "title": "CodeContext parser-worker protocol v1",
+  "description": "Canonical contract for CodeContext language workers. Transport: JSON-RPC 2.0 messages framed as 'Content-Length: N\\r\\n\\r\\n{payload}' over stdin/stdout. Headers are ASCII, payloads UTF-8. Workers MUST exit when stdin reaches EOF, MUST NOT open network ports, and MUST NOT register as CodeContext instances. Worker stderr is free-form log text captured by the host. Request ids are numbers. The host cancels a request by sending the '$/cancel' notification; the worker answers the cancelled request with error code -32800.",
+  "$defs": {
+    "message": {
+      "type": "object",
+      "required": ["jsonrpc"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "type": "integer", "description": "Present on requests and responses; absent on notifications." },
+        "method": { "type": "string", "description": "Present on requests and notifications; absent on responses." },
+        "params": {},
+        "result": {},
+        "error": { "$ref": "#/$defs/error" }
+      }
+    },
+    "error": {
+      "type": "object",
+      "required": ["code", "message"],
+      "properties": {
+        "code": {
+          "type": "integer",
+          "description": "Standard JSON-RPC codes, plus -32800 (request cancelled) and -32000 (incompatible protocol version)."
+        },
+        "message": { "type": "string" },
+        "data": {}
+      }
+    },
+    "initializeParams": {
+      "type": "object",
+      "required": ["hostName", "hostVersion", "rootPath", "minProtocolVersion", "maxProtocolVersion"],
+      "properties": {
+        "hostName": { "type": "string" },
+        "hostVersion": { "type": "string" },
+        "rootPath": { "type": "string", "description": "Absolute path of the watched repository root." },
+        "minProtocolVersion": { "type": "integer" },
+        "maxProtocolVersion": { "type": "integer" },
+        "configuration": { "type": "object", "additionalProperties": { "type": "string" } }
+      }
+    },
+    "initializeResult": {
+      "type": "object",
+      "required": ["parserId", "parserVersion", "displayName", "protocolVersion", "languages", "extensions", "projectMarkers", "capabilities", "spanSemantics"],
+      "properties": {
+        "parserId": { "type": "string", "description": "Stable lowercase identifier, e.g. 'csharp'." },
+        "parserVersion": { "type": "string" },
+        "displayName": { "type": "string" },
+        "protocolVersion": {
+          "type": "integer",
+          "description": "The version the worker will speak. Must lie inside the host's [min, max] range or the host terminates the worker."
+        },
+        "languages": { "type": "array", "items": { "type": "string" } },
+        "extensions": { "type": "array", "items": { "type": "string" }, "description": "File extensions including the dot, e.g. '.cs'." },
+        "projectMarkers": { "type": "array", "items": { "type": "string" }, "description": "File names/globs marking a project root, e.g. '*.csproj'." },
+        "capabilities": {
+          "type": "object",
+          "required": ["workspaceAnalysis", "incrementalUpdates", "semanticAnalysis", "nativeSyntaxTree"],
+          "properties": {
+            "workspaceAnalysis": { "type": "boolean" },
+            "incrementalUpdates": { "type": "boolean" },
+            "semanticAnalysis": { "type": "boolean" },
+            "nativeSyntaxTree": { "type": "boolean" }
+          }
+        },
+        "spanSemantics": {
+          "type": "object",
+          "required": ["lineBase", "columnBase", "endIsInclusive"],
+          "properties": {
+            "lineBase": { "type": "integer", "enum": [0, 1] },
+            "columnBase": { "type": "integer", "enum": [0, 1] },
+            "endIsInclusive": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "openWorkspaceParams": {
+      "type": "object",
+      "required": ["workspaceId", "rootPath", "projectMarkers", "approvedFiles"],
+      "properties": {
+        "workspaceId": { "type": "string", "description": "Host-assigned logical workspace id; one worker process may hold several." },
+        "rootPath": { "type": "string" },
+        "projectMarkers": { "type": "array", "items": { "type": "string" }, "description": "Absolute paths of project files found by the host for this workspace." },
+        "approvedFiles": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "The host-approved file set. Workers must not crawl the repository themselves."
+        }
+      }
+    },
+    "openWorkspaceResult": {
+      "type": "object",
+      "required": ["workspaceId", "opened"],
+      "properties": {
+        "workspaceId": { "type": "string" },
+        "opened": { "type": "boolean" },
+        "message": { "type": "string" }
+      }
+    },
+    "indexWorkspaceParams": {
+      "type": "object",
+      "required": ["workspaceId", "generation", "files"],
+      "properties": {
+        "workspaceId": { "type": "string" },
+        "generation": { "type": "integer", "description": "Host-assigned, monotonically increasing per workspace. Deltas for a stale generation are discarded." },
+        "files": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "indexWorkspaceResult": {
+      "type": "object",
+      "required": ["workspaceId", "generation", "deltasEmitted", "complete"],
+      "properties": {
+        "workspaceId": { "type": "string" },
+        "generation": { "type": "integer" },
+        "deltasEmitted": { "type": "integer" },
+        "complete": { "type": "boolean", "description": "False when some files could not be analyzed; details arrive as delta diagnostics." }
+      }
+    },
+    "applyChangesParams": {
+      "type": "object",
+      "required": ["workspaceId", "generation", "changes"],
+      "properties": {
+        "workspaceId": { "type": "string" },
+        "generation": { "type": "integer" },
+        "changes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["path", "changeType"],
+            "properties": {
+              "path": { "type": "string" },
+              "changeType": { "type": "string", "enum": ["created", "changed", "deleted", "renamed"] },
+              "oldPath": { "type": "string", "description": "Previous path for 'renamed' changes." }
+            }
+          }
+        }
+      }
+    },
+    "applyChangesResult": { "$ref": "#/$defs/indexWorkspaceResult" },
+    "nativeSyntaxTreeParams": {
+      "type": "object",
+      "required": ["workspaceId", "filePath"],
+      "properties": {
+        "workspaceId": { "type": "string" },
+        "filePath": { "type": "string" },
+        "start": { "type": ["integer", "null"], "minimum": 0 },
+        "length": { "type": ["integer", "null"], "minimum": 0 },
+        "maxDepth": { "type": "integer", "minimum": 0, "maximum": 32, "default": 8 }
+      }
+    },
+    "nativeSyntaxTreeResult": {
+      "type": "object",
+      "required": ["parserId", "parserVersion", "workspaceId", "filePath", "format", "tree", "truncated"],
+      "properties": {
+        "parserId": { "type": "string" },
+        "parserVersion": { "type": "string" },
+        "workspaceId": { "type": "string" },
+        "filePath": { "type": "string" },
+        "format": { "type": "string", "description": "Parser-owned, versioned payload format identifier." },
+        "tree": { "description": "Parser-native JSON tree; interpret using parserId and format." },
+        "truncated": { "type": "boolean" }
+      }
+    },
+    "cancelParams": {
+      "type": "object",
+      "required": ["requestId"],
+      "properties": { "requestId": { "type": "integer" } }
+    },
+    "node": {
+      "type": "object",
+      "required": ["id", "name", "kind", "language"],
+      "properties": {
+        "id": { "type": "string", "description": "Stable id namespaced by language and parser/workspace ownership, e.g. 'csharp:ws-1:MyNs.MyClass'." },
+        "name": { "type": "string" },
+        "kind": { "type": "string", "description": "Versioned string ('class', 'method', ...), not a closed enum." },
+        "language": { "type": "string" },
+        "filePath": { "type": "string" },
+        "startLine": { "type": "integer", "description": "Worker-native base on the wire; host storage normalizes to zero-based." },
+        "endLine": { "type": "integer" },
+        "startColumn": { "type": "integer" },
+        "endColumn": { "type": "integer" },
+        "namespace": { "type": "string" },
+        "visibility": { "type": "string" },
+        "signature": { "type": "string" },
+        "returnType": { "type": "string" },
+        "parameters": { "type": "string" },
+        "modifiers": { "type": "string" },
+        "metadata": { "type": "object", "additionalProperties": { "type": "string" } }
+      }
+    },
+    "edge": {
+      "type": "object",
+      "required": ["id", "sourceId", "targetId", "kind"],
+      "properties": {
+        "id": { "type": "string" },
+        "sourceId": { "type": "string" },
+        "targetId": { "type": "string" },
+        "kind": { "type": "string", "description": "Versioned string ('calls', 'implements', ...), not a closed enum." },
+        "metadata": { "type": "object", "additionalProperties": { "type": "string" } }
+      }
+    },
+    "analysisDelta": {
+      "type": "object",
+      "required": ["parserId", "parserVersion", "workspaceId", "generation", "requestId", "replacesWorkspace", "replacesFiles", "nodes", "edges", "isLastForRequest"],
+      "properties": {
+        "parserId": { "type": "string" },
+        "parserVersion": { "type": "string" },
+        "workspaceId": { "type": "string" },
+        "generation": { "type": "integer" },
+        "requestId": { "type": "integer", "description": "Id of the workspace/index or workspace/applyChanges request this delta answers." },
+        "replacesWorkspace": { "type": "boolean", "description": "True: the delta replaces every fact this parser owns in the workspace." },
+        "replacesFiles": { "type": "array", "items": { "type": "string" }, "description": "When replacesWorkspace is false: the files whose facts this delta replaces." },
+        "nodes": { "type": "array", "items": { "$ref": "#/$defs/node" } },
+        "edges": { "type": "array", "items": { "$ref": "#/$defs/edge" } },
+        "unresolvedReferences": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["sourceNodeId", "targetName", "kind"],
+            "properties": {
+              "sourceNodeId": { "type": "string" },
+              "targetName": { "type": "string" },
+              "kind": { "type": "string" }
+            }
+          }
+        },
+        "diagnostics": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["severity", "message"],
+            "properties": {
+              "filePath": { "type": "string" },
+              "severity": { "type": "string", "enum": ["info", "warning", "error"] },
+              "message": { "type": "string" }
+            }
+          }
+        },
+        "isLastForRequest": { "type": "boolean", "description": "True on the final chunk for this request. The host buffers chunks and atomically commits only after this marker." }
+      }
+    },
+    "workerManifest": {
+      "type": "object",
+      "required": ["manifestVersion", "parserId", "displayName", "version", "command", "minProtocolVersion", "maxProtocolVersion"],
+      "properties": {
+        "manifestVersion": { "const": 1 },
+        "parserId": { "type": "string" },
+        "displayName": { "type": "string" },
+        "version": { "type": "string" },
+        "command": { "type": "string", "description": "Executable. Relative paths resolve against the manifest directory; bare names resolve on PATH." },
+        "args": { "type": "array", "items": { "type": "string" } },
+        "minProtocolVersion": { "type": "integer" },
+        "maxProtocolVersion": { "type": "integer" },
+        "languages": { "type": "array", "items": { "type": "string" } },
+        "extensions": { "type": "array", "items": { "type": "string" } },
+        "projectMarkers": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  },
+  "methods": {
+    "initialize": { "params": { "$ref": "#/$defs/initializeParams" }, "result": { "$ref": "#/$defs/initializeResult" } },
+    "workspace/open": { "params": { "$ref": "#/$defs/openWorkspaceParams" }, "result": { "$ref": "#/$defs/openWorkspaceResult" } },
+    "workspace/index": { "params": { "$ref": "#/$defs/indexWorkspaceParams" }, "result": { "$ref": "#/$defs/indexWorkspaceResult" } },
+    "workspace/applyChanges": { "params": { "$ref": "#/$defs/applyChangesParams" }, "result": { "$ref": "#/$defs/applyChangesResult" } },
+    "shutdown": { "params": null, "result": null },
+    "syntaxTree/get": {
+      "description": "Optional (capabilities.nativeSyntaxTree). Returns a parser-native tree behind a common envelope.",
+      "params": { "$ref": "#/$defs/nativeSyntaxTreeParams" },
+      "result": { "$ref": "#/$defs/nativeSyntaxTreeResult" }
+    }
+  },
+  "notifications": {
+    "$/cancel": { "direction": "host->worker", "params": { "$ref": "#/$defs/cancelParams" } },
+    "analysis/delta": { "direction": "worker->host", "params": { "$ref": "#/$defs/analysisDelta" } }
+  }
+}

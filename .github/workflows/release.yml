@@ -1,0 +1,190 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.15.0'
+      - name: Install TypeScript worker dependencies
+        run: npm ci --prefix src/CodeContext.TypeScript.Worker
+      # Tests that depend on external tooling (Python/CSnakes provisioning, Node.js)
+      # carry the explicit ExternalTooling trait; see DEVELOPMENT.md for the quarantine
+      # list and how to run them locally.
+      - name: Run tests
+        run: >
+          dotnet test tests/CodeContext.Core.Tests/CodeContext.Core.Tests.csproj
+          --filter "Category!=ExternalTooling"
+      - name: Run TypeScript worker protocol tests
+        run: >
+          dotnet test tests/CodeContext.Core.Tests/CodeContext.Core.Tests.csproj
+          --filter "FullyQualifiedName~TypeScriptWorkerProtocolTests"
+
+  publish:
+    needs: test
+    strategy:
+      matrix:
+        include:
+          - rid: win-x64
+            os: windows-latest
+          - rid: linux-x64
+            os: ubuntu-latest
+          - rid: osx-x64
+            os: macos-latest
+          - rid: osx-arm64
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.15.0'
+
+      - name: Bundle target Node.js runtime
+        shell: pwsh
+        run: ./scripts/prepare-node-worker-runtime.ps1 -RuntimeIdentifier '${{ matrix.rid }}'
+
+      - name: Install TypeScript worker dependencies
+        shell: bash
+        run: npm ci --prefix src/CodeContext.TypeScript.Worker
+
+      - name: Publish and smoke-test packaged host
+        shell: pwsh
+        run: |
+          $version = '${{ github.ref_name }}' -replace '^v', ''
+          ./scripts/verify-publish.ps1 `
+            -RuntimeIdentifier '${{ matrix.rid }}' `
+            -ReleaseVersion $version `
+            -PublishDirectory 'out/${{ matrix.rid }}'
+
+      - name: Verify payload
+        shell: bash
+        run: |
+          ls "out/${{ matrix.rid }}"
+          # Language workers must ship under workers/<name>/ next to the host binary
+          # (the layout WorkerCatalog scans). The Kuzu/Python payload is an opt-in
+          # backend and is intentionally not a release requirement.
+          for required in \
+            "workers/csharp/worker-manifest.json" \
+            "workers/typescript/worker-manifest.json" \
+            "workers/typescript/typescript-worker.js" \
+            "workers/typescript/node_modules/typescript/package.json" \
+            "workers/typescript/node-LICENSE" \
+            "protocol/parser-protocol.schema.json" \
+            "skill/SKILL.md" \
+            "skill/install-skill.sh" \
+            "skill/install-skill.ps1"; do
+            [[ -f "out/${{ matrix.rid }}/$required" ]] \
+              || { echo "::error::$required missing from publish output"; exit 1; }
+          done
+          if [[ "${{ matrix.rid }}" == win-* ]]; then
+            executables=("workers/csharp/CodeContext.CSharp.Worker.exe" "workers/typescript/node.exe")
+          else
+            executables=("workers/csharp/CodeContext.CSharp.Worker" "workers/typescript/node")
+          fi
+          for executable in "${executables[@]}"; do
+            [[ -f "out/${{ matrix.rid }}/$executable" ]] \
+              || { echo "::error::$executable missing from publish output"; exit 1; }
+          done
+
+      - name: Package
+        shell: bash
+        run: |
+          cd "out/${{ matrix.rid }}"
+          if [[ "${{ matrix.rid }}" == win-* ]]; then
+            7z a "../../codecontext-${GITHUB_REF_NAME}-${{ matrix.rid }}.zip" .
+          else
+            zip -r "../../codecontext-${GITHUB_REF_NAME}-${{ matrix.rid }}.zip" .
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: codecontext-${{ matrix.rid }}
+          path: codecontext-*.zip
+          if-no-files-found: error
+
+  kuzu-integration:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Provision pinned Kuzu environment
+        shell: pwsh
+        run: |
+          python -m venv src/CodeContext.Python.Kuzu/.venv
+          src/CodeContext.Python.Kuzu/.venv/Scripts/python -m pip install kuzu==0.10.1
+      - name: Run isolated Kuzu integration tests
+        run: >
+          dotnet test tests/CodeContext.Core.Tests/CodeContext.Core.Tests.csproj
+          --filter "Category=KuzuIntegration"
+
+  sdk:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.15.0'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test and pack worker SDKs
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p out/sdk
+          dotnet pack src/CodeContext.Parser.Protocol -c Release \
+            -p:Version="$VERSION" -o out/sdk
+          npm test --prefix sdk/npm
+          npm version "$VERSION" --prefix sdk/npm --no-git-tag-version
+          npm pack sdk/npm --pack-destination out/sdk
+          python -m pip install build
+          PYTHONPATH=sdk/python/src python -m unittest discover -s sdk/python/tests
+          python -c "from pathlib import Path; p=Path('sdk/python/pyproject.toml'); p.write_text(p.read_text().replace('version = \"1.0.0\"', 'version = \"$VERSION\"'))"
+          python -m build sdk/python --outdir out/sdk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: codecontext-worker-sdks
+          path: out/sdk/*
+          if-no-files-found: error
+
+  release:
+    needs: [publish, sdk, kuzu-integration]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" artifacts/* \
+            --title "CodeContext $GITHUB_REF_NAME" \
+            --generate-notes

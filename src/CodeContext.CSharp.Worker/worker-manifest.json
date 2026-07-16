@@ -1,0 +1,13 @@
+{
+  "manifestVersion": 1,
+  "parserId": "csharp",
+  "displayName": "CSharp",
+  "version": "1.0.0",
+  "command": "CodeContext.CSharp.Worker",
+  "args": [],
+  "minProtocolVersion": 1,
+  "maxProtocolVersion": 1,
+  "languages": ["csharp"],
+  "extensions": [".cs"],
+  "projectMarkers": [".csproj", ".sln"]
+}

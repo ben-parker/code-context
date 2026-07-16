@@ -1,0 +1,13 @@
+{
+  "manifestVersion": 1,
+  "parserId": "typescript",
+  "displayName": "TypeScript",
+  "version": "1.0.0",
+  "command": "node",
+  "args": ["typescript-worker.js"],
+  "minProtocolVersion": 1,
+  "maxProtocolVersion": 1,
+  "languages": ["typescript", "javascript"],
+  "extensions": [".ts", ".tsx", ".js", ".jsx"],
+  "projectMarkers": ["tsconfig.json", "package.json"]
+}

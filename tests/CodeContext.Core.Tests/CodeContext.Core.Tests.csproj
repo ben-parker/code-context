@@ -1,0 +1,58 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <EmitCompilerGeneratedFiles>true</EmitCompilerGeneratedFiles>
+    <!-- Keep native-tooling integration tests opt-in while allowing an explicit
+         command-line filter to select their dedicated categories. -->
+    <VSTestTestCaseFilter Condition="'$(VSTestTestCaseFilter)' == ''">Category!=ExternalTooling</VSTestTestCaseFilter>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="6.0.2" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" Version="9.0.6" />
+    <PackageReference Include="NSubstitute" Version="5.3.0" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+    <PackageReference Include="CSnakes.Runtime" Version="1.1.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="TestFiles\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\CodeContext.Core\CodeContext.Core.csproj" />
+    <ProjectReference Include="..\..\src\CodeContext.Api\CodeContext.Api.csproj" />
+    <ProjectReference Include="..\..\src\CodeContext.Python.Kuzu\CodeContext.Python.Kuzu.csproj" />
+    <ProjectReference Include="..\..\src\CodeContext.Parser.Protocol\CodeContext.Parser.Protocol.csproj" />
+    <!-- Supervisor tests spawn the fake worker's apphost from the test output directory. -->
+    <ProjectReference Include="..\CodeContext.FakeWorker\CodeContext.FakeWorker.csproj" />
+    <!-- Protocol-fixture tests spawn the real C# worker; analyzer tests use its
+         engine types in-process. Roslyn enters the test process only through this
+         reference — the host projects have no Roslyn dependency. -->
+    <ProjectReference Include="..\..\src\CodeContext.CSharp.Worker\CodeContext.CSharp.Worker.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Net.Compilers.Toolset" Version="4.14.0" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Include all Python files from TestFiles directory -->
+    <AdditionalFiles Include="TestFiles\hello_kuzu.py">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </AdditionalFiles>
+  </ItemGroup>
+
+</Project>

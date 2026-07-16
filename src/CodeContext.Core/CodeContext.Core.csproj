@@ -1,0 +1,26 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsAotCompatible>true</IsAotCompatible>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- No Roslyn here: C# semantics live in CodeContext.CSharp.Worker behind the
+         parser protocol. The host must never depend on a language toolchain. -->
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.0-preview.5.25277.114" />
+    <PackageReference Include="Microsoft.Extensions.Logging" Version="10.0.0-preview.5.25277.114" />
+    <PackageReference Include="CSnakes.Runtime" Version="1.1.0" />
+  </ItemGroup>
+
+<ItemGroup>
+  <PackageReference Include="Microsoft.Net.Compilers.Toolset" Version="4.14.0" PrivateAssets="all" />
+</ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\CodeContext.Python.Kuzu\CodeContext.Python.Kuzu.csproj" />
+    <ProjectReference Include="..\CodeContext.Parser.Protocol\CodeContext.Parser.Protocol.csproj" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,15 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "build",
+      "command": "dotnet",
+      "type": "process",
+      "args": [
+        "build",
+        "/home/ben/source/repos/code-context/src/CodeContext.Api/CodeContext.Api.csproj",
+      ],
+      "problemMatcher": "$msCompile"
+    }
+  ]
+}

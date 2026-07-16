@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsAotCompatible>true</IsAotCompatible>
+    <IsPackable>true</IsPackable>
+    <PackageId>CodeContext.Worker.Protocol</PackageId>
+    <Version>1.0.0</Version>
+    <Authors>CodeContext</Authors>
+    <PackageDescription>Contracts, framing, and JSON-RPC helpers for CodeContext language workers.</PackageDescription>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <Description>Canonical parser-worker protocol contracts: JSON-RPC framing, message DTOs, worker manifests. External workers implement the JSON schema, not this assembly.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="protocol\parser-protocol.schema.json"
+          CopyToOutputDirectory="PreserveNewest"
+          Pack="true" PackagePath="protocol" />
+    <None Include="README.md" Pack="true" PackagePath="/" />
+  </ItemGroup>
+
+</Project>

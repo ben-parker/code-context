@@ -1,0 +1,37 @@
+# Normalize line endings: store LF in the repository, let editors work natively.
+* text=auto
+
+# Shell scripts must stay LF even when checked out on Windows.
+*.sh text eol=lf
+
+# Windows scripts are CRLF by convention.
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Source and config files are text.
+*.cs text
+*.csproj text
+*.sln text
+*.props text
+*.targets text
+*.js text
+*.ts text
+*.json text
+*.py text
+*.md text
+*.yml text
+*.yaml text
+*.toml text
+
+# Binaries must never be normalized.
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.dll binary
+*.exe binary
+*.so binary
+*.dylib binary
+*.binlog binary
+*.kuzu binary

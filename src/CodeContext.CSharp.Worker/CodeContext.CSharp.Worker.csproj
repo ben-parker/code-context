@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <!-- The worker deliberately stays a regular JIT executable: Roslyn is not AOT
+         friendly, worker startup is amortized over a long-lived process, and the
+         Native AOT goal applies to the host only. -->
+    <PublishAot>false</PublishAot>
+    <PublishSingleFile>false</PublishSingleFile>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.14.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\CodeContext.Parser.Protocol\CodeContext.Parser.Protocol.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The manifest travels with the executable so hosts can discover the worker by
+         scanning workers/<name>/worker-manifest.json directories. -->
+    <None Include="worker-manifest.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Net.Compilers.Toolset" Version="4.14.0" PrivateAssets="all" />
+  </ItemGroup>
+
+</Project>

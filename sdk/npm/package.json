@@ -1,0 +1,12 @@
+{
+  "name": "@codecontext/worker-sdk",
+  "version": "1.0.0",
+  "description": "Content-Length framing and protocol constants for CodeContext language workers",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": ["index.js", "index.d.ts"],
+  "license": "UNLICENSED",
+  "scripts": {
+    "test": "node --test"
+  }
+}

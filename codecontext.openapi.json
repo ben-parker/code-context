@@ -1,0 +1,1384 @@
+{
+  "openapi": "3.0.1",
+  "info": {
+    "title": "CodeContext API",
+    "description": "Local code context API for LLMs - provides dependency graph and code relationships",
+    "contact": {
+      "name": "CodeContext Team",
+      "url": "https://github.com/you/codecontext"
+    },
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "http://localhost:7890",
+      "description": "Local CodeContext server"
+    }
+  ],
+  "paths": {
+    "/api/status": {
+      "get": {
+        "tags": [
+          "codecontext"
+        ],
+        "summary": "Get API status",
+        "description": "Returns comprehensive system health and debugging information.",
+        "operationId": "GetStatus",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResponseDto"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/context/complete": {
+      "get": {
+        "tags": [
+          "codecontext"
+        ],
+        "summary": "Get complete context for an identifier",
+        "description": "Returns comprehensive context information for a code construct. Searches by name or file path. Without 'type' parameter, searches across all entity types and returns best match or multiple matches. With 'type' parameter, searches only within specified type. Returns array of matches to handle ambiguity.",
+        "operationId": "GetCompleteContext",
+        "parameters": [
+          {
+            "name": "identifier",
+            "in": "query",
+            "description": "Name or file path to search for",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "description": "Filter by type (Class, Method, Interface, Property, etc.)",
+            "schema": {
+              "type": "string",
+              "default": null
+            }
+          },
+          {
+            "name": "depth",
+            "in": "query",
+            "description": "How many relationship levels to traverse (0-10)",
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "default": 1
+            }
+          },
+          {
+            "name": "includeTests",
+            "in": "query",
+            "description": "Whether to include test-related information",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          {
+            "name": "includeContent",
+            "in": "query",
+            "description": "Whether to include file content snippets",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          {
+            "name": "exact",
+            "in": "query",
+            "description": "Exact matching; omit for exact-first matching with substring fallback",
+            "schema": {
+              "type": "boolean",
+              "default": null
+            }
+          },
+          {
+            "name": "includeRelated",
+            "in": "query",
+            "description": "Whether to include loosely related same-file/namespace symbols",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          {
+            "name": "includeMetrics",
+            "in": "query",
+            "description": "Whether to include heuristic code metrics",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          {
+            "name": "maxMatches",
+            "in": "query",
+            "description": "Maximum ambiguous candidate summaries to return (1-50)",
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "default": 5
+            }
+          },
+          {
+            "name": "maxRelationships",
+            "in": "query",
+            "description": "Maximum entries returned per relationship list (1-100)",
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "default": 10
+            }
+          },
+          {
+            "name": "maxCallSites",
+            "in": "query",
+            "description": "Maximum locations returned per aggregated relationship (0-100)",
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "default": 3
+            }
+          },
+          {
+            "name": "expandAmbiguous",
+            "in": "query",
+            "description": "Expand bounded ambiguous matches instead of returning summaries",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          {
+            "name": "qualifiedIdentifier",
+            "in": "query",
+            "description": "Stable qualified identity from an ambiguous summary",
+            "schema": {
+              "type": "string",
+              "default": null
+            }
+          },
+          {
+            "name": "containingType",
+            "in": "query",
+            "description": "Filter members by containing type",
+            "schema": {
+              "type": "string",
+              "default": null
+            }
+          },
+          {
+            "name": "namespace",
+            "in": "query",
+            "description": "Filter by exact namespace or module",
+            "schema": {
+              "type": "string",
+              "default": null
+            }
+          },
+          {
+            "name": "signature",
+            "in": "query",
+            "description": "Filter by exact signature",
+            "schema": {
+              "type": "string",
+              "default": null
+            }
+          },
+          {
+            "name": "sourceFile",
+            "in": "query",
+            "description": "Filter by repository-relative or absolute source file",
+            "schema": {
+              "type": "string",
+              "default": null
+            }
+          },
+          {
+            "name": "view",
+            "in": "query",
+            "description": "Response shape: compact (default) or full",
+            "schema": {
+              "type": "string",
+              "default": "compact"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompactContextResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request"
+          }
+        }
+      }
+    },
+    "/api/context/multi": {
+      "post": {
+        "tags": [
+          "codecontext"
+        ],
+        "summary": "Get context for multiple identifiers",
+        "description": "Returns complete context information for multiple code constructs in a single request. Useful for batch operations and reducing HTTP round-trips.",
+        "operationId": "GetMultipleContext",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MultiContextRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/CompactContextResponse"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request"
+          }
+        }
+      }
+    },
+    "/api/index/refresh": {
+      "post": {
+        "tags": [
+          "codecontext"
+        ],
+        "summary": "Refresh the code index",
+        "description": "Triggers a re-parse of the specified file or the entire codebase. If path is provided, only that file is refreshed synchronously. If path is omitted, a full background rescan starts (202) and the response carries an operationId observable via /api/status; returns 409 if a scan is already in progress.",
+        "operationId": "RefreshIndex",
+        "parameters": [
+          {
+            "name": "path",
+            "in": "query",
+            "description": "Path to the file to refresh. If omitted, performs full scan.",
+            "schema": {
+              "type": "string",
+              "default": null
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RefreshFileResponseDto"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RefreshStartedResponseDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request"
+          },
+          "409": {
+            "description": "Conflict"
+          }
+        }
+      }
+    },
+    "/api/syntax-tree": {
+      "post": {
+        "tags": [
+          "codecontext"
+        ],
+        "summary": "Get a language-native syntax tree",
+        "description": "Returns an on-demand, parser-specific syntax tree for an indexed file. Use the normalized context endpoints for cross-language relationships; use this endpoint for exact syntax, tokens, nesting, and language-specific constructs.",
+        "operationId": "GetNativeSyntaxTree",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NativeSyntaxTreeRequestDto"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeSyntaxTreeResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request"
+          },
+          "409": {
+            "description": "Conflict"
+          },
+          "501": {
+            "description": "Not Implemented"
+          },
+          "503": {
+            "description": "Service Unavailable"
+          }
+        }
+      }
+    },
+    "/healthz": {
+      "get": {
+        "tags": [
+          "codecontext"
+        ],
+        "summary": "Liveness probe",
+        "description": "Returns 200 as soon as the HTTP host is accepting requests. Use /api/status to determine whether indexing has completed.",
+        "operationId": "Healthz",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthzResponseDto"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/shutdown": {
+      "post": {
+        "tags": [
+          "codecontext"
+        ],
+        "summary": "Gracefully stop this instance",
+        "description": "Requests a graceful shutdown of this CodeContext instance. Requires the target instance's instanceId as a query parameter. The instance unregisters itself from the instance registry on exit.",
+        "operationId": "Shutdown",
+        "parameters": [
+          {
+            "name": "instanceId",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "default": null
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShutdownResponseDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        }
+      }
+    },
+    "/api/schema": {
+      "get": {
+        "tags": [
+          "codecontext"
+        ],
+        "summary": "Get OpenAPI 3.0 specification",
+        "description": "Returns the OpenAPI 3.0 specification for the CodeContext API",
+        "operationId": "GetOpenApiSchema",
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ApiStatusDto": {
+        "required": [
+          "endpoints",
+          "requestCount",
+          "averageResponseTime",
+          "contractVersion"
+        ],
+        "type": "object",
+        "properties": {
+          "endpoints": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "requestCount": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "averageResponseTime": {
+            "type": "string"
+          },
+          "contractVersion": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "CompactCodeNode": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "nullable": true
+          },
+          "type": {
+            "type": "string",
+            "nullable": true
+          },
+          "file": {
+            "type": "string",
+            "nullable": true
+          },
+          "line": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "signature": {
+            "type": "string",
+            "nullable": true
+          },
+          "relations": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "nullable": true
+          },
+          "occurrences": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "lines": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "nullable": true
+          },
+          "callSiteCount": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "callSitesTruncated": {
+            "type": "boolean"
+          },
+          "distance": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "relationPath": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "nullable": true
+          },
+          "qualifiedIdentifier": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "CompactContextMatch": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "$ref": "#/components/schemas/CompactCodeNode"
+          },
+          "relationships": {
+            "$ref": "#/components/schemas/CompactRelationships"
+          },
+          "testing": {
+            "$ref": "#/components/schemas/CompactTesting"
+          },
+          "metrics": {
+            "$ref": "#/components/schemas/ContextMetrics"
+          },
+          "content": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "CompactContextResponse": {
+        "type": "object",
+        "properties": {
+          "view": {
+            "type": "string"
+          },
+          "matchMode": {
+            "type": "string"
+          },
+          "substringSearchSkipped": {
+            "type": "boolean"
+          },
+          "totalMatches": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "returnedMatches": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "ambiguous": {
+            "type": "boolean"
+          },
+          "disambiguationHint": {
+            "type": "string",
+            "nullable": true
+          },
+          "facets": {
+            "$ref": "#/components/schemas/CompactMatchFacets"
+          },
+          "matches": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CompactContextMatch"
+            }
+          }
+        }
+      },
+      "CompactMatchFacets": {
+        "type": "object",
+        "properties": {
+          "types": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          "files": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          "totalFiles": {
+            "type": "integer",
+            "format": "int32"
+          }
+        },
+        "nullable": true
+      },
+      "CompactRelationships": {
+        "type": "object",
+        "properties": {
+          "uses": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CompactCodeNode"
+            },
+            "nullable": true
+          },
+          "usesCount": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "usesReturnedCount": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "usesTruncated": {
+            "type": "boolean"
+          },
+          "usedBy": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CodeNode"
+            },
+            "nullable": true
+          },
+          "usedByCount": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "usedByReturnedCount": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "usedByTruncated": {
+            "type": "boolean"
+          },
+          "transitiveUses": {
+            "type": "array",
+            "items": { },
+            "nullable": true
+          },
+          "transitiveUsesCount": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "transitiveUsesReturnedCount": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "transitiveUsesTruncated": {
+            "type": "boolean"
+          },
+          "transitiveUsedBy": {
+            "type": "array",
+            "items": { },
+            "nullable": true
+          },
+          "transitiveUsedByCount": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "transitiveUsedByReturnedCount": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "transitiveUsedByTruncated": {
+            "type": "boolean"
+          },
+          "dependencies": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "nullable": true
+          },
+          "dependenciesCount": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "dependenciesReturnedCount": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "dependenciesTruncated": {
+            "type": "boolean"
+          },
+          "dependedBy": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "nullable": true
+          },
+          "dependedByCount": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "dependedByReturnedCount": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "dependedByTruncated": {
+            "type": "boolean"
+          },
+          "relatedItems": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CodeNode"
+            },
+            "nullable": true
+          },
+          "relatedItemsCount": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "relatedItemsReturnedCount": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "relatedItemsTruncated": {
+            "type": "boolean"
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        },
+        "nullable": true
+      },
+      "CompactTestFile": {
+        "type": "object",
+        "properties": {
+          "file": {
+            "type": "string"
+          },
+          "testCount": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "testMethods": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CodeNode"
+            }
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "CompactTesting": {
+        "type": "object",
+        "properties": {
+          "isTested": {
+            "type": "boolean"
+          },
+          "directlyTested": {
+            "type": "boolean"
+          },
+          "testReferenceCount": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "testImplementerCount": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "heuristicMatchCount": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "testFileCount": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "testFiles": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CompactTestFile"
+            }
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        },
+        "nullable": true
+      },
+      "ContextMetrics": {
+        "type": "object",
+        "properties": {
+          "complexity": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "linesOfCode": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "dependencyCount": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "dependentCount": {
+            "type": "integer",
+            "format": "int32"
+          }
+        },
+        "nullable": true
+      },
+      "ContextResponseView": {
+        "enum": [
+          "Compact",
+          "Full"
+        ]
+      },
+      "DatabaseStatusDto": {
+        "required": [
+          "fileCount",
+          "nodeCount",
+          "edgeCount",
+          "nodeTypes",
+          "languageBreakdown",
+          "repositoryType"
+        ],
+        "type": "object",
+        "properties": {
+          "fileCount": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "nodeCount": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "edgeCount": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "nodeTypes": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          "languageBreakdown": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          "repositoryType": {
+            "type": "string"
+          },
+          "edgeTypes": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "default": null,
+            "nullable": true
+          }
+        }
+      },
+      "HealthzResponseDto": {
+        "required": [
+          "status"
+        ],
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string"
+          }
+        }
+      },
+      "IndexingStatusDto": {
+        "required": [
+          "indexed",
+          "status",
+          "lastScanAt",
+          "scanDuration",
+          "rootPath",
+          "filesByStatus"
+        ],
+        "type": "object",
+        "properties": {
+          "indexed": {
+            "type": "boolean"
+          },
+          "status": {
+            "type": "string"
+          },
+          "lastScanAt": {
+            "type": "string",
+            "nullable": true
+          },
+          "scanDuration": {
+            "type": "string",
+            "nullable": true
+          },
+          "rootPath": {
+            "type": "string"
+          },
+          "filesByStatus": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          "filesProcessed": {
+            "type": "integer",
+            "format": "int32",
+            "default": 0
+          },
+          "filesTotal": {
+            "type": "integer",
+            "format": "int32",
+            "default": 0
+          },
+          "lastError": {
+            "type": "string",
+            "default": null,
+            "nullable": true
+          },
+          "operationId": {
+            "type": "integer",
+            "format": "int64",
+            "default": 0
+          }
+        }
+      },
+      "JsonElement": { },
+      "MultiContextRequest": {
+        "type": "object",
+        "properties": {
+          "identifiers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "type": {
+            "type": "string",
+            "nullable": true
+          },
+          "depth": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "view": {
+            "$ref": "#/components/schemas/ContextResponseView"
+          },
+          "includeTests": {
+            "type": "boolean"
+          },
+          "includeContent": {
+            "type": "boolean"
+          },
+          "exact": {
+            "type": "boolean",
+            "nullable": true
+          },
+          "includeRelated": {
+            "type": "boolean"
+          },
+          "includeMetrics": {
+            "type": "boolean"
+          },
+          "maxMatches": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "maxRelationships": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "maxCallSites": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "expandAmbiguous": {
+            "type": "boolean"
+          },
+          "qualifiedIdentifier": {
+            "type": "string",
+            "nullable": true
+          },
+          "containingType": {
+            "type": "string",
+            "nullable": true
+          },
+          "namespace": {
+            "type": "string",
+            "nullable": true
+          },
+          "signature": {
+            "type": "string",
+            "nullable": true
+          },
+          "sourceFile": {
+            "type": "string",
+            "nullable": true
+          },
+          "relationshipTypes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "NativeSyntaxTreeRequestDto": {
+        "required": [
+          "filePath"
+        ],
+        "type": "object",
+        "properties": {
+          "filePath": {
+            "type": "string"
+          },
+          "start": {
+            "type": "integer",
+            "format": "int32",
+            "default": null,
+            "nullable": true
+          },
+          "length": {
+            "type": "integer",
+            "format": "int32",
+            "default": null,
+            "nullable": true
+          },
+          "maxDepth": {
+            "type": "integer",
+            "format": "int32",
+            "default": 8
+          }
+        }
+      },
+      "NativeSyntaxTreeResult": {
+        "required": [
+          "parserId",
+          "parserVersion",
+          "workspaceId",
+          "filePath",
+          "format",
+          "tree",
+          "truncated"
+        ],
+        "type": "object",
+        "properties": {
+          "parserId": {
+            "type": "string"
+          },
+          "parserVersion": {
+            "type": "string"
+          },
+          "workspaceId": {
+            "type": "string"
+          },
+          "filePath": {
+            "type": "string"
+          },
+          "format": {
+            "type": "string"
+          },
+          "tree": {
+            "$ref": "#/components/schemas/JsonElement"
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ParserSessionDto": {
+        "required": [
+          "parserId",
+          "displayName",
+          "state",
+          "message",
+          "lastError",
+          "pid",
+          "restartCount",
+          "parserVersion",
+          "protocolVersion",
+          "updatedAt"
+        ],
+        "type": "object",
+        "properties": {
+          "parserId": {
+            "type": "string"
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string",
+            "nullable": true
+          },
+          "lastError": {
+            "type": "string",
+            "nullable": true
+          },
+          "pid": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "restartCount": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "parserVersion": {
+            "type": "string",
+            "nullable": true
+          },
+          "protocolVersion": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "updatedAt": {
+            "type": "string"
+          }
+        }
+      },
+      "ParserStatusDto": {
+        "required": [
+          "enabled",
+          "available",
+          "status"
+        ],
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "available": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "status": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "sessions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ParserSessionDto"
+            },
+            "default": null,
+            "nullable": true
+          }
+        }
+      },
+      "RefreshFileResponseDto": {
+        "required": [
+          "message"
+        ],
+        "type": "object",
+        "properties": {
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "RefreshStartedResponseDto": {
+        "required": [
+          "message",
+          "operationId"
+        ],
+        "type": "object",
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "operationId": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "ShutdownResponseDto": {
+        "required": [
+          "message"
+        ],
+        "type": "object",
+        "properties": {
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "StatusResponseDto": {
+        "required": [
+          "system",
+          "indexing",
+          "database",
+          "watchers",
+          "parsers",
+          "api",
+          "indexed",
+          "fileCount",
+          "nodeCount"
+        ],
+        "type": "object",
+        "properties": {
+          "system": {
+            "$ref": "#/components/schemas/SystemStatusDto"
+          },
+          "indexing": {
+            "$ref": "#/components/schemas/IndexingStatusDto"
+          },
+          "database": {
+            "$ref": "#/components/schemas/DatabaseStatusDto"
+          },
+          "watchers": {
+            "$ref": "#/components/schemas/WatcherStatusDto"
+          },
+          "parsers": {
+            "$ref": "#/components/schemas/ParserStatusDto"
+          },
+          "api": {
+            "$ref": "#/components/schemas/ApiStatusDto"
+          },
+          "indexed": {
+            "type": "boolean"
+          },
+          "fileCount": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "nodeCount": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "SystemStatusDto": {
+        "required": [
+          "version",
+          "informationalVersion",
+          "uptime",
+          "startedAt",
+          "memoryUsage",
+          "apiHealth"
+        ],
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "string"
+          },
+          "informationalVersion": {
+            "type": "string"
+          },
+          "uptime": {
+            "type": "string"
+          },
+          "startedAt": {
+            "type": "string"
+          },
+          "memoryUsage": {
+            "type": "string"
+          },
+          "apiHealth": {
+            "type": "string"
+          },
+          "instanceId": {
+            "type": "string",
+            "default": null,
+            "nullable": true
+          }
+        }
+      },
+      "WatcherStatusDto": {
+        "required": [
+          "active",
+          "watchedPaths",
+          "ignoredPatterns",
+          "pendingChanges"
+        ],
+        "type": "object",
+        "properties": {
+          "active": {
+            "type": "boolean"
+          },
+          "watchedPaths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "ignoredPatterns": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "pendingChanges": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "ignoreSourceCount": {
+            "type": "integer",
+            "format": "int32",
+            "default": 0
+          },
+          "ignoredPathCount": {
+            "type": "integer",
+            "format": "int32",
+            "default": 0
+          },
+          "mandatoryExclusions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": null,
+            "nullable": true
+          }
+        }
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "codecontext"
+    }
+  ]
+}
