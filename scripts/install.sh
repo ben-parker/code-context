@@ -15,6 +15,21 @@ case "$os" in
   *) echo "Unsupported OS: $os" >&2; exit 1 ;;
 esac
 
+# Swapping the launcher/release payload out from under a running instance can corrupt
+# an in-flight index or crash it outright, so refuse to install while any are up.
+existing_launcher="$install_dir/codecontext"
+if [ -x "$existing_launcher" ]; then
+  running_output=$("$existing_launcher" list 2>/dev/null) || running_output=""
+  if [ -n "$running_output" ] && [ "$running_output" != "No running instances." ]; then
+    echo "CodeContext is currently running:" >&2
+    echo "$running_output" >&2
+    echo "" >&2
+    echo "Stop all running instances first, then rerun the installer:" >&2
+    echo "  codecontext stop --all" >&2
+    exit 1
+  fi
+fi
+
 echo "Resolving latest release for $rid..."
 url=$(curl -fsSL "https://api.github.com/repos/$repo/releases/latest" \
   | grep -o "\"browser_download_url\": *\"[^\"]*-$rid\.zip\"" \
@@ -63,6 +78,13 @@ fi
 if [ -f "$release_dir/skill/install-skill.sh" ]; then
   sh "$release_dir/skill/install-skill.sh"
 fi
+
+# The launcher now points at the new release, so old ones are dead weight.
+for old_dir in "$codecontext_home"/releases/*/; do
+  old_dir=${old_dir%/}
+  [ "$old_dir" = "$release_dir" ] && continue
+  rm -rf "$old_dir"
+done
 
 echo "Installed $tag to $release_dir"
 case ":$PATH:" in
