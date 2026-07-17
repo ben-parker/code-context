@@ -288,7 +288,7 @@ namespace CodeContext.Core.Services
         /// uses/usedBy, so accepting them would silently return zero. <c>USES</c> matches
         /// null-typed edges (see <see cref="ToCompactRelatedNodesAsync"/>).
         /// </summary>
-        private static readonly HashSet<string> FilterableRelationKinds = new(StringComparer.OrdinalIgnoreCase)
+        internal static readonly HashSet<string> FilterableRelationKinds = new(StringComparer.OrdinalIgnoreCase)
         {
             "CALLS", "MOCK_CALLS", "REFERENCES", "IMPLEMENTS", "INHERITS", "EXTENDS", "IMPORTS", "USES",
         };
@@ -873,12 +873,12 @@ namespace CodeContext.Core.Services
         /// context lists real calls/inheritance instead of its own member list (which
         /// RelatedItems already covers via same-file grouping).
         /// </summary>
-        private static readonly HashSet<string> ContainmentEdgeKinds = new(StringComparer.OrdinalIgnoreCase)
+        internal static readonly HashSet<string> ContainmentEdgeKinds = new(StringComparer.OrdinalIgnoreCase)
         {
             "HAS_METHOD", "HAS_PROPERTY", "HAS_FIELD", "CONTAINS",
         };
 
-        private static readonly HashSet<string> MethodFamilyEdgeKinds = new(StringComparer.OrdinalIgnoreCase)
+        internal static readonly HashSet<string> MethodFamilyEdgeKinds = new(StringComparer.OrdinalIgnoreCase)
         {
             "IMPLEMENTS_MEMBER", "OVERRIDES_MEMBER",
         };
@@ -887,7 +887,7 @@ namespace CodeContext.Core.Services
             => edge.Type is null || (!ContainmentEdgeKinds.Contains(edge.Type)
                 && !MethodFamilyEdgeKinds.Contains(edge.Type));
 
-        private static readonly HashSet<string> SemanticFileRelationshipKinds = new(StringComparer.OrdinalIgnoreCase)
+        internal static readonly HashSet<string> SemanticFileRelationshipKinds = new(StringComparer.OrdinalIgnoreCase)
         {
             "CALLS", "MOCK_CALLS", "REFERENCES", "IMPLEMENTS", "INHERITS", "EXTENDS", "IMPORTS",
             "IMPLEMENTS_MEMBER", "OVERRIDES_MEMBER",

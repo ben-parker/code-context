@@ -7,7 +7,6 @@
     <IsAotCompatible>true</IsAotCompatible>
     <IsPackable>true</IsPackable>
     <PackageId>CodeContext.Worker.Protocol</PackageId>
-    <Version>1.0.0</Version>
     <Authors>CodeContext</Authors>
     <PackageDescription>Contracts, framing, and JSON-RPC helpers for CodeContext language workers.</PackageDescription>
     <PackageReadmeFile>README.md</PackageReadmeFile>

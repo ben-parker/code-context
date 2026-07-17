@@ -21,4 +21,11 @@
   <ItemGroup>
     <ProjectReference Include="..\CodeContext.Parser.Protocol\CodeContext.Parser.Protocol.csproj" />
   </ItemGroup>
+
+  <ItemGroup>
+    <!-- GraphContractTests references ContextService's edge-kind sets directly so the
+         producer/consumer contract is checked against the real consumed lists, not a
+         hand-copied duplicate. -->
+    <InternalsVisibleTo Include="CodeContext.Core.Tests" />
+  </ItemGroup>
 </Project>

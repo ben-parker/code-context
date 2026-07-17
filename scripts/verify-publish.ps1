@@ -74,6 +74,82 @@ New-Item -ItemType Directory -Path $fixture | Out-Null
     (Join-Path $fixture 'RepositoryService.cs'),
     "namespace PublishFixture;`npublic class RepositoryService { public Repository Create() => new(); }`n")
 
+# The graph edge-kind contract (tests/.../Workers/GraphContractTests.cs) is also a live
+# guardrail: both language workers must actually emit every kind ContextService consumes.
+# These extra fixtures exercise every contracted C# and TypeScript kind so the smoke test
+# below can assert the packaged host's graph reports them all with count > 0.
+$csharpContractFixture = @'
+namespace PublishFixture;
+using System;
+
+public sealed class FactAttribute : Attribute { }
+
+// Interface implementation, inheritance, and method families (IMPLEMENTS, INHERITS,
+// IMPLEMENTS_MEMBER, OVERRIDES_MEMBER, HAS_METHOD).
+public interface IBase<T> { void Work(T value); }
+public interface IDerived : IBase<int> { }
+public class FirstWorker : IDerived { public void Work(int value) { } }
+public class SecondWorker : IDerived { void IBase<int>.Work(int value) { } }
+public class RunBase { public virtual void Run(int value) { } }
+public class RunDerived : RunBase { public override void Run(int value) { } }
+
+// HAS_PROPERTY, REFERENCES (to a concrete type), and CALLS.
+public class Widget { }
+public class Assembler
+{
+    public int Count { get; set; }
+    private Widget _widget;
+    public Widget Current => _widget;
+    public void Build() { Consume(); }
+    public void Consume() { }
+}
+
+// MOCK_CALLS: NSubstitute-shaped fluent/mock calls (self-contained stand-ins).
+public interface IService { int Get(int value); }
+public static class MockExtensions
+{
+    public static T Received<T>(this T value) => value;
+    public static T Returns<T>(this T value, T configured) => value;
+}
+public class ServiceTests
+{
+    [Fact]
+    public void Verify()
+    {
+        IService service = null;
+        service.Received().Get(1);
+        service.Get(3).Returns(4);
+    }
+}
+'@
+[IO.File]::WriteAllText((Join-Path $fixture 'Contracts.cs'), $csharpContractFixture)
+
+# TypeScript fixtures exercise EXTENDS, HAS_FIELD, IMPORTS (and the shared kinds) through
+# the packaged Node worker. A minimal tsconfig makes it a real project so imports resolve.
+[IO.File]::WriteAllText(
+    (Join-Path $fixture 'tsconfig.json'),
+    '{ "compilerOptions": { "strict": false, "target": "ES2020", "module": "ESNext" } }' + "`n")
+$typeScriptBaseModule = @'
+export interface IService { run(): void; }
+export class Base {
+    count: number = 0;
+    get label(): string { return 'b'; }
+    greet(): string { return 'hi'; }
+}
+'@
+[IO.File]::WriteAllText((Join-Path $fixture 'base.ts'), $typeScriptBaseModule)
+$typeScriptMainModule = @'
+import { Base, IService } from './base';
+export class Derived extends Base {
+    greet(): string { return this.helper(); }
+    helper(): string { return 'x'; }
+}
+export class Impl implements IService {
+    run(): void { }
+}
+'@
+[IO.File]::WriteAllText((Join-Path $fixture 'main.ts'), $typeScriptMainModule)
+
 $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
 $listener.Start()
 $port = ([Net.IPEndPoint]$listener.LocalEndpoint).Port
@@ -128,6 +204,29 @@ try {
     }
     if ([int]$status.api.contractVersion -ne 1) {
         throw "Published status reported contractVersion '$($status.api.contractVersion)' instead of 1."
+    }
+
+    # Graph edge-kind contract: every edge kind ContextService consumes must be produced by
+    # a real worker in the packaged host (see GraphContractTests). Assert the live graph
+    # reports each contracted C# and TypeScript kind (both workers, not the RESERVED set)
+    # with count > 0. A missing kind means a worker regressed or failed to start.
+    $edgeTypes = $status.database.edgeTypes
+    if ($null -eq $edgeTypes) {
+        throw 'Published status omitted database.edgeTypes.'
+    }
+    $contractedEdgeKinds = @(
+        'CALLS', 'MOCK_CALLS', 'REFERENCES', 'IMPLEMENTS', 'INHERITS',
+        'IMPLEMENTS_MEMBER', 'OVERRIDES_MEMBER', 'HAS_METHOD', 'HAS_PROPERTY',
+        'EXTENDS', 'HAS_FIELD', 'IMPORTS')
+    $missingEdgeKinds = foreach ($kind in $contractedEdgeKinds) {
+        $property = $edgeTypes.PSObject.Properties[$kind]
+        if ($null -eq $property -or [int]$property.Value -le 0) { $kind }
+    }
+    if ($missingEdgeKinds) {
+        $present = ($edgeTypes.PSObject.Properties |
+            ForEach-Object { "$($_.Name)=$($_.Value)" }) -join ', '
+        throw ("Published graph is missing contracted edge kind(s): " +
+            ($missingEdgeKinds -join ', ') + ". Present edge types: $present.")
     }
     $reportedInstanceId = [string]$status.system.instanceId
     if ([string]::IsNullOrWhiteSpace($reportedInstanceId)) {
