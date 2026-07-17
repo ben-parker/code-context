@@ -185,22 +185,40 @@ warm-up. Cold `--version`: 10 runs `61.5,62.4,62.5,63.2,63.5,66.8,67.9,79,80.6,8
   - **Hardening:** `FrameLease.Dispose` now guards a null backing buffer so `default(FrameLease).Dispose()` is a no-op instead of an NRE. `ContentLengthHeader` tightened to `private` (no cross-class/test use; `MaxHeaderBytes` kept `internal` for `FrameReader`).
 
 ## Phase 7 — Wrap-up
-- [ ] Final benchmark table (below)
-- [ ] AOT_COMPATIBILITY.md + CLAUDE.md publish notes (additive)
-- [ ] 4-RID CI release dry-run on branch
-- [ ] Fable end-to-end check + final review of cumulative diff
+- [x] Final benchmark table (below) — re-measured on finished HEAD (f87189c, release 0.2.35), fresh win-x64 AOT publish + verify-publish green
+- [x] AOT_COMPATIBILITY.md (verified accurate post-Phase-6, no change needed) + CLAUDE.md publish notes verified + "Performance architecture" note appended (additive)
+- [ ] 4-RID CI release dry-run on branch — pending push decision (local-only commits so far)
+- [ ] Fable end-to-end check + final review of cumulative diff — orchestrator
 
 ## Benchmarks
 
-| Metric | net9 JIT baseline | Post-AOT (Ph4) | Post-perf (Ph6) |
+| Metric | net9 JIT baseline | Post-AOT (Ph4) | Final (Ph7) |
 |---|---|---|---|
-| Cold `--version` (min/avg ms) | 61.5 / 69.2 | **15.7 / 19.2** | |
-| Time-to-listening (ms) | 1198 | **556** (516–580, n=3) | |
-| Time-to-indexed, this repo (ms) | 7118 | **5688** (5551–5823, n=3) | |
-| Query latency p50, depth=2+tests (ms) | 228.3 | **293** (287–316, 2 runs) ⚠️ | **191.6** (185.8–210.9, 20 runs) |
-| Alloc rate during rescan (MB/s) | 9.75 (JIT, pre-6a) | | **7.4** (JIT) |
-| Alloc/5-rescan workload (MB) | 185.0 (JIT, pre-6a) | | **140.8** (JIT) |
-| Publish size, win-x64 (MB) | 215.9 | **165.2** shippable / 29.2 host | |
+| Cold `--version` (min/avg ms) | 61.5 / 69.2 | 15.7 / 19.2 | **15.3 / 18.0** |
+| Time-to-listening (ms) | 1198 | 556 (516–580, n=3) | **521** (512–577, n=3) |
+| Time-to-indexed, this repo (ms) | 7118 | 5688 (5551–5823, n=3) | **5639** (5607–5927, n=3) |
+| Query latency p50, depth=2+tests (ms) | 228.3 | 293 (287–316, 2 runs) ⚠️ | **204.5** (197.5–232.5, 20 runs) |
+| Alloc rate during rescan (MB/s) | 9.75 (JIT, pre-6a) | — | **7.4** (JIT, Ph6 †) |
+| Alloc/5-rescan workload (MB) | 185.0 (JIT, pre-6a) | — | **140.8** (JIT, Ph6 †) |
+| Publish size, win-x64 (MB) | 215.9 | 165.2 shippable / 29.2 host | **165.3** shippable / 29.2 host |
+
+**Final (Ph7) summary.** Measured on the finished HEAD (f87189c, release 0.2.35) — a fresh
+`scripts/verify-publish.ps1 -RuntimeIdentifier win-x64` AOT publish, re-run against the same
+`%TEMP%\cc-repo-copy` corpus/query/protocol as Phases 0/4/5. Headline wins over the net9 JIT
+baseline: **cold `--version` 3.8× faster** (69.2→18.0ms avg), **time-to-listening 2.3×** (1198→521ms),
+**time-to-indexed 1.26×** (7118→5639ms), and **publish payload −23%** (215.9→165.3MB shippable,
+single 29.2MB native host). **Query latency traced a disclosed journey — 228.3ms warmed JIT →
+293ms post-AOT (the expected AOT-vs-warmed-JIT regression on the O(E) traversal) → 204.5ms** once
+Phase 5's adjacency indexes turned every hop's edge lookup into an O(degree) `FrozenDictionary`
+read (Phase 5 first measured 191.6ms; Phase 7's 200.5–204.5ms across two 20-run sweeps sits in the
+same adjacency-index band, the spread being machine run-to-run noise — both beat the 228.3ms
+warmed-JIT baseline and recover the AOT regression). The compact response is byte-deterministic
+(19453 bytes, stable across runs). **† The alloc rows keep their Phase 6 numbers**, measured on a
+JIT (`dotnet build`) host for EventPipe/`dotnet-counters` support — the shipped host is AOT — over
+5 forced rescans of the 119-`.cs` corpus (~24% fewer bytes than pre-6a). **Deferred:** Commit B
+copy-free `IReadOnlyList` reads and `NodesByFilePath` production wiring (the index is built +
+equivalence-tested, not yet consumed — both blocked on the ~19-file mock ripple), and the
+ServerGC/DATAS re-test for the worker (kept on workstation GC for low per-repo memory).
 
 Post-AOT conditions (win-x64, SDK 10.0.302, release version 0.2.20, VS 2026 C++ link toolchain):
 - **Cold `--version`, startup, query** measured against the SAME temp corpus Phase 0 used
