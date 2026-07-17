@@ -4,6 +4,7 @@ using CodeContext.Core.Repositories;
 using CodeContext.Core.Serialization;
 using CodeContext.Core.Services;
 using CodeContext.Core.Workers;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using System.Text.Json.Serialization;
 
@@ -80,6 +81,11 @@ public static class ProgramHelpers
         services.AddSingleton<IAnalysisDeltaSink>(sp => new AnalysisDeltaApplier(
             (IGenerationalGraphStore)sp.GetRequiredService<IRepositoryFactory>().CreateGraphRepository(),
             sp.GetRequiredService<ILogger<AnalysisDeltaApplier>>()));
+        // Per-worker env overlays (e.g. GC A/B knobs) come from the CodeContext:WorkerEnvironment
+        // configuration section; this instance flows into LanguageWorkerService's optional
+        // workerOptions parameter via constructor injection. Absent section => defaults, no overlay.
+        services.AddSingleton(sp =>
+            ParserWorkerOptions.FromConfiguration(sp.GetRequiredService<IConfiguration>()));
         services.AddSingleton<LanguageWorkerService>();
         services.AddSingleton<ILanguageWorkerService>(sp => sp.GetRequiredService<LanguageWorkerService>());
         services.AddHostedService(sp => sp.GetRequiredService<LanguageWorkerService>());
