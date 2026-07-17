@@ -3,6 +3,8 @@ using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Text;
+using System.Collections.Immutable;
+using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
@@ -11,111 +13,52 @@ namespace CodeContext.CSharp.Worker;
 /// <summary>
 /// Owns the Roslyn state for one logical workspace: cached syntax trees per file and
 /// the compilation built from them. Incremental means "reparse only the files that
-/// changed"; the compilation itself is recreated per mutation (cheap next to parsing)
-/// and the emitted facts always replace the whole workspace, mirroring the whole-scope
-/// C# generation semantics the host commits atomically.
+/// changed"; the compilation is mutated in lockstep with the tree cache so Roslyn's
+/// declaration-table and binding caches survive across mutations, and the emitted facts
+/// always replace the whole workspace, mirroring the whole-scope C# generation semantics
+/// the host commits atomically.
 /// </summary>
 public sealed class CSharpWorkspaceAnalyzer
 {
     /// <summary>Prefix shared by all C# facts; a workspace component follows it.</summary>
     public const string IdPrefix = "csharp:";
 
+    /// <summary>Name given to the persistent compilation across every mutation.</summary>
+    private const string CompilationName = "CodeContextWorkspace";
+
     private static readonly StringComparer PathComparer =
         OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+
+    /// <summary>
+    /// Runtime metadata references shared process-wide. MetadataReference instances are
+    /// immutable and safe to share across compilations and threads, so resolving them
+    /// once (best-effort) avoids re-reading the assemblies on every mutation.
+    /// </summary>
+    private static readonly Lazy<ImmutableArray<MetadataReference>> SharedReferences =
+        new(ResolveReferences);
 
     private readonly Dictionary<string, SyntaxTree> _syntaxTrees = new(PathComparer);
     private readonly List<ProtocolDiagnostic> _pendingDiagnostics = [];
     private readonly string _workspaceIdPrefix;
 
+    /// <summary>
+    /// The workspace compilation, kept in lockstep with <see cref="_syntaxTrees"/> so
+    /// Roslyn's declaration-table and binding caches survive across mutations. The
+    /// invariant, restored at every mutation entry point: the compilation's tree set
+    /// (by instance) equals <see cref="_syntaxTrees"/>.Values.
+    /// </summary>
+    private CSharpCompilation _compilation;
+
     public CSharpWorkspaceAnalyzer(string workspaceId)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(workspaceId);
         _workspaceIdPrefix = IdPrefix + Uri.EscapeDataString(workspaceId) + ":";
+        _compilation = CSharpCompilation.Create(CompilationName, references: SharedReferences.Value);
     }
 
-    public int FileCount => _syntaxTrees.Count;
-
-    /// <summary>
-    /// Reconciles the cached tree set with the approved file list: files no longer
-    /// approved are dropped, newly approved files are loaded from disk. Cached trees
-    /// for still-approved files are kept as-is (changes arrive via
-    /// <see cref="ApplyChanges"/>). This runs on every workspace/open, which the host
-    /// sends before each mutation, so a restarted worker self-heals its state here.
-    /// </summary>
-    public void SyncApprovedFiles(IReadOnlyList<string> approvedFiles, CancellationToken ct)
+    private static ImmutableArray<MetadataReference> ResolveReferences()
     {
-        var approved = new HashSet<string>(approvedFiles, PathComparer);
-        foreach (var stale in _syntaxTrees.Keys.Where(path => !approved.Contains(path)).ToList())
-        {
-            _syntaxTrees.Remove(stale);
-        }
-        foreach (var path in approvedFiles)
-        {
-            ct.ThrowIfCancellationRequested();
-            if (!_syntaxTrees.ContainsKey(path))
-            {
-                TryLoadFile(path);
-            }
-        }
-    }
-
-    /// <summary>Replaces the workspace file set entirely and reparses everything.</summary>
-    public void ReplaceFiles(IReadOnlyList<string> files, CancellationToken ct)
-    {
-        _syntaxTrees.Clear();
-        foreach (var path in files)
-        {
-            ct.ThrowIfCancellationRequested();
-            TryLoadFile(path);
-        }
-    }
-
-    /// <summary>Applies an ordered change batch: deleted files drop their tree, all
-    /// other change kinds re-read the file from disk.</summary>
-    public void ApplyChanges(IReadOnlyList<FileChangeDto> changes, CancellationToken ct)
-    {
-        foreach (var change in changes)
-        {
-            ct.ThrowIfCancellationRequested();
-            if (change.ChangeType == FileChangeKinds.Renamed && change.OldPath is { Length: > 0 } oldPath)
-            {
-                _syntaxTrees.Remove(oldPath);
-            }
-            if (change.ChangeType == FileChangeKinds.Deleted)
-            {
-                _syntaxTrees.Remove(change.Path);
-            }
-            else
-            {
-                TryLoadFile(change.Path);
-            }
-        }
-    }
-
-    private void TryLoadFile(string path)
-    {
-        try
-        {
-            var content = File.ReadAllText(path);
-            _syntaxTrees[path] = CSharpSyntaxTree.ParseText(content, path: path);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            // The file disappeared or is unreadable: treat it as absent so its stale
-            // facts are replaced by nothing, and tell the host why.
-            _syntaxTrees.Remove(path);
-            _pendingDiagnostics.Add(new ProtocolDiagnostic(
-                path, "warning", $"File could not be read and was skipped: {ex.Message}"));
-        }
-    }
-
-    /// <summary>
-    /// Compiles the current tree set and walks every file into normalized nodes/edges.
-    /// The result always represents the complete workspace.
-    /// </summary>
-    public AnalysisResult Analyze(CancellationToken ct)
-    {
-        var references = new List<MetadataReference>();
+        var references = ImmutableArray.CreateBuilder<MetadataReference>();
         try
         {
             // Basic runtime references give the semantic model real symbols for core
@@ -135,11 +78,145 @@ public sealed class CSharpWorkspaceAnalyzer
         {
             // Reference resolution is best-effort.
         }
+        return references.ToImmutable();
+    }
 
-        var compilation = CSharpCompilation.Create(
-            "CodeContextWorkspace",
-            syntaxTrees: _syntaxTrees.Values,
-            references: references);
+    public int FileCount => _syntaxTrees.Count;
+
+    /// <summary>
+    /// Reconciles the cached tree set with the approved file list: files no longer
+    /// approved are dropped, newly approved files are loaded from disk. Cached trees
+    /// for still-approved files are kept as-is (changes arrive via
+    /// <see cref="ApplyChanges"/>). This runs on every workspace/open, which the host
+    /// sends before each mutation, so a restarted worker self-heals its state here.
+    /// </summary>
+    public void SyncApprovedFiles(IReadOnlyList<string> approvedFiles, CancellationToken ct)
+    {
+        var approved = new HashSet<string>(approvedFiles, PathComparer);
+        foreach (var stale in _syntaxTrees.Keys.Where(path => !approved.Contains(path)).ToList())
+        {
+            // Capture the exact tree instance before dropping it: the compilation keys
+            // trees by instance, not path.
+            var staleTree = _syntaxTrees[stale];
+            _syntaxTrees.Remove(stale);
+            _compilation = _compilation.RemoveSyntaxTrees(staleTree);
+        }
+        foreach (var path in approvedFiles)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (!_syntaxTrees.ContainsKey(path))
+            {
+                TryLoadFile(path);
+            }
+        }
+    }
+
+    /// <summary>Replaces the workspace file set entirely and reparses everything.</summary>
+    public void ReplaceFiles(IReadOnlyList<string> files, CancellationToken ct)
+    {
+        // Deliberate full reset: drop every tree and start from a fresh compilation
+        // rather than diffing. Every file below then takes the AddSyntaxTrees path.
+        _syntaxTrees.Clear();
+        _compilation = CSharpCompilation.Create(CompilationName, references: SharedReferences.Value);
+        foreach (var path in files)
+        {
+            ct.ThrowIfCancellationRequested();
+            TryLoadFile(path);
+        }
+    }
+
+    /// <summary>Applies an ordered change batch: deleted files drop their tree, all
+    /// other change kinds re-read the file from disk.</summary>
+    public void ApplyChanges(IReadOnlyList<FileChangeDto> changes, CancellationToken ct)
+    {
+        foreach (var change in changes)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (change.ChangeType == FileChangeKinds.Renamed && change.OldPath is { Length: > 0 } oldPath)
+            {
+                // Drop the old-path tree; the new path is loaded via TryLoadFile below.
+                // A rename whose OldPath equals Path under the path comparer degenerates
+                // to a replace: the entry is removed here, so TryLoadFile sees no old
+                // tree and takes the AddSyntaxTrees path — no double-remove.
+                if (_syntaxTrees.TryGetValue(oldPath, out var oldTree))
+                {
+                    _syntaxTrees.Remove(oldPath);
+                    _compilation = _compilation.RemoveSyntaxTrees(oldTree);
+                }
+            }
+            if (change.ChangeType == FileChangeKinds.Deleted)
+            {
+                if (_syntaxTrees.TryGetValue(change.Path, out var deletedTree))
+                {
+                    _syntaxTrees.Remove(change.Path);
+                    _compilation = _compilation.RemoveSyntaxTrees(deletedTree);
+                }
+            }
+            else
+            {
+                TryLoadFile(change.Path);
+            }
+        }
+    }
+
+    private void TryLoadFile(string path)
+    {
+        // Capture any existing tree instance first so the compilation is mutated in
+        // lockstep with the dictionary (the compilation keys trees by instance).
+        _syntaxTrees.TryGetValue(path, out var oldTree);
+        try
+        {
+            var content = File.ReadAllText(path);
+            var newTree = CSharpSyntaxTree.ParseText(content, path: path);
+            _syntaxTrees[path] = newTree;
+            _compilation = oldTree is null
+                ? _compilation.AddSyntaxTrees(newTree)
+                : _compilation.ReplaceSyntaxTree(oldTree, newTree);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // The file disappeared or is unreadable: treat it as absent so its stale
+            // facts are replaced by nothing, and tell the host why.
+            _syntaxTrees.Remove(path);
+            if (oldTree is not null)
+            {
+                _compilation = _compilation.RemoveSyntaxTrees(oldTree);
+            }
+            _pendingDiagnostics.Add(new ProtocolDiagnostic(
+                path, "warning", $"File could not be read and was skipped: {ex.Message}"));
+        }
+    }
+
+    /// <summary>
+    /// Compiles the current tree set and walks every file into normalized nodes/edges.
+    /// The result always represents the complete workspace.
+    /// </summary>
+    public AnalysisResult Analyze(CancellationToken ct)
+    {
+        // The compilation is mutated in lockstep with the tree dictionary at every
+        // mutation site, so its tree set must match by instance. A count-only check
+        // would miss the likeliest future drift — a missed ReplaceSyntaxTree leaving the
+        // dict holding the new instance while the compilation still holds the old — which
+        // then makes GetSemanticModel throw on every Analyze. So verify instance
+        // membership (reference equality): counts equal AND every cached tree is present
+        // in the compilation. If bookkeeping ever drifts, scream in debug/test builds and
+        // self-heal in release by rebuilding from the trees, recording a diagnostic so the
+        // correction surfaces rather than hiding forever.
+        var compiledTrees = new HashSet<SyntaxTree>(_compilation.SyntaxTrees);
+        if (compiledTrees.Count != _syntaxTrees.Count
+            || !_syntaxTrees.Values.All(compiledTrees.Contains))
+        {
+            Debug.Assert(false,
+                $"Compilation drifted from tree cache: {_compilation.SyntaxTrees.Count()} tree(s) " +
+                $"in compilation vs {_syntaxTrees.Count} cached.");
+            _compilation = CSharpCompilation.Create(
+                CompilationName, _syntaxTrees.Values, SharedReferences.Value);
+            _pendingDiagnostics.Add(new ProtocolDiagnostic(
+                null, "warning",
+                "Internal compilation cache drifted from the tree set and was rebuilt."));
+        }
+
+        var compilation = _compilation;
 
         var nodes = new List<ProtocolNode>();
         var edges = new List<ProtocolEdge>();
