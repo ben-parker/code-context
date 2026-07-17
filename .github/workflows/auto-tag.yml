@@ -73,9 +73,12 @@ jobs:
           # Pin the nbgv CLI to the same version Directory.Build.props pins for
           # the MSBuild package (3.6.146) so the CLI computes the exact same
           # version the build produces, and so a future nbgv release can't shift
-          # the tag format out from under us.
-          dotnet tool install --global nbgv --version 3.6.146
-          export PATH="$PATH:$HOME/.dotnet/tools"
+          # the tag format out from under us. --tool-path (not --global) because
+          # runner images preinstall a newer global nbgv and `dotnet tool install
+          # --global` refuses to downgrade past it; an isolated tool-path install
+          # honors the pin regardless of what the image ships.
+          dotnet tool install nbgv --version 3.6.146 --tool-path "${RUNNER_TEMP}/nbgv-tool"
+          export PATH="${RUNNER_TEMP}/nbgv-tool:$PATH"
 
           # SimpleVersion is major.minor.height (a clean 3-part X.Y.Z). The
           # `Version` property adds a 4th revision component, and
