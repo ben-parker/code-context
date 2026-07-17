@@ -7,6 +7,10 @@ repo='ben-parker/code-context'
 codecontext_home="$HOME/.codecontext"
 install_dir="$codecontext_home/bin"
 
+# Run installer tools from a stable directory instead of inheriting an arbitrary
+# caller directory. This avoids macOS child-process getcwd failures during install.
+cd "$HOME"
+
 os=$(uname -s)
 arch=$(uname -m)
 case "$os" in
@@ -75,14 +79,16 @@ if [ "$os" = 'Darwin' ]; then
   xattr -dr com.apple.quarantine "$release_dir" 2>/dev/null || true
 fi
 
-if [ -f "$release_dir/skill/install-skill.sh" ]; then
-  sh "$release_dir/skill/install-skill.sh"
-fi
-
 # The launcher now points at the new release, so old ones are dead weight.
+removal_noted=false
 for old_dir in "$codecontext_home"/releases/*/; do
   old_dir=${old_dir%/}
+  [ -d "$old_dir" ] || continue
   [ "$old_dir" = "$release_dir" ] && continue
+  if [ "$removal_noted" = false ]; then
+    echo "Removing previous CodeContext versions..."
+    removal_noted=true
+  fi
   rm -rf "$old_dir"
 done
 
@@ -90,7 +96,25 @@ echo "Installed $tag to $release_dir"
 case ":$PATH:" in
   *":$install_dir:"*) echo "Run: codecontext --version" ;;
   *)
-    echo "Add it to your PATH, e.g.:"
-    echo "  echo 'export PATH=\"\$PATH:$install_dir\"' >> ~/.profile"
+    shell_path=${SHELL:-}
+    shell_name=${shell_path##*/}
+    case "$shell_name" in
+      zsh)  profile="$HOME/.zshrc" ;;
+      bash) profile="$HOME/.bashrc" ;;
+      fish) profile="$HOME/.config/fish/config.fish" ;;
+      *)    profile="$HOME/.profile" ;;
+    esac
+    mkdir -p "$(dirname "$profile")"
+    if [ ! -f "$profile" ] || ! grep -F "$install_dir" "$profile" >/dev/null 2>&1; then
+      if [ "$shell_name" = fish ]; then
+        printf '\n# CodeContext\nfish_add_path "%s"\n' "$install_dir" >> "$profile"
+      else
+        printf '\n# CodeContext\nexport PATH="$PATH:%s"\n' "$install_dir" >> "$profile"
+      fi
+      echo "Added $install_dir to PATH in $profile."
+    else
+      echo "$install_dir is already configured in $profile."
+    fi
+    echo "Open a new terminal, then run: codecontext --version"
     ;;
 esac
