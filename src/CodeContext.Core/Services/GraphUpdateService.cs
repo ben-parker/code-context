@@ -25,6 +25,12 @@ public class GraphUpdateService : IGraphUpdateService
     private readonly ILanguageWorkerService? _workerService;
     private readonly IRepositoryFileSelector _fileSelector;
 
+    // The worker catalog is fixed at construction (LanguageWorkerService populates its
+    // extension map only in its ctor), so the owned-extension set is invariant for this
+    // service's lifetime and is computed once instead of per scan. The cached list is only
+    // ever enumerated read-only by callers.
+    private List<string>? _cachedSupportedExtensions;
+
     private static readonly StringComparer PathComparer =
         OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
 
@@ -196,7 +202,7 @@ public class GraphUpdateService : IGraphUpdateService
     }
 
     private List<string> GetAllSupportedExtensions()
-        => (_workerService?.OwnedExtensions ?? [])
+        => _cachedSupportedExtensions ??= (_workerService?.OwnedExtensions ?? [])
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
 
