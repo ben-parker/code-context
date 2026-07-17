@@ -291,6 +291,11 @@ FakesAssemblies/
 .ntvs_analysis.dat
 node_modules/
 
+# Locally prepared Node.js runtime for the bundled TypeScript worker
+src/CodeContext.TypeScript.Worker/node
+src/CodeContext.TypeScript.Worker/node.exe
+src/CodeContext.TypeScript.Worker/node-LICENSE
+
 # Visual Studio 6 build log
 *.plg
 
