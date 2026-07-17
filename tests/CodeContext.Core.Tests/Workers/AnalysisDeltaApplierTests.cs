@@ -36,6 +36,65 @@ public class AnalysisDeltaApplierTests
     private static ProtocolNode Node(string id, string file)
         => new(id, id, id, "class", "fake", file);
 
+    private static ProtocolNode NodeWithMetadata(string id, string file, IReadOnlyDictionary<string, string> metadata)
+        => new(id, id, id, "class", "fake", file) { Metadata = metadata };
+
+    /// <summary>An IReadOnlyDictionary that is deliberately NOT a mutable Dictionary, to hit the defensive-copy branch.</summary>
+    private sealed class ReadOnlyMetadata(IReadOnlyDictionary<string, string> inner) : IReadOnlyDictionary<string, string>
+    {
+        public string this[string key] => inner[key];
+        public IEnumerable<string> Keys => inner.Keys;
+        public IEnumerable<string> Values => inner.Values;
+        public int Count => inner.Count;
+        public bool ContainsKey(string key) => inner.ContainsKey(key);
+        public bool TryGetValue(string key, out string value) => inner.TryGetValue(key, out value!);
+        public IEnumerator<KeyValuePair<string, string>> GetEnumerator() => inner.GetEnumerator();
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => inner.GetEnumerator();
+    }
+
+    private async Task<CodeNode> ApplyAndGetSingleNode(ProtocolNode node)
+    {
+        var delta = new AnalysisDelta(
+            ParserId: "fake", ParserVersion: "1.0", WorkspaceId: "ws-1",
+            Generation: 1, RequestId: 1, ReplacesWorkspace: true, ReplacesFiles: [],
+            Nodes: [node], Edges: [], IsLastForRequest: true);
+        Assert.True(await _applier.ApplyAsync(delta));
+        var repo = (ICodeGraphRepository)_store;
+        return (await repo.GetGraphAsync())!.Nodes.Single();
+    }
+
+    [Fact]
+    public async Task Apply_MutableMetadataWithConflictingOwnershipKey_DeltaOwnershipWinsAndOriginalEntriesSurvive()
+    {
+        var node = await ApplyAndGetSingleNode(NodeWithMetadata("fake:ws-1:A", "a.fake",
+            new Dictionary<string, string> { ["parserId"] = "SPOOFED", ["custom"] = "keep-me" }));
+
+        Assert.Equal("fake", node.Metadata!["parserId"]);   // delta ownership overrides the source's parserId
+        Assert.Equal("ws-1", node.Metadata["workspaceId"]);  // stamped even though source omitted it
+        Assert.Equal("keep-me", node.Metadata["custom"]);    // unrelated source entries survive
+    }
+
+    [Fact]
+    public async Task Apply_NullMetadata_ProducesExactlyTheTwoOwnershipEntries()
+    {
+        var node = await ApplyAndGetSingleNode(Node("fake:ws-1:A", "a.fake"));
+
+        Assert.Equal(2, node.Metadata!.Count);
+        Assert.Equal("fake", node.Metadata["parserId"]);
+        Assert.Equal("ws-1", node.Metadata["workspaceId"]);
+    }
+
+    [Fact]
+    public async Task Apply_NonDictionaryReadOnlyMetadata_DefensivelyCopiedWithOwnershipStamped()
+    {
+        var node = await ApplyAndGetSingleNode(NodeWithMetadata("fake:ws-1:A", "a.fake",
+            new ReadOnlyMetadata(new Dictionary<string, string> { ["custom"] = "keep-me" })));
+
+        Assert.Equal("fake", node.Metadata!["parserId"]);
+        Assert.Equal("ws-1", node.Metadata["workspaceId"]);
+        Assert.Equal("keep-me", node.Metadata["custom"]);
+    }
+
     [Fact]
     public async Task Apply_CommitsNodesWithOwnershipMetadata()
     {

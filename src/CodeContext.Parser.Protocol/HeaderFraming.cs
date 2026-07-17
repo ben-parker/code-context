@@ -12,7 +12,7 @@ public static class HeaderFraming
 {
     public const int DefaultMaxPayloadBytes = 64 * 1024 * 1024;
 
-    internal const string ContentLengthHeader = "Content-Length";
+    private const string ContentLengthHeader = "Content-Length";
     internal const int MaxHeaderBytes = 4 * 1024;
 
     public static async Task WriteFrameAsync(Stream output, ReadOnlyMemory<byte> payload, CancellationToken ct = default)
@@ -50,6 +50,10 @@ public static class HeaderFraming
             }
 
             var value = TrimAsciiSpace(line[(separator + 1)..]);
+            // Deliberate narrowing vs. the former int.TryParse: Utf8Parser is digits-with-
+            // optional-sign and is not culture/format-flexible. In practice the framing spec is
+            // digits-only and no worker emits a sign, so the two agree on every real input; a
+            // framing test documents the exact behavior for '+' and '-'.
             if (Utf8Parser.TryParse(value, out int length, out int consumed) && consumed == value.Length)
             {
                 parsedLength = length;
@@ -63,6 +67,9 @@ public static class HeaderFraming
         throw new ParserProtocolViolationException("Frame header is missing Content-Length.");
     }
 
+    // ASCII-only trim (space and tab), a deliberate narrowing from the former Unicode
+    // string.Trim(): frame headers are ASCII by spec, so no Unicode whitespace can legitimately
+    // appear around a header value here.
     private static ReadOnlySpan<byte> TrimAsciiSpace(ReadOnlySpan<byte> span)
     {
         int start = 0;
@@ -98,7 +105,9 @@ public readonly struct FrameLease : IDisposable
 
     public void Dispose()
     {
-        if (_rented.Length > 0)
+        // default(FrameLease) carries a null buffer (never rented) — make its Dispose a no-op
+        // instead of throwing a NullReferenceException on the .Length access.
+        if (_rented is { Length: > 0 })
         {
             ArrayPool<byte>.Shared.Return(_rented);
         }
@@ -253,6 +262,10 @@ public sealed class FrameReader : IDisposable
         }
 
         // Still full (a single header region larger than the buffer): grow.
+        // Defensive only under production constants: DefaultInitialBufferSize (8192) already
+        // exceeds MaxHeaderBytes (4096), so the header-size cap in ReadPastHeaderAsync trips
+        // before an 8 KB buffer can fill without a terminator. Reached only via the internal
+        // small-initial-buffer ctor, which the framing tests use to exercise this branch.
         var next = ArrayPool<byte>.Shared.Rent(_buffer.Length * 2);
         Array.Copy(_buffer, _start, next, 0, _end - _start);
         _end -= _start;
