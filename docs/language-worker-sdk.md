@@ -57,9 +57,13 @@ Implement this sequence:
 5. `$/cancel`: cooperatively stop work for the named request.
 6. `shutdown`: answer, then exit when the host closes stdin.
 
-The canonical schema ships at `protocol/parser-protocol.schema.json`. Helper packages
-are released as `CodeContext.Worker.Protocol`, `@codecontext/worker-sdk`, and
-`codecontext-worker-sdk` for .NET, npm, and PyPI-style packaging respectively.
+The [canonical schema](../src/CodeContext.Parser.Protocol/protocol/parser-protocol.schema.json)
+ships in releases as `protocol/parser-protocol.schema.json`. Helper packages are
+released as `CodeContext.Worker.Protocol`, `@codecontext/worker-sdk`, and
+`codecontext-worker-sdk` for .NET, npm, and PyPI-style packaging respectively. See the
+[.NET protocol package](../src/CodeContext.Parser.Protocol/README.md),
+[npm SDK](../sdk/npm/README.md), and [Python SDK](../sdk/python/README.md) for the
+language-specific entry points.
 
 ## Preserve graph ownership
 
