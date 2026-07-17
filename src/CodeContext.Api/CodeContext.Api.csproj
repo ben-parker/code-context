@@ -4,10 +4,16 @@
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <!-- Disable AOT for testing -->
-    <PublishAot>false</PublishAot>
-    <!-- <RuntimeIdentifier>linux-x64</RuntimeIdentifier> -->
-    <!-- <IsAotCompatible>true</IsAotCompatible> -->
+    <!-- Phase 4: the host publishes as a single Native AOT native binary (no JIT, no
+         managed DLLs beside it). PublishAot only takes effect on `publish -r <rid>`;
+         plain `dotnet build`/`dotnet test` stay JIT. OptimizationPreference=Speed favours
+         throughput over size for a long-lived per-repo service; StripSymbols is applied
+         only on non-Windows RIDs below (Windows keeps the PDB). InvariantGlobalization
+         removes ICU/culture data — the host does only ordinal/invariant string work
+         (audited: StatusService uses CultureInfo.InvariantCulture explicitly). -->
+    <PublishAot>true</PublishAot>
+    <OptimizationPreference>Speed</OptimizationPreference>
+    <InvariantGlobalization>true</InvariantGlobalization>
     <AssemblyName>codecontext</AssemblyName>
     <!-- Phase 3: turn on trim/AOT/single-file/RDG analyzers now (while still publishing
          JIT) so AOT-incompatible patterns surface as build diagnostics ahead of the
@@ -17,6 +23,13 @@
     <EnableAotAnalyzer>true</EnableAotAnalyzer>
     <EnableSingleFileAnalyzer>true</EnableSingleFileAnalyzer>
     <EnableRequestDelegateGenerator>true</EnableRequestDelegateGenerator>
+  </PropertyGroup>
+
+  <!-- Strip native debug symbols only on non-Windows RIDs. On Windows the AOT toolchain
+       emits a separate .pdb (nothing to strip from the binary); on Linux/macOS StripSymbols
+       removes the embedded symbol table, shrinking the shipped native binary. -->
+  <PropertyGroup Condition="'$(RuntimeIdentifier)' != '' and !$(RuntimeIdentifier.StartsWith('win'))">
+    <StripSymbols>true</StripSymbols>
   </PropertyGroup>
 
   <!-- Phase 3c: OpenAPI is a development-only convenience. ENABLE_OPENAPI is defined only in

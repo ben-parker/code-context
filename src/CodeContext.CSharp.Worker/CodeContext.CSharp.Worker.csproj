@@ -11,6 +11,20 @@
     <PublishAot>false</PublishAot>
     <PublishSingleFile>false</PublishSingleFile>
     <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- Phase 4: pre-JIT the worker (and Roslyn) to native R2R images so the long-lived
+         worker reaches steady state faster. R2R needs a RID; the host publishes the worker
+         RID-specific (PublishCSharpWorkerForHost). Tiered JIT + PGO still recompile hot
+         paths above the R2R baseline over the process lifetime. -->
+    <PublishReadyToRun Condition="'$(RuntimeIdentifier)' != ''">true</PublishReadyToRun>
+    <TieredCompilation>true</TieredCompilation>
+    <TieredPGO>true</TieredPGO>
+    <!-- Workstation + concurrent (background) GC: one worker is resident per watched repo,
+         and workstation GC keeps that per-repo heap/commit small. Server GC's per-core heaps
+         would multiply resident memory across many watched repos for no throughput win on this
+         single-pipeline workload. Server GC + DATAS is deliberately deferred to the benchmark
+         pass and flipped only if numbers justify it. -->
+    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
+    <ServerGarbageCollection>false</ServerGarbageCollection>
   </PropertyGroup>
 
   <ItemGroup>

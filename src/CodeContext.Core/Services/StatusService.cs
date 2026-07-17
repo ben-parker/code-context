@@ -168,7 +168,7 @@ public class StatusService : IStatusService
         var version = assembly.GetName().Version?.ToString() ?? "1.0.0";
         var informationalVersion = AssemblyVersionInfo.GetInformationalVersion(assembly, version);
         var memoryUsage = GC.GetTotalMemory(false);
-        var memoryMB = (memoryUsage / 1024.0 / 1024.0).ToString("F1");
+        var memoryMB = (memoryUsage / 1024.0 / 1024.0).ToString("F1", CultureInfo.InvariantCulture);
 
         return new SystemStatusDto(
             Version: version,
