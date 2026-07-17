@@ -50,9 +50,12 @@ namespace CodeContext.Core.Repositories.InMemory
             return Task.FromResult(query.ToList());
         }
 
+        // Resolves through the version-stamped adjacency snapshot (built once per mutation version)
+        // rather than materializing the live dictionary on every call; returns a fresh List so the
+        // caller owns its copy. Same node set and order as the previous Nodes.Values.ToList().
         public Task<List<CodeNode>> GetAllAsync()
         {
-            return Task.FromResult(_database.Nodes.Values.ToList());
+            return Task.FromResult(new List<CodeNode>(_database.GetAdjacency().Nodes));
         }
 
         public Task UpsertAsync(CodeNode node)

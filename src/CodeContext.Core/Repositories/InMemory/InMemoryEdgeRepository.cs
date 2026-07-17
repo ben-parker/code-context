@@ -14,15 +14,18 @@ namespace CodeContext.Core.Repositories.InMemory
             _database = database;
         }
 
+        // Reads resolve through the version-stamped adjacency index (O(degree)) instead of a full
+        // O(E) scan of the edge table, then return a fresh List so callers keep exclusive ownership.
         public Task<List<CodeEdge>> GetAllAsync()
         {
-            return Task.FromResult(_database.Edges.Values.ToList());
+            return Task.FromResult(new List<CodeEdge>(_database.GetAdjacency().Edges));
         }
 
         public Task<List<CodeEdge>> GetBySourceIdAsync(string sourceId, string? type = null)
         {
-            var query = _database.Edges.Values.Where(e => e.SourceId == sourceId);
-            
+            var edges = _database.GetAdjacency().GetEdgesBySource(sourceId);
+            IEnumerable<CodeEdge> query = edges;
+
             if (type != null)
             {
                 query = query.Where(e => e.Type == type);
@@ -33,8 +36,9 @@ namespace CodeContext.Core.Repositories.InMemory
 
         public Task<List<CodeEdge>> GetByTargetIdAsync(string targetId, string? type = null)
         {
-            var query = _database.Edges.Values.Where(e => e.TargetId == targetId);
-            
+            var edges = _database.GetAdjacency().GetEdgesByTarget(targetId);
+            IEnumerable<CodeEdge> query = edges;
+
             if (type != null)
             {
                 query = query.Where(e => e.Type == type);
