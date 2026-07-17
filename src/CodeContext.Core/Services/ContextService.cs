@@ -1,13 +1,15 @@
 using CodeContext.Core.Repositories;
 using Microsoft.Extensions.Options;
+using System.Collections.Frozen;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 
 namespace CodeContext.Core.Services
 {
-    public class ContextService : IContextService
+    public partial class ContextService : IContextService
     {
         private readonly ICodeNodeRepository _nodeRepository;
         private readonly ICodeEdgeRepository _edgeRepository;
@@ -795,39 +797,52 @@ namespace CodeContext.Core.Services
         private static string? Truncate(string? value, int maxLength)
             => value is null || value.Length <= maxLength ? value : value[..maxLength] + "…";
 
+        [GeneratedRegex(@"\s+")]
+        private static partial Regex WhitespaceRegex();
+
         private static string? NormalizeCompactSignature(string? signature)
         {
             if (signature is null)
                 return null;
 
-            return System.Text.RegularExpressions.Regex.Replace(signature.Trim(), @"\s+", " ");
+            return WhitespaceRegex().Replace(signature.Trim(), " ");
         }
 
         private static bool IsTestPath(string? path)
             => path?.Contains("test", StringComparison.OrdinalIgnoreCase) == true ||
                path?.Contains("spec", StringComparison.OrdinalIgnoreCase) == true;
 
-        private static int TypeRank(string? type) => type?.ToLowerInvariant() switch
-        {
-            "class" => 0,
-            "interface" => 1,
-            "method" => 2,
-            "property" => 3,
-            _ => 4
-        };
+        // Case-insensitive rank tables: an OrdinalIgnoreCase lookup avoids the per-node/per-edge
+        // ToLower/ToUpper string allocation the switch statements used to force.
+        private static readonly FrozenDictionary<string, int> TypeRanks =
+            new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["class"] = 0,
+                ["interface"] = 1,
+                ["method"] = 2,
+                ["property"] = 3,
+            }.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
+
+        private static readonly FrozenDictionary<string, int> RelationshipRanks =
+            new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["IMPLEMENTS"] = 0,
+                ["INHERITS"] = 1,
+                ["EXTENDS"] = 1,
+                ["CALLS"] = 2,
+                ["REFERENCES"] = 3,
+                ["USES"] = 3,
+                ["IMPORTS"] = 4,
+            }.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
+
+        private static int TypeRank(string? type)
+            => type is not null && TypeRanks.TryGetValue(type, out var rank) ? rank : 4;
 
         private static int RelationshipRank(IReadOnlyCollection<CodeEdge> edges)
             => edges.Count == 0 ? 5 : edges.Min(edge => RelationshipRank(edge.Type));
 
-        private static int RelationshipRank(string? relationship) => relationship?.ToUpperInvariant() switch
-        {
-            "IMPLEMENTS" => 0,
-            "INHERITS" or "EXTENDS" => 1,
-            "CALLS" => 2,
-            "REFERENCES" or "USES" => 3,
-            "IMPORTS" => 4,
-            _ => 5
-        };
+        private static int RelationshipRank(string? relationship)
+            => relationship is not null && RelationshipRanks.TryGetValue(relationship, out var rank) ? rank : 5;
 
         private async Task<ContextMatch> BuildContextMatchAsync(
             CodeNode targetNode,
@@ -1421,52 +1436,58 @@ namespace CodeContext.Core.Services
             var fileNameMatchesTarget = Path.GetFileNameWithoutExtension(testFilePath)
                 .Contains(targetNode.Name, StringComparison.OrdinalIgnoreCase);
 
+            // The target's name patterns depend only on the target, not the candidate method:
+            // build them once per call instead of rebuilding ~15 interpolated strings per method.
+            var targetName = targetNode.Name.ToLowerInvariant();
+            var targetPatterns = fileNameMatchesTarget ? null : BuildTargetTestPatterns(targetName);
+
             var testMethods = actualTestMethods
-                .Where(n => fileNameMatchesTarget || IsTestMethodForTarget(n, targetNode))
+                .Where(n => fileNameMatchesTarget
+                    || IsTestMethodForTarget(n, targetNode, targetPatterns!, targetName))
                 .ToList();
 
             return testMethods;
         }
 
-        private bool IsTestMethodForTarget(CodeNode testMethod, CodeNode targetNode)
+        private static string[] BuildTargetTestPatterns(string targetName) =>
+        [
+            // Direct name match: "TestUserService", "UserServiceTests", "Test_UserService"
+            $"test{targetName}",
+            $"{targetName}test",
+            $"{targetName}tests",
+            $"test_{targetName}",
+            $"{targetName}_test",
+            $"{targetName}_tests",
+
+            // Method-specific patterns: "TestGetUser", "GetUserTests", "Test_GetUser_ReturnsUser"
+            $"test{targetName.Replace("get", "").Replace("set", "").Replace("create", "").Replace("update", "").Replace("delete", "")}",
+
+            // BDD-style patterns: "Should_CreateUser_WhenValidInput", "Given_UserExists_When_Delete_Then_UserRemoved"
+            $"should_{targetName}",
+            $"given_{targetName}",
+            $"when_{targetName}",
+
+            // Fact/Theory patterns: "CanCreateUser", "ShouldCreateUser"
+            $"can{targetName}",
+            $"should{targetName}",
+
+            // Behavior patterns: "UserService_Create_ShouldReturnUser"
+            $"{targetName}_",
+        ];
+
+        private static bool IsTestMethodForTarget(
+            CodeNode testMethod, CodeNode targetNode, string[] targetPatterns, string targetName)
         {
-            if (string.IsNullOrEmpty(testMethod.Name) || string.IsNullOrEmpty(targetNode.Name))
+            if (string.IsNullOrEmpty(testMethod.Name))
                 return false;
 
             var testMethodName = testMethod.Name.ToLowerInvariant();
-            var targetName = targetNode.Name.ToLowerInvariant();
 
-            // Common test method naming patterns
-            var testPatterns = new[]
-            {
-                // Direct name match: "TestUserService", "UserServiceTests", "Test_UserService"
-                $"test{targetName}",
-                $"{targetName}test",
-                $"{targetName}tests",
-                $"test_{targetName}",
-                $"{targetName}_test",
-                $"{targetName}_tests",
-                
-                // Method-specific patterns: "TestGetUser", "GetUserTests", "Test_GetUser_ReturnsUser"
-                $"test{targetName.Replace("get", "").Replace("set", "").Replace("create", "").Replace("update", "").Replace("delete", "")}",
-                
-                // BDD-style patterns: "Should_CreateUser_WhenValidInput", "Given_UserExists_When_Delete_Then_UserRemoved"
-                $"should_{targetName}",
-                $"given_{targetName}",
-                $"when_{targetName}",
-                
-                // Fact/Theory patterns: "CanCreateUser", "ShouldCreateUser"
-                $"can{targetName}",
-                $"should{targetName}",
-                
-                // Behavior patterns: "UserService_Create_ShouldReturnUser"
-                $"{targetName}_"
-            };
-
-            return testPatterns.Any(pattern => testMethodName.Contains(pattern)) ||
+            return targetPatterns.Any(pattern => testMethodName.Contains(pattern)) ||
                    testMethodName.Contains(targetName) ||
                    // Check if method signature or content might reference the target
-                   (testMethod.Signature?.Contains(targetNode.Name, StringComparison.OrdinalIgnoreCase) ?? false);
+                   // (targetNode.Name is non-empty: the caller guards it before building patterns).
+                   (testMethod.Signature?.Contains(targetNode.Name!, StringComparison.OrdinalIgnoreCase) ?? false);
         }
 
         private bool IsTestMethod(CodeNode method)
