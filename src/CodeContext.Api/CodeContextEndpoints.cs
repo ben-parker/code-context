@@ -76,21 +76,16 @@ public static class CodeContextEndpoints
             }
             catch (Exception ex)
             {
-                return Results.BadRequest(new
-                {
-                    error = new
-                    {
-                        code = "CONTEXT_ERROR",
-                        message = ex.Message,
-                        details = new
-                        {
+                return Results.Json(
+                    new ContextErrorResponse(new ContextErrorBody(
+                        "CONTEXT_ERROR", ex.Message,
+                        new ContextErrorDetails(
                             identifier, type, depth, includeTests, includeContent, exact,
                             includeRelated, includeMetrics, maxMatches, maxRelationships,
                             maxCallSites, maxTestFiles, maxTestMethods, expandAmbiguous, containingType,
-                            @namespace, signature, sourceFile, relation, view
-                        }
-                    }
-                });
+                            @namespace, signature, sourceFile, relation, view))),
+                    CodeContextJsonContext.Default.ContextErrorResponse,
+                    statusCode: StatusCodes.Status400BadRequest);
             }
         })
         .WithName("GetCompleteContext")
@@ -121,15 +116,11 @@ public static class CodeContextEndpoints
             }
             catch (Exception ex)
             {
-                return Results.BadRequest(new
-                {
-                    error = new
-                    {
-                        code = "MULTI_CONTEXT_ERROR",
-                        message = ex.Message,
-                        details = request
-                    }
-                });
+                return Results.Json(
+                    new MultiContextErrorResponse(new MultiContextErrorBody(
+                        "MULTI_CONTEXT_ERROR", ex.Message, request)),
+                    CodeContextJsonContext.Default.MultiContextErrorResponse,
+                    statusCode: StatusCodes.Status400BadRequest);
             }
         })
         .WithName("GetMultipleContext")
@@ -154,7 +145,10 @@ public static class CodeContextEndpoints
                     var operationId = await coordinator.TryRequestFullRescanAsync();
                     if (operationId is null)
                     {
-                        return Results.Conflict(new { error = new { code = "SCAN_IN_PROGRESS", message = "A scan is already running." } });
+                        return Results.Json(
+                            new ApiErrorResponse(new ApiError("SCAN_IN_PROGRESS", "A scan is already running.")),
+                            CodeContextJsonContext.Default.ApiErrorResponse,
+                            statusCode: StatusCodes.Status409Conflict);
                     }
 
                     return Results.Accepted(value: new RefreshStartedResponseDto(
@@ -171,20 +165,17 @@ public static class CodeContextEndpoints
             catch (System.Threading.Channels.ChannelClosedException)
             {
                 return Results.Json(
-                    new { error = new { code = "SHUTTING_DOWN", message = "The instance is shutting down." } },
+                    new ApiErrorResponse(new ApiError("SHUTTING_DOWN", "The instance is shutting down.")),
+                    CodeContextJsonContext.Default.ApiErrorResponse,
                     statusCode: StatusCodes.Status503ServiceUnavailable);
             }
             catch (Exception ex)
             {
-                return Results.BadRequest(new
-                {
-                    error = new
-                    {
-                        code = "REFRESH_ERROR",
-                        message = ex.Message,
-                        details = new { path }
-                    }
-                });
+                return Results.Json(
+                    new RefreshErrorResponse(new RefreshErrorBody(
+                        "REFRESH_ERROR", ex.Message, new RefreshErrorDetails(path))),
+                    CodeContextJsonContext.Default.RefreshErrorResponse,
+                    statusCode: StatusCodes.Status400BadRequest);
             }
         })
         .WithName("RefreshIndex")
@@ -223,35 +214,44 @@ public static class CodeContextEndpoints
             catch (NotSupportedException ex)
             {
                 return Results.Json(
-                    new { error = new { code = "NATIVE_TREE_UNSUPPORTED", message = ex.Message } },
+                    new ApiErrorResponse(new ApiError("NATIVE_TREE_UNSUPPORTED", ex.Message)),
+                    CodeContextJsonContext.Default.ApiErrorResponse,
                     statusCode: StatusCodes.Status501NotImplemented);
             }
             catch (InvalidOperationException ex)
             {
-                return Results.Conflict(
-                    new { error = new { code = "FILE_NOT_INDEXED", message = ex.Message } });
+                return Results.Json(
+                    new ApiErrorResponse(new ApiError("FILE_NOT_INDEXED", ex.Message)),
+                    CodeContextJsonContext.Default.ApiErrorResponse,
+                    statusCode: StatusCodes.Status409Conflict);
             }
             catch (ParserWorkerUnavailableException ex)
             {
                 return Results.Json(
-                    new { error = new { code = "PARSER_UNAVAILABLE", message = ex.Message } },
+                    new ApiErrorResponse(new ApiError("PARSER_UNAVAILABLE", ex.Message)),
+                    CodeContextJsonContext.Default.ApiErrorResponse,
                     statusCode: StatusCodes.Status503ServiceUnavailable);
             }
             catch (ParserWorkerFailedException ex)
             {
                 return Results.Json(
-                    new { error = new { code = "PARSER_FAILED", message = ex.Message } },
+                    new ApiErrorResponse(new ApiError("PARSER_FAILED", ex.Message)),
+                    CodeContextJsonContext.Default.ApiErrorResponse,
                     statusCode: StatusCodes.Status503ServiceUnavailable);
             }
             catch (JsonRpcRemoteException ex)
             {
-                return Results.BadRequest(
-                    new { error = new { code = "NATIVE_TREE_ERROR", message = ex.Message } });
+                return Results.Json(
+                    new ApiErrorResponse(new ApiError("NATIVE_TREE_ERROR", ex.Message)),
+                    CodeContextJsonContext.Default.ApiErrorResponse,
+                    statusCode: StatusCodes.Status400BadRequest);
             }
             catch (ArgumentException ex)
             {
-                return Results.BadRequest(
-                    new { error = new { code = "INVALID_NATIVE_TREE_REQUEST", message = ex.Message } });
+                return Results.Json(
+                    new ApiErrorResponse(new ApiError("INVALID_NATIVE_TREE_REQUEST", ex.Message)),
+                    CodeContextJsonContext.Default.ApiErrorResponse,
+                    statusCode: StatusCodes.Status400BadRequest);
             }
         })
         .WithName("GetNativeSyntaxTree")
@@ -286,7 +286,10 @@ public static class CodeContextEndpoints
                 || !string.Equals(instanceId, options.Value.InstanceId, StringComparison.Ordinal))
             {
                 return Results.Json(
-                    new { error = new { code = "INSTANCE_ID_MISMATCH", message = "Pass this instance's instanceId (see `codecontext list --json`) to shut it down." } },
+                    new ApiErrorResponse(new ApiError(
+                        "INSTANCE_ID_MISMATCH",
+                        "Pass this instance's instanceId (see `codecontext list --json`) to shut it down.")),
+                    CodeContextJsonContext.Default.ApiErrorResponse,
                     statusCode: StatusCodes.Status403Forbidden);
             }
 
@@ -309,7 +312,13 @@ public static class CodeContextEndpoints
     }
 
     private static JsonElement CompactNativeTree(JsonElement tree)
-        => JsonSerializer.SerializeToElement(CompactNativeNode(tree));
+    {
+        // Convert the JsonObject DOM to a JsonElement without the reflection-based
+        // JsonSerializer.SerializeToElement(object) overload (IL2026/IL3050). JsonNode
+        // writing is AOT-safe, and JsonDocument.Parse is a pure reader.
+        using var document = JsonDocument.Parse(CompactNativeNode(tree).ToJsonString());
+        return document.RootElement.Clone();
+    }
 
     private static JsonObject CompactNativeNode(JsonElement node)
     {
@@ -329,7 +338,10 @@ public static class CodeContextEndpoints
         if (node.TryGetProperty("children", out var children) && children.ValueKind == JsonValueKind.Array)
         {
             var array = new JsonArray();
-            foreach (var child in children.EnumerateArray()) array.Add(CompactNativeNode(child));
+            // Use IList<JsonNode?>.Add (the JsonArray indexer/Add<T> generic overload routes
+            // through reflection-based JsonValue.Create, tripping IL2026/IL3050).
+            IList<JsonNode?> items = array;
+            foreach (var child in children.EnumerateArray()) items.Add(CompactNativeNode(child));
             compact["children"] = array;
         }
         return compact;

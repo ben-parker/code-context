@@ -57,22 +57,15 @@ public sealed class CodeContextTools
         }
         catch (Exception ex)
         {
-            var error = new
-            {
-                error = new
-                {
-                    code = "CONTEXT_ERROR",
-                    message = ex.Message,
-                    details = new
-                    {
-                        identifier, type, depth, includeTests, includeContent, exact,
-                        includeRelated, includeMetrics, maxMatches, maxRelationships,
-                        maxCallSites, maxTestFiles, maxTestMethods, expandAmbiguous, containingType,
-                        @namespace, signature, sourceFile, relation, view
-                    }
-                }
-            };
-            throw new InvalidOperationException(JsonSerializer.Serialize(error));
+            var error = new McpContextError(new McpContextErrorBody(
+                "CONTEXT_ERROR", ex.Message,
+                new McpContextErrorDetails(
+                    identifier, type, depth, includeTests, includeContent, exact,
+                    includeRelated, includeMetrics, maxMatches, maxRelationships,
+                    maxCallSites, maxTestFiles, maxTestMethods, expandAmbiguous, containingType,
+                    @namespace, signature, sourceFile, relation, view)));
+            throw new InvalidOperationException(
+                JsonSerializer.Serialize(error, McpJsonContext.Default.McpContextError));
         }
     }
 
@@ -133,16 +126,10 @@ public sealed class CodeContextTools
         }
         catch (Exception ex)
         {
-            var error = new
-            {
-                error = new
-                {
-                    code = "MULTI_CONTEXT_ERROR",
-                    message = ex.Message,
-                    details = multiRequest
-                }
-            };
-            throw new InvalidOperationException(JsonSerializer.Serialize(error));
+            var error = new McpMultiContextError(new McpMultiContextErrorBody(
+                "MULTI_CONTEXT_ERROR", ex.Message, multiRequest));
+            throw new InvalidOperationException(
+                JsonSerializer.Serialize(error, McpJsonContext.Default.McpMultiContextError));
         }
     }
 
@@ -157,15 +144,9 @@ public sealed class CodeContextTools
         }
         catch (Exception ex)
         {
-            var error = new
-            {
-                error = new
-                {
-                    code = "STATUS_ERROR",
-                    message = ex.Message
-                }
-            };
-            throw new InvalidOperationException(JsonSerializer.Serialize(error));
+            var error = new McpStatusError(new McpStatusErrorBody("STATUS_ERROR", ex.Message));
+            throw new InvalidOperationException(
+                JsonSerializer.Serialize(error, McpJsonContext.Default.McpStatusError));
         }
     }
 }

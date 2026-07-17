@@ -119,9 +119,12 @@ public record FileMetadataDto(
     [property: JsonPropertyName("error_message")] string? ErrorMessage
 );
 
+// The historical `_query_stats` field was a `Dictionary<string, object>` debug blob that no
+// code path ever populated (no producer anywhere in the solution) and, being null-by-default
+// under WhenWritingNull, never appeared on the wire. It is dropped here to remove the only
+// `object`-typed (reflection-requiring, AOT-hostile) member in the serialization surface.
 public record CountResponseDto(
-    [property: JsonPropertyName("count")] int Count,
-    [property: JsonPropertyName("_query_stats")] Dictionary<string, object>? QueryStats = null
+    [property: JsonPropertyName("count")] int Count
 );
 
 public record ReconcileStatsDto(
@@ -312,9 +315,13 @@ public record NativeSyntaxTreeRequestDto(
 [JsonSerializable(typeof(Dictionary<string, string>))]
 [JsonSerializable(typeof(IReadOnlyDictionary<string, string>))]
 [JsonSerializable(typeof(Dictionary<string, int>))]
-[JsonSerializable(typeof(Dictionary<string, object>))]
 [JsonSerializable(typeof(Dictionary<string, List<NodeWithRelationshipTypeDto>>))]
 [JsonSerializable(typeof(int))]
+// Phase 3a: typed REST error envelopes (replace anonymous objects).
+[JsonSerializable(typeof(ApiErrorResponse))]
+[JsonSerializable(typeof(ContextErrorResponse))]
+[JsonSerializable(typeof(MultiContextErrorResponse))]
+[JsonSerializable(typeof(RefreshErrorResponse))]
 [JsonSourceGenerationOptions(
     PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
     WriteIndented = false,
