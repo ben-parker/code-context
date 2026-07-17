@@ -902,6 +902,20 @@ namespace CodeContext.Core.Services
             => edge.Type is null || (!ContainmentEdgeKinds.Contains(edge.Type)
                 && !MethodFamilyEdgeKinds.Contains(edge.Type));
 
+        // Graph traversal uses first-parent-wins semantics: the first edge that reaches a
+        // node fixes that node's recorded RelationPath (and, for family expansion, its
+        // membership). The repository hands edges back in store-enumeration order, which
+        // shifts with ConcurrentDictionary bucket geometry (capacity presizing, insertion
+        // order), so expansion inputs must be ordered on a stable key before iteration to
+        // keep the output byte-identical across builds. Edge Ids are worker-assigned stable
+        // strings; the extra keys are pure tie-breakers for null/duplicate Ids.
+        private static IEnumerable<CodeEdge> OrderForTraversal(IEnumerable<CodeEdge> edges)
+            => edges
+                .OrderBy(edge => edge.Id ?? string.Empty, StringComparer.Ordinal)
+                .ThenBy(edge => edge.SourceId ?? string.Empty, StringComparer.Ordinal)
+                .ThenBy(edge => edge.TargetId ?? string.Empty, StringComparer.Ordinal)
+                .ThenBy(edge => edge.Type ?? string.Empty, StringComparer.Ordinal);
+
         internal static readonly HashSet<string> SemanticFileRelationshipKinds = new(StringComparer.OrdinalIgnoreCase)
         {
             "CALLS", "MOCK_CALLS", "REFERENCES", "IMPLEMENTS", "INHERITS", "EXTENDS", "IMPORTS",
@@ -979,9 +993,9 @@ namespace CodeContext.Core.Services
             pending.Enqueue(rootNodeId);
             while (pending.TryDequeue(out var current))
             {
-                var edges = (await _edgeRepository.GetBySourceIdAsync(current))
+                var edges = OrderForTraversal((await _edgeRepository.GetBySourceIdAsync(current))
                     .Concat(await _edgeRepository.GetByTargetIdAsync(current))
-                    .Where(edge => edge.Type is not null && MethodFamilyEdgeKinds.Contains(edge.Type));
+                    .Where(edge => edge.Type is not null && MethodFamilyEdgeKinds.Contains(edge.Type)));
                 foreach (var edge in edges)
                 {
                     var relatedId = edge.SourceId == current ? edge.TargetId : edge.SourceId;
@@ -1005,7 +1019,7 @@ namespace CodeContext.Core.Services
 
             foreach (var familyId in familyIds)
             {
-                foreach (var edge in (await _edgeRepository.GetByTargetIdAsync(familyId)).Where(IsUsageEdge))
+                foreach (var edge in OrderForTraversal((await _edgeRepository.GetByTargetIdAsync(familyId)).Where(IsUsageEdge)))
                 {
                     if (string.IsNullOrEmpty(edge.SourceId) || visited.Contains(edge.SourceId)) continue;
                     var node = await _nodeRepository.GetByIdAsync(edge.SourceId);
@@ -1025,7 +1039,7 @@ namespace CodeContext.Core.Services
                 var next = new List<(string NodeId, List<string> Path)>();
                 foreach (var (current, currentPath) in frontier)
                 {
-                    foreach (var edge in (await _edgeRepository.GetByTargetIdAsync(current)).Where(IsUsageEdge))
+                    foreach (var edge in OrderForTraversal((await _edgeRepository.GetByTargetIdAsync(current)).Where(IsUsageEdge)))
                     {
                         if (string.IsNullOrEmpty(edge.SourceId) || !visited.Add(edge.SourceId)) continue;
                         var node = await _nodeRepository.GetByIdAsync(edge.SourceId);
@@ -1069,7 +1083,7 @@ namespace CodeContext.Core.Services
                         ? await _edgeRepository.GetBySourceIdAsync(currentNodeId)
                         : await _edgeRepository.GetByTargetIdAsync(currentNodeId);
 
-                    foreach (var edge in edges ?? new List<CodeEdge>())
+                    foreach (var edge in OrderForTraversal(edges ?? new List<CodeEdge>()))
                     {
                         if (!IsUsageEdge(edge))
                             continue;

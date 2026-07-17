@@ -213,7 +213,8 @@ Phase 5's adjacency indexes turned every hop's edge lookup into an O(degree) `Fr
 read (Phase 5 first measured 191.6ms; Phase 7's 200.5–204.5ms across two 20-run sweeps sits in the
 same adjacency-index band, the spread being machine run-to-run noise — both beat the 228.3ms
 warmed-JIT baseline and recover the AOT regression). The compact response is byte-deterministic
-(19453 bytes, stable across runs). **† The alloc rows keep their Phase 6 numbers**, measured on a
+(**19457 bytes**, stable byte-for-byte across separate process starts — see the anomaly note below).
+**† The alloc rows keep their Phase 6 numbers**, measured on a
 JIT (`dotnet build`) host for EventPipe/`dotnet-counters` support — the shipped host is AOT — over
 5 forced rescans of the 119-`.cs` corpus (~24% fewer bytes than pre-6a). **Deferred:** Commit B
 copy-free `IReadOnlyList` reads and `NodesByFilePath` production wiring (the index is built +
@@ -256,3 +257,38 @@ Phase 0/4: `%TEMP%\cc-repo-copy`, `identifier=ContextService&depth=2&includeTest
   index preserves node/edge enumeration order, so results are set- AND order-identical.
 - Commit A was the only consumed change; the copy-free `IReadOnlyList` read path (Commit B) was
   deferred, so this number reflects O(E)→O(degree) alone, with per-hop `List` copies still present.
+
+### Phase 7 byte-count anomaly — root cause and fix (post-review)
+
+The compact `/api/context/complete?identifier=ContextService&depth=2&includeTests=true` byte count
+drifted across builds: **19439** (Phases 5/6) → **19453** (Phase 7). The earlier docs called this
+"byte-deterministic, stable across runs" — that was wrong. The membership/content of the
+`transitiveUsedBy` list was silently sensitive to store enumeration order.
+
+**True root cause (proven empirically by an A/B revert test):** Phase 6d added `GraphState`
+presizing (`new GraphState(nodeCapacity, edgeCapacity)` in `InMemoryDatabase.cs`). Presizing changes
+`ConcurrentDictionary` bucket geometry → its `Values` enumeration order → the order edges land in the
+adjacency buckets (`EdgesBySource`/`EdgesByTarget`) that `InMemoryEdgeRepository` returns. The
+sensitivity itself lived in `ContextService`'s inbound BFS (`TraverseInboundFromFamilyAsync`, with the
+same latent pattern in `GetMethodFamilyAsync` and `TraverseRelationshipsAsync`): expansion used
+**first-parent-wins** semantics (`visited.Add`), so the first edge to reach a node fixed that node's
+recorded `RelationPath` (edge-type list). Equal-distance nodes reachable via different edge types
+therefore recorded different paths depending purely on edge enumeration order, and that path is
+serialized into the response — 14 bytes of drift (e.g. `["CALLS","CALLS"]` vs `["CALLS","MOCK_CALLS"]`).
+Reverting the 6d presizing restored 19439, confirming the trigger; the presizing is correct and was
+**kept**.
+
+**Fix:** the 6d presizing stays. `ContextService` now orders every expansion input on a stable
+ordinal key (`OrderForTraversal`, keyed on `edge.Id` with `SourceId`/`TargetId`/`Type` tie-breakers)
+before the first-wins iteration — in `GetMethodFamilyAsync`, both the seed and BFS loops of
+`TraverseInboundFromFamilyAsync`, and `TraverseRelationshipsAsync` — so results are
+enumeration-order-independent. Regression test:
+`tests/CodeContext.Core.Tests/Services/TraversalDeterminismTests.cs` builds one logical graph, feeds
+it to two services differing only in edge enumeration order (forward vs reversed), and asserts the
+compact output is byte-identical. It fails pre-fix (`["CALLS","CALLS"]` vs `["CALLS","MOCK_CALLS"]`)
+and passes post-fix.
+
+**New canonical byte count: 19457** — verified byte-for-byte identical across two separate Release
+host process starts indexing `%TEMP%\cc-repo-copy` (1703 nodes / 6701 edges). It differs from both
+19439 and 19453 by design: it is now the enumeration-order-independent canon, no longer a hostage to
+`ConcurrentDictionary` bucket geometry.
