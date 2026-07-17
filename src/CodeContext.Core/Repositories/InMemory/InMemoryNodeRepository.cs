@@ -30,11 +30,11 @@ namespace CodeContext.Core.Repositories.InMemory
             return Task.FromResult<CodeNode?>(null);
         }
 
-        public Task<List<CodeNode>> FindByNameAsync(string name, string? type = null, bool exact = false)
+        public Task<IReadOnlyList<CodeNode>> FindByNameAsync(string name, string? type = null, bool exact = false)
         {
             if (name == null)
             {
-                return Task.FromResult(new List<CodeNode>());
+                return Task.FromResult<IReadOnlyList<CodeNode>>(new List<CodeNode>());
             }
 
             var query = _database.EnumerateNodes().Where(n =>
@@ -47,16 +47,35 @@ namespace CodeContext.Core.Repositories.InMemory
                 query = query.Where(n => string.Equals(n.Type, type, StringComparison.OrdinalIgnoreCase));
             }
 
-            return Task.FromResult(query.ToList());
+            return Task.FromResult<IReadOnlyList<CodeNode>>(query.ToList());
+        }
+
+        // Resolves through the version-stamped adjacency path index (O(matches)) instead of a full
+        // O(N) scan + FilePathMatcher.Matches filter. FindNodesByPath builds a fresh list, so the
+        // no-type result is returned directly; the type filter runs the SAME case-insensitive (ordinal)
+        // comparison ContextService.FindNodesByFilePathAsync used, over that already-narrowed set.
+        public Task<IReadOnlyList<CodeNode>> FindByFilePathAsync(string filePath, string? type = null)
+        {
+            var nodes = _database.GetAdjacency().FindNodesByPath(filePath);
+
+            if (string.IsNullOrEmpty(type))
+            {
+                return Task.FromResult(nodes);
+            }
+
+            return Task.FromResult<IReadOnlyList<CodeNode>>(nodes
+                .Where(n => string.Equals(n.Type, type, StringComparison.OrdinalIgnoreCase))
+                .ToList());
         }
 
         // Resolves through the version-stamped adjacency snapshot (built once per mutation version)
-        // rather than materializing the live dictionaries on every call; returns a fresh List so the
-        // caller owns its copy. Order is ordinal-shard-then-per-shard-dictionary order (identical to the
-        // former single-dictionary enumeration in the common single-shard case).
-        public Task<List<CodeNode>> GetAllAsync()
+        // and returns its cached, downcast-proof read-only view — zero per-call copy, and the result
+        // cannot be cast back to the shared List/array backing store. Order is ordinal-shard-then-
+        // per-shard-dictionary order (identical to the former single-dictionary enumeration in the
+        // common single-shard case).
+        public Task<IReadOnlyList<CodeNode>> GetAllAsync()
         {
-            return Task.FromResult(new List<CodeNode>(_database.GetAdjacency().Nodes));
+            return Task.FromResult(_database.GetAdjacency().NodesView);
         }
 
         public Task UpsertAsync(CodeNode node)

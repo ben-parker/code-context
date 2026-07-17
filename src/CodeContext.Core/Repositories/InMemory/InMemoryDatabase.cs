@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Collections.Frozen;
 using System.Collections.Immutable;
+using System.Collections.ObjectModel;
 using CodeContext.Core.Models;
 using CodeContext.Core.Repositories;
 using CodeContext.Core.Services;
@@ -1057,6 +1058,8 @@ namespace CodeContext.Core.Repositories.InMemory
             private readonly GraphAdjacency[] _shards;
             private IReadOnlyList<CodeNode>? _nodes;
             private IReadOnlyList<CodeEdge>? _edges;
+            private IReadOnlyList<CodeNode>? _nodesView;
+            private IReadOnlyList<CodeEdge>? _edgesView;
 
             private CompositeAdjacency(GraphAdjacency[] shards) => _shards = shards;
 
@@ -1088,6 +1091,20 @@ namespace CodeContext.Core.Repositories.InMemory
                     return _edges ??= _shards.SelectMany(s => s.Edges).ToList();
                 }
             }
+
+            // Cached, downcast-proof read-only facades over the whole-graph node/edge lists, built ONCE
+            // per composite instance (i.e. once per mutation version). GetAll repository reads return
+            // these directly — zero per-call copy — yet the returned object cannot be cast back to the
+            // shared List/array backing store (single-shard delegates straight to a GraphAdjacency's List;
+            // the multi-shard concat caches its own List), so no reader can mutate another reader's view.
+            public IReadOnlyList<CodeNode> NodesView => _nodesView ??= AsReadOnlyView(Nodes);
+
+            public IReadOnlyList<CodeEdge> EdgesView => _edgesView ??= AsReadOnlyView(Edges);
+
+            private static IReadOnlyList<T> AsReadOnlyView<T>(IReadOnlyList<T> source)
+                => source is IList<T> list
+                    ? new ReadOnlyCollection<T>(list)
+                    : new ReadOnlyCollection<T>(source.ToList());
 
             public IReadOnlyList<CodeEdge> GetEdgesBySource(string sourceId)
             {

@@ -64,6 +64,7 @@ public class TraversalDeterminismTests
         var files = Substitute.For<IFileMetadataRepository>();
 
         nodeRepository.GetAllAsync().Returns(nodes.ToList());
+        nodeRepository.StubFindByFilePathFromGetAll();
         nodeRepository.GetByIdAsync(Arg.Any<string>()).Returns(call =>
             nodes.SingleOrDefault(node => node.Id == call.Arg<string>()));
         nodeRepository.GetByIdentifierAsync(Arg.Any<string>()).Returns(call =>

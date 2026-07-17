@@ -1,9 +1,11 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using CodeContext.Core.Repositories.InMemory;
+using CodeContext.Core.Services;
 using Xunit;
 
 namespace CodeContext.Core.Tests.Repositories;
@@ -296,6 +298,82 @@ public class InMemoryNodeRepositoryTests
         var allNodes = await _repository.GetAllAsync();
         Assert.Equal(nodeCount, allNodes.Count);
     }
+
+    [Fact]
+    public async Task FindByFilePathAsync_MatchesBruteForceFilePathMatcherScan_AcrossPathShapes()
+    {
+        // A file-path index keyed on normalized paths, exercised against every match shape.
+        var featureClass = FileNode("f-class", "TestClass", "Class", "/repo/src/Feature/TestClass.cs");
+        var featureMethod = FileNode("f-method", "DoWork", "Method", "/repo/src/Feature/TestClass.cs");
+        var otherClass = FileNode("o-class", "TestClass", "Class", "/repo/src/Other/TestClass.cs");
+        var helper = FileNode("helper", "Helper", "Class", "/repo/src/Feature/Helper.cs");
+        // Stored with backslashes to prove the index normalizes exactly like FilePathMatcher.
+        var winStyle = FileNode("win", "Widget", "Class", "/repo/src/Feature/Widget.cs".Replace('/', '\\'));
+        foreach (var node in new[] { featureClass, featureMethod, otherClass, helper, winStyle })
+            _database.UpsertNode(node);
+
+        var all = await _repository.GetAllAsync();
+
+        (string Path, string? Type)[] queries =
+        [
+            ("/repo/src/Feature/TestClass.cs", null),  // rooted: exact key only (excludes Other/TestClass.cs)
+            ("Feature/TestClass.cs", null),            // relative multi-segment: exact-or-suffix
+            ("TestClass.cs", null),                    // bare filename suffix: both TestClass.cs files
+            ("/REPO/SRC/FEATURE/testclass.cs", null),  // rooted, case-insensitive
+            ("feature/widget.cs", null),               // relative suffix against a backslash-stored path
+            ("TestClass.cs", "Method"),                // type filter narrows to the method
+            ("Nonexistent.cs", null),                  // no match
+        ];
+
+        foreach (var (path, type) in queries)
+        {
+            var actual = await _repository.FindByFilePathAsync(path, type);
+            var expected = BruteForceMatches(all, path, type);
+            Assert.Equal(
+                expected.Select(n => n.Id).OrderBy(id => id, StringComparer.Ordinal),
+                actual.Select(n => n.Id).OrderBy(id => id, StringComparer.Ordinal));
+        }
+
+        // Guard against a vacuous brute force: confirm the interesting shapes are non-trivial.
+        // Bare "TestClass.cs" suffix-matches all three TestClass.cs nodes (both in Feature + the one in Other).
+        Assert.Equal(3, (await _repository.FindByFilePathAsync("TestClass.cs")).Count);
+        Assert.Equal("f-method", Assert.Single(await _repository.FindByFilePathAsync("TestClass.cs", "Method")).Id);
+        Assert.Empty(await _repository.FindByFilePathAsync("Nonexistent.cs"));
+    }
+
+    [Fact]
+    public async Task GetAllAsync_ReturnedInstance_IsNotDowncastableToMutableBackingStore()
+    {
+        _database.UpsertNode(CreateTestNode("id1", "One"));
+        _database.UpsertNode(CreateTestNode("id2", "Two"));
+
+        var result = await _repository.GetAllAsync();
+
+        // The whole-graph node list is a cached, shared snapshot: it must not be downcastable to
+        // the mutable List/array backing the adjacency, or a caller could corrupt every other reader.
+        Assert.Null(result as CodeNode[]);
+        Assert.Null(result as List<CodeNode>);
+        Assert.IsType<ReadOnlyCollection<CodeNode>>(result);
+    }
+
+    private static IReadOnlyList<CodeNode> BruteForceMatches(
+        IReadOnlyList<CodeNode> all, string path, string? type)
+    {
+        IEnumerable<CodeNode> matches = all.Where(n => FilePathMatcher.Matches(n.FilePath, path));
+        if (!string.IsNullOrEmpty(type))
+            matches = matches.Where(n => string.Equals(n.Type, type, StringComparison.OrdinalIgnoreCase));
+        return matches.ToList();
+    }
+
+    private static CodeNode FileNode(string id, string name, string type, string filePath) => new()
+    {
+        Id = id,
+        Name = name,
+        Type = type,
+        FilePath = filePath,
+        StartLine = 1,
+        EndLine = 5,
+    };
 
     private static CodeNode CreateTestNode(string? id, string name, string type = "Class")
     {

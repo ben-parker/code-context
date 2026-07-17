@@ -269,9 +269,9 @@ namespace CodeContext.Core.Services
             var candidates = isFilePath
                 ? await FindNodesByFilePathAsync(identifier, type)
                 : await _nodeRepository.FindByNameAsync(identifier, type, exact);
-            candidates = candidates.Where(candidate => CandidateMatchesFilters(
+            var filtered = candidates.Where(candidate => CandidateMatchesFilters(
                 candidate, type, containingType, @namespace, signature, sourceFile)).ToList();
-            return (candidates, isFilePath);
+            return (filtered, isFilePath);
         }
 
         private static bool CandidateMatchesFilters(
@@ -587,14 +587,15 @@ namespace CodeContext.Core.Services
                 }
             }
 
-            List<CodeEdge> directEdges;
+            IReadOnlyList<CodeEdge> directEdges;
             if (string.IsNullOrEmpty(target.Id)) directEdges = [];
             else if (outgoing) directEdges = await _edgeRepository.GetBySourceIdAsync(target.Id);
             else if (family.Count > 0)
             {
-                directEdges = [];
+                var collected = new List<CodeEdge>();
                 foreach (var familyId in family.Keys)
-                    directEdges.AddRange(await _edgeRepository.GetByTargetIdAsync(familyId));
+                    collected.AddRange(await _edgeRepository.GetByTargetIdAsync(familyId));
+                directEdges = collected;
             }
             else directEdges = await _edgeRepository.GetByTargetIdAsync(target.Id);
             var edgesByNode = (directEdges ?? new List<CodeEdge>())
@@ -1303,20 +1304,8 @@ namespace CodeContext.Core.Services
             return null;
         }
 
-        private async Task<List<CodeNode>> FindNodesByFilePathAsync(string filePath, string? type = null)
-        {
-            var allNodes = await _nodeRepository.GetAllAsync();
-            var matchingNodes = allNodes.Where(n => 
-                FilePathMatches(n.FilePath, filePath));
-
-            if (!string.IsNullOrEmpty(type))
-            {
-                matchingNodes = matchingNodes.Where(n => 
-                    string.Equals(n.Type, type, StringComparison.OrdinalIgnoreCase));
-            }
-
-            return matchingNodes.ToList();
-        }
+        private Task<IReadOnlyList<CodeNode>> FindNodesByFilePathAsync(string filePath, string? type = null)
+            => _nodeRepository.FindByFilePathAsync(filePath, type);
 
         // File-path matching lives in the shared FilePathMatcher so the in-memory adjacency
         // index (GraphAdjacency.NodesByFilePath) resolves paths with byte-identical semantics.

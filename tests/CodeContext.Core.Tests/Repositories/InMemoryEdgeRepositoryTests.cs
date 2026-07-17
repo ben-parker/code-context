@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -332,6 +333,47 @@ public class InMemoryEdgeRepositoryTests
         // Assert
         var remainingEdges = await _repository.GetAllAsync();
         Assert.Empty(remainingEdges);
+    }
+
+    [Fact]
+    public async Task GetBySourceIdAsync_NoTypeFilter_ReturnedInstance_IsNotDowncastableToRawBuffer()
+    {
+        _database.UpsertEdge(CreateTestEdge("edge1", "source1", "target1", "CALLS"));
+        _database.UpsertEdge(CreateTestEdge("edge2", "source1", "target2", "INHERITS"));
+
+        var result = await _repository.GetBySourceIdAsync("source1");
+
+        // The keyed lookup's backing bucket is a raw CodeEdge[] shared by every reader (or, multi-shard,
+        // a per-call List). Neither may escape downcastable — a stray .Sort()/index-write would corrupt
+        // the frozen snapshot other readers hold.
+        Assert.Equal(2, result.Count);
+        Assert.Null(result as CodeEdge[]);
+        Assert.Null(result as List<CodeEdge>);
+    }
+
+    [Fact]
+    public async Task GetByTargetIdAsync_NoTypeFilter_ReturnedInstance_IsNotDowncastableToRawBuffer()
+    {
+        _database.UpsertEdge(CreateTestEdge("edge1", "source1", "target1", "CALLS"));
+        _database.UpsertEdge(CreateTestEdge("edge2", "source2", "target1", "INHERITS"));
+
+        var result = await _repository.GetByTargetIdAsync("target1");
+
+        Assert.Equal(2, result.Count);
+        Assert.Null(result as CodeEdge[]);
+        Assert.Null(result as List<CodeEdge>);
+    }
+
+    [Fact]
+    public async Task GetAllAsync_ReturnedInstance_IsNotDowncastableToMutableBackingStore()
+    {
+        _database.UpsertEdge(CreateTestEdge("edge1", "source1", "target1", "CALLS"));
+
+        var result = await _repository.GetAllAsync();
+
+        Assert.Null(result as CodeEdge[]);
+        Assert.Null(result as List<CodeEdge>);
+        Assert.IsType<ReadOnlyCollection<CodeEdge>>(result);
     }
 
     private static CodeEdge CreateTestEdge(string? id, string sourceId, string targetId, string type)
