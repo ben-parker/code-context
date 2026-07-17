@@ -170,12 +170,14 @@ warm-up. Cold `--version`: 10 runs `61.5,62.4,62.5,63.2,63.5,66.8,67.9,79,80.6,8
     ExternalTooling **8** green; no test-duration anomalies (GraphAdjacencyTests ~2s, full suite ~7s).
 
 ## Phase 6 — Allocation passes (one reviewed commit each)
-- [ ] 6a. HeaderFraming: pooled buffered reads, Span header parse, ArrayPool payloads (tests first)
-- [ ] 6b. RepositoryFileSelector: FileSystemEnumerable attributes, span segment walk, SearchValues
-- [ ] 6c. ContextService: GeneratedRegex, no ToLower ranking allocs, cached test-name patterns (byte-identical fixtures)
-- [ ] 6d. AnalysisDeltaApplier metadata reuse; GraphState rebuild size hints
-- [ ] 6e. Cache worker supported-extensions set
-- [ ] Verify: suite; dotnet-counters alloc rate before/after rescan
+- [x] 6a. HeaderFraming: pooled buffered reads, Span header parse, ArrayPool payloads (tests first) — new stateful `FrameReader` (ArrayPool buffer, `\r\n\r\n` scan with carry-over for pipelined frames, `Utf8Parser` span Content-Length parse, pooled `FrameLease` payload returned to the pool right after the synchronous deserialize). `JsonRpcConnection` owns one reader per connection. 10 new framing tests first (split-across-read-boundaries, pipelined-in-one-buffer, tiny-buffer boundary, interleaved partial reads, oversize/EOF/dup/missing/zero-length). Added `InternalsVisibleTo` for the test-only small-buffer ctor. (f8af38a)
+- [x] 6b. RepositoryFileSelector: `FileSystemEnumerable` carries attributes (kills the per-entry `File.GetAttributes` syscall; `AttributesToSkip=0` keeps Hidden visible, System/ReparsePoint filtered as before), span segment walk replacing the Split + O(depth²) `string.Join` loop (mandatory-name membership via the set's `GetAlternateLookup<ReadOnlySpan<char>>`), extension match via `FrozenSet` span alt-lookup (no `Path.GetExtension` substring). 6 new tests first (hidden dotdirs, mandatory-at-depth, deep paths, nested negation, platform case semantics, best-effort symlink skip). (0f2b97a)
+- [x] 6c. ContextService (behavior-preserving): `[GeneratedRegex]` for `NormalizeCompactSignature`; `TypeRank`/`RelationshipRank` via OrdinalIgnoreCase `FrozenDictionary` (no per-node/edge ToLower/ToUpper alloc, same ranks); `IsTestMethodForTarget` ~15 interpolated patterns built once per call, not per candidate. (4cd1322)
+- [x] 6d. AnalysisDeltaApplier `BuildOwnedMetadata` transfers the freshly-deserialized node/edge metadata dict in place (ownership keys stamped last so they still win) instead of cloning; `GraphState` rebuild paths (`BuildNextState`, `PruneFilesNotPresent`) presize via a ctor with `concurrencyLevel:1` (single writer) + capacity from prior counts. (b09af3a)
+- [x] 6e. Cache worker supported-extensions set — `GetAllSupportedExtensions` memoizes its `Distinct().ToList()` (the worker catalog / extension map is fixed at LanguageWorkerService construction; verified), consumed read-only. (38c69cd)
+- [x] Verify: full suite **437** + ExternalTooling **8** green; 0 warnings Debug **and** Release (`-warnaserror`); ContextService byte-identity E2E IDENTICAL (see below); `dotnet-counters` alloc before/after (below).
+  - **Byte-identity E2E (6c gate):** pre-change (85d0cdd) vs post-change (Phase 6 HEAD) JIT hosts, both indexing the Phase-0 corpus (`%TEMP%\cc-repo-copy`), `identifier=ContextService&depth=2&includeTests=true` → **19439 bytes byte-for-byte identical**; second shape `identifier=BuildRelationshipsAsync&relation=CALLS` (method-level + relation filter) → **4890 bytes identical**.
+  - **Alloc measurement:** `dotnet-counters` (`System.Runtime`, 1s interval, 19-sample window) against the JIT host during 5 forced full rescans of `%TEMP%\cc-repo-copy` (119 `.cs`). Measured JIT (`dotnet build` host) for EventPipe support; the published host is AOT. Two runs each, stable: `dotnet.gc.heap.total_allocated` summed over the window **85d0cdd 184.6 / 185.5 MB → Phase 6 140.4 / 141.1 MB (~24% fewer bytes)**; avg allocation rate **9.75 → 7.4 MB/s**; gen2 collections over the window **11 → 5**.
 - [ ] Opus + Sonnet review; findings fixed
 
 ## Phase 7 — Wrap-up
@@ -192,7 +194,8 @@ warm-up. Cold `--version`: 10 runs `61.5,62.4,62.5,63.2,63.5,66.8,67.9,79,80.6,8
 | Time-to-listening (ms) | 1198 | **556** (516–580, n=3) | |
 | Time-to-indexed, this repo (ms) | 7118 | **5688** (5551–5823, n=3) | |
 | Query latency p50, depth=2+tests (ms) | 228.3 | **293** (287–316, 2 runs) ⚠️ | **191.6** (185.8–210.9, 20 runs) |
-| Alloc rate during rescan (MB/s) | (Phase 6) | | |
+| Alloc rate during rescan (MB/s) | 9.75 (JIT, pre-6a) | | **7.4** (JIT) |
+| Alloc/5-rescan workload (MB) | 185.0 (JIT, pre-6a) | | **140.8** (JIT) |
 | Publish size, win-x64 (MB) | 215.9 | **165.2** shippable / 29.2 host | |
 
 Post-AOT conditions (win-x64, SDK 10.0.302, release version 0.2.20, VS 2026 C++ link toolchain):
