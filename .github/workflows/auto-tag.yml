@@ -1,0 +1,94 @@
+name: Auto Tag
+
+# On every push to main, run the same tests release.yml gates on, then compute
+# the next Nerdbank.GitVersioning version and push a `vX.Y.Z` tag for the commit.
+# Pushing that tag fires release.yml (which triggers on `push: tags: ['v*']`).
+# Note: a tag push does NOT raise a `push: branches: [main]` event, so this
+# workflow cannot re-trigger itself — no loop guard is needed.
+on:
+  push:
+    branches: [main]
+
+# The default GITHUB_TOKEN needs write access to push the tag back to origin.
+permissions:
+  contents: write
+
+jobs:
+  # Mirror release.yml's `test` job exactly (same OS, SDKs, and filters) so we
+  # never auto-tag a commit whose tests would fail the real release build.
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.15.0'
+      - name: Install TypeScript worker dependencies
+        run: npm ci --prefix src/CodeContext.TypeScript.Worker
+      - name: Run tests
+        run: >
+          dotnet test tests/CodeContext.Core.Tests/CodeContext.Core.Tests.csproj
+          --filter "Category!=ExternalTooling"
+      - name: Run TypeScript worker protocol tests
+        run: >
+          dotnet test tests/CodeContext.Core.Tests/CodeContext.Core.Tests.csproj
+          --filter "FullyQualifiedName~TypeScriptWorkerProtocolTests"
+
+  # nbgv-only job: no solution build, just git history + the nbgv CLI. Runs on
+  # ubuntu-latest because it is the fastest/cheapest GitHub-hosted runner and
+  # nbgv + git + a tag push are all fully cross-platform. Tests already ran in
+  # their exact release.yml environment (windows-latest) in the `test` job above.
+  tag:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth: 0 gives nbgv the full history it needs to compute git
+      # height (a shallow clone errors: "lacks the objects required to calculate
+      # version height"). fetch-tags: true is belt-and-suspenders so the local
+      # tag check below is reliable (nbgv itself does not use tags for height).
+      # persist-credentials defaults to true, which stores the GITHUB_TOKEN as
+      # the origin credential so the later `git push` authenticates — we keep it.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+      - name: Compute version and push tag
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Pin the nbgv CLI to the same version Directory.Build.props pins for
+          # the MSBuild package (3.6.146) so the CLI computes the exact same
+          # version the build produces, and so a future nbgv release can't shift
+          # the tag format out from under us.
+          dotnet tool install --global nbgv --version 3.6.146
+          export PATH="$PATH:$HOME/.dotnet/tools"
+
+          # SimpleVersion is major.minor.height (a clean 3-part X.Y.Z). The
+          # `Version` property adds a 4th revision component, and
+          # NuGetPackageVersion can gain a `-commit` suffix off public branches;
+          # SimpleVersion is always the plain 3-part release number we want.
+          VERSION="$(nbgv get-version --variable SimpleVersion)"
+          TAG="v${VERSION}"
+          echo "Computed version: ${VERSION} -> tag ${TAG}"
+
+          # Idempotency: on a retry (or any re-run against the same commit) the
+          # tag may already exist. Ask origin directly so we skip regardless of
+          # what is fetched locally. `--exit-code` returns non-zero when the ref
+          # is absent, which the `if` swallows so this is a clean skip, not a
+          # failure.
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "Tag ${TAG} already exists on origin; nothing to do."
+            exit 0
+          fi
+
+          # Lightweight tag: no committer identity or annotation required.
+          git tag "${TAG}"
+          git push origin "refs/tags/${TAG}"
+          echo "Pushed ${TAG}."

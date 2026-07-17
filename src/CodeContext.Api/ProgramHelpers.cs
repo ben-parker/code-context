@@ -7,6 +7,7 @@ using CodeContext.Core.Workers;
 using Microsoft.AspNetCore.OpenApi;
 using Microsoft.Extensions.Logging;
 using Microsoft.OpenApi.Models;
+using System.Reflection;
 using System.Text.Json.Serialization;
 
 namespace CodeContext.Api;
@@ -179,7 +180,7 @@ internal sealed class OpenApiDocumentTransformer : IOpenApiDocumentTransformer
         document.Info = new OpenApiInfo
         {
             Title = "CodeContext API",
-            Version = "1.0.0",
+            Version = AssemblyVersionInfo.GetInformationalVersion(Assembly.GetExecutingAssembly()),
             Description = "Local code context API for LLMs - provides dependency graph and code relationships",
             Contact = new OpenApiContact
             {

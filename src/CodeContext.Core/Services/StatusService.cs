@@ -169,9 +169,7 @@ public class StatusService : IStatusService
         var uptime = DateTimeOffset.UtcNow - _startTime;
         var assembly = Assembly.GetExecutingAssembly();
         var version = assembly.GetName().Version?.ToString() ?? "1.0.0";
-        var informationalVersion = assembly
-            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
-            ?? version;
+        var informationalVersion = AssemblyVersionInfo.GetInformationalVersion(assembly, version);
         var memoryUsage = GC.GetTotalMemory(false);
         var memoryMB = (memoryUsage / 1024.0 / 1024.0).ToString("F1");
 

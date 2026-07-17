@@ -1,17 +1,101 @@
 name: Release
 
+# Triggers on BOTH:
+#   (a) a human (or anything) pushing a `v*` tag directly, and
+#   (b) the "Auto Tag" workflow completing on main.
+#
+# Why (b) is needed: Auto Tag pushes its `vX.Y.Z` tag using the default
+# GITHUB_TOKEN. GitHub deliberately does NOT let a push made with the default
+# GITHUB_TOKEN trigger another workflow (documented anti-recursion behavior), so
+# Auto Tag's tag push does NOT fire the `push: tags` trigger below. `workflow_run`
+# fires on workflow COMPLETION (not on the push event), so it is not subject to
+# that restriction and covers the automated path.
 on:
   push:
     tags: ['v*']
+  workflow_run:
+    workflows: ['Auto Tag']
+    types: [completed]
 
 permissions:
   contents: write
 
 jobs:
+  # Single source of truth for "which tag are we building?". Every other job
+  # depends on this (directly or transitively) and checks out `needs.resolve.
+  # outputs.tag` explicitly — in the workflow_run case github.ref/github.ref_name
+  # point at the workflow FILE's ref (main), NOT the pushed tag, so the tag must
+  # be resolved and passed downstream by hand.
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      should_run: ${{ steps.resolve.outputs.should_run }}
+    steps:
+      # workflow_run only: check out the exact commit Auto Tag validated so the
+      # `git tag --points-at` lookup below can see the tag Auto Tag pushed.
+      # fetch-depth: 0 + fetch-tags: true make all tags available. For the
+      # tag-push trigger this step is skipped entirely.
+      - name: Checkout triggering commit (workflow_run only)
+        if: github.event_name == 'workflow_run'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Resolve tag to build
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            # Case (a): a tag push. The pushed ref IS the tag to build — trivial.
+            TAG="${{ github.ref_name }}"
+            echo "Tag push: building ${TAG}"
+            echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Case (b): "Auto Tag" completed. Never build/publish/release on a
+          # failed upstream run.
+          CONCLUSION="${{ github.event.workflow_run.conclusion }}"
+          if [[ "${CONCLUSION}" != "success" ]]; then
+            echo "Auto Tag concluded '${CONCLUSION}' (not success); skipping the release pipeline."
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Read back the v* tag Auto Tag actually pushed at the validated commit.
+          # `git tag --points-at` is preferred over recomputing the version with
+          # `nbgv get-version`: it reflects exactly what was pushed rather than
+          # ASSUMING recomputation reproduces the same tag. The tag is guaranteed
+          # fetchable here because Auto Tag has, by definition, already completed
+          # (and thus already pushed) by the time this workflow_run event fires.
+          SHA="${{ github.event.workflow_run.head_sha }}"
+          TAG="$(git tag --points-at "${SHA}" | grep -E '^v[0-9]' | sort -V | tail -n1 || true)"
+          if [[ -z "${TAG}" ]]; then
+            echo "No v* tag points at ${SHA}; nothing to release."
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Auto Tag success: building ${TAG} (commit ${SHA})"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "should_run=true" >> "$GITHUB_OUTPUT"
+
   test:
+    needs: resolve
+    if: success() && needs.resolve.outputs.should_run == 'true'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.tag }}
+          # nbgv needs full history + the tag itself to compute the version.
+          fetch-depth: 0
+          fetch-tags: true
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '9.0.x'
@@ -33,7 +117,8 @@ jobs:
           --filter "FullyQualifiedName~TypeScriptWorkerProtocolTests"
 
   publish:
-    needs: test
+    needs: [resolve, test]
+    if: success() && needs.resolve.outputs.should_run == 'true'
     strategy:
       matrix:
         include:
@@ -48,6 +133,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.tag }}
+          # nbgv needs full history + the tag itself to compute the version.
+          fetch-depth: 0
+          fetch-tags: true
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '9.0.x'
@@ -66,7 +156,7 @@ jobs:
       - name: Publish and smoke-test packaged host
         shell: pwsh
         run: |
-          $version = '${{ github.ref_name }}' -replace '^v', ''
+          $version = '${{ needs.resolve.outputs.tag }}' -replace '^v', ''
           ./scripts/verify-publish.ps1 `
             -RuntimeIdentifier '${{ matrix.rid }}' `
             -ReleaseVersion $version `
@@ -101,14 +191,50 @@ jobs:
               || { echo "::error::$executable missing from publish output"; exit 1; }
           done
 
+      # Stamp the release version into the packaged worker JSON files.
+      # Unlike the rest of the build, these three files are STATIC JSON copied
+      # verbatim into the payload by MSBuild — they are never built, so
+      # Nerdbank.GitVersioning (nbgv) does not touch them and they still read
+      # "1.0.0" from the git-tracked source. Rewrite only the copies in the
+      # build output (out/<rid>/) so the shipped zip reports the real version;
+      # the source files intentionally stay at "1.0.0" in git. Runs AFTER
+      # "Verify payload" (which has already asserted these paths exist) and
+      # BEFORE "Package" (so the change lands in the shipped zip). pwsh is used
+      # because it is cross-platform and already proven available on all four
+      # matrix OSes by the publish step above; ConvertFrom-Json/ConvertTo-Json
+      # keeps the rewrite valid across OSes without jq/sed.
+      - name: Stamp version into packaged worker manifests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = '${{ needs.resolve.outputs.tag }}' -replace '^v', ''
+          $base = 'out/${{ matrix.rid }}'
+          $targets = @(
+            "$base/workers/csharp/worker-manifest.json",
+            "$base/workers/typescript/worker-manifest.json",
+            "$base/workers/typescript/package.json"
+          )
+          foreach ($target in $targets) {
+            if (-not (Test-Path -LiteralPath $target)) {
+              throw "Expected version-bearing file not found: $target"
+            }
+            $json = Get-Content -LiteralPath $target -Raw | ConvertFrom-Json
+            $json.version = $version
+            # -Depth 10: package.json nests dependencies; the default depth (2)
+            # would silently truncate nested objects.
+            ($json | ConvertTo-Json -Depth 10) | Set-Content -LiteralPath $target -Encoding utf8
+            Write-Host "Stamped version $version into $target"
+          }
+
       - name: Package
         shell: bash
         run: |
+          TAG="${{ needs.resolve.outputs.tag }}"
           cd "out/${{ matrix.rid }}"
           if [[ "${{ matrix.rid }}" == win-* ]]; then
-            7z a "../../codecontext-${GITHUB_REF_NAME}-${{ matrix.rid }}.zip" .
+            7z a "../../codecontext-${TAG}-${{ matrix.rid }}.zip" .
           else
-            zip -r "../../codecontext-${GITHUB_REF_NAME}-${{ matrix.rid }}.zip" .
+            zip -r "../../codecontext-${TAG}-${{ matrix.rid }}.zip" .
           fi
 
       - uses: actions/upload-artifact@v4
@@ -118,10 +244,16 @@ jobs:
           if-no-files-found: error
 
   sdk:
-    needs: test
+    needs: [resolve, test]
+    if: success() && needs.resolve.outputs.should_run == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.tag }}
+          # nbgv needs full history + the tag itself to compute the version.
+          fetch-depth: 0
+          fetch-tags: true
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '9.0.x'
@@ -134,7 +266,8 @@ jobs:
       - name: Test and pack worker SDKs
         shell: bash
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          TAG="${{ needs.resolve.outputs.tag }}"
+          VERSION="${TAG#v}"
           mkdir -p out/sdk
           dotnet pack src/CodeContext.Parser.Protocol -c Release \
             -p:Version="$VERSION" -o out/sdk
@@ -152,10 +285,13 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [publish, sdk]
+    needs: [resolve, publish, sdk]
+    if: success() && needs.resolve.outputs.should_run == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.tag }}
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -164,6 +300,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" artifacts/* \
-            --title "CodeContext $GITHUB_REF_NAME" \
+          TAG="${{ needs.resolve.outputs.tag }}"
+          gh release create "$TAG" artifacts/* \
+            --title "CodeContext $TAG" \
             --generate-notes

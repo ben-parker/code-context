@@ -34,9 +34,6 @@ $project = Join-Path $repoRoot 'src/CodeContext.Api/CodeContext.Api.csproj'
     --self-contained `
     -p:PublishSingleFile=true `
     -p:IncludeNativeLibrariesForSelfExtract=true `
-    -p:Version=$ReleaseVersion `
-    -p:InformationalVersion=$ReleaseVersion `
-    -p:IncludeSourceRevisionInInformationalVersion=false `
     -o $publishPath
 if ($LASTEXITCODE -ne 0) {
     throw "dotnet publish failed with exit code $LASTEXITCODE"
@@ -61,7 +58,11 @@ if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
     throw "Published executable is missing: $executable"
 }
 $publishedVersion = (& $executable --version 2>&1 | Out-String).Trim()
-if ($LASTEXITCODE -ne 0 -or $publishedVersion -cne $ReleaseVersion) {
+# nbgv's InformationalVersion always carries a `+<gitcommit>` build-metadata suffix
+# (even on a public-release tag build), so compare only the semantic-version portion
+# against the resolved release tag.
+$publishedVersionCore = $publishedVersion.Split('+')[0]
+if ($LASTEXITCODE -ne 0 -or $publishedVersionCore -cne $ReleaseVersion) {
     throw "Published executable version '$publishedVersion' does not match '$ReleaseVersion'."
 }
 

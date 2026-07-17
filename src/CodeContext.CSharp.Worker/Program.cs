@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Text.Json;
 using CodeContext.CSharp.Worker;
 using CodeContext.Parser.Protocol;
@@ -37,7 +38,23 @@ internal sealed class CSharpWorkerHost(JsonRpcConnection connection)
 {
     private const string ParserId = "csharp";
     private static readonly string ParserVersion =
-        typeof(CSharpWorkerHost).Assembly.GetName().Version?.ToString(3) ?? "1.0.0";
+        GetInformationalVersion(typeof(CSharpWorkerHost).Assembly);
+
+    // Mirror of CodeContext.Core.AssemblyVersionInfo.GetInformationalVersion. The worker
+    // deliberately references only Parser.Protocol + Roslyn and must not take a dependency
+    // on Core (which drags in Microsoft.Extensions.Hosting/Logging), so this tiny reader is
+    // duplicated here rather than shared.
+    private static string GetInformationalVersion(Assembly assembly)
+    {
+        var informational = assembly
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+        if (!string.IsNullOrEmpty(informational))
+        {
+            return informational;
+        }
+
+        return assembly.GetName().Version?.ToString() ?? "0.0.0";
+    }
 
     /// <summary>Upper bound on nodes/edges per analysis/delta message so a huge
     /// workspace streams in bounded frames instead of one giant payload.</summary>
