@@ -20,23 +20,26 @@
   </PropertyGroup>
 
   <!-- Phase 3c: OpenAPI is a development-only convenience. ENABLE_OPENAPI is defined only in
-       Debug; the OpenApi packages below are Debug-only too, so Release/published binaries
-       carry no OpenAPI code (and none of its Assembly.GetExecutingAssembly reflection). -->
+       Debug, so the OpenApi transformers + AddOpenApi/MapOpenApi compile only in Debug and
+       Release/published binaries carry no OpenAPI *code* (none of its
+       Assembly.GetExecutingAssembly reflection). The compile-time gating stays Debug-only. -->
   <PropertyGroup Condition="'$(Configuration)' == 'Debug'">
     <DefineConstants>$(DefineConstants);ENABLE_OPENAPI</DefineConstants>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="System.CommandLine" Version="2.0.10" />
-  </ItemGroup>
-
-  <ItemGroup Condition="'$(Configuration)' == 'Debug'">
+    <!-- The two OpenAPI packages are referenced UNCONDITIONALLY for restore determinism:
+         `dotnet restore` is configuration-independent (it evaluates the Debug graph), so a
+         Debug-only PackageReference is restore-order-fragile: a `restore` followed by a
+         no-restore `build -c Release` still copies the OpenAPI DLLs into the Release output.
+         Keeping them unconditional makes both configs restore the same graph. Release compiles
+         no OpenAPI code (ENABLE_OPENAPI is Debug-only), so these assemblies are dead weight in
+         the Release *build* output only, until the Phase 4 AOT publish trims unreferenced
+         assemblies. The Microsoft.OpenApi 2.11.0 pin must stay unconditional because the package
+         is now always restored: AspNetCore.OpenApi 10.0.10 pulls the vulnerable 2.0.0 transitively
+         (NU1903, GHSA-v5pm-xwqc-g5wc, patched in 2.7.5+); this pin clears the advisory. -->
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.10" />
-    <!-- Microsoft.AspNetCore.OpenApi 10.0.10 pulls Microsoft.OpenApi 2.0.0 transitively,
-         which carries NU1903 (GHSA-v5pm-xwqc-g5wc, patched in 2.7.5+). Pin a patched 2.x
-         explicitly to clear the advisory; the 2.x API surface used by the OpenAPI
-         transformers is unchanged. Debug-only: it exists solely for the OpenApi package's
-         vulnerable transitive. -->
     <PackageReference Include="Microsoft.OpenApi" Version="2.11.0" />
   </ItemGroup>
 

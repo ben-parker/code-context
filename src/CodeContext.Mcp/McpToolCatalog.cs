@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeContext.Core.Services;
 using Microsoft.Extensions.DependencyInjection;
+using ModelContextProtocol;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 
@@ -80,6 +81,14 @@ internal static class McpToolCatalog
         var name = context.Params?.Name;
         var args = context.Params?.Arguments;
 
+        // An unknown tool name is a JSON-RPC *protocol* error (McpErrorCode.InvalidParams, -32602),
+        // matching the SDK's built-in call-tool dispatcher on the pre-upgrade binary (verified over
+        // stdio: `no_such_tool` returned {"error":{"code":-32602,...}}). It must be THROWN so the
+        // request pipeline emits a JsonRpcError, not folded into the in-band isError path below.
+        // McpProtocolException is the McpException subtype that carries the wire error code.
+        if (name is not ("get_context" or "get_multi_context" or "get_status"))
+            throw new McpProtocolException($"Unknown tool: '{name}'", McpErrorCode.InvalidParams);
+
         try
         {
             var text = name switch
@@ -87,14 +96,18 @@ internal static class McpToolCatalog
                 "get_context" => await InvokeGetContextAsync(context, args),
                 "get_multi_context" => await InvokeGetMultiContextAsync(context, args),
                 "get_status" => await InvokeGetStatusAsync(context),
-                _ => throw new ArgumentException($"Unknown tool: '{name}'."),
+                _ => throw new InvalidOperationException("Unreachable: tool name validated above."),
             };
             return Success(text);
         }
         catch (Exception ex)
         {
-            // Mirror the SDK's default tool-invocation behavior: surface the failure in-band as
-            // a CallToolResult with isError = true rather than as a JSON-RPC protocol error.
+            // Tool-body failures (missing/invalid arguments, service exceptions) surface in-band as
+            // a CallToolResult with isError = true — the same taxonomy the old [McpServerTool]
+            // wrapper produced (verified: missing identifier/identifiers and an invalid view all
+            // returned isError results, not protocol errors). The old wrapper hid the underlying
+            // exception behind a generic "An error occurred invoking '<tool>'." string; we surface
+            // the real, actionable message instead (e.g. "identifier is required.").
             return Error(ex.Message);
         }
     }
@@ -133,7 +146,7 @@ internal static class McpToolCatalog
         var service = context.Services!.GetRequiredService<IContextService>();
         return CodeContextTools.GetMultiContext(
             service,
-            StrArray(args, "identifiers"),
+            RequiredStrArray(args, "identifiers"),
             Str(args, "type"),
             Int(args, "depth", 1),
             Bool(args, "includeTests", false),
@@ -163,8 +176,10 @@ internal static class McpToolCatalog
     private static CallToolResult Error(string text) =>
         new() { IsError = true, Content = { new TextContentBlock { Text = text } } };
 
-    // Argument extractors mirroring the defaults the [Description]/optional-parameter binding
-    // produced. Missing or wrong-kind values fall back to the declared default.
+    // Argument extractors mirroring the old [Description]/optional-parameter binding. Optional
+    // scalars (Str/Int/Bool/NBool) fall back to their declared default on a missing or wrong-kind
+    // value — the old binding likewise returned a success for e.g. depth="5" (verified). Required
+    // or constrained inputs (identifiers, view) instead throw; see those methods.
     private static string? Str(IDictionary<string, JsonElement>? args, string key) =>
         args is not null && args.TryGetValue(key, out var v) && v.ValueKind == JsonValueKind.String
             ? v.GetString()
@@ -187,10 +202,15 @@ internal static class McpToolCatalog
             ? v.GetBoolean()
             : null;
 
-    private static string[] StrArray(IDictionary<string, JsonElement>? args, string key)
+    // A required string[] argument. The old reflection binding treated a missing or non-array
+    // `identifiers` as a binding failure → in-band isError (verified: {} and a string value both
+    // returned isError), while a present-but-empty array bound cleanly and returned an empty
+    // success list. Throwing here reproduces that: the CallAsync catch turns it into an isError
+    // result; an empty array falls through to a successful [] response.
+    private static string[] RequiredStrArray(IDictionary<string, JsonElement>? args, string key)
     {
         if (args is null || !args.TryGetValue(key, out var v) || v.ValueKind != JsonValueKind.Array)
-            return [];
+            throw new ArgumentException($"{key} is required.");
         var list = new List<string>();
         foreach (var element in v.EnumerateArray())
         {
@@ -200,9 +220,25 @@ internal static class McpToolCatalog
         return list.ToArray();
     }
 
-    private static ContextResponseView View(IDictionary<string, JsonElement>? args) =>
-        args is not null && args.TryGetValue("view", out var v) && v.ValueKind == JsonValueKind.String
-        && string.Equals(v.GetString(), "Full", StringComparison.OrdinalIgnoreCase)
-            ? ContextResponseView.Full
-            : ContextResponseView.Compact;
+    // Missing/null view defaults to Compact; "compact"/"full" (case-insensitive) parse. Any other
+    // value throws — the old enum binding rejected an out-of-range view as a binding failure
+    // (verified: view="bogus" returned isError), so silently coercing it to Compact would hide a
+    // caller mistake. The throw is caught by CallAsync and surfaced as an isError result, matching
+    // the old taxonomy (and REST's ParseView, which 400s on the same input).
+    private static ContextResponseView View(IDictionary<string, JsonElement>? args)
+    {
+        if (args is null || !args.TryGetValue("view", out var v) || v.ValueKind == JsonValueKind.Null)
+            return ContextResponseView.Compact;
+        if (v.ValueKind == JsonValueKind.String)
+        {
+            switch (v.GetString()?.ToLowerInvariant())
+            {
+                case null or "" or "compact":
+                    return ContextResponseView.Compact;
+                case "full":
+                    return ContextResponseView.Full;
+            }
+        }
+        throw new ArgumentException("view must be 'Compact' or 'Full'.");
+    }
 }

@@ -105,18 +105,61 @@ public class CodeContextEndpointTests
     [Fact]
     public async Task CompleteContext_ArgumentExceptionReturnsBadRequestContextError()
     {
+        // Full-shape (byte-identity) live assertion — locks the CONTEXT_ERROR envelope emitted by
+        // the real endpoint, not just the presence of the code. Mirrors the DTO-level golden in
+        // ErrorContractTests, driven end-to-end through the ASP.NET host's Results.Json path.
         var service = Substitute.For<IContextService>();
         service.GetCompactContextAsync(
-                "   ", null, 1, false, false, null, false, false, 5, 10, false)
-            .Returns<CompactContextResponse>(_ => throw new ArgumentException(
-                "identifier must be a non-empty, non-whitespace string.", "identifier"));
+                "Target", null, 1, false, false, null, false, false, 5, 10, false)
+            .Returns<CompactContextResponse>(_ => throw new InvalidOperationException("boom-ctx"));
         await using var app = await StartAppAsync(service);
 
-        var response = await app.GetTestClient().GetAsync("/api/context/complete?identifier=%20%20%20");
+        var response = await app.GetTestClient().GetAsync("/api/context/complete?identifier=Target");
         var json = await response.Content.ReadAsStringAsync();
 
         Assert.Equal(System.Net.HttpStatusCode.BadRequest, response.StatusCode);
-        Assert.Contains("CONTEXT_ERROR", json);
+        Assert.Equal(
+            "{\"error\":{\"code\":\"CONTEXT_ERROR\",\"message\":\"boom-ctx\",\"details\":{\"identifier\":\"Target\",\"depth\":1,\"includeTests\":false,\"includeContent\":false,\"includeRelated\":false,\"includeMetrics\":false,\"maxMatches\":5,\"maxRelationships\":10,\"maxCallSites\":3,\"maxTestFiles\":5,\"maxTestMethods\":5,\"expandAmbiguous\":false,\"view\":\"compact\"}}}",
+            json);
+    }
+
+    [Fact]
+    public async Task MultiContext_ExceptionReturnsBadRequestMultiContextError()
+    {
+        // Full-shape live assertion for the MULTI_CONTEXT_ERROR envelope: the posted request is
+        // echoed back in details, so the whole shape (camelCase, null-omitted, defaults) is locked.
+        var service = Substitute.For<IContextService>();
+        service.GetMultipleCompactContextAsync(Arg.Any<MultiContextRequest>())
+            .Returns<Task<List<CompactContextResponse>>>(_ => throw new InvalidOperationException("boom-multi"));
+        await using var app = await StartAppAsync(service);
+
+        var response = await app.GetTestClient().PostAsJsonAsync(
+            "/api/context/multi", new { identifiers = new[] { "A", "B" } });
+        var json = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(System.Net.HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal(
+            "{\"error\":{\"code\":\"MULTI_CONTEXT_ERROR\",\"message\":\"boom-multi\",\"details\":{\"identifiers\":[\"A\",\"B\"],\"depth\":1,\"view\":\"Compact\",\"includeTests\":false,\"includeContent\":false,\"includeRelated\":false,\"includeMetrics\":false,\"maxMatches\":5,\"maxRelationships\":3,\"maxCallSites\":3,\"maxTestFiles\":5,\"maxTestMethods\":5,\"expandAmbiguous\":false,\"relationshipTypes\":[]}}}",
+            json);
+    }
+
+    [Fact]
+    public async Task RefreshFile_ExceptionReturnsBadRequestRefreshError()
+    {
+        // Full-shape live assertion for the single-file REFRESH_ERROR variant (path present).
+        var service = Substitute.For<IContextService>();
+        var coordinator = Substitute.For<IIndexCoordinator>();
+        coordinator.RefreshFileAsync("x/y.cs", Arg.Any<CancellationToken>())
+            .Returns(Task.FromException(new InvalidOperationException("boom")));
+        await using var app = await StartAppAsync(service, coordinator: coordinator);
+
+        var response = await app.GetTestClient().PostAsync("/api/index/refresh?path=x/y.cs", content: null);
+        var json = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(System.Net.HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal(
+            "{\"error\":{\"code\":\"REFRESH_ERROR\",\"message\":\"boom\",\"details\":{\"path\":\"x/y.cs\"}}}",
+            json);
     }
 
     [Fact]
@@ -153,13 +196,14 @@ public class CodeContextEndpointTests
     }
 
     private static async Task<WebApplication> StartAppAsync(
-        IContextService service, ILanguageWorkerService? workers = null)
+        IContextService service, ILanguageWorkerService? workers = null,
+        IIndexCoordinator? coordinator = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
         builder.Services.AddSingleton(service);
         builder.Services.AddSingleton(Substitute.For<IStatusService>());
-        builder.Services.AddSingleton(Substitute.For<IIndexCoordinator>());
+        builder.Services.AddSingleton(coordinator ?? Substitute.For<IIndexCoordinator>());
         builder.Services.AddSingleton(workers ?? Substitute.For<ILanguageWorkerService>());
         builder.Services.AddSingleton(Options.Create(new CodeContextOptions()));
         ProgramHelpers.AddRestApi(builder.Services);
