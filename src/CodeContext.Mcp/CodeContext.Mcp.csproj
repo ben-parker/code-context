@@ -15,6 +15,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Phase 3b: McpToolCatalog parity test asserts tools/list against the golden snapshot. -->
+    <InternalsVisibleTo Include="CodeContext.Core.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\CodeContext.Core\CodeContext.Core.csproj" />
   </ItemGroup>
 

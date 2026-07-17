@@ -2,14 +2,15 @@ using System.ComponentModel;
 using System.Text.Json;
 using CodeContext.Core.Serialization;
 using CodeContext.Core.Services;
-using ModelContextProtocol.Server;
 
 namespace CodeContext.Mcp;
 
-[McpServerToolType]
+// Tool discovery is manual and reflection-free (see McpToolCatalog); these methods are the
+// invocation bodies the catalog dispatches to. The [Description] attributes are retained as
+// living documentation of each parameter's contract (they no longer drive schema generation).
 public sealed class CodeContextTools
 {
-    [McpServerTool, Description("Get comprehensive context for a code identifier. Returns relationships, dependencies, tests, and metrics.")]
+    [Description("Get comprehensive context for a code identifier. Returns relationships, dependencies, tests, and metrics.")]
     public static async Task<string> GetContext(
         IContextService contextService,
         [Description("Canonical returned identifier, symbol name, or file path")] string identifier,
@@ -69,7 +70,7 @@ public sealed class CodeContextTools
         }
     }
 
-    [McpServerTool, Description("Get context for multiple identifiers in a single request. Useful for batch operations.")]
+    [Description("Get context for multiple identifiers in a single request. Useful for batch operations.")]
     public static async Task<string> GetMultiContext(
         IContextService contextService,
         [Description("List of identifiers to get context for")] string[] identifiers,
@@ -133,7 +134,7 @@ public sealed class CodeContextTools
         }
     }
 
-    [McpServerTool, Description("Get comprehensive system health and debugging information")]
+    [Description("Get comprehensive system health and debugging information")]
     public static async Task<string> GetStatus(IStatusService statusService)
     {
         try
