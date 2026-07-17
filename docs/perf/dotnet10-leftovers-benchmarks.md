@@ -165,3 +165,46 @@ Proposed v2 shape (the host side already exists):
 Remaining work for v2: both workers' emit paths, the per-file hash bookkeeping,
 `AnalysisDeltaApplier` accepting mixed per-file deltas per generation, and protocol
 version bump. The store, scoping, and atomicity story need no further changes.
+
+## Protocol v2 — SHIPPED (July 17 2026, commits f5610ed / 8397398 / f2fba88)
+
+Both workers now emit file-scoped incremental deltas on `workspace/applyChanges`
+(`replacesWorkspace:false`, `replacesFiles` = hash-dirty ∪ removed, verbatim paths),
+with per-file SHA-256 fact-hash diffing over the whole-workspace walk for cross-file
+correctness, deterministic duplicate-id ownership (ordinal-min path — fixes the
+partial-type winner-flip a reviewer proved end-to-end), commit-baseline-after-send in
+both workers, and the contract documented as canonical in the schema +
+`language-worker-sdk.md`. TS chunk size unified with C# at 2000. The host needed zero
+changes — `CommitScope.ReplacesFiles` (landed with sharding) was already the exact
+primitive. Suites: 505 default + 13 ExternalTooling, all green; dual whole-effort
+review APPROVE.
+
+### Measured outcome — honest assessment
+
+| scenario | pre-v2 | v2 | delta |
+|---|---|---|---|
+| 119-file corpus: touch med (3 runs) | 1166 ms | 1170 ms | flat |
+| 119-file corpus: worker alloc/workload | 2335 MB | 2222 MB | −5% |
+| self repo (~250 files): warmed touch med (5-touch loop) | 1893 ms | 1921 ms | flat |
+| 1500-file synthetic (~46K facts): warmed touch med (2×) | ~1681–1807 ms | ~1490–1695 ms | **≈ −11%** |
+| 1500-file synthetic: cold index (2nd launch) | 6379 ms | 6623 ms | flat (v2 adds hashing) |
+
+**The original premise was wrong about where the cost lives.** Whole-workspace
+*emission* — the thing v2 eliminates — costs only tens of milliseconds even at ~46K
+facts; the steady-state incremental batch is dominated by the watcher's 500 ms
+debounce window plus the whole-workspace *semantic re-walk*, which v2 deliberately
+keeps (the hash diff needs every file's current facts to catch cross-file changes).
+Emission scales with fact count, so the win grows with repo size (~11% at 1500 files,
+and it would dominate at true monorepo scale where pre-v2 serialized hundreds of MB
+per save) — but at this project's target scale v2 is latency-neutral.
+
+**What v2 actually bought:** (1) modest allocation/churn reduction now; (2) scaling
+headroom — per-save wire+materialization cost is O(change), not O(workspace); and
+most importantly (3) **the prerequisite for the real win**: with emission now
+file-scoped and hash-bookkeeped, the next lever is scoping the *walk* itself —
+re-analyzing only changed files plus their reverse-dependency closure (Roslyn/TS both
+expose the needed reference info) and trusting stored hashes for everything else.
+That is where the order-of-magnitude lives, and it was unreachable while the protocol
+demanded whole-workspace re-emission. Recommended as the next perf effort; also
+consider making the 500 ms debounce adaptive, since it is now the floor of every
+incremental batch.
