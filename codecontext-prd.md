@@ -655,10 +655,10 @@ jobs:
     steps:
       - name: Build AOT
         run: |
+          # Host is Native AOT (PublishAot=true is set in the csproj), so it publishes as a
+          # single native binary — PublishSingleFile is meaningless here and is not passed.
           dotnet publish -c Release -r ${{ matrix.target }} \
             --self-contained true \
-            -p:PublishAot=true \
-            -p:PublishSingleFile=true \
             -o ./publish
       
       - name: Upload Release

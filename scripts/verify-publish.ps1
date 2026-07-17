@@ -10,7 +10,12 @@ param(
 
     [Parameter(Mandatory = $true)]
     [ValidateNotNullOrEmpty()]
-    [string]$PublishDirectory
+    [string]$PublishDirectory,
+
+    # Debug symbols are NOT part of the shipped payload; by default they are pruned from
+    # the publish root (see the cleanup below). Pass -KeepSymbols to leave them in place
+    # for local native debugging.
+    [switch]$KeepSymbols
 )
 
 $ErrorActionPreference = 'Stop'
@@ -40,16 +45,36 @@ if ($LASTEXITCODE -ne 0) {
     throw "dotnet publish failed with exit code $LASTEXITCODE"
 }
 
+# Strip debug symbols from the publish ROOT (not workers/**). Native AOT emits a separate
+# .pdb next to the host binary on Windows (~125MB — StripSymbols is deliberately non-Windows
+# only), and a handful of managed .pdb files (Core/Mcp/Parser.Protocol) also land here.
+# release.yml zips the publish directory verbatim, so any .pdb left here ships in the release
+# archive — nearly tripling its size. Debug symbols are not part of the shipped payload;
+# remove them so what CI zips is exactly the shippable payload. Workers keep their symbols
+# (they are already part of the self-contained worker payload the size table accounts for).
+# Contributors debugging locally can pass -KeepSymbols to skip this.
+if (-not $KeepSymbols) {
+    Get-ChildItem -LiteralPath $publishPath -Filter '*.pdb' -File |
+        Remove-Item -Force
+}
+
 # AOT payload guard: a Native AOT publish must leave NO managed *.dll next to the host
 # binary in the publish root. This is the permanent guard that unreferenced packages
 # (e.g. Microsoft.AspNetCore.OpenApi, which is referenced but never rooted in Release)
-# do not leak into the shipped host payload. The language workers legitimately ship
-# managed DLLs (JIT+R2R), so workers/csharp/** and workers/typescript/** are exempt.
-$strayManagedDlls = Get-ChildItem -LiteralPath $publishPath -Filter '*.dll' -File |
+# do not leak into the shipped host payload. The *.pdb guard likewise ensures debug
+# symbols (native AOT PDB + managed PDBs) never re-enter the shipped root — the cleanup
+# above must have removed them (unless -KeepSymbols was passed). The language workers
+# legitimately ship managed DLLs and their PDBs (JIT+R2R), so workers/csharp/** and
+# workers/typescript/** are exempt.
+# A stray *.dll always fails the guard. A stray *.pdb fails too, unless -KeepSymbols was
+# passed (in which case the contributor deliberately kept native symbols for local debugging).
+$strayExtensions = if ($KeepSymbols) { @('.dll') } else { @('.dll', '.pdb') }
+$strayFiles = Get-ChildItem -LiteralPath $publishPath -File |
+    Where-Object { $_.Extension -in $strayExtensions } |
     Select-Object -ExpandProperty Name
-if ($strayManagedDlls) {
-    throw ("Native AOT host publish leaked managed DLL(s) into the publish root: " +
-        ($strayManagedDlls -join ', ') + ". The AOT host must be a single native binary.")
+if ($strayFiles) {
+    throw ("Native AOT host publish leaked managed DLL/PDB file(s) into the publish root: " +
+        ($strayFiles -join ', ') + ". The AOT host must be a single native binary with no shipped symbols.")
 }
 
 $canonicalSkill = Join-Path $repoRoot 'skill/SKILL.md'

@@ -44,13 +44,13 @@ dotnet run --project src/CodeContext.Api -- start --path /path/to/watch --mcp
 # Install the agent skill (agent-agnostic SKILL.md + Claude Code frontmatter)
 skill/install-skill.ps1   # or skill/install-skill.sh
 
-# Publish self-contained (per-RID; AOT is currently disabled, see below)
-dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o ./publish
-dotnet publish -c Release -r linux-x64 --self-contained true -p:PublishSingleFile=true -o ./publish
-dotnet publish -c Release -r osx-x64 --self-contained true -p:PublishSingleFile=true -o ./publish
+# Publish per-RID (the acceptance-gated path used by CI; boots + smoke-tests the packaged host)
+scripts/verify-publish.ps1 -RuntimeIdentifier win-x64 -ReleaseVersion <ver> -PublishDirectory out/win-x64
+# Or a plain publish (no PublishSingleFile flags — the AOT host is already a single native binary)
+dotnet publish -c Release -r win-x64 -o ./publish
 ```
 
-Note: `CodeContext.Api.csproj` currently sets `<PublishAot>false</PublishAot>` ("Disable AOT for testing"). Several parts of the codebase (JSON source-gen context, `IsAotCompatible` on other projects) are still written with AOT compatibility in mind — don't reintroduce reflection-heavy patterns even though AOT publish is off.
+Note: the host publishes as **Native AOT** (`<PublishAot>true</PublishAot>`); language workers publish as **self-contained JIT + ReadyToRun**. See `AOT_COMPATIBILITY.md` for the full architecture and toolchain prerequisites. Several parts of the codebase (JSON source-gen context, `IsAotCompatible` on other projects) are written for AOT compatibility — don't reintroduce reflection-heavy patterns.
 
 ## Architecture Overview
 

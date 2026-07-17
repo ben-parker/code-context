@@ -6,6 +6,9 @@
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
     <EmitCompilerGeneratedFiles>true</EmitCompilerGeneratedFiles>
+    <!-- Match the published host's invariant mode so the suite exercises the same
+         globalization behavior (ordinal/invariant string work) as production. -->
+    <InvariantGlobalization>true</InvariantGlobalization>
     <!-- Keep native-tooling integration tests opt-in while allowing an explicit
          command-line filter to select their dedicated categories. -->
     <VSTestTestCaseFilter Condition="'$(VSTestTestCaseFilter)' == ''">Category!=ExternalTooling</VSTestTestCaseFilter>

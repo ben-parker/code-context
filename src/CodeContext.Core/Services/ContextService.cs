@@ -1022,7 +1022,7 @@ namespace CodeContext.Core.Services
                 }
                 frontier = next;
             }
-            return result.Values.OrderBy(item => item.Distance).ThenBy(item => item.Node.Identifier).ToList();
+            return result.Values.OrderBy(item => item.Distance).ThenBy(item => item.Node.Identifier, StringComparer.Ordinal).ToList();
         }
 
         private async Task<List<CodeNode>> GetStaticallyBoundTargetsAsync(

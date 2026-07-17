@@ -53,6 +53,8 @@ Worker (`src/CodeContext.CSharp.Worker/CodeContext.CSharp.Worker.csproj`):
 
 A local Native AOT publish needs the C++ link toolchain: **Visual Studio 2022+ with the "Desktop development with C++" workload** (VS 2026 verified for this repo; CI `windows-latest` already carries it). Without it, ILC fails at the link step.
 
+VS 2026 gotcha (Windows local publish): its `vcvarsall.bat` invokes a bare `vswhere.exe`, so the VS Installer directory (`C:\Program Files (x86)\Microsoft Visual Studio\Installer`) must be on `PATH`. If it is not, `dotnet publish -r <rid>` fails at the ILC link step with `MSB3073` — vswhere's "not recognized" stderr corrupts the linker-path property ILC computes. Add that directory to `PATH` before publishing. CI `windows-latest` already has it on `PATH`, so no workflow change is needed.
+
 ## Publishing
 
 ```bash

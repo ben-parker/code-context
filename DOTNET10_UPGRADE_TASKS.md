@@ -100,7 +100,34 @@ warm-up. Cold `--version`: 10 runs `61.5,62.4,62.5,63.2,63.5,66.8,67.9,79,80.6,8
 - [x] Delete roslyn-aot-test/; rewrite AOT_COMPATIBILITY.md (final architecture: host Native AOT, worker JIT+R2R and why; AOT-clean requirements; InvariantGlobalization; VS 2026 C++ toolchain prereq).
 - [x] Prereq: VS 2026 Community C++ (VC.Tools.x86.x64) confirmed via vswhere. Local publish fix: VS 2026 `vcvarsall.bat` invokes bare `vswhere.exe`, so the VS **Installer dir must be on PATH** for `dotnet publish -r` locally (otherwise ILC's linker-path property is corrupted by vswhere's "not recognized" stderr → MSB3073 link error). CI `windows-latest` already has it on PATH; no repo change needed. Documented in the report.
 - [x] Verify: `scripts/verify-publish.ps1 -RuntimeIdentifier win-x64` green (AOT, incl. new no-DLL assertion + all 12 edge kinds live); MCP stdio smoke on the **published AOT binary** green (initialize→serverInfo, tools/list→3 tools, get_status→success, bad tool→ -32602 "Unknown tool", clean JSON-only stdout — Phase 3 taxonomy); CLI smoke green (--version 0.2.20, list [], start --detach JSON, status, stop round trip); cold-start 3.6× faster vs baseline. (4-RID CI branch run: deferred to Phase 7 dry-run.)
-- [ ] Opus + Sonnet review; findings fixed
+- [x] Opus + Sonnet review; findings fixed
+  - **Finding 1 (HIGH, both) — PDBs shipped in the release zip.** Sonnet's empirical evidence:
+    `codecontext.pdb` ~124.5MB (native AOT PDB; StripSymbols is deliberately non-Windows-only)
+    plus three managed PDBs (Core/Mcp/Parser.Protocol) leaking into the publish root, and
+    release.yml zips the publish dir verbatim while verify-publish's guard was `*.dll`-only — so
+    the shipped win-x64 zip would have been ~290MB, larger than the 215.9MB pre-AOT baseline.
+    Fixed at the single source of truth: `verify-publish.ps1` now removes all `*.pdb` from the
+    publish ROOT after publish/before assertions (workers/** untouched; `-KeepSymbols` switch for
+    local native debugging), and the stray-file guard now covers `*.dll` **and** `*.pdb`. release.yml
+    needed no change — the script cleans the exact directory CI zips. Re-ran verify-publish win-x64
+    green; the shipped payload is now the real **165.2MB** (host 29.2MB; the table's figure is now
+    what the pipeline actually produces, footnote corrected from "conceptually excluded" to "actively
+    pruned").
+  - **Finding 2 (LOW, both) — ordinal comparer.** `ContextService.cs:1025` `ThenBy(item => item.Node.Identifier)`
+    now passes `StringComparer.Ordinal`, matching line 1036 and every other sort in the file. Suite
+    green, no output shift (invariant mode already made the default ordinal-equivalent).
+  - **Finding 3 (LOW, Opus) — test invariant mode.** Added `<InvariantGlobalization>true</InvariantGlobalization>`
+    to `CodeContext.Core.Tests.csproj` so the suite runs under the same globalization mode as the
+    published host. Full suite stayed green.
+  - **Finding 4 (MEDIUM, both) — docs.** AOT_COMPATIBILITY.md gained the VS 2026 vswhere/PATH gotcha
+    (bare `vswhere.exe` in `vcvarsall.bat` → MSB3073 at the ILC link step if the VS Installer dir is
+    off PATH). CLAUDE.md's stale publish section rewritten (host = Native AOT, worker = self-contained
+    JIT+R2R; correct command is verify-publish or plain `dotnet publish -r <rid>` with no
+    PublishSingleFile flags; removed the "Disable AOT for testing" note). codecontext-prd.md's stale
+    PublishAot+PublishSingleFile sketch corrected (single-line: drop the meaningless PublishSingleFile).
+  - **Gate:** dotnet build Debug + Release 0 warnings (`-warnaserror`); full suite 410 + ExternalTooling 8
+    green; verify-publish win-x64 green with the new PDB cleanup + extended assertion (0 root DLLs, 0
+    root PDBs, 2 worker PDBs kept, 165.2MB payload).
 
 ## Phase 5 — Adjacency + file-path indexes (TDD)
 - [ ] GraphAdjacency (FrozenDictionary source/target/filePath) + version-stamped `GetAdjacency()` on InMemoryDatabase
@@ -147,9 +174,13 @@ Post-AOT conditions (win-x64, SDK 10.0.302, release version 0.2.20, VS 2026 C++ 
   JIT process re-optimizes the hot O(E) traversal loop with tiered/dynamic PGO, which a
   compile-once AOT image cannot. This CPU-bound traversal path is exactly what Phase 5's adjacency
   indexes replace (O(E)→O(degree)); re-measure there. Stable across two runs (287–316ms spread).
-- **Publish size**: 215.9MB baseline was single-file JIT self-contained *including* workers. AOT
-  win-x64 publish dir is 290.3MB *with* a 125.1MB standalone debug PDB (symbols stripped only on
-  non-Windows); excluding that separable debug artifact the shippable payload is **165.2MB**
-  (host native binary 29.2MB + workers/csharp 32.7MB self-contained JIT+R2R + workers/typescript
-  103.3MB Node runtime/deps + protocol + skill). Worker size grew from R2R (Roslyn DLL +11MB).
-  Zero managed DLLs sit next to the host binary (assertion enforced).
+- **Publish size**: 215.9MB baseline was single-file JIT self-contained *including* workers.
+  The raw AOT win-x64 publish dir would be 290.3MB *with* the 125.1MB standalone native debug
+  PDB Windows emits next to the host (symbols are stripped only on non-Windows RIDs). Debug
+  symbols are not part of the shipped payload, so `verify-publish.ps1` now removes every `*.pdb`
+  from the publish root before packaging (worker symbols under `workers/**` are kept — already
+  counted in the worker payload). The **shipped** win-x64 payload — exactly what release.yml
+  zips — is **165.2MB** (host native binary 29.2MB + workers/csharp 32.7MB self-contained
+  JIT+R2R + workers/typescript 103.3MB Node runtime/deps + protocol + skill), measured on the
+  Phase-4-review publish (release version 0.2.23). Worker size grew from R2R (Roslyn DLL +11MB).
+  Zero managed DLLs *and* zero PDBs sit next to the host binary (assertion enforced).
