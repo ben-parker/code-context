@@ -30,28 +30,42 @@
 - Ignore patterns: `node_modules/`, `bin/`, `obj/`, `.git/`
 - Use `FileSystemWatcher` with buffer overflow handling
 
-### 3.2 Extensible AST Parser Architecture
+### 3.2 Extensible Language-Worker Architecture
 
-**Critical Design Goal**: Easy community contributions for new language parsers.
+**Critical Design Goal**: Easy community contributions for new language support, without
+the host ever taking a dependency on a language toolchain.
 
-```csharp
-// Example interface for language parsers
-public interface ILanguageParser
+New languages are added as **out-of-process language workers**, not as in-process classes.
+A worker is any executable that speaks the parser protocol (JSON-RPC 2.0 + Content-Length
+framing over stdio, defined by `protocol/parser-protocol.schema.json`) and ships a
+`worker-manifest.json` under `workers/<name>/`. The manifest declares the parser id, owned
+file extensions, project markers, and supported protocol version range; the host discovers
+it, launches the worker, negotiates the protocol, and routes changes for the worker's
+extensions to it. The worker holds its own compilation/type state and streams normalized
+node/edge deltas back, which the host commits atomically as immutable generations.
+
+```jsonc
+// workers/<name>/worker-manifest.json (shape)
 {
-    string[] SupportedExtensions { get; }
-    CodeGraph ParseFile(string filePath, string content);
-}
-
-public class CodeGraph
-{
-    public List<CodeNode> Nodes { get; set; }
-    public List<CodeEdge> Edges { get; set; }
+  "parserId": "csharp",
+  "displayName": "C#",
+  "extensions": [".cs"],
+  "projectMarkers": [".csproj", ".sln"],
+  "command": "CodeContext.CSharp.Worker",
+  "minProtocolVersion": 1,
+  "maxProtocolVersion": 1
 }
 ```
 
-**Initial Parsers**:
-- **C# Parser**: Use Microsoft.CodeAnalysis.CSharp (Roslyn)
-- **JavaScript/TypeScript Parser**: Use Esprima-DotNet or TypeScript.NET
+The host stays language-agnostic (no Roslyn, no Node, no compiler references); those live
+only inside the workers. See `docs/language-worker-architecture-plan.md` for the worker
+rules and `src/CodeContext.CSharp.Worker` / `src/CodeContext.TypeScript.Worker` for the
+reference implementations.
+
+**Initial Workers**:
+- **C# Worker**: Microsoft.CodeAnalysis.CSharp (Roslyn), inside the worker process.
+- **TypeScript/JavaScript Worker**: a persistent Node.js process driving the TypeScript
+  language service.
 
 ### 3.3 Graph Database Schema
 

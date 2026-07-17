@@ -149,8 +149,13 @@ the presence of a cycle.
 
 ## Workstream 4: state test semantics honestly
 
-`GraphUpdateService` direct tests are now reported accurately, but `ILanguageParser`
-returns `isTested=false` despite test fakes and indirect test references. The current
+> Note (July 2026, .NET 10 upgrade Phase 2): `ILanguageParser` has since been removed;
+> language support is now provided exclusively by out-of-process workers. The
+> test-semantics concern below still applies to any consumed symbol — read the old
+> `ILanguageParser` reference as an illustrative example only.
+
+`GraphUpdateService` direct tests are now reported accurately, but a consumed symbol can
+return `isTested=false` despite test fakes and indirect test references. The current
 field overstates what a naming/direct-call heuristic can prove.
 
 - Define separate concepts for directly exercised by a test method, referenced by test

@@ -1,5 +1,14 @@
 ## Plan: Implementing TypeScript Parsing for CodeContext
 
+> **Historical note (superseded).** This document records the original design, in which a
+> C# `TypeScriptParser : ILanguageParser` shelled out to Node per file. That in-process
+> `ILanguageParser` seam has since been removed (July 2026, .NET 10 upgrade Phase 2).
+> TypeScript/JavaScript is now handled by `src/CodeContext.TypeScript.Worker` — a
+> persistent Node.js process speaking the parser protocol over stdio and holding one
+> `ts.LanguageService` per workspace. Read the `ILanguageParser`/`TypeScriptParser`
+> references below as the historical shape of the bridge, not the current implementation;
+> the current contract is the worker protocol (`protocol/parser-protocol.schema.json`).
+
 **Objective:** Implement a new parser for TypeScript and JavaScript files (`.ts`, `.tsx`, `.js`, `.jsx`) 
 
 ## Revised Plan: Implementing TypeScript Parsing via Node.js Bridge

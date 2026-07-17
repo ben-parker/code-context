@@ -140,9 +140,9 @@ test_status_endpoint() {
 # Test /api/context/complete endpoint with various queries
 test_complete_context_endpoint() {
     local test_cases=(
-        "CSharpParser|Class|CSharpParser class context"
-        "ILanguageParser|Interface|ILanguageParser interface context"
-        "ParseFile|Method|ParseFile method context"
+        "GraphUpdateService|Class|GraphUpdateService class context"
+        "ILanguageWorkerService|Interface|ILanguageWorkerService interface context"
+        "ProcessFileChangesAsync|Method|ProcessFileChangesAsync method context"
         "NonExistentClass12345||Non-existent identifier"
     )
     
@@ -194,7 +194,7 @@ test_relationship_arrays() {
     local test_name="Relationship Arrays Structure"
     
     local response
-    if response=$(api_request "context/complete?identifier=CSharpParser&depth=2"); then
+    if response=$(api_request "context/complete?identifier=GraphUpdateService&depth=2"); then
         local schema='.matches != null and .matches | length > 0'
         if validate_json "$response" "$schema"; then
             local relationships_valid=true
@@ -240,7 +240,7 @@ test_duplicate_test_files_bug() {
     local test_name="Duplicate Test Files Bug Check"
     
     local response
-    if response=$(api_request "context/complete?identifier=CSharpParser"); then
+    if response=$(api_request "context/complete?identifier=GraphUpdateService"); then
         local schema='.matches != null and .matches | length > 0'
         if validate_json "$response" "$schema"; then
             # Check for duplicate test files
@@ -264,7 +264,7 @@ test_duplicate_test_files_bug() {
 test_multi_context_endpoint() {
     local test_name="Multi Context Endpoint"
     
-    local request_data='{"identifiers": ["CSharpParser", "ILanguageParser"], "depth": 1}'
+    local request_data='{"identifiers": ["GraphUpdateService", "ILanguageWorkerService"], "depth": 1}'
     local response
     if response=$(api_request "context/multi" "POST" "$request_data"); then
         # Should return array with 2 items
@@ -311,7 +311,7 @@ test_aot_serialization() {
     local test_name="AOT JSON Serialization"
     
     # Test various endpoints to ensure JSON serialization works
-    local endpoints=("status" "context/complete?identifier=CSharpParser" "context/complete?identifier=ILanguageParser&type=Interface")
+    local endpoints=("status" "context/complete?identifier=GraphUpdateService" "context/complete?identifier=ILanguageWorkerService&type=Interface")
     local all_valid=true
     local details=""
     
@@ -342,7 +342,7 @@ test_performance() {
     # Test with complex query that might take time
     local start_time=$(date +%s.%N)
     local response
-    if response=$(api_request "context/complete?identifier=ParseFile&type=Method&depth=3"); then
+    if response=$(api_request "context/complete?identifier=ProcessFileChangesAsync&type=Method&depth=3"); then
         local end_time=$(date +%s.%N)
         local duration=$(echo "$end_time - $start_time" | bc -l)
         local duration_int=$(printf "%.0f" "$duration")

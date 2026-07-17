@@ -46,7 +46,7 @@ Some current mechanisms are transitional:
 
 | Current mechanism | Disposition |
 | --- | --- |
-| `ILanguageParser` | Keep temporarily for tests/adapters; replace as Core's extension seam. |
+| `ILanguageParser` | Removed (July 2026, .NET 10 upgrade Phase 2). No production parser used it; the out-of-process worker protocol is now the sole extension seam. |
 | Concrete parser registration in `ProgramHelpers` | Replace with manifest/client registration. |
 | C# special cases and `OfType<CSharpParser>` in `GraphUpdateService` | Replace with worker capabilities and workspace sessions. |
 | Node process per TypeScript file | Replace with a persistent project-aware TypeScript worker. |
