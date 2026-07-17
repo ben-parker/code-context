@@ -190,20 +190,24 @@ internal sealed class CSharpWorkerHost(JsonRpcConnection connection)
     }
 
     /// <summary>
-    /// Whole-workspace (index/reset) path: walks everything, seeds the per-file hash
-    /// baseline, and streams the complete workspace replacement as one or more
-    /// analysis/delta notifications, all flagged <c>replacesWorkspace</c>.
+    /// Whole-workspace (index/reset) path: walks everything, streams the complete
+    /// workspace replacement as one or more analysis/delta notifications (all flagged
+    /// <c>replacesWorkspace</c>), then seeds the per-file hash baseline.
     /// </summary>
     private async Task<int> PublishFullAsync(
         CSharpWorkspaceAnalyzer workspace, string workspaceId, long generation, long requestId, CancellationToken ct)
     {
         var analysis = workspace.Analyze(ct);
-        workspace.SeedFactHashes(analysis);
-        return await PublishAsync(
+        var emitted = await PublishAsync(
             workspaceId, generation, requestId,
             analysis.Nodes, analysis.Edges,
             replacesWorkspace: true, replacesFiles: [],
             analysis.Diagnostics, ct);
+        // Seed only after every chunk was sent, mirroring the incremental path's
+        // commit-after-send rule: a cancelled mid-index emission must not leave the
+        // hash baseline claiming facts the host never received.
+        workspace.SeedFactHashes(analysis);
+        return emitted;
     }
 
     /// <summary>

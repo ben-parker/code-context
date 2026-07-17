@@ -18,6 +18,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 let ts;
 try {
@@ -198,6 +199,15 @@ class Workspace {
     constructor(rootPath) {
         this.rootPath = rootPath;
         this.files = new Map(); // canonicalKey -> { path, version }
+        // Per-file content hash of the facts last emitted for that file, keyed by
+        // canonicalKey (so lookups survive Windows casing) with the verbatim bucket path
+        // stored alongside. This is the sole record of "what the host currently holds per
+        // file": workspace/index reseeds it wholesale; each incremental applyChanges reads
+        // it to find the dirty buckets and commits the new hashes back. Its key set
+        // therefore equals the set of files whose facts are committed downstream, so a key
+        // present here with no current bucket is a removal — no separate drop-tracking is
+        // needed (mirrors the C# analyzer's _factHashes / PathComparer semantics).
+        this.factHashes = new Map(); // canonicalKey -> { hash: string, path: string }
         const loaded = loadCompilerOptions(rootPath);
         this.compilerOptions = loaded.options;
         this.configDiagnostic = loaded.diagnostic;
@@ -287,6 +297,79 @@ class Workspace {
             }
         }
         return touched;
+    }
+
+    /**
+     * Seeds the fact-hash map from a full (index/reset) analysis: every walked file's
+     * bucket hash becomes the baseline the next incremental apply diffs against. The
+     * whole-workspace path replaces the whole workspace downstream, so the previous map is
+     * discarded wholesale. Mirrors CSharpWorkspaceAnalyzer.SeedFactHashes.
+     */
+    seedFactHashes(buckets) {
+        this.factHashes = new Map();
+        for (const bucket of buckets) {
+            this.factHashes.set(canonicalKey(bucket.path), {
+                hash: computeBucketHash(bucket),
+                path: bucket.path,
+            });
+        }
+    }
+
+    /**
+     * Diffs freshly walked buckets against the stored hash map and produces the scoped
+     * incremental emission WITHOUT mutating the map. Dirty = buckets whose hash differs
+     * from (or is absent in) the stored map; removed = stored keys with no current bucket
+     * (deleted files, renamed old paths, files dropped by workspace/open's syncApproved,
+     * unreadable files). The emission carries the dirty buckets' facts (concatenated in
+     * bucket order) and replacesFiles = dirty ∪ removed as verbatim paths. Commit the
+     * pending hashes only after every chunk has been accepted (see commitIncremental), so
+     * a failed send leaves the map untouched and the next batch re-diffs.
+     * Mirrors CSharpWorkspaceAnalyzer.BuildIncrementalEmission.
+     */
+    buildIncrementalEmission(buckets) {
+        const nodes = [];
+        const edges = [];
+        const replacesFiles = [];
+        const pendingHashes = new Map(); // canonicalKey -> { hash, path }
+        const currentKeys = new Set();
+
+        for (const bucket of buckets) {
+            const key = canonicalKey(bucket.path);
+            currentKeys.add(key);
+            const hash = computeBucketHash(bucket);
+            pendingHashes.set(key, { hash, path: bucket.path });
+            const stored = this.factHashes.get(key);
+            if (!stored || stored.hash !== hash) {
+                nodes.push(...bucket.nodes);
+                edges.push(...bucket.edges);
+                replacesFiles.push(bucket.path);
+            }
+        }
+
+        const removedKeys = [];
+        for (const [key, value] of this.factHashes) {
+            if (!currentKeys.has(key)) {
+                removedKeys.push(key);
+                replacesFiles.push(value.path);
+            }
+        }
+
+        return { nodes, edges, replacesFiles, pendingHashes, removedKeys };
+    }
+
+    /**
+     * Commits an emission's hash changes: stores the added/changed buckets' new hashes and
+     * deletes the removed files' entries, so the map again mirrors exactly the facts the
+     * host now holds. Call only after every chunk has been accepted.
+     * Mirrors CSharpWorkspaceAnalyzer.CommitIncremental.
+     */
+    commitIncremental(emission) {
+        for (const [key, value] of emission.pendingHashes) {
+            this.factHashes.set(key, value);
+        }
+        for (const key of emission.removedKeys) {
+            this.factHashes.delete(key);
+        }
     }
 }
 
@@ -712,32 +795,140 @@ function analyzeFile(workspace, workspaceId, program, checker, fileName, diagnos
 // Delta publication
 // ---------------------------------------------------------------------------
 
-async function publishDeltas(requestId, workspaceId, generation, workspace, filesToEmit, replacesWorkspace, replacesFiles, token) {
+/**
+ * Maps each fact id to the ordinally smallest bucket path that emits it. Cross-file
+ * duplicate ids are impossible in this worker (node ids and edge source ids both embed the
+ * WALKED file's fileRel, so two files never mint the same id), but the pass is kept as a
+ * defensive mirror of the C# analyzer and to make within-bucket dedup share one code path.
+ * The winner is a pure function of the file SET (never edit order), so incremental
+ * emission of only the dirty buckets can never diverge from a fresh whole-tree scan.
+ */
+function computeOwners(buckets, factsOf, idOf) {
+    const owner = new Map();
+    for (const bucket of buckets) {
+        for (const fact of factsOf(bucket)) {
+            const key = idOf(fact);
+            const current = owner.get(key);
+            if (current === undefined || bucket.path < current) {
+                owner.set(key, bucket.path);
+            }
+        }
+    }
+    return owner;
+}
+
+/**
+ * Keeps only the facts this bucket canonically owns; among within-bucket duplicates of an
+ * id (declaration merging — e.g. two `interface Shared` in one file mint the same node id),
+ * keeps the LAST occurrence. Returns the original array untouched when nothing was dropped
+ * (the overwhelmingly common no-duplicates case). Mirrors CSharpWorkspaceAnalyzer.FilterOwned.
+ */
+function filterOwned(items, idOf, owner, bucketPath) {
+    const lastIndex = new Map();
+    for (let i = 0; i < items.length; i++) {
+        lastIndex.set(idOf(items[i]), i);
+    }
+    const kept = [];
+    for (let i = 0; i < items.length; i++) {
+        const key = idOf(items[i]);
+        if (lastIndex.get(key) === i && owner.get(key) === bucketPath) {
+            kept.push(items[i]);
+        }
+    }
+    return kept.length === items.length ? items : kept;
+}
+
+/**
+ * Deterministic, length-and-type-framed serialization of any emitted fact value. Every
+ * string carries a length prefix, every object emits sorted keys, and each type gets a
+ * distinct tag, so two distinct fact sets can never collide by field-boundary ambiguity.
+ * This is the JS analog of the C# FactHasher's null/present + length framing.
+ */
+function stableSerialize(value) {
+    if (value === undefined) return 'u';
+    if (value === null) return 'n';
+    if (typeof value === 'string') return `s${value.length}:${value}`;
+    if (typeof value === 'number') return `i${value}`;
+    if (typeof value === 'boolean') return `b${value ? 1 : 0}`;
+    if (Array.isArray(value)) {
+        return `a${value.length}[${value.map(stableSerialize).join(',')}]`;
+    }
+    const keys = Object.keys(value).sort();
+    return `o${keys.length}{${keys.map(k => `${stableSerialize(k)}=${stableSerialize(value[k])}`).join(',')}}`;
+}
+
+/**
+ * SHA-256 content hash of one file's (deduped) bucket, stable across processes. Nodes are
+ * sorted by id and edges by id first so the hash is independent of walk order, then every
+ * emission-affecting field of each fact is folded in with unambiguous framing. Hex string.
+ * Mirrors CSharpWorkspaceAnalyzer.ComputeBucketHash.
+ */
+function computeBucketHash(bucket) {
+    const byId = (a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+    const nodes = [...bucket.nodes].sort(byId);
+    const edges = [...bucket.edges].sort(byId);
+    const hash = crypto.createHash('sha256');
+    hash.update(`N${nodes.length};`);
+    for (const node of nodes) hash.update(`${stableSerialize(node)};`);
+    hash.update(`E${edges.length};`);
+    for (const edge of edges) hash.update(`${stableSerialize(edge)};`);
+    return hash.digest('hex');
+}
+
+/**
+ * Walks the whole workspace into per-file buckets (cross-file binding correctness requires
+ * the full walk; the language service makes unchanged-file re-walks cheap), then applies
+ * duplicate-id canonicalization so the deduped buckets feed BOTH the flat whole-workspace
+ * emission and the per-file hashes by construction. Returns { buckets, diagnostics }.
+ */
+async function analyzeWorkspace(workspace, workspaceId, token) {
     const program = workspace.service.getProgram();
     const checker = program.getTypeChecker();
 
-    const nodes = [];
-    const edges = [];
     const diagnostics = [];
     if (workspace.configDiagnostic) {
         diagnostics.push(workspace.configDiagnostic);
     }
-    for (const file of filesToEmit) {
+
+    const rawBuckets = [];
+    for (const file of workspace.filePaths()) {
         throwIfCancelled(token);
+        let result;
         try {
-            const result = analyzeFile(workspace, workspaceId, program, checker, file, diagnostics);
-            nodes.push(...result.nodes);
-            edges.push(...result.edges);
+            result = analyzeFile(workspace, workspaceId, program, checker, file, diagnostics);
         } catch (error) {
             diagnostics.push({
                 filePath: file,
                 severity: 'warning',
                 message: `File analysis failed and was skipped: ${error.message}`,
             });
+            result = { nodes: [], edges: [] };
         }
+        // bucket.path is the verbatim filePaths() entry — the same string analyzeFile
+        // stamped on each node's filePath and the same string ReplacesFiles must carry.
+        rawBuckets.push({ path: file, nodes: result.nodes, edges: result.edges });
         await breathe(); // let $/cancel land between files
     }
 
+    const nodeOwner = computeOwners(rawBuckets, b => b.nodes, n => n.id);
+    const edgeOwner = computeOwners(rawBuckets, b => b.edges, e => e.id);
+
+    const buckets = rawBuckets.map(raw => ({
+        path: raw.path,
+        nodes: filterOwned(raw.nodes, n => n.id, nodeOwner, raw.path),
+        edges: filterOwned(raw.edges, e => e.id, edgeOwner, raw.path),
+    }));
+
+    return { buckets, diagnostics };
+}
+
+/**
+ * Streams a node/edge set as one or more analysis/delta notifications, chunked at
+ * MAX_ITEMS_PER_DELTA. Always emits at least one delta (the supervisor requires ≥1 per
+ * mutation), so an empty incremental batch still sends a single terminal delta carrying
+ * only its replacesFiles. Diagnostics ride on the first chunk only.
+ */
+async function emitDeltas(requestId, workspaceId, generation, nodes, edges, replacesWorkspace, replacesFiles, diagnostics, token) {
     const chunk = (items, size) => {
         const chunks = [];
         for (let offset = 0; offset < items.length; offset += size) {
@@ -826,9 +1017,22 @@ handlers.set('workspace/index', async (id, params, token) => {
     const index = requireParams(params);
     const workspace = getWorkspace(index.workspaceId);
     workspace.replaceFiles(index.files || []);
-    const deltasEmitted = await publishDeltas(
-        id, index.workspaceId, index.generation, workspace,
-        workspace.filePaths(), true, [], token);
+    // Whole-workspace (index/reset) path: walk everything, seed the per-file hash
+    // baseline, and replace the whole workspace (replacesWorkspace:true, empty
+    // replacesFiles). The deduped buckets feed both the flat emission and the seed.
+    const { buckets, diagnostics } = await analyzeWorkspace(workspace, index.workspaceId, token);
+    const nodes = [];
+    const edges = [];
+    for (const bucket of buckets) {
+        nodes.push(...bucket.nodes);
+        edges.push(...bucket.edges);
+    }
+    const deltasEmitted = await emitDeltas(
+        id, index.workspaceId, index.generation, nodes, edges, true, [], diagnostics, token);
+    // Seed only after every chunk was sent, mirroring the incremental path's
+    // commit-after-send rule: a cancelled mid-index emission must not leave the
+    // hash baseline claiming facts the host never received.
+    workspace.seedFactHashes(buckets);
     return {
         workspaceId: index.workspaceId,
         generation: index.generation,
@@ -841,13 +1045,21 @@ handlers.set('workspace/applyChanges', async (id, params, token) => {
     const apply = requireParams(params);
     const workspace = getWorkspace(apply.workspaceId);
     workspace.applyChanges(apply.changes || []);
-    // A one-file edit can change semantic resolution in untouched dependents. The
-    // language service retains and reuses their SourceFiles, but normalized facts
-    // must be re-walked as a workspace replacement so stale cross-file edges cannot
-    // survive. This does not respawn Node or reparse unchanged snapshots.
-    const deltasEmitted = await publishDeltas(
-        id, apply.workspaceId, apply.generation, workspace,
-        workspace.filePaths(), true, [], token);
+    // Incremental path: re-walk the whole workspace for cross-file binding correctness
+    // (a one-file edit can change semantic resolution in untouched dependents — the
+    // language service reuses their SourceFiles, so this does not respawn Node or reparse
+    // unchanged snapshots), then hash-diff the freshly walked buckets against the last
+    // emission and send ONLY the dirty buckets' facts, scoped to dirty ∪ removed
+    // (replacesWorkspace:false, verbatim replacesFiles). Cross-file rebinds surface for
+    // free: an untouched dependent whose edge target changed hashes differently and joins
+    // the dirty set. The hash map is committed only after every chunk is accepted, so a
+    // failed send cannot desync it.
+    const { buckets, diagnostics } = await analyzeWorkspace(workspace, apply.workspaceId, token);
+    const emission = workspace.buildIncrementalEmission(buckets);
+    const deltasEmitted = await emitDeltas(
+        id, apply.workspaceId, apply.generation,
+        emission.nodes, emission.edges, false, emission.replacesFiles, diagnostics, token);
+    workspace.commitIncremental(emission);
     return {
         workspaceId: apply.workspaceId,
         generation: apply.generation,
