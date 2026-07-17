@@ -105,8 +105,15 @@ function Wait-Until([scriptblock]$Condition, [datetime]$Deadline, [int]$PollMs, 
 
 function Get-CommittedCount([string]$LogPath) {
     if (-not (Test-Path -LiteralPath $LogPath -PathType Leaf)) { return 0 }
-    # -Raw + regex count: the log is appended concurrently; tolerate partial last line.
-    $text = [IO.File]::ReadAllText($LogPath)
+    # Shared read: the host keeps the log open for append; tolerate partial last line.
+    $stream = [IO.FileStream]::new($LogPath, [IO.FileMode]::Open, [IO.FileAccess]::Read,
+        [IO.FileShare]([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+    try {
+        $reader = [IO.StreamReader]::new($stream)
+        $text = $reader.ReadToEnd()
+    } finally {
+        $stream.Dispose()
+    }
     return ([regex]::Matches($text, 'atomically committed generation')).Count
 }
 
