@@ -1,6 +1,6 @@
 ---
 name: code-context
-description: Query a local CodeContext graph or parser-native syntax tree for callers, implementations, dependencies, blast radius, tests, ambiguous symbols, or exact syntax.
+description: Use BEFORE grep/Read whenever the question is about a symbol's relationships — who calls, implements, or depends on it, the blast radius of changing or deleting it, which tests cover it — or exact syntax structure. Grep finds text matches; this answers dependency questions from a live index in one query.
 ---
 
 # CodeContext
@@ -11,10 +11,14 @@ exact parser structure after locating the symbol or file.
 
 ## Connect
 
-Run `codecontext list --json` and choose the instance whose `rootPath` contains the
-working directory. If absent, run `codecontext start --detach --path <repo-root>`.
-Before trusting graph results, poll `http://localhost:<port>/api/status` until
-`indexing.status` is `ready`; confirm the instance ID, relevant parser is ready, and
+Fast path — usually two commands against an already-running instance:
+`codecontext list --json`, then
+`curl -s "http://localhost:<port>/api/context/complete?identifier=X"`.
+
+Choose the instance whose `rootPath` contains the working directory. If absent, run
+`codecontext start --detach --path <repo-root>`. The readiness checks below matter only
+for a fresh instance or when results look wrong: poll `http://localhost:<port>/api/status`
+until `indexing.status` is `ready`; confirm the instance ID, relevant parser is ready, and
 `api.contractVersion == 1`.
 
 ## Query

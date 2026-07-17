@@ -8,7 +8,7 @@ The `codecontext` MCP tool, when connected, exposes syntax-tree and dependency-g
 
 - **The `codecontext` tool may be running on the same source code you are being asked to modify.**
 - If the tool gives unexpected or incorrect results, it may be because **the tool itself has a bug** — that's likely what you're here to fix.
-- If the `codecontext` MCP tool is available, use it as your **first step** for investigations: `codecontext.GetCompleteContext(identifier="MyClassName")`. Fall back to `Read`/`Grep` for implementation detail once you know which files matter, and use `codecontext.GetStatus()` to check indexing health if a search returns unexpectedly empty results.
+- Use the `code-context` **skill** (or the `codecontext` MCP tools when connected) as your **first step** for investigations: `codecontext.GetCompleteContext(identifier="MyClassName")` via MCP, or the skill's REST flow otherwise. Fall back to `Read`/`Grep` for implementation detail once you know which files matter, and use `codecontext.GetStatus()` to check indexing health if a search returns unexpectedly empty results.
 
 ## Commands
 
