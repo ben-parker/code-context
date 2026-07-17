@@ -1289,27 +1289,13 @@ namespace CodeContext.Core.Services
             return matchingNodes.ToList();
         }
 
+        // File-path matching lives in the shared FilePathMatcher so the in-memory adjacency
+        // index (GraphAdjacency.NodesByFilePath) resolves paths with byte-identical semantics.
         private static bool FilePathMatches(string? indexedPath, string requestedPath)
-        {
-            if (string.IsNullOrWhiteSpace(indexedPath) || string.IsNullOrWhiteSpace(requestedPath))
-                return false;
-
-            var normalizedIndexed = NormalizePath(indexedPath);
-            var normalizedRequested = NormalizePath(requestedPath);
-
-            if (Path.IsPathRooted(requestedPath))
-            {
-                return string.Equals(
-                    normalizedIndexed, normalizedRequested, StringComparison.OrdinalIgnoreCase);
-            }
-
-            return string.Equals(normalizedIndexed, normalizedRequested, StringComparison.OrdinalIgnoreCase)
-                || normalizedIndexed.EndsWith(
-                    "/" + normalizedRequested, StringComparison.OrdinalIgnoreCase);
-        }
+            => FilePathMatcher.Matches(indexedPath, requestedPath);
 
         private static string NormalizePath(string path)
-            => path.Replace('\\', '/').TrimEnd('/');
+            => FilePathMatcher.Normalize(path);
 
         private async Task<List<string>> GetFileDependenciesAsync(string filePath)
             => await GetSemanticFileRelationshipsAsync(filePath, outgoing: true);

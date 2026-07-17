@@ -1,5 +1,7 @@
 using System.Collections.Concurrent;
+using System.Collections.Frozen;
 using CodeContext.Core.Models;
+using CodeContext.Core.Services;
 
 namespace CodeContext.Core.Repositories.InMemory
 {
@@ -32,6 +34,9 @@ namespace CodeContext.Core.Repositories.InMemory
 
         private GraphStatistics? _cachedStatistics;
         private long _cachedStatisticsVersion = -1;
+
+        private GraphAdjacency? _cachedAdjacency;
+        private long _cachedAdjacencyVersion = -1;
 
         public ConcurrentDictionary<string, CodeNode> Nodes => _state.Nodes;
         public ConcurrentDictionary<string, string> Identifiers => _state.Identifiers;
@@ -228,6 +233,74 @@ namespace CodeContext.Core.Repositories.InMemory
             _cachedStatistics = statistics;
             Interlocked.Exchange(ref _cachedStatisticsVersion, version);
             return statistics;
+        }
+
+        /// <summary>
+        /// Returns a version-stamped source/target/file-path adjacency snapshot of the current
+        /// committed state, rebuilt in one O(N+E) pass only when the mutation version changes.
+        /// Same benign rebuild race as <see cref="GetStatistics"/>: concurrent callers at the same
+        /// version may each build once, but every returned <see cref="GraphAdjacency"/> is a complete,
+        /// internally consistent view of a single committed <see cref="GraphState"/>.
+        /// </summary>
+        internal GraphAdjacency GetAdjacency()
+        {
+            var version = Interlocked.Read(ref _version);
+            var cached = _cachedAdjacency;
+            if (cached is not null && Interlocked.Read(ref _cachedAdjacencyVersion) == version)
+            {
+                return cached;
+            }
+
+            var state = _state;
+            var nodes = new List<CodeNode>(state.Nodes.Count);
+            var edges = new List<CodeEdge>(state.Edges.Count);
+            var bySource = new Dictionary<string, List<CodeEdge>>(StringComparer.Ordinal);
+            var byTarget = new Dictionary<string, List<CodeEdge>>(StringComparer.Ordinal);
+            var byFilePath = new Dictionary<string, List<CodeNode>>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var node in state.Nodes.Values)
+            {
+                nodes.Add(node);
+                if (!string.IsNullOrWhiteSpace(node.FilePath))
+                {
+                    var key = FilePathMatcher.Normalize(node.FilePath);
+                    if (!byFilePath.TryGetValue(key, out var bucket))
+                        byFilePath[key] = bucket = new List<CodeNode>();
+                    bucket.Add(node);
+                }
+            }
+
+            foreach (var edge in state.Edges.Values)
+            {
+                edges.Add(edge);
+                if (edge.SourceId is not null)
+                {
+                    if (!bySource.TryGetValue(edge.SourceId, out var bucket))
+                        bySource[edge.SourceId] = bucket = new List<CodeEdge>();
+                    bucket.Add(edge);
+                }
+                if (edge.TargetId is not null)
+                {
+                    if (!byTarget.TryGetValue(edge.TargetId, out var bucket))
+                        byTarget[edge.TargetId] = bucket = new List<CodeEdge>();
+                    bucket.Add(edge);
+                }
+            }
+
+            var adjacency = new GraphAdjacency
+            {
+                Nodes = nodes,
+                Edges = edges,
+                EdgesBySource = bySource.ToFrozenDictionary(
+                    entry => entry.Key, entry => entry.Value.ToArray(), StringComparer.Ordinal),
+                EdgesByTarget = byTarget.ToFrozenDictionary(
+                    entry => entry.Key, entry => entry.Value.ToArray(), StringComparer.Ordinal),
+                NodesByFilePath = byFilePath.ToFrozenDictionary(
+                    entry => entry.Key, entry => entry.Value.ToArray(), StringComparer.OrdinalIgnoreCase),
+            };
+            _cachedAdjacency = adjacency;
+            Interlocked.Exchange(ref _cachedAdjacencyVersion, version);
+            return adjacency;
         }
 
         private GraphState BuildNextState(
