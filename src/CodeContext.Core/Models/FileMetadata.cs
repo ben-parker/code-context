@@ -5,7 +5,6 @@ public class FileMetadata
     public string FilePath { get; set; } = string.Empty;
     public DateTime LastModified { get; set; }
     public DateTime LastScanned { get; set; }
-    public string FileHash { get; set; } = string.Empty;
     public FileProcessingStatus Status { get; set; }
     public string? ErrorMessage { get; set; }
 }

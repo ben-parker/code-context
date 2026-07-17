@@ -288,7 +288,7 @@ public sealed class GraphContractTests : IDisposable
         await File.WriteAllTextAsync(Path.Combine(_tempDir, "main.ts"), TypeScriptMainModule);
 
         await using var pipeline = new CSharpWorkerPipeline(
-            _tempDir, parsers: null, TypeScriptWorkerProtocolTests.TypeScriptWorkerRegistration());
+            _tempDir, TypeScriptWorkerProtocolTests.TypeScriptWorkerRegistration());
         await pipeline.GraphUpdateService.PerformInitialScanAsync(_tempDir, null, CancellationToken.None);
 
         var edges = await pipeline.RepositoryFactory.CreateEdgeRepository().GetAllAsync();

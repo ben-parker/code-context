@@ -17,7 +17,7 @@ public class TypeScriptWorkerProtocolTests : IAsyncLifetime
 
     public Task InitializeAsync()
     {
-        _pipeline = new CSharpWorkerPipeline(_tempDir, parsers: null, TypeScriptWorkerRegistration());
+        _pipeline = new CSharpWorkerPipeline(_tempDir, TypeScriptWorkerRegistration());
         return Task.CompletedTask;
     }
 

@@ -14,7 +14,6 @@ public class StatusService : IStatusService
     private readonly ICodeEdgeRepository _edgeRepository;
     private readonly IFileMetadataRepository _fileMetadataRepository;
     private readonly IRepositoryFactory _repositoryFactory;
-    private readonly IEnumerable<ILanguageParser> _parsers;
     private readonly CodeContextOptions _options;
     private readonly IScanStateService _scanState;
     private readonly IParserSessionRegistry _sessionRegistry;
@@ -27,7 +26,6 @@ public class StatusService : IStatusService
         ICodeEdgeRepository edgeRepository,
         IFileMetadataRepository fileMetadataRepository,
         IRepositoryFactory repositoryFactory,
-        IEnumerable<ILanguageParser> parsers,
         IOptions<CodeContextOptions> options,
         IScanStateService scanState,
         IParserSessionRegistry sessionRegistry,
@@ -39,7 +37,6 @@ public class StatusService : IStatusService
         _edgeRepository = edgeRepository;
         _fileMetadataRepository = fileMetadataRepository;
         _repositoryFactory = repositoryFactory;
-        _parsers = parsers;
         _options = options.Value;
         _scanState = scanState;
         _sessionRegistry = sessionRegistry;
@@ -239,36 +236,15 @@ public class StatusService : IStatusService
 
     private ParserStatusDto GetParserStatus()
     {
-        // Discovered from the registered parsers, never hard-coded. A parser whose
-        // external tooling is missing reports "unavailable" with a remediation message
-        // so clients (the agent skill) can distinguish "no references" from "not parsed".
+        // Parser health is discovered entirely from worker session reports, never
+        // hard-coded. Out-of-process workers appear only here, so their sessions feed
+        // the available/enabled lists. A worker whose external tooling is missing
+        // reports "unavailable" so clients (the agent skill) can distinguish "no
+        // references" from "not parsed".
         var enabled = new List<string>();
         var available = new List<string>();
         var status = new Dictionary<string, string>();
 
-        foreach (var parser in _parsers)
-        {
-            var diagnostics = parser as IParserDiagnostics;
-            var name = diagnostics?.DisplayName ?? DeriveParserName(parser);
-            available.Add(name);
-
-            if (diagnostics is { IsAvailable: false })
-            {
-                status[name] = diagnostics.UnavailableReason is { } reason
-                    ? $"unavailable: {reason}"
-                    : "unavailable";
-            }
-            else
-            {
-                enabled.Add(name);
-                status[name] = "active";
-            }
-        }
-
-        // Session reports (worker supervisors and in-process parse outcomes) are the
-        // richer source of truth: where one exists it overrides the coarse
-        // active/unavailable default above. Out-of-process workers appear only here,
-        // so their sessions also feed the available/enabled lists.
         var snapshots = _sessionRegistry.GetSnapshots();
         var sessions = new List<ParserSessionDto>(snapshots.Count);
         foreach (var session in snapshots)
@@ -310,12 +286,6 @@ public class StatusService : IStatusService
 
     private static string ToCamelCase(string value)
         => value.Length == 0 ? value : char.ToLowerInvariant(value[0]) + value[1..];
-
-    private static string DeriveParserName(ILanguageParser parser)
-    {
-        var name = parser.GetType().Name;
-        return name.EndsWith("Parser", StringComparison.Ordinal) ? name[..^"Parser".Length] : name;
-    }
 
     private ApiStatusDto GetApiStatus()
     {

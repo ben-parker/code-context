@@ -72,10 +72,9 @@ public static class ProgramHelpers
             options.IdleTimeoutMinutes = idleTimeoutMinutes;
         });
 
-        // No in-process language parsers remain: C# and TypeScript both run
-        // out-of-process. The worker catalog below discovers workers/<name>/ next to
-        // the host binary and routes their extensions over the parser protocol.
-        // (ILanguageParser stays as the seam for tests and future in-process adapters.)
+        // All languages are parsed out-of-process: the worker catalog below discovers
+        // workers/<name>/ next to the host binary and routes their extensions over the
+        // parser protocol. There is no in-process parser seam.
 
         // Register services
         services.AddSingleton<IParserSessionRegistry, ParserSessionRegistry>();

@@ -115,7 +115,6 @@ public record FileMetadataDto(
     [property: JsonPropertyName("file_path")] string FilePath,
     [property: JsonPropertyName("last_modified")] string LastModified,
     [property: JsonPropertyName("last_scanned")] string LastScanned,
-    [property: JsonPropertyName("file_hash")] string FileHash,
     [property: JsonPropertyName("status")] string Status,
     [property: JsonPropertyName("error_message")] string? ErrorMessage
 );

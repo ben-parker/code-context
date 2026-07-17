@@ -31,7 +31,6 @@ public sealed class CSharpWorkerPipeline : IAsyncDisposable
 
     public CSharpWorkerPipeline(
         string rootPath,
-        IEnumerable<ILanguageParser>? parsers = null,
         params RegisteredWorker[] additionalWorkers)
     {
         RepositoryFactory = new InMemoryRepositoryFactory(NullLogger<InMemoryRepositoryFactory>.Instance);
@@ -52,11 +51,9 @@ public sealed class CSharpWorkerPipeline : IAsyncDisposable
 
         GraphUpdateService = new GraphUpdateService(
             RepositoryFactory,
-            parsers ?? [],
             options,
             NullLogger<GraphUpdateService>.Instance,
             FileMetadataRepository,
-            SessionRegistry,
             WorkerService);
     }
 

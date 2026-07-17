@@ -13,8 +13,8 @@ namespace CodeContext.Core.Workers;
 /// </summary>
 public interface ILanguageWorkerService
 {
-    /// <summary>Extensions owned by a discovered worker (routed via the protocol
-    /// instead of an in-process <see cref="ILanguageParser"/>).</summary>
+    /// <summary>Extensions owned by a discovered worker (routed to the worker process
+    /// over the parser protocol).</summary>
     IReadOnlyCollection<string> OwnedExtensions { get; }
 
     bool TryGetParserForExtension(string extension, out string parserId);

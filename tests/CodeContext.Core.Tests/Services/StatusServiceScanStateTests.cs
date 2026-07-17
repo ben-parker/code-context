@@ -18,10 +18,8 @@ namespace CodeContext.Core.Tests.Services
         private readonly IRepositoryFactory _repositoryFactory = Substitute.For<IRepositoryFactory>();
         private readonly IScanStateService _scanState = Substitute.For<IScanStateService>();
 
-        // A stand-in in-process parser named "CSharp": status discovery only reads
-        // parser metadata (the real C# parser now runs out-of-process and reports via
-        // the session registry instead).
-        private readonly List<ILanguageParser> _parsers = new() { new StubCSharpParser() };
+        // Parser health is discovered entirely from worker session reports; the real
+        // parsers run out-of-process and report through this registry.
         private readonly ParserSessionRegistry _sessionRegistry = new();
 
         private StatusService CreateService(
@@ -36,7 +34,7 @@ namespace CodeContext.Core.Tests.Services
             var options = Options.Create(new CodeContextOptions { RootPath = "/tmp/repo" });
             return new StatusService(
                 _nodeRepository, _edgeRepository, _fileMetadataRepository,
-                _repositoryFactory, _parsers, options, _scanState, _sessionRegistry,
+                _repositoryFactory, options, _scanState, _sessionRegistry,
                 apiMetrics ?? new ApiMetrics(), applicationStartTime: applicationStartTime);
         }
 
@@ -148,34 +146,6 @@ namespace CodeContext.Core.Tests.Services
         }
 
         [Fact]
-        public async Task GetStatusAsync_ParserStatus_ComesFromRegisteredParsers()
-        {
-            _scanState.Phase.Returns(ScanPhase.Ready);
-
-            var status = await CreateService().GetStatusAsync();
-
-            // Discovered, not hard-coded: only the registered C# parser appears, and
-            // the historical phantom "Python" entry is gone.
-            Assert.Contains("CSharp", status.Parsers.Available);
-            Assert.DoesNotContain("Python", status.Parsers.Available);
-            Assert.Equal("active", status.Parsers.Status["CSharp"]);
-        }
-
-        [Fact]
-        public async Task GetStatusAsync_UnavailableParser_ReportsRemediation()
-        {
-            _scanState.Phase.Returns(ScanPhase.Ready);
-            _parsers.Add(new FakeUnavailableParser());
-
-            var status = await CreateService().GetStatusAsync();
-
-            Assert.Contains("Fake", status.Parsers.Available);
-            Assert.DoesNotContain("Fake", status.Parsers.Enabled);
-            Assert.StartsWith("unavailable", status.Parsers.Status["Fake"]);
-            Assert.Contains("install the fake runtime", status.Parsers.Status["Fake"]);
-        }
-
-        [Fact]
         public async Task GetStatusAsync_NoSessionReports_OmitsSessions()
         {
             _scanState.Phase.Returns(ScanPhase.Ready);
@@ -201,9 +171,9 @@ namespace CodeContext.Core.Tests.Services
             Assert.Equal("csharp", session.ParserId);
             Assert.Equal("failed", session.State);
             Assert.Contains("boom", session.LastError);
-            // The session state overrides the coarse "active" default for that parser.
-            Assert.StartsWith("failed", status.Parsers.Status["CSharp"]);
-            Assert.Contains("boom", status.Parsers.Status["CSharp"]);
+            // With no in-process parsers, status is keyed by the worker's parserId.
+            Assert.StartsWith("failed", status.Parsers.Status["csharp"]);
+            Assert.Contains("boom", status.Parsers.Status["csharp"]);
         }
 
         [Fact]
@@ -220,7 +190,7 @@ namespace CodeContext.Core.Tests.Services
             var session = Assert.Single(status.Parsers.Sessions!);
             Assert.Equal("ready", session.State);
             Assert.Equal("boom", session.LastError);
-            Assert.Equal("ready", status.Parsers.Status["CSharp"]);
+            Assert.Equal("ready", status.Parsers.Status["csharp"]);
         }
 
         [Fact]
@@ -238,26 +208,6 @@ namespace CodeContext.Core.Tests.Services
             Assert.Equal(4242, session.Pid);
             Assert.Equal(1, session.ProtocolVersion);
             Assert.Equal("indexing", status.Parsers.Status["fake"]);
-        }
-
-        private sealed class StubCSharpParser : ILanguageParser, IParserDiagnostics
-        {
-            public string[] SupportedExtensions => [".cs"];
-            public string DisplayName => "CSharp";
-            public bool IsAvailable => true;
-            public string? UnavailableReason => null;
-            public CodeGraph ParseFile(string filePath, string content) => new();
-            public CodeGraph ParseFiles(Dictionary<string, string> fileContents) => new();
-        }
-
-        private sealed class FakeUnavailableParser : ILanguageParser, IParserDiagnostics
-        {
-            public string[] SupportedExtensions => [".fake"];
-            public string DisplayName => "Fake";
-            public bool IsAvailable => false;
-            public string? UnavailableReason => "install the fake runtime";
-            public CodeGraph ParseFile(string filePath, string content) => new();
-            public CodeGraph ParseFiles(Dictionary<string, string> fileContents) => new();
         }
     }
 }

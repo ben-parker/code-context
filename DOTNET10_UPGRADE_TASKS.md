@@ -37,14 +37,14 @@ warm-up. Cold `--version`: 10 runs `61.5,62.4,62.5,63.2,63.5,66.8,67.9,79,80.6,8
   - Noted for Phase 3d+: MCP-mode stdout logging (pre-existing; observed on the old binary during the parity probe).
 
 ## Phase 2 — Remove in-process parser seam
-- [ ] Delete `ILanguageParser` + `IParserDiagnostics` (all implementers are test fakes — live-graph verified)
-- [ ] GraphUpdateService: delete `ProcessFileChangeOldWayAsync`, `UpdateGraphAsync`, `HandleFileDeletedAsync`, `ComputeFileHash`, `InProcessParserOutcomes`, `_parsers`; collapse fallback branches in `ProcessFileChangesAsync`/`PerformInitialScanCoreAsync`/`PerformResumableScanCoreAsync`
-- [ ] StatusService: remove `_parsers` loop + `DeriveParserName`
-- [ ] FileMetadata: remove `FileHash` (+ JSON context surface; confirm no REST DTO exposure)
-- [ ] DI: remove `IEnumerable<ILanguageParser>` plumbing (Api ProgramHelpers)
-- [ ] Tests: port surviving behaviors (scan-state aggregation, session reporting) to worker fixtures; delete legacy-only tests; mechanical CSharpWorkerTestSupport/StatusServiceScanStateTests updates
-- [ ] CLAUDE.md: rewrite parser-extensibility + fallback sections (workers only)
-- [ ] Verify: full suite + ExternalTooling; `/api/status` byte-identical; verify-publish edge kinds green
+- [x] Delete `ILanguageParser` + `IParserDiagnostics` (all implementers are test fakes — live-graph verified)
+- [x] GraphUpdateService: delete `ProcessFileChangeOldWayAsync`, `UpdateGraphAsync`, `HandleFileDeletedAsync`, `ComputeFileHash`, `InProcessParserOutcomes`, `_parsers`; collapse fallback branches in `ProcessFileChangesAsync`/`PerformInitialScanCoreAsync`/`PerformResumableScanCoreAsync` (scans only enumerate worker-owned extensions, so the "other files" branches were dead; also dropped the now-unused `IParserSessionRegistry` ctor param and the `!_parsers.Any()` guard in `RunReconciliationAsync`)
+- [x] StatusService: remove `_parsers` loop + `DeriveParserName` (parser health now sourced entirely from worker session reports)
+- [x] FileMetadata: remove `FileHash` (+ removed dead `file_hash` field from the never-emitted `FileMetadataDto`; no REST endpoint constructs it)
+- [x] DI: remove `IEnumerable<ILanguageParser>` plumbing (Api ProgramHelpers) — was comment-only; no registration existed
+- [x] Tests: deleted legacy-only ScanResilienceTests (6) + GraphUpdateSessionReportTests (2) + 2 in-process-parser StatusService tests; surviving behaviors already covered by worker fixtures (GraphUpdateServiceTests/LanguageWorkerServiceTests); mechanical CSharpWorkerTestSupport/StatusServiceScanStateTests + repo-test updates
+- [x] CLAUDE.md: rewrite parser-extensibility + fallback sections (workers only)
+- [x] Verify: full suite (386) + ExternalTooling (8) green; `/api/status` byte-identical (normalized diff); verify-publish win-x64 edge kinds green
 - [ ] Opus + Sonnet review; findings fixed
 
 ## Phase 3 — AOT-safety refactors (still JIT)

@@ -520,7 +520,6 @@ public class InMemoryFileMetadataRepositoryTests
             LastModified = lastModified ?? DateTime.Now.AddHours(-1),
             LastScanned = DateTime.Now,
             Status = status,
-            FileHash = "test-hash",
             ErrorMessage = status == FileProcessingStatus.Failed ? "Test error" : null
         };
     }

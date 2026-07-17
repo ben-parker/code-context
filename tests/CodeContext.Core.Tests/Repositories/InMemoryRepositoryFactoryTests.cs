@@ -261,8 +261,7 @@ public class InMemoryRepositoryFactoryTests
             FilePath = "/test/path.cs",
             LastModified = DateTime.Now,
             LastScanned = DateTime.Now,
-            Status = CodeContext.Core.Models.FileProcessingStatus.Completed,
-            FileHash = "test-hash"
+            Status = CodeContext.Core.Models.FileProcessingStatus.Completed
         };
 
         // Insert in first repository
