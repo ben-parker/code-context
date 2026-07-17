@@ -77,4 +77,97 @@ public sealed class RepositoryFileSelectorTests : IDisposable
 
         Assert.True(selector.IsIncluded(source));
     }
+
+    [Fact]
+    public void DeepPath_WithNoRules_IsIncludedAndEnumerated()
+    {
+        var deep = Write("a/b/c/d/e/f/g/keep.cs");
+        var selector = CreateSelector();
+
+        Assert.True(selector.IsIncluded(deep));
+        Assert.Contains(deep, selector.EnumerateIncludedFiles([".cs"]));
+    }
+
+    [Fact]
+    public void MandatoryDirectory_IsExcludedAtAnyDepth()
+    {
+        var nestedGit = Write("src/lib/.git/config.cs");
+        var nestedCodeContext = Write("a/b/.codecontext/cache.cs");
+        var ordinary = Write("a/b/ordinary.cs");
+        var selector = CreateSelector();
+
+        var files = selector.EnumerateIncludedFiles([".cs"]);
+        Assert.DoesNotContain(nestedGit, files);
+        Assert.DoesNotContain(nestedCodeContext, files);
+        Assert.Contains(ordinary, files);
+        Assert.False(selector.IsIncluded(nestedGit));
+        Assert.False(selector.IsIncluded(nestedCodeContext));
+    }
+
+    [Fact]
+    public void HiddenDotDirectory_NotMandatory_IsIncluded()
+    {
+        // Only .git/.codecontext are mandatory exclusions; other dotfiles/dotdirs are ordinary.
+        var dotDirFile = Write(".config/app.cs");
+        var dotFile = Write(".hidden.cs");
+        var selector = CreateSelector();
+
+        var files = selector.EnumerateIncludedFiles([".cs"]);
+        Assert.Contains(dotDirFile, files);
+        Assert.Contains(dotFile, files);
+    }
+
+    [Fact]
+    public void NestedIgnore_DeepNegationReincludesUnderAllowedParent()
+    {
+        Write(".gitignore", "*.log.cs\n");
+        Write("a/b/.gitignore", "!keep.log.cs\n");
+        var reincluded = Write("a/b/keep.log.cs");
+        var stillIgnored = Write("a/b/drop.log.cs");
+        var rootIgnored = Write("root.log.cs");
+        var selector = CreateSelector();
+
+        var files = selector.EnumerateIncludedFiles([".cs"]);
+        Assert.Contains(reincluded, files);
+        Assert.DoesNotContain(stillIgnored, files);
+        Assert.DoesNotContain(rootIgnored, files);
+    }
+
+    [Fact]
+    public void IgnoreRule_CaseSensitivity_MatchesPlatformPathSemantics()
+    {
+        Write(".gitignore", "Ignored.cs\n");
+        var lower = Write("ignored.cs");
+        var selector = CreateSelector();
+
+        // Windows path semantics are case-insensitive; Unix are case-sensitive.
+        if (OperatingSystem.IsWindows())
+            Assert.False(selector.IsIncluded(lower));
+        else
+            Assert.True(selector.IsIncluded(lower));
+    }
+
+    [Fact]
+    public void SymbolicLink_IsSkipped_WhenReparsePointsUnsupportedIsNoted()
+    {
+        var target = Write("realdir/target.cs");
+        var linkPath = Path.Combine(_root, "link");
+        try
+        {
+            Directory.CreateSymbolicLink(linkPath, Path.Combine(_root, "realdir"));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+        {
+            // Creating symlinks needs privilege/developer mode on Windows; behavior under
+            // reparse points is that they are skipped, but we cannot always create one to assert.
+            return;
+        }
+
+        var selector = CreateSelector();
+        var files = selector.EnumerateIncludedFiles([".cs"]);
+        // The real file is enumerated via its real path; the reparse-point link is skipped,
+        // so target.cs is never reached a second time through "link/target.cs".
+        Assert.Contains(target, files);
+        Assert.DoesNotContain(Path.Combine(linkPath, "target.cs"), files);
+    }
 }

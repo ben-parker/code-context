@@ -1,3 +1,5 @@
+using System.Collections.Frozen;
+using System.IO.Enumeration;
 using System.Text;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Options;
@@ -67,53 +69,51 @@ public sealed class RepositoryFileSelector : IRepositoryFileSelector
         Invalidate();
         var extensions = supportedExtensions
             .Select(extension => extension.StartsWith('.') ? extension : "." + extension)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            .ToFrozenSet(StringComparer.OrdinalIgnoreCase);
+        var extensionLookup = extensions.GetAlternateLookup<ReadOnlySpan<char>>();
         var files = new List<string>();
         var directories = new Stack<string>();
         directories.Push(_rootPath);
 
+        // AttributesToSkip = 0 so Hidden entries stay visible (only System/ReparsePoint are
+        // filtered below, matching the pre-existing contract); attributes are read straight
+        // from the directory enumeration, avoiding a per-entry File.GetAttributes syscall.
+        var enumerationOptions = new EnumerationOptions
+        {
+            RecurseSubdirectories = false,
+            IgnoreInaccessible = true,
+            AttributesToSkip = 0,
+            ReturnSpecialDirectories = false,
+        };
+
         while (directories.TryPop(out var directory))
         {
             EnsureRulesLoaded(directory);
-            IEnumerable<string> entries;
-            try
-            {
-                entries = Directory.EnumerateFileSystemEntries(directory);
-            }
-            catch (UnauthorizedAccessException)
-            {
-                continue;
-            }
-            catch (IOException)
-            {
-                continue;
-            }
+            var entries = new FileSystemEnumerable<ScannedEntry>(
+                directory,
+                static (ref FileSystemEntry entry) =>
+                    new ScannedEntry(entry.ToFullPath(), entry.IsDirectory, entry.Attributes),
+                enumerationOptions);
 
             try
             {
                 foreach (var entry in entries)
                 {
-                    FileAttributes attributes;
-                    try { attributes = File.GetAttributes(entry); }
-                    catch (UnauthorizedAccessException) { continue; }
-                    catch (IOException) { continue; }
-
-                    var isDirectory = attributes.HasFlag(FileAttributes.Directory);
-                    if (attributes.HasFlag(FileAttributes.ReparsePoint)
-                        || attributes.HasFlag(FileAttributes.System)
-                        || !IsIncluded(entry, isDirectory))
+                    if (entry.Attributes.HasFlag(FileAttributes.ReparsePoint)
+                        || entry.Attributes.HasFlag(FileAttributes.System)
+                        || !IsIncluded(entry.Path, entry.IsDirectory))
                     {
                         Interlocked.Increment(ref _ignoredPathCount);
                         continue;
                     }
 
-                    if (isDirectory)
+                    if (entry.IsDirectory)
                     {
-                        directories.Push(entry);
+                        directories.Push(entry.Path);
                     }
-                    else if (extensions.Contains(Path.GetExtension(entry)))
+                    else if (extensionLookup.Contains(Path.GetExtension(entry.Path.AsSpan())))
                     {
-                        files.Add(entry);
+                        files.Add(entry.Path);
                     }
                 }
             }
@@ -129,6 +129,8 @@ public sealed class RepositoryFileSelector : IRepositoryFileSelector
 
         return files;
     }
+
+    private readonly record struct ScannedEntry(string Path, bool IsDirectory, FileAttributes Attributes);
 
     public bool IsIncluded(string path, bool isDirectory = false)
     {
@@ -146,20 +148,34 @@ public sealed class RepositoryFileSelector : IRepositoryFileSelector
         if (relative == ".")
             return true;
 
-        var segments = relative.Split('/', StringSplitOptions.RemoveEmptyEntries);
-        var directorySegmentCount = isDirectory ? segments.Length : Math.Max(0, segments.Length - 1);
-        for (var index = 0; index < directorySegmentCount; index++)
+        // Span-based segment walk: O(depth) prefix slices instead of Split + an O(depth^2)
+        // string.Join-per-segment loop. Mandatory-name membership is checked span-first via
+        // the set's alternate lookup, so no per-segment string is allocated for the check.
+        var mandatory = _mandatoryNames.GetAlternateLookup<ReadOnlySpan<char>>();
+        var span = relative.AsSpan();
+        var start = 0;
+        while (true)
         {
-            if (_mandatoryNames.Contains(segments[index]))
-                return false;
+            var slash = relative.IndexOf('/', start);
+            var isLast = slash < 0;
+            var segmentEnd = isLast ? relative.Length : slash;
+            var segment = span[start..segmentEnd];
 
-            var directoryRelative = string.Join('/', segments.Take(index + 1));
-            if (!EvaluateRules(directoryRelative, isDirectory: true))
-                return false; // Git cannot re-include a file below an excluded directory.
+            if (!segment.IsEmpty)
+            {
+                if (mandatory.Contains(segment))
+                    return false; // covers every segment, leaf included
+
+                // Directory segments are every segment for a directory target, and every
+                // segment except the leaf for a file target.
+                if ((!isLast || isDirectory) && !EvaluateRules(relative[..segmentEnd], isDirectory: true))
+                    return false; // Git cannot re-include a file below an excluded directory.
+            }
+
+            if (isLast) break;
+            start = slash + 1;
         }
 
-        if (segments.Any(segment => _mandatoryNames.Contains(segment)))
-            return false;
         return EvaluateRules(relative, isDirectory);
     }
 
