@@ -39,7 +39,9 @@ const PARSER_VERSION = (() => {
         return '1.0.0';
     }
 })();
-const MAX_ITEMS_PER_DELTA = 1000;
+// Matches the C# worker's chunk size so both language pipelines have the same
+// streaming granularity.
+const MAX_ITEMS_PER_DELTA = 2000;
 
 const ErrorCodes = {
     InvalidParams: -32602,
