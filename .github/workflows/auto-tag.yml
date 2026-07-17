@@ -19,7 +19,14 @@ jobs:
   test:
     runs-on: windows-latest
     steps:
+      # fetch-depth: 0 because Nerdbank.GitVersioning runs in every project build
+      # (Directory.Build.props) and throws on shallow clones ("lacks the objects
+      # required to calculate version height"). release.yml's test job does the
+      # same for the same reason.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
