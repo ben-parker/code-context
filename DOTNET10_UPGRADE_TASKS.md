@@ -94,12 +94,12 @@ warm-up. Cold `--version`: 10 runs `61.5,62.4,62.5,63.2,63.5,66.8,67.9,79,80.6,8
     0 stdout pollution).
 
 ## Phase 4 — Host AOT + worker R2R + publish/CI
-- [ ] Host: PublishAot=true, OptimizationPreference=Speed, InvariantGlobalization (audit culture use first), StripSymbols non-Windows
-- [ ] Worker: PublishReadyToRun (RID-conditioned), TieredCompilation/TieredPGO explicit, workstation+concurrent GC
-- [ ] verify-publish.ps1: drop SingleFile/IncludeNativeLibraries flags; add no-managed-host-DLLs assertion
-- [ ] Delete roslyn-aot-test/; rewrite AOT_COMPATIBILITY.md
-- [ ] Prereq: VS 2022 Build Tools C++ (installing — verify before local publish)
-- [ ] Verify: verify-publish win-x64 local + 4 RIDs via CI branch; MCP smoke on published AOT binary; cold-start vs baseline
+- [x] Host: PublishAot=true, OptimizationPreference=Speed, InvariantGlobalization, StripSymbols non-Windows. Culture audit of Api+Core first: only `StatusService` memory-MB `ToString("F1")` was implicit-culture (all other user-facing formats use round-trip `"O"` or explicit `CultureInfo.InvariantCulture`); pinned it to InvariantCulture. Removed stale "Disable AOT for testing" comment + commented-out AOT lines. Worker publish stays PublishAot=false via existing ProjectReference AdditionalProperties + PublishCSharpWorkerForHost RemoveProperties/Properties (verified).
+- [x] Worker: PublishReadyToRun (RID-conditioned), explicit TieredCompilation/TieredPGO, ConcurrentGarbageCollection=true + ServerGarbageCollection=false (workstation GC, per-repo memory; DATAS deferred to benchmarks). R2R verified live: `workers/csharp/Microsoft.CodeAnalysis.CSharp.dll` 6.52MB (non-R2R IL) → 17.67MB (R2R, 2.7×).
+- [x] verify-publish.ps1: dropped `-p:PublishSingleFile`/`-p:IncludeNativeLibrariesForSelfExtract`; added no-managed-DLL-in-publish-root assertion (workers/** exempt). Kept all live assertions (boot, indexing ready, contractVersion 1, 12 edge kinds, skill hash) — all green on the AOT publish.
+- [x] Delete roslyn-aot-test/; rewrite AOT_COMPATIBILITY.md (final architecture: host Native AOT, worker JIT+R2R and why; AOT-clean requirements; InvariantGlobalization; VS 2026 C++ toolchain prereq).
+- [x] Prereq: VS 2026 Community C++ (VC.Tools.x86.x64) confirmed via vswhere. Local publish fix: VS 2026 `vcvarsall.bat` invokes bare `vswhere.exe`, so the VS **Installer dir must be on PATH** for `dotnet publish -r` locally (otherwise ILC's linker-path property is corrupted by vswhere's "not recognized" stderr → MSB3073 link error). CI `windows-latest` already has it on PATH; no repo change needed. Documented in the report.
+- [x] Verify: `scripts/verify-publish.ps1 -RuntimeIdentifier win-x64` green (AOT, incl. new no-DLL assertion + all 12 edge kinds live); MCP stdio smoke on the **published AOT binary** green (initialize→serverInfo, tools/list→3 tools, get_status→success, bad tool→ -32602 "Unknown tool", clean JSON-only stdout — Phase 3 taxonomy); CLI smoke green (--version 0.2.20, list [], start --detach JSON, status, stop round trip); cold-start 3.6× faster vs baseline. (4-RID CI branch run: deferred to Phase 7 dry-run.)
 - [ ] Opus + Sonnet review; findings fixed
 
 ## Phase 5 — Adjacency + file-path indexes (TDD)
@@ -129,9 +129,27 @@ warm-up. Cold `--version`: 10 runs `61.5,62.4,62.5,63.2,63.5,66.8,67.9,79,80.6,8
 
 | Metric | net9 JIT baseline | Post-AOT (Ph4) | Post-perf (Ph6) |
 |---|---|---|---|
-| Cold `--version` (min/avg ms) | 61.5 / 69.2 | | |
-| Time-to-listening (ms) | 1198 | | |
-| Time-to-indexed, this repo (ms) | 7118 | | |
-| Query latency p50, depth=2+tests (ms) | 228.3 | | |
+| Cold `--version` (min/avg ms) | 61.5 / 69.2 | **15.7 / 19.2** | |
+| Time-to-listening (ms) | 1198 | **556** (516–580, n=3) | |
+| Time-to-indexed, this repo (ms) | 7118 | **5688** (5551–5823, n=3) | |
+| Query latency p50, depth=2+tests (ms) | 228.3 | **293** (287–316, 2 runs) ⚠️ | |
 | Alloc rate during rescan (MB/s) | (Phase 6) | | |
-| Publish size, win-x64 (MB) | 215.9 | | |
+| Publish size, win-x64 (MB) | 215.9 | **165.2** shippable / 29.2 host | |
+
+Post-AOT conditions (win-x64, SDK 10.0.302, release version 0.2.20, VS 2026 C++ link toolchain):
+- **Cold `--version`, startup, query** measured against the SAME temp corpus Phase 0 used
+  (`%TEMP%\cc-repo-copy`, still present, 199 files / 119 `.cs`), query target `ContextService`,
+  depth=2, includeTests=true, 20 runs after 1 warm-up (median of the sorted 20).
+- **Cold start is the headline win**: `--version` 3.6× faster (69.2→19.2ms avg), time-to-listening
+  2.2× faster (1198→556ms), time-to-indexed 1.25× faster (7118→5688ms). These are the per-repo-spawn
+  costs AOT targets.
+- **Query p50 regressed ~28%** (228→293ms) — the expected AOT-vs-warmed-JIT tradeoff: after warm-up a
+  JIT process re-optimizes the hot O(E) traversal loop with tiered/dynamic PGO, which a
+  compile-once AOT image cannot. This CPU-bound traversal path is exactly what Phase 5's adjacency
+  indexes replace (O(E)→O(degree)); re-measure there. Stable across two runs (287–316ms spread).
+- **Publish size**: 215.9MB baseline was single-file JIT self-contained *including* workers. AOT
+  win-x64 publish dir is 290.3MB *with* a 125.1MB standalone debug PDB (symbols stripped only on
+  non-Windows); excluding that separable debug artifact the shippable payload is **165.2MB**
+  (host native binary 29.2MB + workers/csharp 32.7MB self-contained JIT+R2R + workers/typescript
+  103.3MB Node runtime/deps + protocol + skill). Worker size grew from R2R (Roslyn DLL +11MB).
+  Zero managed DLLs sit next to the host binary (assertion enforced).
