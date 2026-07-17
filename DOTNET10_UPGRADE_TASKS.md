@@ -59,7 +59,39 @@ warm-up. Cold `--version`: 10 runs `61.5,62.4,62.5,63.2,63.5,66.8,67.9,79,80.6,8
 - [x] 3d. `WebApplication.CreateBuilder` → `CreateSlimBuilder` (REST); throwaway `LoggerFactory` deleted, current-dir line moved to `app.Logger` (REST only).
 - [x] 3d+. MCP mode: `builder.Logging.ClearProviders()` + `AddConsole(LogToStandardErrorThreshold=Trace)` so stdout is JSON-RPC-only. Verified live: stdio round-trip (initialize + tools/list + tools/call get_status + get_context) returns 4 valid JSON responses on stdout with **0** `info:` lines; all logs on stderr.
 - [x] Verify: 0 warnings Debug **and** Release (full solution); `dotnet test` 398 + ExternalTooling 8 green; snapshot parity green; Debug/Development serves `/openapi/v1.json` (200) + `/api/schema` (302), Release 404s both; REST smoke — `/api/status` 200, `/api/context/complete?identifier=Widget` compact 200, `?view=bogus` 400 byte-identical error; `scripts/verify-publish.ps1 -RuntimeIdentifier win-x64` green (JIT publish unchanged).
-- [ ] Opus + Sonnet review; findings fixed
+- [x] Opus + Sonnet review; findings fixed
+  - **Finding 1 (MCP arg binding strictness).** The manual `McpToolCatalog` handler now reproduces the
+    pre-upgrade SDK's `tools/call` taxonomy, established empirically by probing the old self-contained
+    binary (`out/smoke-win-x64/codecontext.exe`) over stdio. Per-case decisions:
+    (a) missing `identifier` → in-band `isError` result (old = isError behind a generic message; we
+    surface `"identifier is required."`); (b) missing/non-array `identifiers` → in-band `isError`
+    `"identifiers is required."` (was a *silent empty success* — the bug; old = isError), while an
+    explicit empty array still binds to a successful `[]`; (c) wrong-kind optional scalar (`depth="5"`)
+    → falls back to the default and succeeds (matches the old success taxonomy; numeric-string coercion
+    is intentionally not replicated); (d) out-of-range `view="bogus"` → in-band `isError`
+    `"view must be 'Compact' or 'Full'."` (was silent coercion to Compact; old = isError); (e) unknown
+    tool → JSON-RPC **protocol** error via `McpProtocolException(McpErrorCode.InvalidParams)` = `-32602`,
+    byte-identical message `"Unknown tool: '<name>'"` (thrown, not folded into `isError`). New
+    `McpToolCatalogCallTests` (10) cover happy dispatch of all three tools through a DI scope, cases
+    a–e, and tool-body-exception → `isError`.
+  - **Finding 2 (restore determinism).** Both OpenAPI `PackageReference`s (`Microsoft.AspNetCore.OpenApi`
+    + the `Microsoft.OpenApi` 2.11.0 CVE pin) made unconditional; `ENABLE_OPENAPI` stays Debug-only.
+    Empirically verified in a fresh HEAD worktree: config-independent `dotnet restore` then no-restore
+    `build -c Release` → 0 warnings, no NU1903; no-restore `build -c Debug` → 0 warnings with
+    `OpenApiSupport` compiled into the Debug assembly and absent from the Release assembly.
+  - **Finding 3 (REST error contract).** `CodeContextEndpointTests` gained full-shape (byte-identity)
+    live assertions driven through the real ASP.NET host for `CONTEXT_ERROR` (upgraded from a loose
+    `Assert.Contains`), `MULTI_CONTEXT_ERROR`, and the single-file `REFRESH_ERROR` variant.
+  - **Finding 4 (cosmetic).** Phase 3a text corrected: `ErrorContractTests` is 8, not 10.
+  - **Accepted debt.** The endpoint tests use `WebApplication.CreateBuilder`/`UseTestServer`, not the
+    production slim builder (`CreateSlimBuilder`), so the slim-builder wiring is not covered by these
+    tests — it is validated via `scripts/verify-publish.ps1` against the packaged host. Remaining
+    REST/MCP error variants (e.g. `SCAN_IN_PROGRESS` 409, `SHUTTING_DOWN` 503, syntax-tree error codes,
+    the full-view `relation` 400) have DTO-level golden coverage in `ErrorContractTests` but no live
+    end-to-end assertion; the three above lock the pattern.
+  - Verification: `dotnet build` Debug **and** Release 0 warnings; full suite 410 + ExternalTooling 8
+    green; MCP stdio round-trip clean (initialize + tools/list + `get_status` + `no_such_tool` → -32602,
+    0 stdout pollution).
 
 ## Phase 4 — Host AOT + worker R2R + publish/CI
 - [ ] Host: PublishAot=true, OptimizationPreference=Speed, InvariantGlobalization (audit culture use first), StripSymbols non-Windows
