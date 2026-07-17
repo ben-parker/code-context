@@ -20,7 +20,7 @@ public sealed class JsonRpcConnection : IAsyncDisposable
 
     private readonly Stream _input;
     private readonly Stream _output;
-    private readonly int _maxPayloadBytes;
+    private readonly FrameReader _frameReader;
     private readonly SemaphoreSlim _writeLock = new(1, 1);
     private readonly ConcurrentDictionary<long, TaskCompletionSource<JsonRpcMessage>> _pendingRequests = new();
     private readonly ConcurrentDictionary<string, Func<long, JsonElement?, CancellationToken, Task<JsonElement?>>> _requestHandlers = new();
@@ -38,7 +38,7 @@ public sealed class JsonRpcConnection : IAsyncDisposable
     {
         _input = input;
         _output = output;
-        _maxPayloadBytes = maxPayloadBytes;
+        _frameReader = new FrameReader(input, maxPayloadBytes);
     }
 
     public void AddRequestHandler(string method, Func<JsonElement?, CancellationToken, Task<JsonElement?>> handler)
@@ -81,21 +81,27 @@ public sealed class JsonRpcConnection : IAsyncDisposable
         {
             while (true)
             {
-                var payload = await HeaderFraming.ReadFrameAsync(_input, _maxPayloadBytes, _disposal.Token)
-                    .ConfigureAwait(false);
-                if (payload is null)
+                var frame = await _frameReader.ReadFrameAsync(_disposal.Token).ConfigureAwait(false);
+                if (frame is not { } lease)
                 {
                     break; // clean EOF
                 }
 
                 JsonRpcMessage? message;
+                // The lease's pooled buffer is only borrowed for the synchronous deserialize:
+                // deserialization copies any JsonElement bytes into their own document, so the
+                // buffer can be returned to the pool immediately afterwards.
                 try
                 {
-                    message = JsonSerializer.Deserialize(payload, ParserProtocolJsonContext.Default.JsonRpcMessage);
+                    message = JsonSerializer.Deserialize(lease.Payload, ParserProtocolJsonContext.Default.JsonRpcMessage);
                 }
                 catch (JsonException ex)
                 {
                     throw new ParserProtocolViolationException("Frame payload is not valid JSON-RPC.", ex);
+                }
+                finally
+                {
+                    lease.Dispose();
                 }
                 if (message is null)
                 {
@@ -430,5 +436,6 @@ public sealed class JsonRpcConnection : IAsyncDisposable
         }
         _disposal.Dispose();
         _writeLock.Dispose();
+        _frameReader.Dispose();
     }
 }
