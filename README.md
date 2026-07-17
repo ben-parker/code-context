@@ -23,6 +23,22 @@ Arm64. The archives are self-contained: they include the .NET host, the C# worke
 Node.js, and the TypeScript worker dependencies. Building from source requires the
 local prerequisites in [DEVELOPMENT.md](DEVELOPMENT.md).
 
+## Requirements
+
+Installing a published release does not require a language toolchain:
+
+- You do not need the .NET SDK or a separately installed .NET runtime. The native
+  CodeContext host and the self-contained C# worker ship in the release archive.
+- You do not need Node.js, npm, TypeScript, or JavaScript build tools. The release
+  includes its own Node.js runtime, TypeScript package, and TypeScript/JavaScript
+  worker.
+- The repository being indexed does not need to be built or restored first.
+
+You only need a supported operating system and architecture, plus network access
+during installation to download the release archive. These statements apply to the
+published releases and bundled workers; building CodeContext from source or adding a
+third-party language worker may require the tools documented for that workflow.
+
 ## Install a release
 
 On Windows PowerShell:
