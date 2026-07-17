@@ -53,10 +53,11 @@ On Linux or macOS:
 curl -fsSL https://raw.githubusercontent.com/ben-parker/code-context/main/scripts/install.sh | sh
 ```
 
-The installer places a versioned release under `~/.codecontext`, adds a stable
-`codecontext` launcher, and installs the bundled agent skill. If it updates your user
-`PATH`, open a new terminal before continuing. Stop running CodeContext instances
-before upgrading.
+The installer places a versioned release under `~/.codecontext` and adds a stable
+`codecontext` launcher. It does not modify agent skill directories; the optional
+CodeContext skill remains in the release payload for manual installation. If the
+installer updates your user `PATH`, open a new terminal before continuing. Stop
+running CodeContext instances before upgrading.
 
 ## Quick start
 

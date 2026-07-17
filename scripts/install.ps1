@@ -72,7 +72,10 @@ try {
     # Migrate the pre-Phase-5 in-place executable. A running old executable is locked
     # on Windows, so fail with a clear retry instead of producing a mixed install.
     $legacyExecutable = Join-Path $installDir 'codecontext.exe'
+    $removalNoted = $false
     if (Test-Path $legacyExecutable) {
+        Write-Host "Removing previous CodeContext versions..."
+        $removalNoted = $true
         try { Remove-Item -LiteralPath $legacyExecutable -Force }
         catch { throw "Close running CodeContext instances, then rerun the installer to complete the upgrade." }
     }
@@ -102,16 +105,20 @@ set /p CODECONTEXT_VERSION=<"%~dp0current.txt"
     $posixLauncher = ($posixLauncherLines -join "`n") + "`n"
     [System.IO.File]::WriteAllText((Join-Path $installDir 'codecontext'), $posixLauncher)
 
-    $skillInstaller = Join-Path $releaseDir 'skill\install-skill.ps1'
-    if (Test-Path $skillInstaller) { & $skillInstaller }
-
     # current.txt/launchers now point at the new release, so old ones are dead weight.
-    Get-ChildItem -Path $releaseRoot -Directory -ErrorAction SilentlyContinue |
-        Where-Object { $_.FullName -ne $releaseDir } |
-        ForEach-Object {
-            try { Remove-Item -LiteralPath $_.FullName -Recurse -Force }
-            catch { Write-Host "Warning: could not remove old release $($_.FullName): $_" -ForegroundColor Yellow }
+    $oldReleases = @(
+        Get-ChildItem -Path $releaseRoot -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -ne $releaseDir }
+    )
+    if ($oldReleases.Count -gt 0) {
+        if (-not $removalNoted) {
+            Write-Host "Removing previous CodeContext versions..."
         }
+        foreach ($oldRelease in $oldReleases) {
+            try { Remove-Item -LiteralPath $oldRelease.FullName -Recurse -Force }
+            catch { Write-Host "Warning: could not remove old release $($oldRelease.FullName): $_" -ForegroundColor Yellow }
+        }
+    }
 
     Write-Host "Installed $($release.tag_name) to $releaseDir"
 }
