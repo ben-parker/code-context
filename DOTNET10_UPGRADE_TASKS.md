@@ -130,11 +130,11 @@ warm-up. Cold `--version`: 10 runs `61.5,62.4,62.5,63.2,63.5,66.8,67.9,79,80.6,8
     root PDBs, 2 worker PDBs kept, 165.2MB payload).
 
 ## Phase 5 — Adjacency + file-path indexes (TDD)
-- [ ] GraphAdjacency (FrozenDictionary source/target/filePath) + version-stamped `GetAdjacency()` on InMemoryDatabase
-- [ ] Commit 1: repos consume index internally, signatures unchanged
-- [ ] Commit 2 (optional): `Task<IReadOnlyList<T>>` reads without copies
-- [ ] TDD: invalidation (upsert/delete/commit/prune/rollback), scan-vs-index equivalence, path-case semantics
-- [ ] Verify: suite + ExternalTooling; live-index byte-compare of fixture /api/context; query-latency before/after
+- [x] GraphAdjacency (FrozenDictionary EdgesBySource/EdgesByTarget/NodesByFilePath + cached Nodes/Edges snapshots) + version-stamped `GetAdjacency()` on InMemoryDatabase (modeled exactly on the `GetStatistics()` benign-race cache; reads the committed `_state` so reconciliation-staged generations stay invisible until commit). Extracted the file-path normalize/match into a shared `FilePathMatcher` (used by both ContextService and the index) so they cannot drift — **finding: the real semantics are `OrdinalIgnoreCase` on every platform (NOT the store's per-OS `PathComparer`); rooted=exact, relative=exact-or-suffix**. ContextService delegates to it (behavior-preserving).
+- [x] Commit A (2b91116): InMemoryEdgeRepository.GetBySourceIdAsync/GetByTargetIdAsync/GetAllAsync + InMemoryNodeRepository.GetAllAsync consume the index internally, still return fresh `List<>`; signatures/mocks unchanged, full suite passed untouched. Removes the per-hop O(E) edge scans (→ O(degree)).
+- [~] Commit B (optional `Task<IReadOnlyList<T>>` copy-free reads): **DEFERRED.** The return-type change ripples across both repo interfaces + both InMemory impls + ContextService (`directEdges` is a `List` with `.AddRange`) + StatusService + **19 mock-based test files** (well over the ~15-file threshold), for a marginal gain (Commit A already killed the O(E) scans; the residual is an O(degree) list copy). `NodesByFilePath` production consumption in ContextService is deferred for the same reason (needs a new interface method → same 19-file mock ripple); the index is built + equivalence-tested (`FindNodesByPath`) and ready to wire in that future commit.
+- [x] TDD (11 tests, `tests/CodeContext.Core.Tests/Repositories/GraphAdjacencyTests.cs`): invalidation on upsert/node-delete/edge-delete-by-node/generation-commit(scope replacement)/prune/reconcile-commit/rollback; version-stamped caching (same instance when version unchanged); scan-vs-index set-equivalence on a seeded (20260717) random graph (200 nodes / 600 edges) for both edge directions; NodesByFilePath set-equal to a brute-force `FilePathMatcher.Matches` filter incl. rooted/relative/case-variant/backslash/suffix paths; concurrent reader/generation-swap smoke (readers only ever see a complete snapshot). Verified the invalidation tests fail (6/11) when the version check is bypassed.
+- [x] Verify: full suite **421** + ExternalTooling **8** green; 0 warnings Debug **and** Release (`-warnaserror`); **live-index byte-compare IDENTICAL** — pre-change (f4767c4) vs post-change AOT publishes both indexing the Phase-0 corpus (`%TEMP%\cc-repo-copy`, 1703 nodes / 6701 edges), `/api/context/complete?identifier=ContextService&depth=2&includeTests=true` → **19439 bytes byte-for-byte, no normalization needed, zero ordering drift**; query p50 **191.6ms** on the AOT publish (see table); `scripts/verify-publish.ps1 -RuntimeIdentifier win-x64` green (0.2.26; all 12 edge kinds, contractVersion 1, no stray DLL/PDB, skill hash).
 - [ ] Opus + Sonnet review; findings fixed
 
 ## Phase 6 — Allocation passes (one reviewed commit each)
@@ -159,7 +159,7 @@ warm-up. Cold `--version`: 10 runs `61.5,62.4,62.5,63.2,63.5,66.8,67.9,79,80.6,8
 | Cold `--version` (min/avg ms) | 61.5 / 69.2 | **15.7 / 19.2** | |
 | Time-to-listening (ms) | 1198 | **556** (516–580, n=3) | |
 | Time-to-indexed, this repo (ms) | 7118 | **5688** (5551–5823, n=3) | |
-| Query latency p50, depth=2+tests (ms) | 228.3 | **293** (287–316, 2 runs) ⚠️ | |
+| Query latency p50, depth=2+tests (ms) | 228.3 | **293** (287–316, 2 runs) ⚠️ | **191.6** (185.8–210.9, 20 runs) |
 | Alloc rate during rescan (MB/s) | (Phase 6) | | |
 | Publish size, win-x64 (MB) | 215.9 | **165.2** shippable / 29.2 host | |
 
@@ -184,3 +184,18 @@ Post-AOT conditions (win-x64, SDK 10.0.302, release version 0.2.20, VS 2026 C++ 
   JIT+R2R + workers/typescript 103.3MB Node runtime/deps + protocol + skill), measured on the
   Phase-4-review publish (release version 0.2.23). Worker size grew from R2R (Roslyn DLL +11MB).
   Zero managed DLLs *and* zero PDBs sit next to the host binary (assertion enforced).
+
+Post-perf (Ph5) conditions (win-x64 AOT, release version 0.2.26, same corpus/query/protocol as
+Phase 0/4: `%TEMP%\cc-repo-copy`, `identifier=ContextService&depth=2&includeTests=true`, median of
+20 runs after 1 warm-up):
+- **Query p50 191.6ms** — the adjacency indexes turned every `ContextService` hop's edge lookup
+  from a full O(E) scan of the ~6.7k-edge table into an O(degree) `FrozenDictionary` lookup. This
+  is **34.7% below the 293ms post-AOT number** (recovering the AOT-vs-warmed-JIT regression) **and
+  16.1% below the 228.3ms warmed-JIT baseline** — the compile-once AOT image now beats warmed JIT
+  because the structural win dwarfs what tiered/dynamic PGO recovered on the old O(E) loop. Tight
+  spread (185.8–210.9ms over 20 runs).
+- **Output unchanged**: the compact `/api/context/complete` response is byte-for-byte identical
+  (19439 bytes) between the pre-change and post-change AOT builds indexing the same corpus — the
+  index preserves node/edge enumeration order, so results are set- AND order-identical.
+- Commit A was the only consumed change; the copy-free `IReadOnlyList` read path (Commit B) was
+  deferred, so this number reflects O(E)→O(degree) alone, with per-hop `List` copies still present.
