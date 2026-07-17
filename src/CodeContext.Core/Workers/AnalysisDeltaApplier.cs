@@ -179,20 +179,42 @@ public sealed class AnalysisDeltaApplier : IAnalysisDeltaSink
             "[{ParserId}] discarded stale delta: generation {Stale} <= newest {Newest} for workspace {WorkspaceId}.",
             delta.ParserId, delta.Generation, newestGeneration, delta.WorkspaceId);
 
-    private static CodeNode ToCodeNode(ProtocolNode node, PendingDelta delta)
+    // The node/edge metadata dictionaries arrive freshly deserialized on this delta and are
+    // never read again after this mapping (pending.Nodes/Edges are each projected exactly once
+    // and then discarded), so we take ownership of the dictionary in place and stamp the two
+    // ownership keys onto it instead of allocating a fresh dictionary and copying every entry.
+    // The ownership keys are assigned last so they always win over any same-named source key
+    // (matching the previous ownership-first + TryAdd precedence).
+    private static Dictionary<string, string> BuildOwnedMetadata(
+        IReadOnlyDictionary<string, string>? source, PendingDelta delta)
     {
-        var metadata = new Dictionary<string, string>
+        if (source is null)
         {
-            [ParserIdKey] = delta.ParserId,
-            [WorkspaceIdKey] = delta.WorkspaceId,
-        };
-        if (node.Metadata is not null)
-        {
-            foreach (var (key, value) in node.Metadata)
+            return new Dictionary<string, string>(2)
             {
-                metadata.TryAdd(key, value);
+                [ParserIdKey] = delta.ParserId,
+                [WorkspaceIdKey] = delta.WorkspaceId,
+            };
+        }
+
+        if (source is not Dictionary<string, string> owned)
+        {
+            // Defensive: an IReadOnlyDictionary that is not a mutable Dictionary must be copied.
+            owned = new Dictionary<string, string>(source.Count + 2);
+            foreach (var (key, value) in source)
+            {
+                owned[key] = value;
             }
         }
+
+        owned[ParserIdKey] = delta.ParserId;
+        owned[WorkspaceIdKey] = delta.WorkspaceId;
+        return owned;
+    }
+
+    private static CodeNode ToCodeNode(ProtocolNode node, PendingDelta delta)
+    {
+        var metadata = BuildOwnedMetadata(node.Metadata, delta);
 
         return new CodeNode
         {
@@ -218,18 +240,7 @@ public sealed class AnalysisDeltaApplier : IAnalysisDeltaSink
 
     private static CodeEdge ToCodeEdge(ProtocolEdge edge, PendingDelta delta)
     {
-        var metadata = new Dictionary<string, string>
-        {
-            [ParserIdKey] = delta.ParserId,
-            [WorkspaceIdKey] = delta.WorkspaceId,
-        };
-        if (edge.Metadata is not null)
-        {
-            foreach (var (key, value) in edge.Metadata)
-            {
-                metadata.TryAdd(key, value);
-            }
-        }
+        var metadata = BuildOwnedMetadata(edge.Metadata, delta);
 
         return new CodeEdge
         {

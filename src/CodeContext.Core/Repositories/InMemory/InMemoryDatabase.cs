@@ -17,9 +17,27 @@ namespace CodeContext.Core.Repositories.InMemory
     {
         private sealed class GraphState
         {
-            public ConcurrentDictionary<string, CodeNode> Nodes { get; } = new();
-            public ConcurrentDictionary<string, string> Identifiers { get; } = new(StringComparer.Ordinal);
-            public ConcurrentDictionary<string, CodeEdge> Edges { get; } = new();
+            public ConcurrentDictionary<string, CodeNode> Nodes { get; }
+            public ConcurrentDictionary<string, string> Identifiers { get; }
+            public ConcurrentDictionary<string, CodeEdge> Edges { get; }
+
+            public GraphState()
+            {
+                Nodes = new ConcurrentDictionary<string, CodeNode>();
+                Identifiers = new ConcurrentDictionary<string, string>(StringComparer.Ordinal);
+                Edges = new ConcurrentDictionary<string, CodeEdge>();
+            }
+
+            // Rebuild ctor: the graph is populated by a single writer (the index coordinator),
+            // so one concurrency stripe is enough, and presizing to the previous generation's
+            // counts avoids repeated grow/rehash while the replacement state is populated.
+            public GraphState(int nodeCapacity, int edgeCapacity)
+            {
+                Nodes = new ConcurrentDictionary<string, CodeNode>(concurrencyLevel: 1, capacity: nodeCapacity);
+                Identifiers = new ConcurrentDictionary<string, string>(
+                    concurrencyLevel: 1, capacity: nodeCapacity, StringComparer.Ordinal);
+                Edges = new ConcurrentDictionary<string, CodeEdge>(concurrencyLevel: 1, capacity: edgeCapacity);
+            }
         }
 
         private static readonly StringComparer PathComparer =
@@ -167,7 +185,7 @@ namespace CodeContext.Core.Repositories.InMemory
             {
                 var current = _reconciliationState ?? _state;
                 var removedNodeIds = new HashSet<string>();
-                var next = new GraphState();
+                var next = new GraphState(current.Nodes.Count, current.Edges.Count);
 
                 foreach (var node in current.Nodes.Values)
                 {
@@ -313,7 +331,7 @@ namespace CodeContext.Core.Repositories.InMemory
             IEnumerable<CodeEdge> edges,
             Func<CodeNode, bool>? replacesScope)
         {
-            var next = new GraphState();
+            var next = new GraphState(current.Nodes.Count, current.Edges.Count);
             var removedNodeIds = new HashSet<string>();
 
             if (replacesScope is not null)
