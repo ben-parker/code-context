@@ -59,8 +59,9 @@ for the corresponding call-site or test list.
 
 Use `depth=0` for cheap identity lookup and raise caps only when counts require it.
 `view=full` exposes parser/debug details, method-family members, and bound targets.
-`/api/context/multi` reduces HTTP round trips, not response tokens, and defaults
-`maxRelationships` to three.
+`POST /api/context/multi` with body `{"identifiers":[...]}` (GET returns 405) responds
+with a JSON array in request order. It reduces HTTP round trips, not response tokens,
+and defaults `maxRelationships` to three.
 
 For tokens, modifiers, nesting, or overload/accessor form, read
 [Native syntax trees](references/native-syntax.md).
