@@ -494,3 +494,8 @@ out/
 # Local AOT experiment output and build logs
 roslyn-aot-test/output/
 *.binlog
+
+# Locally staged Node runtime for the bundled TypeScript worker (scripts/prepare-node-worker-runtime.ps1)
+src/CodeContext.TypeScript.Worker/node.exe
+src/CodeContext.TypeScript.Worker/node
+src/CodeContext.TypeScript.Worker/node-LICENSE
