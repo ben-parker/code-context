@@ -9,6 +9,14 @@
     <!-- <RuntimeIdentifier>linux-x64</RuntimeIdentifier> -->
     <!-- <IsAotCompatible>true</IsAotCompatible> -->
     <AssemblyName>codecontext</AssemblyName>
+    <!-- Phase 3: turn on trim/AOT/single-file/RDG analyzers now (while still publishing
+         JIT) so AOT-incompatible patterns surface as build diagnostics ahead of the
+         Phase 4 PublishAot flip. RDG works without AOT and flags non-source-generatable
+         endpoint lambdas in CodeContextEndpoints.cs. -->
+    <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
+    <EnableAotAnalyzer>true</EnableAotAnalyzer>
+    <EnableSingleFileAnalyzer>true</EnableSingleFileAnalyzer>
+    <EnableRequestDelegateGenerator>true</EnableRequestDelegateGenerator>
   </PropertyGroup>
 
   <ItemGroup>
