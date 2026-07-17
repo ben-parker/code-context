@@ -6,42 +6,38 @@ CodeContext can investigate its own source tree. Before tracing a feature or cha
 behavior, run:
 
 ```bash
-codecontext list --json
+codecontext query ContextService
+codecontext query ContextService --tests  # when test evidence matters
 ```
 
-Choose the instance whose `rootPath` contains this checkout. If none exists, start one:
-
-```bash
-codecontext start --detach --path .
-```
-
-Poll `http://localhost:<port>/api/status` before trusting graph results. Confirm all
-of the following:
-
-- `api.contractVersion` is `1`.
-- `indexing.status` is `ready`.
-- `indexing.rootPath` is this checkout.
-- The parser session needed for the files under investigation is `ready`.
+`query` selects the closest registered ancestor, starts a detached instance when none
+exists, waits for indexing, and verifies contract, root, and instance identity. Tests
+are omitted by default; add `--tests` whenever test evidence matters.
 
 Use the normalized graph for semantic questions:
 
 ```bash
-curl "http://localhost:<port>/api/context/complete?identifier=ContextService"
-curl "http://localhost:<port>/api/context/complete?identifier=ExecuteAsync&type=Method&containingType=StartCommandHandler"
+codecontext query ContextService
+codecontext query "csharp:CodeContext.Api.Commands.StartCommandHandler" --tests
+codecontext query multi ContextService StartCommandHandler
 ```
 
 Round-trip the returned canonical `target.identifier` for unambiguous follow-up
-queries. Inspect relationship totals and truncation flags. Use
-`POST /api/context/multi` to reduce HTTP round trips, and use `POST /api/syntax-tree`
-only when exact parser structure, tokens, modifiers, or spans matter.
+queries. Inspect relationship totals and truncation flags. `query multi` reduces HTTP
+round trips while preserving order and duplicates. Default output is compact
+agent-oriented text; use `--human` for expanded prose or `--json` for the exact API
+response. Use `POST /api/syntax-tree` only
+when exact parser structure, tokens, modifiers, or spans matter.
 
 After a branch switch or large rewrite, call `POST /api/index/refresh` and wait until
 `indexing.status` is `ready` with `indexing.operationId` at least the operation ID in
 the refresh response.
 
 The tool under investigation can itself be stale or broken. For unexpected empty
-results, verify root path, indexing state, parser state, spelling, filters, caps, and
-ignore rules. Use `rg` as the required cross-check and as the primary tool for literal
+results, use `codecontext status --path .` and, when necessary, `codecontext list
+--json` or manual `codecontext start --detach --path .`; verify root path, indexing
+state, parser state, spelling, filters, caps, and ignore rules. Use `rg` as the required
+cross-check and as the primary tool for literal
 strings, configuration, comments, filenames, and documentation:
 
 ```bash
@@ -52,7 +48,7 @@ rg --files -g '*.cs' -g '*.ts'
 ## Solution and runtime architecture
 
 - `src/CodeContext.Api` is the composition root and CLI. `Program.cs` defines
-  `start`, `stop`, `list`, and `status`; `CodeContextEndpoints.cs` owns REST routes.
+  `start`, `stop`, `list`, `status`, and `query`; `CodeContextEndpoints.cs` owns REST routes.
 - `src/CodeContext.Mcp` exposes `GetContext`, `GetMultiContext`, and `GetStatus` over
   MCP stdio using the same Core services as REST.
 - `src/CodeContext.Core` owns graph models, in-memory repositories, context assembly,

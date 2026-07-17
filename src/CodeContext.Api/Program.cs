@@ -1,5 +1,7 @@
 
 using System.CommandLine;
+using System.CommandLine.Help;
+using System.CommandLine.Invocation;
 using CodeContext.Api;
 using CodeContext.Api.Commands;
 
@@ -7,7 +9,10 @@ namespace CodeContext.Api;
 
 public class Program
 {
-    static async Task<int> Main(string[] args)
+    public static Task<int> Main(string[] args)
+        => CreateRootCommand().Parse(args).InvokeAsync();
+
+    public static RootCommand CreateRootCommand()
     {
         Option<string> pathOption = new("--path", "-p")
         {
@@ -120,11 +125,198 @@ public class Program
         statusCommand.SetAction((ParseResult parseResult, CancellationToken ct) =>
             StatusCommandHandler.ExecuteAsync(parseResult.GetValue(instancePathOption), ct));
 
+        var queryCommand = new Command(
+            "query",
+            "Discovers or starts an instance, waits for indexing, and queries one identifier.");
+        Argument<string> queryIdentifierArgument = new("identifier")
+        {
+            Description = "A symbol name, canonical identifier, or source file path.",
+        };
+        Option<string> queryPathOption = CreateQueryPathOption();
+        Option<int> queryDepthOption = CreateDepthOption();
+        Option<bool> queryTestsOption = CreateTestsOption();
+        Option<string?> queryRelationOption = CreateRelationOption();
+        Option<bool> queryExactOption = CreateExactOption();
+        Option<bool> queryJsonOption = CreateQueryJsonOption();
+        Option<bool> queryHumanOption = CreateQueryHumanOption();
+        foreach (var option in new Option[]
+                 {
+                     queryPathOption,
+                     queryDepthOption,
+                     queryTestsOption,
+                     queryRelationOption,
+                     queryExactOption,
+                     queryJsonOption,
+                     queryHumanOption,
+                 })
+        {
+            option.Recursive = true;
+        }
+
+        var queryHelpOption = new HelpOption();
+        queryHelpOption.Action = new QueryHelpAction(queryIdentifierArgument);
+        queryCommand.Arguments.Add(queryIdentifierArgument);
+        queryCommand.Options.Add(queryPathOption);
+        queryCommand.Options.Add(queryDepthOption);
+        queryCommand.Options.Add(queryTestsOption);
+        queryCommand.Options.Add(queryRelationOption);
+        queryCommand.Options.Add(queryExactOption);
+        queryCommand.Options.Add(queryJsonOption);
+        queryCommand.Options.Add(queryHumanOption);
+        queryCommand.Options.Add(queryHelpOption);
+        queryCommand.SetAction((ParseResult parseResult, CancellationToken ct) =>
+            QueryCommandHandler.ExecuteAsync(
+                new QuerySettings(
+                    [parseResult.GetValue(queryIdentifierArgument)!],
+                    parseResult.GetValue(queryPathOption)!,
+                    parseResult.GetValue(queryDepthOption),
+                    parseResult.GetValue(queryTestsOption),
+                    parseResult.GetValue(queryRelationOption),
+                    parseResult.GetValue(queryExactOption),
+                    parseResult.GetValue(queryJsonOption),
+                    Multi: false,
+                    parseResult.GetValue(queryHumanOption)),
+                ct));
+
+        var multiQueryCommand = new Command(
+            "multi",
+            "Queries multiple identifiers in one API round trip, preserving order and duplicates.");
+        Argument<string[]> queryIdentifiersArgument = new("identifier")
+        {
+            Description = "One or more symbol names, canonical identifiers, or source file paths.",
+            Arity = ArgumentArity.OneOrMore,
+        };
+        multiQueryCommand.Arguments.Add(queryIdentifiersArgument);
+        var multiHelpOption = new HelpOption();
+        multiHelpOption.Action = new QueryHelpAction(queryIdentifierArgument);
+        multiQueryCommand.Options.Add(multiHelpOption);
+        multiQueryCommand.SetAction((ParseResult parseResult, CancellationToken ct) =>
+            QueryCommandHandler.ExecuteAsync(
+                new QuerySettings(
+                    parseResult.GetValue(queryIdentifiersArgument)!,
+                    parseResult.GetValue(queryPathOption)!,
+                    parseResult.GetValue(queryDepthOption),
+                    parseResult.GetValue(queryTestsOption),
+                    parseResult.GetValue(queryRelationOption),
+                    parseResult.GetValue(queryExactOption),
+                    parseResult.GetValue(queryJsonOption),
+                    Multi: true,
+                    parseResult.GetValue(queryHumanOption)),
+                ct));
+        queryCommand.Subcommands.Add(multiQueryCommand);
+
         rootCommand.Subcommands.Add(startCommand);
         rootCommand.Subcommands.Add(stopCommand);
         rootCommand.Subcommands.Add(listCommand);
         rootCommand.Subcommands.Add(statusCommand);
+        rootCommand.Subcommands.Add(queryCommand);
 
-        return await rootCommand.Parse(args).InvokeAsync();
+        return rootCommand;
+    }
+
+    private static Option<string> CreateQueryPathOption()
+        => new("--path", "-p")
+        {
+            Description = "A path inside the repository to query. Defaults to the current directory.",
+            DefaultValueFactory = _ => Directory.GetCurrentDirectory(),
+        };
+
+    private static Option<int> CreateDepthOption()
+    {
+        Option<int> option = new("--depth")
+        {
+            Description = "Relationship traversal depth (non-negative).",
+            DefaultValueFactory = _ => 1,
+        };
+        option.Validators.Add(result =>
+        {
+            if (result.GetValueOrDefault<int>() < 0)
+                result.AddError("Depth must be non-negative.");
+        });
+        return option;
+    }
+
+    private static Option<bool> CreateTestsOption()
+        => new("--tests")
+        {
+            Description = "Include static test evidence (omitted by default).",
+            DefaultValueFactory = _ => false,
+        };
+
+    private static Option<string?> CreateRelationOption()
+        => new("--relation")
+        {
+            Description = "Comma-separated relationship kinds for uses/used-by filtering.",
+            DefaultValueFactory = _ => null,
+        };
+
+    private static Option<bool> CreateExactOption()
+        => new("--exact")
+        {
+            Description = "Require an exact identifier match.",
+            DefaultValueFactory = _ => false,
+        };
+
+    private static Option<bool> CreateQueryJsonOption()
+        => new("--json")
+        {
+            Description = "Write the exact compact API response to stdout.",
+            DefaultValueFactory = _ => false,
+        };
+
+    private static Option<bool> CreateQueryHumanOption()
+        => new("--human")
+        {
+            Description = "Write expanded human-readable output instead of compact agent text.",
+            DefaultValueFactory = _ => false,
+        };
+}
+
+internal sealed class QueryHelpAction(Argument<string> singleIdentifier) : SynchronousCommandLineAction
+{
+    public override bool Terminating => true;
+    public override bool ClearsParseErrors => true;
+
+    public override int Invoke(ParseResult parseResult)
+    {
+        var command = parseResult.CommandResult.Command;
+        var previousHidden = singleIdentifier.Hidden;
+        singleIdentifier.Hidden = command.Name == "multi";
+        try
+        {
+            using var rendered = new StringWriter();
+            var invocation = parseResult.InvocationConfiguration;
+            var output = invocation.Output;
+            invocation.Output = rendered;
+            try
+            {
+                new HelpAction().Invoke(parseResult);
+            }
+            finally
+            {
+                invocation.Output = output;
+            }
+            var usage = command.Name == "multi"
+                ? "codecontext query multi <identifier>... [options]"
+                : "codecontext query <identifier> [options]";
+            output.Write(ReplaceUsage(rendered.ToString(), usage));
+            return 0;
+        }
+        finally
+        {
+            singleIdentifier.Hidden = previousHidden;
+        }
+    }
+
+    private static string ReplaceUsage(string help, string usage)
+    {
+        var newline = help.Contains("\r\n", StringComparison.Ordinal) ? "\r\n" : "\n";
+        var usageStart = help.IndexOf($"Usage:{newline}", StringComparison.Ordinal);
+        if (usageStart < 0) return help;
+        var usageEnd = help.IndexOf(newline + newline, usageStart, StringComparison.Ordinal);
+        if (usageEnd < 0) return help;
+        return help[..usageStart]
+            + $"Usage:{newline}  {usage}{newline}{newline}"
+            + help[(usageEnd + (newline.Length * 2))..];
     }
 }

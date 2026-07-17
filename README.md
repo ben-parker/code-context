@@ -44,30 +44,24 @@ before upgrading.
 
 ## Quick start
 
-Start an instance for the current repository in the background:
+Query the current repository in one command:
 
 ```bash
-codecontext start --detach --path .
+codecontext query ContextService
+codecontext query ContextService --tests
+codecontext query multi ContextService StartCommandHandler
 ```
 
-The command prints JSON containing the allocated localhost port, process ID, root
-path, and instance ID. Wait for the index and both relevant parser sessions to become
-ready:
-
-```bash
-codecontext status --path .
-```
-
-Then query the port returned by `start` (7890 is the first port considered):
-
-```bash
-curl "http://localhost:7890/api/context/complete?identifier=ContextService"
-```
+`query` finds the closest instance watching the requested path, starts one in the
+background when necessary, waits for indexing, and queries the compact API. Compact,
+line-oriented agent text is the default. Use `--human` for expanded human-readable
+output or `--json` for the exact API response; progress stays on stderr. Test evidence
+is omitted by default, so add `--tests` whenever it matters. Other options include
+`--path DIR`, `--depth N`, `--relation CSV`, and `--exact`.
 
 Returned targets include canonical identifiers that can be passed back as
 `identifier` without modification. Name searches use exact-first matching with a
-substring fallback; optional filters include `type`, `containingType`, `namespace`,
-`signature`, and `sourceFile`.
+substring fallback.
 
 ## Instance lifecycle
 
@@ -78,6 +72,8 @@ unless `--port` is supplied.
 codecontext start --path .                  # foreground REST service
 codecontext start --detach --path .         # background REST service
 codecontext start --path . --port 8080      # fixed port
+codecontext query ContextService            # discover/start, wait, and query
+codecontext query multi A B --tests         # ordered multi-query with test evidence
 codecontext list                            # human-readable instances
 codecontext list --json                     # machine-readable instances
 codecontext status --path .                 # status for the containing instance
@@ -101,8 +97,10 @@ The main endpoints are:
 - `GET /healthz` for process liveness.
 
 Compact context is the default and omits content, metrics, related items, and tests
-unless requested. Use `view=full` for parser/debug details, and inspect each returned
-count and truncation marker before treating an omitted relationship as absent.
+unless requested. The CLI opts into tests with `--tests`. Use REST `view=full` for
+parser/debug details and advanced filters such as `type`, `containingType`,
+`namespace`, `signature`, and `sourceFile`. Inspect each returned count and truncation
+marker before treating an omitted relationship as absent.
 
 The checked-in [OpenAPI specification](codecontext.openapi.json) documents request and
 response shapes. The installed service also serves its generated schema at runtime.
