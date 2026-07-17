@@ -10,7 +10,8 @@ public sealed record WorkerLaunchSpec(
     IReadOnlyList<string> Arguments,
     string? WorkingDirectory = null,
     int MinProtocolVersion = ParserProtocol.Version,
-    int MaxProtocolVersion = ParserProtocol.Version)
+    int MaxProtocolVersion = ParserProtocol.Version,
+    IReadOnlyDictionary<string, string>? Environment = null)
 {
     /// <summary>
     /// Builds a launch spec from a manifest on disk. Relative commands resolve against
@@ -51,6 +52,13 @@ public sealed class ParserWorkerOptions
 
     public int MinProtocolVersion { get; set; } = ParserProtocol.Version;
     public int MaxProtocolVersion { get; set; } = ParserProtocol.Version;
+
+    /// <summary>
+    /// Host-side environment overlays keyed by parser id (e.g. "csharp"). Applied on top
+    /// of any <see cref="WorkerLaunchSpec.Environment"/> when spawning that parser's
+    /// worker, so a var set here wins on collision. Null (the default) touches nothing.
+    /// </summary>
+    public IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>>? WorkerEnvironment { get; set; }
 }
 
 /// <summary>The worker process died or its protocol stream broke mid-conversation.</summary>

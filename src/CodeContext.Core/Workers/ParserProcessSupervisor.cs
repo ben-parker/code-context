@@ -186,24 +186,57 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
         }
     }
 
-    private async Task<InitializeResult> StartAndInitializeAsync(CancellationToken ct)
+    /// <summary>
+    /// Builds the <see cref="ProcessStartInfo"/> for one worker: redirected stdio, no
+    /// window, working directory from the spec. Environment overlays are applied on top
+    /// of the inherited host environment — first <see cref="WorkerLaunchSpec.Environment"/>,
+    /// then <see cref="ParserWorkerOptions.WorkerEnvironment"/> for this parser id (options
+    /// win on key collision). Each var is upserted (never <c>Add</c>) because names may
+    /// already be present in the inherited environment and are case-insensitive on Windows.
+    /// Null/missing maps leave the inherited environment untouched. Extracted so the spawn
+    /// wiring is unit-testable without launching a process.
+    /// </summary>
+    internal static ProcessStartInfo BuildStartInfo(WorkerLaunchSpec spec, ParserWorkerOptions options)
     {
-        Transition(ParserSessionState.Starting);
-
         var startInfo = new ProcessStartInfo
         {
-            FileName = _spec.FileName,
+            FileName = spec.FileName,
             RedirectStandardInput = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
             CreateNoWindow = true,
-            WorkingDirectory = _spec.WorkingDirectory ?? Environment.CurrentDirectory,
+            WorkingDirectory = spec.WorkingDirectory ?? Environment.CurrentDirectory,
         };
-        foreach (var argument in _spec.Arguments)
+        foreach (var argument in spec.Arguments)
         {
             startInfo.ArgumentList.Add(argument);
         }
+
+        if (spec.Environment is { } specEnvironment)
+        {
+            foreach (var (key, value) in specEnvironment)
+            {
+                startInfo.Environment[key] = value;
+            }
+        }
+        if (options.WorkerEnvironment is { } workerEnvironment
+            && workerEnvironment.TryGetValue(spec.ParserId, out var parserEnvironment))
+        {
+            foreach (var (key, value) in parserEnvironment)
+            {
+                startInfo.Environment[key] = value;
+            }
+        }
+
+        return startInfo;
+    }
+
+    private async Task<InitializeResult> StartAndInitializeAsync(CancellationToken ct)
+    {
+        Transition(ParserSessionState.Starting);
+
+        var startInfo = BuildStartInfo(_spec, _options);
 
         Process process;
         try
