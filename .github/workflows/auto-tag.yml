@@ -8,6 +8,19 @@ name: Auto Tag
 on:
   push:
     branches: [main]
+    # Skip auto-tagging (and therefore releasing) pushes that only touch files
+    # which never affect the shipped payload. Deliberately narrow:
+    # - '*.md' matches ROOT-level docs only (CLAUDE.md, task checklists, PRD…);
+    #   it does NOT match skill/SKILL.md, which SHIPS in the release payload
+    #   (verify-publish asserts its hash) and must keep triggering releases.
+    # - .github/** is intentionally NOT ignored: release.yml changes can alter
+    #   the shipped artifacts (e.g. packaging), so CI changes still release.
+    # A push mixing ignored and non-ignored files still triggers normally.
+    paths-ignore:
+      - '*.md'
+      - 'docs/**'
+      - '.vscode/**'
+      - '.gitignore'
 
 # The default GITHUB_TOKEN needs write access to push the tag back to origin.
 permissions:
