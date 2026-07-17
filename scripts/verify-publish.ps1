@@ -30,13 +30,26 @@ if (Test-Path -LiteralPath $publishPath) {
 }
 
 $project = Join-Path $repoRoot 'src/CodeContext.Api/CodeContext.Api.csproj'
+# The host publishes as Native AOT (PublishAot=true in the csproj): ILC emits a single
+# native binary, so PublishSingleFile/IncludeNativeLibrariesForSelfExtract are meaningless
+# and are intentionally omitted.
 & dotnet publish $project -c Release -r $RuntimeIdentifier `
     --self-contained `
-    -p:PublishSingleFile=true `
-    -p:IncludeNativeLibrariesForSelfExtract=true `
     -o $publishPath
 if ($LASTEXITCODE -ne 0) {
     throw "dotnet publish failed with exit code $LASTEXITCODE"
+}
+
+# AOT payload guard: a Native AOT publish must leave NO managed *.dll next to the host
+# binary in the publish root. This is the permanent guard that unreferenced packages
+# (e.g. Microsoft.AspNetCore.OpenApi, which is referenced but never rooted in Release)
+# do not leak into the shipped host payload. The language workers legitimately ship
+# managed DLLs (JIT+R2R), so workers/csharp/** and workers/typescript/** are exempt.
+$strayManagedDlls = Get-ChildItem -LiteralPath $publishPath -Filter '*.dll' -File |
+    Select-Object -ExpandProperty Name
+if ($strayManagedDlls) {
+    throw ("Native AOT host publish leaked managed DLL(s) into the publish root: " +
+        ($strayManagedDlls -join ', ') + ". The AOT host must be a single native binary.")
 }
 
 $canonicalSkill = Join-Path $repoRoot 'skill/SKILL.md'
