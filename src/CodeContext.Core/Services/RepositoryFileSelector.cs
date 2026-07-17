@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Collections.Frozen;
 using System.IO.Enumeration;
 using System.Text;
@@ -24,6 +25,14 @@ public sealed class RepositoryFileSelector : IRepositoryFileSelector
     private readonly HashSet<string> _loadedIgnoreFiles = new(PathComparer);
     private readonly HashSet<string> _mandatoryNames;
     private int _ignoredPathCount;
+
+    // Per-(path, kind) include/exclude verdict memoization. IsIncluded runs multiple times per
+    // surviving FS event and once per entry during scans; each call would otherwise re-walk every
+    // ancestor directory and re-run every compiled regex (O(depth^2) evaluations per leaf). Keyed by
+    // "relativePath\0d|f" so directory and file verdicts for the same path never collide (directory-
+    // only rules make them genuinely different). Swapped wholesale by Invalidate(), the single point
+    // where rule state changes, so verdict staleness is exactly the rules-cache staleness contract.
+    private volatile ConcurrentDictionary<string, bool> _verdicts = new(PathComparer);
 
     public RepositoryFileSelector(IOptions<CodeContextOptions> options)
     {
@@ -61,6 +70,13 @@ public sealed class RepositoryFileSelector : IRepositoryFileSelector
             _rulesByDirectory.Clear();
             _loadedIgnoreFiles.Clear();
         }
+        // Swap in a fresh verdict cache (volatile write). This is the ONLY clearing point, so
+        // verdict staleness is exactly a subset of the rules-cache staleness contract.
+        // ORDERING INVARIANT: the rules clear above must happen BEFORE this swap. A reader that
+        // captures the new cache instance synchronizes-with this volatile write and therefore
+        // observes the cleared rules — so a verdict computed from pre-clear rules can never be
+        // stored into the post-swap cache. Reordering these two statements breaks that proof.
+        _verdicts = new ConcurrentDictionary<string, bool>(PathComparer);
         Volatile.Write(ref _ignoredPathCount, 0);
     }
 
@@ -181,6 +197,14 @@ public sealed class RepositoryFileSelector : IRepositoryFileSelector
 
     private bool EvaluateRules(string rootRelativePath, bool isDirectory)
     {
+        // Memoize the per-(path, kind) verdict. Capture the current cache once so a concurrent
+        // Invalidate() swap does not split the lookup and the store between two instances; adding to
+        // a just-superseded instance is harmless. No lock around the lookup: a duplicate computation
+        // under a race is benign and matches the parsed-rules cache philosophy.
+        var verdicts = _verdicts;
+        var key = rootRelativePath + "\0" + (isDirectory ? "d" : "f");
+        if (verdicts.TryGetValue(key, out var cached)) return cached;
+
         var included = true;
         var parent = isDirectory
             ? Path.GetDirectoryName(Path.Combine(_rootPath, rootRelativePath.Replace('/', Path.DirectorySeparatorChar)))
@@ -200,6 +224,8 @@ public sealed class RepositoryFileSelector : IRepositoryFileSelector
                     included = rule.Negated;
             }
         }
+
+        verdicts.TryAdd(key, included);
         return included;
     }
 
