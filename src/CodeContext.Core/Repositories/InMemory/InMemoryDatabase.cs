@@ -32,11 +32,16 @@ namespace CodeContext.Core.Repositories.InMemory
         private GraphState? _reconciliationState;
         private long _reconciliationGeneration;
 
-        private GraphStatistics? _cachedStatistics;
-        private long _cachedStatisticsVersion = -1;
+        // Each cache publishes {version, payload} as ONE immutable holder swapped through a single
+        // volatile reference, so a reader's single reference read observes the version and its payload
+        // atomically. A reader can never latch an old payload and then match a version another thread
+        // stamped for a newer payload. The only remaining (benign) race is a duplicate rebuild: two
+        // callers at the same version may each build once before either publishes.
+        private sealed record CachedStatistics(long Version, GraphStatistics Value);
+        private sealed record CachedAdjacency(long Version, GraphAdjacency Value);
 
-        private GraphAdjacency? _cachedAdjacency;
-        private long _cachedAdjacencyVersion = -1;
+        private volatile CachedStatistics? _cachedStatistics;
+        private volatile CachedAdjacency? _cachedAdjacency;
 
         public ConcurrentDictionary<string, CodeNode> Nodes => _state.Nodes;
         public ConcurrentDictionary<string, string> Identifiers => _state.Identifiers;
@@ -200,9 +205,9 @@ namespace CodeContext.Core.Repositories.InMemory
         {
             var version = Interlocked.Read(ref _version);
             var cached = _cachedStatistics;
-            if (cached is not null && Interlocked.Read(ref _cachedStatisticsVersion) == version)
+            if (cached is { } c && c.Version == version)
             {
-                return cached;
+                return c.Value;
             }
 
             var state = _state;
@@ -230,25 +235,25 @@ namespace CodeContext.Core.Repositories.InMemory
             }
 
             var statistics = new GraphStatistics(nodeCount, edgeCount, nodesByType, edgesByType);
-            _cachedStatistics = statistics;
-            Interlocked.Exchange(ref _cachedStatisticsVersion, version);
+            _cachedStatistics = new CachedStatistics(version, statistics);
             return statistics;
         }
 
         /// <summary>
         /// Returns a version-stamped source/target/file-path adjacency snapshot of the current
         /// committed state, rebuilt in one O(N+E) pass only when the mutation version changes.
-        /// Same benign rebuild race as <see cref="GetStatistics"/>: concurrent callers at the same
-        /// version may each build once, but every returned <see cref="GraphAdjacency"/> is a complete,
-        /// internally consistent view of a single committed <see cref="GraphState"/>.
+        /// The {version, snapshot} holder is published atomically (see <see cref="_cachedAdjacency"/>),
+        /// so a returned <see cref="GraphAdjacency"/> is always the snapshot built for the version the
+        /// reader matched — never a stale payload under a coincidentally matching version. The only
+        /// remaining benign race, as with <see cref="GetStatistics"/>, is a duplicate rebuild.
         /// </summary>
         internal GraphAdjacency GetAdjacency()
         {
             var version = Interlocked.Read(ref _version);
             var cached = _cachedAdjacency;
-            if (cached is not null && Interlocked.Read(ref _cachedAdjacencyVersion) == version)
+            if (cached is { } c && c.Version == version)
             {
-                return cached;
+                return c.Value;
             }
 
             var state = _state;
@@ -298,8 +303,7 @@ namespace CodeContext.Core.Repositories.InMemory
                 NodesByFilePath = byFilePath.ToFrozenDictionary(
                     entry => entry.Key, entry => entry.Value.ToArray(), StringComparer.OrdinalIgnoreCase),
             };
-            _cachedAdjacency = adjacency;
-            Interlocked.Exchange(ref _cachedAdjacencyVersion, version);
+            _cachedAdjacency = new CachedAdjacency(version, adjacency);
             return adjacency;
         }
 

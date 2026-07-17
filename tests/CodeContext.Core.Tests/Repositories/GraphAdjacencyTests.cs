@@ -62,8 +62,8 @@ public class GraphAdjacencyTests
 
         var after = _database.GetAdjacency();
         Assert.NotSame(before, after);
-        Assert.Equal(2, after.GetEdgesBySource("n1").Length);
-        Assert.Equal(2, after.GetEdgesByTarget("n2").Length);
+        Assert.Equal(2, after.GetEdgesBySource("n1").Count);
+        Assert.Equal(2, after.GetEdgesByTarget("n2").Count);
     }
 
     [Fact]

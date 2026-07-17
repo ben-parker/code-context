@@ -42,10 +42,13 @@ namespace CodeContext.Core.Repositories.InMemory
         /// </summary>
         public required FrozenDictionary<string, CodeNode[]> NodesByFilePath { get; init; }
 
-        public CodeEdge[] GetEdgesBySource(string sourceId)
+        // Returned as IReadOnlyList so callers cannot mutate the shared cached array in place
+        // (a stray .Sort()/Array.Clear() would corrupt the frozen snapshot and the Empty singletons).
+        // All current consumers copy immediately; the read-only facade keeps that a rule, not a habit.
+        public IReadOnlyList<CodeEdge> GetEdgesBySource(string sourceId)
             => EdgesBySource.TryGetValue(sourceId, out var edges) ? edges : EmptyEdges;
 
-        public CodeEdge[] GetEdgesByTarget(string targetId)
+        public IReadOnlyList<CodeEdge> GetEdgesByTarget(string targetId)
             => EdgesByTarget.TryGetValue(targetId, out var edges) ? edges : EmptyEdges;
 
         /// <summary>

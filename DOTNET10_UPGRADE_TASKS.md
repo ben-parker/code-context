@@ -132,10 +132,42 @@ warm-up. Cold `--version`: 10 runs `61.5,62.4,62.5,63.2,63.5,66.8,67.9,79,80.6,8
 ## Phase 5 — Adjacency + file-path indexes (TDD)
 - [x] GraphAdjacency (FrozenDictionary EdgesBySource/EdgesByTarget/NodesByFilePath + cached Nodes/Edges snapshots) + version-stamped `GetAdjacency()` on InMemoryDatabase (modeled exactly on the `GetStatistics()` benign-race cache; reads the committed `_state` so reconciliation-staged generations stay invisible until commit). Extracted the file-path normalize/match into a shared `FilePathMatcher` (used by both ContextService and the index) so they cannot drift — **finding: the real semantics are `OrdinalIgnoreCase` on every platform (NOT the store's per-OS `PathComparer`); rooted=exact, relative=exact-or-suffix**. ContextService delegates to it (behavior-preserving).
 - [x] Commit A (2b91116): InMemoryEdgeRepository.GetBySourceIdAsync/GetByTargetIdAsync/GetAllAsync + InMemoryNodeRepository.GetAllAsync consume the index internally, still return fresh `List<>`; signatures/mocks unchanged, full suite passed untouched. Removes the per-hop O(E) edge scans (→ O(degree)).
-- [~] Commit B (optional `Task<IReadOnlyList<T>>` copy-free reads): **DEFERRED.** The return-type change ripples across both repo interfaces + both InMemory impls + ContextService (`directEdges` is a `List` with `.AddRange`) + StatusService + **19 mock-based test files** (well over the ~15-file threshold), for a marginal gain (Commit A already killed the O(E) scans; the residual is an O(degree) list copy). `NodesByFilePath` production consumption in ContextService is deferred for the same reason (needs a new interface method → same 19-file mock ripple); the index is built + equivalence-tested (`FindNodesByPath`) and ready to wire in that future commit.
+- [~] Commit B (optional `Task<IReadOnlyList<T>>` copy-free reads): **DEFERRED.** The return-type change ripples across both repo interfaces + both InMemory impls + ContextService (`directEdges` is a `List` with `.AddRange`) + StatusService + **19 mock-based test files** (well over the ~15-file threshold), for a marginal gain (Commit A already killed the O(E) scans; the residual is an O(degree) list copy). `NodesByFilePath` production consumption in ContextService is deferred for the same reason (needs a new interface method → same 19-file mock ripple); the index is built + equivalence-tested (`FindNodesByPath`) and ready to wire in that future commit. **Wrap-before-return caution for Commit B:** when it wires copy-free `IReadOnlyList<T>` reads, the cached `CodeEdge[]`/`CodeNode[]` arrays must be wrapped (`Array.AsReadOnly`/`ReadOnlyCollection<T>`) before crossing the repository boundary — a bare `IReadOnlyList<T>` backed by an array can be cast back to the mutable array by any caller in the same assembly graph, which would corrupt the shared frozen snapshot and the static `Empty` singletons. (`GetEdgesBySource`/`GetEdgesByTarget` already return `IReadOnlyList<CodeEdge>` as of the Phase 5 review; the wrap is what makes that a real, not nominal, guarantee once the arrays are handed out uncopied.)
 - [x] TDD (11 tests, `tests/CodeContext.Core.Tests/Repositories/GraphAdjacencyTests.cs`): invalidation on upsert/node-delete/edge-delete-by-node/generation-commit(scope replacement)/prune/reconcile-commit/rollback; version-stamped caching (same instance when version unchanged); scan-vs-index set-equivalence on a seeded (20260717) random graph (200 nodes / 600 edges) for both edge directions; NodesByFilePath set-equal to a brute-force `FilePathMatcher.Matches` filter incl. rooted/relative/case-variant/backslash/suffix paths; concurrent reader/generation-swap smoke (readers only ever see a complete snapshot). Verified the invalidation tests fail (6/11) when the version check is bypassed.
 - [x] Verify: full suite **421** + ExternalTooling **8** green; 0 warnings Debug **and** Release (`-warnaserror`); **live-index byte-compare IDENTICAL** — pre-change (f4767c4) vs post-change AOT publishes both indexing the Phase-0 corpus (`%TEMP%\cc-repo-copy`, 1703 nodes / 6701 edges), `/api/context/complete?identifier=ContextService&depth=2&includeTests=true` → **19439 bytes byte-for-byte, no normalization needed, zero ordering drift**; query p50 **191.6ms** on the AOT publish (see table); `scripts/verify-publish.ps1 -RuntimeIdentifier win-x64` green (0.2.26; all 12 edge kinds, contractVersion 1, no stray DLL/PDB, skill hash).
-- [ ] Opus + Sonnet review; findings fixed
+- [x] Opus + Sonnet review; findings fixed
+  - **Finding 1 (consensus, Sonnet MEDIUM / Opus LOW) — two-field cache publication race.** Both
+    `GetAdjacency()` and the pre-existing `GetStatistics()` published `{payload, version}` as two
+    independent fields (plain payload write + `Interlocked`-stamped version), so a reader could latch an
+    OLD payload, pause while a rebuilder published a NEW payload and stamped the version the reader had
+    captured, then resume, match the stamp, and return the OLD payload under a current version
+    (internally-consistent-but-stale). Fixed BOTH caches identically: a single immutable holder
+    (`record CachedStatistics(long, GraphStatistics)` / `record CachedAdjacency(long, GraphAdjacency)`)
+    stored in one `volatile` reference. Reader takes one reference read (atomic pair), compares
+    `c.Version == version`; writer publishes `new(version, payload)` via the volatile write with no
+    separate stamp field. Deleted the `_cachedStatisticsVersion`/`_cachedAdjacencyVersion` fields.
+    Corrected the doc comments: the only remaining benign race is a duplicate rebuild —
+    staleness-under-matching-version is eliminated. The race is timing-dependent and not reliably
+    unit-testable, so no flaky test was added; instead the existing 11 `GraphAdjacencyTests` stay green
+    and the implementer's mutation sanity was re-run (bypass the version check → 6/11 invalidation tests
+    fail → restore → 11/11 green).
+  - **Finding 2 (both, LOW/defensive) — shared cached array returned by reference.** `GetEdgesBySource`
+    / `GetEdgesByTarget` now return `IReadOnlyList<CodeEdge>` (was `CodeEdge[]`), so a future in-place
+    `.Sort()`/`Array.Clear()` cannot corrupt the shared frozen snapshot or the static `Empty`
+    singletons. Arrays satisfy `IReadOnlyList` with zero allocation; consumers' `IEnumerable`/`new
+    List<>(...)` usages compiled unchanged (one test `.Length`→`.Count`). `FindNodesByPath` already
+    returns a freshly built `List` so needed no change. Recorded the Commit-B wrap-before-return caution
+    in the Phase 5 Commit B note above (a bare `IReadOnlyList` over an array is castable back to the
+    mutable array by a same-assembly caller once arrays are handed out uncopied).
+  - **Doc/checklist notes (Opus F2/F4):** (a) `NodesByFilePath` is built on every adjacency rebuild but
+    has no wired consumer yet — accepted forward-wiring cost, paid now so the index is ready for Commit
+    B. (b) `GraphAdjacency.FindNodesByPath`'s relative-path lookup is O(distinct-file-paths) (it scans
+    the key set for suffix matches), not O(1) — note for when it is wired into ContextService.
+  - Reviewers confirmed byte-identical read behavior (the atomic holder is a pure publication fix, no
+    payload change), ARM-safe publication (single `volatile` reference read/write replaces the
+    two-field read-then-stamp), and the verbatim `FilePathMatcher` extraction from Phase 5.
+  - **Gate:** `dotnet build` Debug **and** Release 0 warnings (`-warnaserror`); full suite **421** +
+    ExternalTooling **8** green; no test-duration anomalies (GraphAdjacencyTests ~2s, full suite ~7s).
 
 ## Phase 6 — Allocation passes (one reviewed commit each)
 - [ ] 6a. HeaderFraming: pooled buffered reads, Span header parse, ArrayPool payloads (tests first)
