@@ -20,16 +20,17 @@ which indexes the same source. Query target `ContextService`, depth=2, includeTe
 warm-up. Cold `--version`: 10 runs `61.5,62.4,62.5,63.2,63.5,66.8,67.9,79,80.6,84.4` ms.
 
 ## Phase 1 — TFM / SDK / package / CI bump (JIT)
-- [ ] `global.json` (10.0.100, rollForward latestFeature)
-- [ ] All csproj → net10.0
-- [ ] Remove all `Microsoft.Net.Compilers.Toolset` pins
-- [ ] Fix `net9.0` hardcoded worker paths in CodeContext.Api.csproj
-- [ ] Packages: M.E.Hosting/Logging → 10.0.x stable; AspNetCore.OpenApi → 10.0.x; Mvc.Testing → 10.0.x; Test.Sdk → 17.14.x; Roslyn → 5.0.x (worker)
-- [ ] System.CommandLine → 2.0.0 stable (fix alias ctors; smoke 4 subcommands)
-- [ ] ModelContextProtocol → current stable (keep reflection WithTools; mechanical renames only)
-- [ ] CI: 9.0.x → 10.0.x (release.yml ×3, auto-tag.yml ×1)
-- [ ] Capture MCP `tools/list` snapshot fixture (for Phase 3b parity)
-- [ ] Verify: build warnings-clean, full tests + ExternalTooling, verify-publish win-x64, MCP smoke, CLI pass
+- [x] `global.json` (10.0.100, rollForward latestFeature) — resolves to installed SDK 10.0.302
+- [x] All csproj → net10.0 (Api, Core, Mcp, Parser.Protocol, CSharp.Worker, Core.Tests, FakeWorker; roslyn-aot-test left on net9.0 per plan — deleted in Phase 4)
+- [x] Remove all `Microsoft.Net.Compilers.Toolset` pins (Api, Core, CSharp.Worker, Core.Tests)
+- [x] Fix `net9.0` hardcoded worker paths in CodeContext.Api.csproj (×3: build + publish item paths); also fixed stale `.vscode/launch.json` path
+- [x] Packages landed: Microsoft.Extensions.Hosting/Logging → **10.0.10**; Microsoft.AspNetCore.OpenApi → **10.0.10**; Microsoft.AspNetCore.Mvc.Testing → **10.0.10**; Microsoft.NET.Test.Sdk → **17.14.1**; Microsoft.CodeAnalysis.CSharp (worker) → **5.0.0**; kept xunit 2.9.2 / NSubstitute 5.3.0 / coverlet 6.0.2 / xunit.runner.visualstudio 2.8.2
+- [x] System.CommandLine → **2.0.10** stable (fixed all 10 option ctors: name no longer repeated in aliases, e.g. `new("--path","-p")`, `new("--port")`); GA `DefaultValueFactory`/`SetAction`/`GetValue`/`Parse().InvokeAsync()` compiled unchanged; smoked start/stop/list/status + --help
+- [x] ModelContextProtocol → **1.4.1** stable (kept reflection `.WithTools<CodeContextTools>()`; `[McpServerTool]`/`[McpServerToolType]` unchanged — zero code changes needed)
+- [x] Extra: pinned **Microsoft.OpenApi 2.11.0** to clear NU1903 (AspNetCore.OpenApi 10.0.10 pulls vulnerable 2.0.0) and migrated the 3 OpenAPI transformers to the Microsoft.OpenApi 2.0 API (namespace `Microsoft.OpenApi`, `OperationType`→`HttpMethod`, `JsonSchemaType` enum, `OpenApiSchemaReference`, read-only `IOpenApiParameter`); removed deprecated `WithOpenApi()` (ASPDEPR002)
+- [x] CI: 9.0.x → 10.0.x (release.yml ×3; auto-tag.yml ×2 — plan said 1, but there are genuinely two setup-dotnet steps)
+- [x] Capture MCP `tools/list` snapshot fixture (for Phase 3b parity) → `tests/CodeContext.Core.Tests/Fixtures/mcp-tools-list.snapshot.json` (3 tools: get_multi_context, get_context, get_status)
+- [x] Verify: build warnings-clean (0W/0E); tests 396 passed + 8 ExternalTooling passed; verify-publish win-x64 green; MCP stdio smoke (initialize+tools/list+tools/call get_status) green; CLI smoke green
 - [ ] Opus + Sonnet review; findings fixed
 
 ## Phase 2 — Remove in-process parser seam
