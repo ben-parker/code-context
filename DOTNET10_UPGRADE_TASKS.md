@@ -187,8 +187,28 @@ warm-up. Cold `--version`: 10 runs `61.5,62.4,62.5,63.2,63.5,66.8,67.9,79,80.6,8
 ## Phase 7 — Wrap-up
 - [x] Final benchmark table (below) — re-measured on finished HEAD (f87189c, release 0.2.35), fresh win-x64 AOT publish + verify-publish green
 - [x] AOT_COMPATIBILITY.md (verified accurate post-Phase-6, no change needed) + CLAUDE.md publish notes verified + "Performance architecture" note appended (additive)
-- [ ] 4-RID CI release dry-run on branch — pending push decision (local-only commits so far)
-- [ ] Fable end-to-end check + final review of cumulative diff — orchestrator
+- [x] 4-RID CI release dry-run + canonical release — **shipped as v0.2.39** (2026-07-17)
+  - Rehearsal path: rc tag `v0.2.35-rc.1` failed verify-publish's version assertion — nbgv overrides
+    `-p:Version`, so only nbgv-derived tags can pass (a real invariant: auto-tag derives tags FROM
+    nbgv, hand tags can't drift). Re-tagged `v0.2.37` (exact nbgv version) → **all 4 RID AOT
+    publishes green** on first try (linux/macos ILC toolchains proven). Rehearsal tag+release then
+    deleted for canonical provenance.
+  - Canonical path exposed two latent CI bugs in the pre-upgrade auto-versioning work, both fixed:
+    (1) auto-tag's test job used a shallow checkout — NB.GV throws on shallow clones now that
+    Directory.Build.props applies it repo-wide (fix: fetch-depth 0, mirroring release.yml, `89e044a`);
+    (2) `dotnet tool install --global nbgv` refused to downgrade past the runner-preinstalled 3.10.91
+    (fix: isolated `--tool-path` install, `1c8fad9`).
+  - Final: auto-tag pushed `v0.2.39` → release.yml built all 4 RIDs → GitHub release with 8 assets.
+    Zips vs v0.1.2 (JIT era): win-x64 79.1→**56.6MB**, linux 91.1→85.8, osx-x64 86.4→77.2,
+    osx-arm64 83.1→72.9.
+- [x] Fable end-to-end check + final review of cumulative diff — done 2026-07-17
+  - Independent gates re-run: full suite + ExternalTooling, build 0W both configs; live E2E on the
+    published AOT binary (CLI lifecycle, REST queries, MCP stdio round-trip with clean stdout).
+  - Found + fixed one latent defect the phase reviews missed: compact-response truncation membership
+    depended on ConcurrentDictionary enumeration order (exposed by 6d presizing; proven via A/B
+    presizing-revert worktree — byte-exact match to the old capture). Fixed with deterministic
+    traversal expansion ordering (`OrderForTraversal`, 4 sites) + a permutation regression test that
+    failed pre-fix. Canonical compact response: 19457 bytes, byte-identical across process restarts.
 
 ## Benchmarks
 
