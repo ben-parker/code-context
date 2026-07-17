@@ -44,17 +44,8 @@ public static class ProgramHelpers
         int idleTimeoutMinutes = 120, string? instanceId = null,
         ApplicationStartTime? applicationStartTime = null)
     {
-        using var loggerFactory = LoggerFactory.Create(loggingBuilder =>
-        {
-            loggingBuilder.AddConsole();
-            loggingBuilder.AddDebug();
-        });
-
-        var logger = loggerFactory.CreateLogger("ProgramHelpers");
-
-        logger.LogInformation("Current directory is {Directory}", Environment.CurrentDirectory);
-
-        // Configure services
+        // Configure services. Console logging is added here for both host modes; the MCP path
+        // (RunMcpAsync) subsequently redirects it to stderr so stdout stays protocol-only.
         services.AddLogging(options => options.AddConsole());
         services.AddSingleton(applicationStartTime ?? new ApplicationStartTime(DateTimeOffset.UtcNow));
 

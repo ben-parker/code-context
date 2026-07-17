@@ -93,7 +93,10 @@ public static class StartCommandHandler
             ? Guid.NewGuid().ToString("N")
             : settings.InstanceId;
 
-        var builder = WebApplication.CreateBuilder();
+        // Slim builder: localhost HTTP only, so the IIS/HTTPS/EventLog wiring a full builder
+        // adds is dead weight and dead cold-start time. Kestrel, config, and console logging
+        // remain (console logging is also ensured by ConfigureCoreServices' AddConsole).
+        var builder = WebApplication.CreateSlimBuilder();
         ProgramHelpers.ConfigureCoreServices(
             builder.Services, rootPath, builder.Environment.IsProduction(),
             port, settings.IdleTimeoutMinutes, instanceId, applicationStartTime);
@@ -104,6 +107,7 @@ public static class StartCommandHandler
         builder.WebHost.UseUrls($"http://localhost:{port}");
 
         var app = builder.Build();
+        app.Logger.LogInformation("Current directory is {Directory}", Environment.CurrentDirectory);
 
         // Initialize the repository factory before starting the app
         using (var scope = app.Services.CreateScope())
@@ -274,6 +278,13 @@ public static class StartCommandHandler
         var builder = Host.CreateApplicationBuilder();
         ProgramHelpers.ConfigureCoreServices(builder.Services, rootPath, builder.Environment.IsProduction());
         Mcp.ProgramHelpers.AddMcpServer(builder.Services);
+
+        // In MCP mode stdout carries the JSON-RPC protocol; any log line written there corrupts
+        // the stream. Drop every console provider registered so far (the Host default console and
+        // ConfigureCoreServices' AddConsole, both stdout) and re-add a single console that writes
+        // ALL levels to stderr. Applied last so it wins.
+        builder.Logging.ClearProviders();
+        builder.Logging.AddConsole(options => options.LogToStandardErrorThreshold = LogLevel.Trace);
 
         var app = builder.Build();
 
