@@ -52,13 +52,13 @@ warm-up. Cold `--version`: 10 runs `61.5,62.4,62.5,63.2,63.5,66.8,67.9,79,80.6,8
   - Reviewers confirmed production behavior is unchanged; the coverage gap predated Phase 2 (the deleted legacy ScanResilienceTests only covered the removed in-process path).
 
 ## Phase 3 — AOT-safety refactors (still JIT)
-- [ ] Enable Trim/AOT/SingleFile analyzers + RequestDelegateGenerator; burn warnings to zero
-- [ ] 3a. Typed DTOs replace anonymous JSON (Mcp tools + REST endpoints + CountResponseDto); contract tests first
-- [ ] 3b. McpToolCatalog: explicit ListTools/CallTool handlers; schema literals; tools/list snapshot parity
-- [ ] 3c. OpenAPI dev-only: Debug-conditioned package + `ENABLE_OPENAPI` + OpenApiSupport.cs
-- [ ] 3d. CreateSlimBuilder; delete throwaway LoggerFactory; MCP mode unchanged
-- [ ] 3d+. Pre-existing bug found during Phase 1 review: in `--mcp` mode, console `info:` logs go to **stdout**, interleaved with protocol JSON (verified against pre-upgrade binary too). Route logging to stderr (or off) when MCP transport is active.
-- [ ] Verify: zero warnings; suite; snapshot parity; Debug /openapi vs Release 404; REST smoke
+- [x] Enable Trim/AOT/SingleFile analyzers + RequestDelegateGenerator (Api) + Trim/AOT/IsAotCompatible (Mcp); burned warnings to zero. Only IL2026/IL3050 surfaced (20, all from reflection JSON of anonymous objects + the CompactNativeTree JsonNode path); **no** RDG warnings (endpoint lambdas already source-generatable).
+- [x] 3a. Typed DTOs replace anonymous JSON — Mcp tools (new `McpJsonContext`, verbatim naming + Never null-ignore to match the old default-options wire shape) + REST endpoints (`ErrorDtos.cs` in `CodeContextJsonContext`, camelCase + WhenWritingNull) via `Results.Json(dto, JsonTypeInfo, statusCode)`; CompactNativeTree de-reflected (`JsonNode.ToJsonString`+`JsonDocument.Parse`, `IList<JsonNode?>.Add`); `CountResponseDto` dropped its never-populated `Dictionary<string,object> _query_stats`. `ErrorContractTests` (10) lock byte-identity, written first.
+- [x] 3b. `McpToolCatalog`: explicit `WithListToolsHandler`/`WithCallToolHandler` (delegate `McpRequestHandler<TParams,TResult>` = `(RequestContext<T>, CancellationToken) => ValueTask<TResult>`); three `Tool`s with InputSchema parsed from const JSON literals + `execution.taskSupport=optional` (ToolExecution is `[Experimental MCPEXP001]` — suppressed narrowly to match the contract). `CallAsync` dispatches by name, args from `ctx.Params.Arguments`, services from `ctx.Services`, delegates to the unchanged `CodeContextTools` bodies. `[McpServerTool]`/`[McpServerToolType]` removed. `McpToolCatalogTests` asserts semantic parity vs the golden snapshot.
+- [x] 3c. OpenAPI dev-only: `ENABLE_OPENAPI` DefineConstant + `Microsoft.AspNetCore.OpenApi`/`Microsoft.OpenApi` PackageReferences all Debug-only; three transformers + AddOpenApi/MapOpenApi moved to `OpenApiSupport.cs` (whole file `#if ENABLE_OPENAPI`); call sites guarded by `#if` + runtime `IsDevelopment()`. Release output carries neither OpenApi DLL.
+- [x] 3d. `WebApplication.CreateBuilder` → `CreateSlimBuilder` (REST); throwaway `LoggerFactory` deleted, current-dir line moved to `app.Logger` (REST only).
+- [x] 3d+. MCP mode: `builder.Logging.ClearProviders()` + `AddConsole(LogToStandardErrorThreshold=Trace)` so stdout is JSON-RPC-only. Verified live: stdio round-trip (initialize + tools/list + tools/call get_status + get_context) returns 4 valid JSON responses on stdout with **0** `info:` lines; all logs on stderr.
+- [x] Verify: 0 warnings Debug **and** Release (full solution); `dotnet test` 398 + ExternalTooling 8 green; snapshot parity green; Debug/Development serves `/openapi/v1.json` (200) + `/api/schema` (302), Release 404s both; REST smoke — `/api/status` 200, `/api/context/complete?identifier=Widget` compact 200, `?view=bogus` 400 byte-identical error; `scripts/verify-publish.ps1 -RuntimeIdentifier win-x64` green (JIT publish unchanged).
 - [ ] Opus + Sonnet review; findings fixed
 
 ## Phase 4 — Host AOT + worker R2R + publish/CI
