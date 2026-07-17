@@ -1,0 +1,276 @@
+{
+  "tools": [
+    {
+      "name": "get_multi_context",
+      "description": "Get context for multiple identifiers in a single request. Useful for batch operations.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "identifiers": {
+            "description": "List of identifiers to get context for",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "type": {
+            "description": "Optional type filter applied to every identifier",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "depth": {
+            "description": "How many relationship levels to traverse",
+            "type": "integer",
+            "default": 1
+          },
+          "includeTests": {
+            "description": "Whether to include classified test evidence",
+            "type": "boolean",
+            "default": false
+          },
+          "exact": {
+            "description": "Exact matching; omit for exact-first fallback",
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "default": null
+          },
+          "maxRelationships": {
+            "description": "Maximum entries returned per relationship list",
+            "type": "integer",
+            "default": 3
+          },
+          "maxCallSites": {
+            "description": "Maximum source locations per aggregated relationship",
+            "type": "integer",
+            "default": 3
+          },
+          "maxTestFiles": {
+            "description": "Maximum test files returned; zero is count-only",
+            "type": "integer",
+            "default": 5
+          },
+          "maxTestMethods": {
+            "description": "Maximum test methods per file; zero is count-only",
+            "type": "integer",
+            "default": 5
+          },
+          "expandAmbiguous": {
+            "description": "Expand bounded ambiguous matches",
+            "type": "boolean",
+            "default": false
+          },
+          "containingType": {
+            "description": "Containing type filter",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "namespace": {
+            "description": "Exact namespace or module filter",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "signature": {
+            "description": "Exact signature filter",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "sourceFile": {
+            "description": "Repository-relative or absolute source file filter",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "relation": {
+            "description": "Comma-separated relation kinds to filter uses/usedBy (CALLS, MOCK_CALLS, REFERENCES, IMPLEMENTS, INHERITS, EXTENDS, IMPORTS, USES); compact view only",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "view": {
+            "description": "Response shape; compact is the default",
+            "type": "string",
+            "enum": [
+              "Compact",
+              "Full"
+            ],
+            "default": "Compact"
+          }
+        },
+        "required": [
+          "identifiers"
+        ]
+      },
+      "execution": {
+        "taskSupport": "optional"
+      }
+    },
+    {
+      "name": "get_context",
+      "description": "Get comprehensive context for a code identifier. Returns relationships, dependencies, tests, and metrics.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "identifier": {
+            "description": "Canonical returned identifier, symbol name, or file path",
+            "type": "string"
+          },
+          "type": {
+            "description": "Filter by type (Class, Method, Interface, Property, etc.)",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "depth": {
+            "description": "How many relationship levels to traverse (0-10)",
+            "type": "integer",
+            "default": 1
+          },
+          "includeTests": {
+            "description": "Whether to include test-related information",
+            "type": "boolean",
+            "default": false
+          },
+          "includeContent": {
+            "description": "Whether to include file content snippets",
+            "type": "boolean",
+            "default": false
+          },
+          "exact": {
+            "description": "Exact matching; omit for exact-first with substring fallback",
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "default": null
+          },
+          "includeRelated": {
+            "description": "Whether to include loosely related symbols",
+            "type": "boolean",
+            "default": false
+          },
+          "includeMetrics": {
+            "description": "Whether to include heuristic metrics",
+            "type": "boolean",
+            "default": false
+          },
+          "maxMatches": {
+            "description": "Maximum ambiguous candidates returned",
+            "type": "integer",
+            "default": 5
+          },
+          "maxRelationships": {
+            "description": "Maximum entries returned per relationship list",
+            "type": "integer",
+            "default": 10
+          },
+          "maxCallSites": {
+            "description": "Maximum source locations returned per aggregated relationship; zero is count-only",
+            "type": "integer",
+            "default": 3
+          },
+          "maxTestFiles": {
+            "description": "Maximum test files returned; zero is count-only",
+            "type": "integer",
+            "default": 5
+          },
+          "maxTestMethods": {
+            "description": "Maximum test methods returned per file; zero is count-only",
+            "type": "integer",
+            "default": 5
+          },
+          "expandAmbiguous": {
+            "description": "Expand bounded ambiguous matches instead of returning summaries",
+            "type": "boolean",
+            "default": false
+          },
+          "containingType": {
+            "description": "Filter members by their containing type",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "namespace": {
+            "description": "Filter by exact namespace or module",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "signature": {
+            "description": "Filter by exact signature",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "sourceFile": {
+            "description": "Filter by repository-relative or absolute source file",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "relation": {
+            "description": "Comma-separated relation kinds to filter uses/usedBy (CALLS, MOCK_CALLS, REFERENCES, IMPLEMENTS, INHERITS, EXTENDS, IMPORTS, USES); compact view only",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "view": {
+            "description": "Response shape; compact is the default",
+            "type": "string",
+            "enum": [
+              "Compact",
+              "Full"
+            ],
+            "default": "Compact"
+          }
+        },
+        "required": [
+          "identifier"
+        ]
+      },
+      "execution": {
+        "taskSupport": "optional"
+      }
+    },
+    {
+      "name": "get_status",
+      "description": "Get comprehensive system health and debugging information",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      },
+      "execution": {
+        "taskSupport": "optional"
+      }
+    }
+  ]
+}
