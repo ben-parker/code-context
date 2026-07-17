@@ -54,30 +54,13 @@ namespace CodeContext.Core.Repositories.InMemory
                 edge.Id = Guid.NewGuid().ToString();
             }
 
-            _database.Edges.AddOrUpdate(edge.Id, edge, (key, existing) => edge);
-            _database.NotifyMutation();
+            _database.UpsertEdge(edge);
             return Task.CompletedTask;
         }
 
         public Task DeleteByNodeIdAsync(string nodeId, CancellationToken ct)
         {
-            
-            var edgesToRemove = _database.Edges.Values
-                .Where(e => e.SourceId == nodeId || e.TargetId == nodeId)
-                .Select(e => e.Id)
-                .Where(id => id != null)
-                .ToList();
-
-            foreach (var edgeId in edgesToRemove)
-            {
-                _database.Edges.TryRemove(edgeId!, out _);
-            }
-
-            if (edgesToRemove.Count > 0)
-            {
-                _database.NotifyMutation();
-            }
-
+            _database.RemoveEdgesTouchingNode(nodeId);
             return Task.CompletedTask;
         }
     }

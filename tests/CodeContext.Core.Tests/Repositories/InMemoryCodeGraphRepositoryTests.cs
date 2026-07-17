@@ -27,8 +27,8 @@ public class InMemoryCodeGraphRepositoryTests
         var existingNode = CreateTestNode("existing-node", "ExistingClass");
         var existingEdge = CreateTestEdge("existing-edge", "source", "target", "CALLS");
         
-        _database.Nodes.TryAdd(existingNode.Id!, existingNode);
-        _database.Edges.TryAdd(existingEdge.Id!, existingEdge);
+        _database.UpsertNode(existingNode);
+        _database.UpsertEdge(existingEdge);
 
         var emptyGraph = new CodeGraph
         {
@@ -41,8 +41,8 @@ public class InMemoryCodeGraphRepositoryTests
 
         // Assert
         Assert.IsType<Guid>(result);
-        Assert.Empty(_database.Nodes);
-        Assert.Empty(_database.Edges);
+        Assert.Equal(0, _database.NodeCount);
+        Assert.Equal(0, _database.EdgeCount);
         Assert.Same(emptyGraph, _database.CurrentGraph);
     }
 
@@ -65,8 +65,8 @@ public class InMemoryCodeGraphRepositoryTests
 
         // Assert
         Assert.IsType<Guid>(result);
-        Assert.Equal(2, _database.Nodes.Count);
-        Assert.Single(_database.Edges);
+        Assert.Equal(2, _database.NodeCount);
+        Assert.Equal(1, _database.EdgeCount);
         Assert.Same(graph, _database.CurrentGraph);
     }
 
@@ -87,8 +87,8 @@ public class InMemoryCodeGraphRepositoryTests
         await _repository.SaveGraphAsync(graph);
 
         // Assert
-        Assert.Single(_database.Nodes);
-        Assert.Equal("valid-node", _database.Nodes.Keys.First());
+        Assert.Equal(1, _database.NodeCount);
+        Assert.Equal("valid-node", _database.EnumerateNodes().First().Id);
     }
 
     [Fact]
@@ -108,8 +108,8 @@ public class InMemoryCodeGraphRepositoryTests
         await _repository.SaveGraphAsync(graph);
 
         // Assert
-        Assert.Single(_database.Edges);
-        Assert.Equal("valid-edge", _database.Edges.Keys.First());
+        Assert.Equal(1, _database.EdgeCount);
+        Assert.Equal("valid-edge", _database.EnumerateEdges().First().Id);
     }
 
     [Fact]
@@ -138,9 +138,9 @@ public class InMemoryCodeGraphRepositoryTests
         await _repository.SaveGraphAsync(newGraph);
 
         // Assert
-        Assert.Single(_database.Nodes);
-        Assert.Equal("new-node", _database.Nodes.Keys.First());
-        Assert.Empty(_database.Edges);
+        Assert.Equal(1, _database.NodeCount);
+        Assert.Equal("new-node", _database.EnumerateNodes().First().Id);
+        Assert.Equal(0, _database.EdgeCount);
         Assert.Same(newGraph, _database.CurrentGraph);
     }
 
@@ -164,9 +164,9 @@ public class InMemoryCodeGraphRepositoryTests
         var node2 = CreateTestNode("node2", "Class2");
         var edge1 = CreateTestEdge("edge1", "node1", "node2", "CALLS");
         
-        _database.Nodes.TryAdd(node1.Id!, node1);
-        _database.Nodes.TryAdd(node2.Id!, node2);
-        _database.Edges.TryAdd(edge1.Id!, edge1);
+        _database.UpsertNode(node1);
+        _database.UpsertNode(node2);
+        _database.UpsertEdge(edge1);
 
         // Act
         var result = await _repository.GetGraphAsync();
@@ -192,16 +192,16 @@ public class InMemoryCodeGraphRepositoryTests
             Edges = new List<CodeEdge> { edge }
         };
 
-        _database.Nodes.TryAdd(node.Id!, node);
-        _database.Edges.TryAdd(edge.Id!, edge);
+        _database.UpsertNode(node);
+        _database.UpsertEdge(edge);
         _database.CurrentGraph = graph;
 
         // Act
         await _repository.ClearAsync();
 
         // Assert
-        Assert.Empty(_database.Nodes);
-        Assert.Empty(_database.Edges);
+        Assert.Equal(0, _database.NodeCount);
+        Assert.Equal(0, _database.EdgeCount);
         Assert.Null(_database.CurrentGraph);
     }
 
@@ -210,7 +210,7 @@ public class InMemoryCodeGraphRepositoryTests
     {
         // Arrange
         var existingNode = CreateTestNode("existing-node", "ExistingClass");
-        _database.Nodes.TryAdd(existingNode.Id!, existingNode);
+        _database.UpsertNode(existingNode);
 
         var nodeDto = new NodeDto(
             Id: "new-node",
@@ -248,10 +248,10 @@ public class InMemoryCodeGraphRepositoryTests
 
         // Assert
         Assert.NotNull(result);
-        Assert.Single(_database.Nodes);
-        Assert.Single(_database.Edges);
-        Assert.Equal("new-node", _database.Nodes.Keys.First());
-        Assert.Equal("new-edge", _database.Edges.Keys.First());
+        Assert.Equal(1, _database.NodeCount);
+        Assert.Equal(1, _database.EdgeCount);
+        Assert.Equal("new-node", _database.EnumerateNodes().First().Id);
+        Assert.Equal("new-edge", _database.EnumerateEdges().First().Id);
 
         var stats = JsonSerializer.Deserialize(result, CodeContextJsonContext.Default.ReconcileStatsDto);
         Assert.NotNull(stats);
@@ -268,8 +268,8 @@ public class InMemoryCodeGraphRepositoryTests
         var existingNode = CreateTestNode("existing-node", "ExistingClass");
         var existingEdge = CreateTestEdge("existing-edge", "source", "target", "CALLS");
         
-        _database.Nodes.TryAdd(existingNode.Id!, existingNode);
-        _database.Edges.TryAdd(existingEdge.Id!, existingEdge);
+        _database.UpsertNode(existingNode);
+        _database.UpsertEdge(existingEdge);
 
         var nodesJson = JsonSerializer.Serialize(new List<NodeDto>(), CodeContextJsonContext.Default.ListNodeDto);
         var edgesJson = JsonSerializer.Serialize(new List<EdgeDto>(), CodeContextJsonContext.Default.ListEdgeDto);
@@ -278,8 +278,8 @@ public class InMemoryCodeGraphRepositoryTests
         var result = await _repository.ReconcileAndPruneAsync(nodesJson, edgesJson);
 
         // Assert
-        Assert.Empty(_database.Nodes);
-        Assert.Empty(_database.Edges);
+        Assert.Equal(0, _database.NodeCount);
+        Assert.Equal(0, _database.EdgeCount);
 
         var stats = JsonSerializer.Deserialize(result, CodeContextJsonContext.Default.ReconcileStatsDto);
         Assert.NotNull(stats);
@@ -339,8 +339,8 @@ public class InMemoryCodeGraphRepositoryTests
         await _repository.ReconcileAndPruneAsync(nodesJson, edgesJson);
 
         // Assert
-        Assert.Single(_database.Nodes);
-        Assert.Equal("valid-node", _database.Nodes.Keys.First());
+        Assert.Equal(1, _database.NodeCount);
+        Assert.Equal("valid-node", _database.EnumerateNodes().First().Id);
     }
 
     [Fact]
@@ -370,8 +370,8 @@ public class InMemoryCodeGraphRepositoryTests
         await _repository.ReconcileAndPruneAsync(nodesJson, edgesJson);
 
         // Assert
-        Assert.Single(_database.Edges);
-        Assert.Equal("valid-edge", _database.Edges.Keys.First());
+        Assert.Equal(1, _database.EdgeCount);
+        Assert.Equal("valid-edge", _database.EnumerateEdges().First().Id);
     }
 
     [Fact]

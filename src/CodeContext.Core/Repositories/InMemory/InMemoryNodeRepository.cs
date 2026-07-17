@@ -16,16 +16,16 @@ namespace CodeContext.Core.Repositories.InMemory
 
         public Task<CodeNode?> GetByIdAsync(string id)
         {
-            _database.Nodes.TryGetValue(id, out var node);
+            _database.TryGetNode(id, out var node);
             return Task.FromResult(node);
         }
 
         public Task<CodeNode?> GetByIdentifierAsync(string identifier)
         {
-            if (_database.Identifiers.TryGetValue(identifier, out var id)
-                && _database.Nodes.TryGetValue(id, out var node))
+            if (_database.TryGetNodeIdByIdentifier(identifier, out var id)
+                && _database.TryGetNode(id!, out var node))
             {
-                return Task.FromResult<CodeNode?>(node);
+                return Task.FromResult(node);
             }
             return Task.FromResult<CodeNode?>(null);
         }
@@ -37,11 +37,11 @@ namespace CodeContext.Core.Repositories.InMemory
                 return Task.FromResult(new List<CodeNode>());
             }
 
-            var query = _database.Nodes.Values.Where(n => 
-                exact 
+            var query = _database.EnumerateNodes().Where(n =>
+                exact
                     ? string.Equals(n.Name, name, StringComparison.OrdinalIgnoreCase)
                     : n.Name?.Contains(name, StringComparison.OrdinalIgnoreCase) ?? false);
-            
+
             if (type != null)
             {
                 query = query.Where(n => string.Equals(n.Type, type, StringComparison.OrdinalIgnoreCase));
@@ -51,8 +51,9 @@ namespace CodeContext.Core.Repositories.InMemory
         }
 
         // Resolves through the version-stamped adjacency snapshot (built once per mutation version)
-        // rather than materializing the live dictionary on every call; returns a fresh List so the
-        // caller owns its copy. Same node set and order as the previous Nodes.Values.ToList().
+        // rather than materializing the live dictionaries on every call; returns a fresh List so the
+        // caller owns its copy. Order is ordinal-shard-then-per-shard-dictionary order (identical to the
+        // former single-dictionary enumeration in the common single-shard case).
         public Task<List<CodeNode>> GetAllAsync()
         {
             return Task.FromResult(new List<CodeNode>(_database.GetAdjacency().Nodes));
@@ -65,37 +66,15 @@ namespace CodeContext.Core.Repositories.InMemory
                 throw new ArgumentException("Node must have an Id", nameof(node));
             }
 
-            if (string.IsNullOrEmpty(node.Identifier))
-                node.Identifier = InMemoryDatabase.DeriveLegacyIdentifier(node) ?? string.Empty;
-            _database.Nodes.TryGetValue(node.Id, out var existingNode);
-            if (!string.IsNullOrWhiteSpace(node.Identifier))
-            {
-                if (!_database.Identifiers.TryAdd(node.Identifier, node.Id)
-                    && _database.Identifiers[node.Identifier] != node.Id)
-                {
-                    throw new InvalidDataException($"Duplicate public symbol identifier '{node.Identifier}'.");
-                }
-            }
-            _database.Nodes.AddOrUpdate(node.Id, node, (key, existing) => node);
-            if (existingNode?.Identifier is { Length: > 0 } previousIdentifier
-                && previousIdentifier != node.Identifier
-                && _database.Identifiers.TryGetValue(previousIdentifier, out var previousId)
-                && previousId == node.Id)
-            {
-                _database.Identifiers.TryRemove(previousIdentifier, out _);
-            }
-            _database.NotifyMutation();
+            // Routing, identifier derivation, cross-shard duplicate enforcement, stale-identifier
+            // cleanup and the mutation notification are all encapsulated by the store.
+            _database.UpsertNode(node);
             return Task.CompletedTask;
         }
 
         public Task DeleteAsync(string id, CancellationToken ct)
         {
-            if (_database.Nodes.TryRemove(id, out _))
-            {
-                foreach (var entry in _database.Identifiers.Where(entry => entry.Value == id).ToList())
-                    _database.Identifiers.TryRemove(entry.Key, out _);
-                _database.NotifyMutation();
-            }
+            _database.RemoveNode(id);
             return Task.CompletedTask;
         }
     }

@@ -3,6 +3,19 @@ using CodeContext.Core.Models;
 namespace CodeContext.Core.Repositories
 {
     /// <summary>
+    /// Identifies the facts a scoped generation commit replaces. Ownership is the
+    /// (parser, workspace) pair stamped onto every fact's metadata by the applier, so the
+    /// store routes and partitions by <paramref name="ParserId"/>/<paramref name="WorkspaceId"/>
+    /// instead of rediscovering the scope with a predicate. When <paramref name="ReplacesFiles"/>
+    /// is null the whole (parser, workspace) shard is replaced; otherwise only facts whose
+    /// file path is in the set are replaced and the rest of the shard is carried over.
+    /// </summary>
+    public sealed record CommitScope(
+        string ParserId,
+        string WorkspaceId,
+        IReadOnlyCollection<string>? ReplacesFiles);
+
+    /// <summary>
     /// Typed, generation-aware graph commits. Implemented by the in-memory store; the
     /// writer side (GraphUpdateService via the coordinator) prefers this over the legacy
     /// JSON reconcile so that JSON stays a process-boundary format only.
@@ -26,16 +39,16 @@ namespace CodeContext.Core.Repositories
         /// an intermediate state. Returns false when <paramref name="generation"/> is
         /// not newer than the last committed generation (stale generations cannot commit).
         /// </summary>
-        /// <param name="replacesScope">
-        /// Predicate selecting the existing nodes this delta replaces (e.g. "all C# nodes").
-        /// Nodes outside the scope — and edges originating from them — are carried over.
-        /// Null replaces the entire graph.
+        /// <param name="scope">
+        /// The (parser, workspace) facts this delta replaces (optionally narrowed to a set
+        /// of files). Facts owned by other (parser, workspace) pairs — and their edges — are
+        /// carried over untouched. Null replaces the entire graph.
         /// </param>
         Task<bool> TryCommitGenerationAsync(
             long generation,
             IReadOnlyList<CodeNode> nodes,
             IReadOnlyList<CodeEdge> edges,
-            Func<CodeNode, bool>? replacesScope = null,
+            CommitScope? scope = null,
             CancellationToken ct = default);
 
         /// <summary>

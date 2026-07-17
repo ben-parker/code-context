@@ -24,7 +24,7 @@ public class InMemoryNodeRepositoryTests
     {
         // Arrange
         var node = CreateTestNode("test-id", "TestClass");
-        _database.Nodes.TryAdd(node.Id!, node);
+        _database.UpsertNode(node);
 
         // Act
         var result = await _repository.GetByIdAsync("test-id");
@@ -53,9 +53,9 @@ public class InMemoryNodeRepositoryTests
         var node2 = CreateTestNode("id2", "TestClassHelper");
         var node3 = CreateTestNode("id3", "testclass");
         
-        _database.Nodes.TryAdd(node1.Id!, node1);
-        _database.Nodes.TryAdd(node2.Id!, node2);
-        _database.Nodes.TryAdd(node3.Id!, node3);
+        _database.UpsertNode(node1);
+        _database.UpsertNode(node2);
+        _database.UpsertNode(node3);
 
         // Act
         var result = await _repository.FindByNameAsync("TestClass", exact: true);
@@ -74,9 +74,9 @@ public class InMemoryNodeRepositoryTests
         var node2 = CreateTestNode("id2", "TestClassHelper");
         var node3 = CreateTestNode("id3", "AnotherClass");
         
-        _database.Nodes.TryAdd(node1.Id!, node1);
-        _database.Nodes.TryAdd(node2.Id!, node2);
-        _database.Nodes.TryAdd(node3.Id!, node3);
+        _database.UpsertNode(node1);
+        _database.UpsertNode(node2);
+        _database.UpsertNode(node3);
 
         // Act
         var result = await _repository.FindByNameAsync("TestClass", exact: false);
@@ -94,8 +94,8 @@ public class InMemoryNodeRepositoryTests
         var classNode = CreateTestNode("id1", "TestClass", "Class");
         var methodNode = CreateTestNode("id2", "TestClass", "Method");
         
-        _database.Nodes.TryAdd(classNode.Id!, classNode);
-        _database.Nodes.TryAdd(methodNode.Id!, methodNode);
+        _database.UpsertNode(classNode);
+        _database.UpsertNode(methodNode);
 
         // Act
         var result = await _repository.FindByNameAsync("TestClass", type: "Class", exact: true);
@@ -110,7 +110,7 @@ public class InMemoryNodeRepositoryTests
     {
         // Arrange
         var methodNode = CreateTestNode("id1", "Parse", "Method");
-        _database.Nodes.TryAdd(methodNode.Id!, methodNode);
+        _database.UpsertNode(methodNode);
 
         // Act
         var result = await _repository.FindByNameAsync("Parse", type: "method", exact: true);
@@ -125,7 +125,7 @@ public class InMemoryNodeRepositoryTests
     {
         // Arrange
         var node = CreateTestNode("id1", "TestClass");
-        _database.Nodes.TryAdd(node.Id!, node);
+        _database.UpsertNode(node);
 
         // Act
         var result = await _repository.FindByNameAsync(null!, exact: false);
@@ -142,9 +142,9 @@ public class InMemoryNodeRepositoryTests
         var node2 = CreateTestNode("id2", "testclass");
         var node3 = CreateTestNode("id3", "TESTCLASS");
         
-        _database.Nodes.TryAdd(node1.Id!, node1);
-        _database.Nodes.TryAdd(node2.Id!, node2);
-        _database.Nodes.TryAdd(node3.Id!, node3);
+        _database.UpsertNode(node1);
+        _database.UpsertNode(node2);
+        _database.UpsertNode(node3);
 
         // Act
         var result = await _repository.FindByNameAsync("testclass", exact: true);
@@ -170,8 +170,8 @@ public class InMemoryNodeRepositoryTests
         var node1 = CreateTestNode("id1", "TestClass1");
         var node2 = CreateTestNode("id2", "TestClass2");
         
-        _database.Nodes.TryAdd(node1.Id!, node1);
-        _database.Nodes.TryAdd(node2.Id!, node2);
+        _database.UpsertNode(node1);
+        _database.UpsertNode(node2);
 
         // Act
         var result = await _repository.GetAllAsync();
@@ -192,8 +192,8 @@ public class InMemoryNodeRepositoryTests
         await _repository.UpsertAsync(node);
 
         // Assert
-        Assert.True(_database.Nodes.ContainsKey("new-id"));
-        Assert.Equal("NewClass", _database.Nodes["new-id"].Name);
+        Assert.True(_database.ContainsNode("new-id"));
+        Assert.Equal("NewClass", _database.GetNode("new-id")!.Name);
     }
 
     [Fact]
@@ -216,7 +216,7 @@ public class InMemoryNodeRepositoryTests
     {
         // Arrange
         var originalNode = CreateTestNode("existing-id", "OriginalClass");
-        _database.Nodes.TryAdd(originalNode.Id!, originalNode);
+        _database.UpsertNode(originalNode);
 
         var updatedNode = CreateTestNode("existing-id", "UpdatedClass");
 
@@ -224,7 +224,7 @@ public class InMemoryNodeRepositoryTests
         await _repository.UpsertAsync(updatedNode);
 
         // Assert
-        Assert.Equal("UpdatedClass", _database.Nodes["existing-id"].Name);
+        Assert.Equal("UpdatedClass", _database.GetNode("existing-id")!.Name);
     }
 
     [Fact]
@@ -243,13 +243,13 @@ public class InMemoryNodeRepositoryTests
     {
         // Arrange
         var node = CreateTestNode("delete-id", "DeleteClass");
-        _database.Nodes.TryAdd(node.Id!, node);
+        _database.UpsertNode(node);
 
         // Act
         await _repository.DeleteAsync("delete-id", CancellationToken.None);
 
         // Assert
-        Assert.False(_database.Nodes.ContainsKey("delete-id"));
+        Assert.False(_database.ContainsNode("delete-id"));
     }
 
     [Fact]
@@ -265,14 +265,14 @@ public class InMemoryNodeRepositoryTests
     {
         // Arrange
         var node = CreateTestNode("delete-id", "DeleteClass");
-        _database.Nodes.TryAdd(node.Id!, node);
+        _database.UpsertNode(node);
         using var cts = new CancellationTokenSource();
 
         // Act
         await _repository.DeleteAsync("delete-id", cts.Token);
 
         // Assert
-        Assert.False(_database.Nodes.ContainsKey("delete-id"));
+        Assert.False(_database.ContainsNode("delete-id"));
     }
 
     [Fact]

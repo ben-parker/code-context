@@ -119,28 +119,21 @@ public sealed class AnalysisDeltaApplier : IAnalysisDeltaSink
             _pending.Remove(pendingKey);
             var nodes = pending.Nodes.Select(n => ToCodeNode(n, pending)).ToList();
             var edges = pending.Edges.Select(e => ToCodeEdge(e, pending)).ToList();
-            var replacesFiles = pending.ReplacesWorkspace ? null : pending.ReplacesFiles;
 
-            bool InScope(CodeNode node)
-            {
-                if (node.Metadata is null
-                    || !node.Metadata.TryGetValue(ParserIdKey, out var owner)
-                    || !string.Equals(owner, pending.ParserId, StringComparison.Ordinal)
-                    || !node.Metadata.TryGetValue(WorkspaceIdKey, out var workspace)
-                    || !string.Equals(workspace, pending.WorkspaceId, StringComparison.Ordinal))
-                {
-                    return false;
-                }
-                return replacesFiles is null
-                    || (node.FilePath is { Length: > 0 } path && replacesFiles.Contains(path));
-            }
+            // The scope names the (parser, workspace) shard this delta replaces (optionally narrowed
+            // to the listed files). The store routes and partitions by the ownership metadata that
+            // BuildOwnedMetadata stamped onto every node/edge — no scope predicate needed.
+            var scope = new CommitScope(
+                pending.ParserId,
+                pending.WorkspaceId,
+                pending.ReplacesWorkspace ? null : pending.ReplacesFiles.ToList());
 
             var committed = false;
             for (var attempt = 0; attempt < 5 && !committed; attempt++)
             {
                 var storeGeneration = _store.LastCommittedGeneration + 1;
                 committed = await _store.TryCommitGenerationAsync(
-                    storeGeneration, nodes, edges, InScope, ct).ConfigureAwait(false);
+                    storeGeneration, nodes, edges, scope, ct).ConfigureAwait(false);
             }
             if (!committed)
             {
