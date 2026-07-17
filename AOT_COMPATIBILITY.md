@@ -1,99 +1,63 @@
-# AOT Compatibility Analysis
+# AOT & Startup Architecture
 
-## Summary
+## Final decision (Phase 4, .NET 10)
 
-CodeContext has been tested and confirmed to work with Native AOT compilation, with some important caveats and findings documented below.
+CodeContext ships as **two processes with two different compilation strategies**:
 
-## Test Results
+| Process | Strategy | Why |
+|---|---|---|
+| **Host** (`codecontext`, `src/CodeContext.Api`) | **Native AOT** (`PublishAot=true`) | Spawned once per repository — cold start is on the critical path. AOT emits a single native binary with no JIT warm-up and no managed assemblies beside it. |
+| **C# worker** (`src/CodeContext.CSharp.Worker`) | **Self-contained JIT + ReadyToRun** (`PublishReadyToRun=true`) | Hosts Roslyn, whose AOT support is officially unsupported upstream. The worker is long-lived (one process per session), so its cold start amortizes; R2R pre-JITs it (and Roslyn) to native images to shrink that one-time cost, and tiered JIT + PGO still recompile hot paths above the R2R baseline. |
 
-✅ **Microsoft.CodeAnalysis (Roslyn) works with AOT** - Basic parsing, semantic analysis, and symbol extraction all function correctly in AOT-compiled environments.
+The host **never references Roslyn** — the worker is a separate executable reached only over the parser protocol (JSON-RPC + Content-Length framing over stdio). That process boundary is what makes host AOT viable: the un-AOT-able compiler never links into the AOT image.
 
-## Key Findings
+## What was required to make the host AOT-clean
 
-### 1. Assembly.Location Issue (IL3000 Warning)
-- **Problem**: `Assembly.Location` returns an empty string in AOT builds
-- **Impact**: Creates issues when trying to add framework references to Roslyn compilations
-- **Solution**: Code has been updated to detect AOT environments and work without external references
-- **Status**: ✅ Fixed
+Native AOT forbids reflection-based serialization, runtime code generation, and reflection-driven discovery. The following were done across Phases 2–4 to reach zero trim/AOT analyzer warnings before flipping `PublishAot=true`:
 
-### 2. JSON Serialization (IL2026/IL3050 Warnings)
-- **Problem**: Reflection-based JSON serialization is incompatible with AOT
-- **Impact**: All repositories using JsonSerializer with Type parameters failed compilation
-- **Solution**: Migrated to source-generated JSON serialization using `CodeContextJsonContext`
-- **Status**: ✅ Fixed
+- **Source-generated JSON everywhere.** Host, protocol, and worker serialize exclusively through `System.Text.Json` source-generated contexts (`CodeContextJsonContext`, `McpJsonContext`, protocol contexts). No `JsonSerializer` overload takes a runtime `Type`.
+- **Typed DTOs, no anonymous objects.** Every REST error/response and every MCP payload is a declared record registered in a source-gen context. `Dictionary<string,object>` shapes were replaced with concrete types.
+- **Manual MCP tool catalog.** The MCP SDK's reflection-based `.WithTools<T>()` discovery was replaced with an explicit `McpToolCatalog` (`WithListToolsHandler`/`WithCallToolHandler`, tool `InputSchema` parsed from const JSON literals). Attribute-scanning discovery is gone.
+- **OpenAPI compile-gated out of Release.** `Microsoft.AspNetCore.OpenApi` code compiles only under the Debug-only `ENABLE_OPENAPI` constant (transformers live in `OpenApiSupport.cs`, whole-file `#if`). Release/AOT binaries carry no OpenAPI code and none of its `Assembly.GetExecutingAssembly()` reflection. (The packages are still referenced unconditionally for restore determinism; nothing roots them in Release, so AOT trims them out — the `verify-publish.ps1` no-managed-DLL assertion is the permanent guard that they never leak into the shipped payload.)
+- **Removed the in-process parser seam** (`ILanguageParser`), including a `GetType().Name` reflection path in `StatusService`. Workers are the only extension mechanism.
+- **Slim host builder.** REST mode uses `WebApplication.CreateSlimBuilder` (localhost HTTP only); MCP mode keeps `Host.CreateApplicationBuilder` for stdio.
 
-### 3. Microsoft.CodeAnalysis Warning (IL2104)
-- **Problem**: Roslyn internally uses reflection and dynamic code features
-- **Impact**: Produces trim warnings but does not break functionality
-- **Solution**: Warning can be safely suppressed for our use case
-- **Status**: ✅ Acceptable
+## InvariantGlobalization
 
-## What Works in AOT
+The host sets `InvariantGlobalization=true`, dropping ICU/culture data from the AOT image. This is safe because the host does only ordinal / invariant string work: identity resolution and edge-kind matching are ordinal, and the sole user-facing numeric/date formats use round-trip (`"O"`) or explicit `CultureInfo.InvariantCulture`. The Api + Core sources were audited for culture-sensitive `ToLower`/`ToUpper`/`string.Compare`/`ToString(format)` before enabling it; the one implicit-culture format (`StatusService` memory MB) was pinned to `InvariantCulture`.
 
-- ✅ C# syntax tree parsing
-- ✅ Semantic model creation and analysis
-- ✅ Symbol resolution (classes, interfaces, methods, properties)
-- ✅ Code graph generation
-- ✅ File watching and incremental updates
-- ✅ JSON serialization/deserialization with source generation
-- ✅ REST API endpoints
-- ✅ Database operations (both in-memory and Kuzu via Python)
+## Build configuration
 
-## Limitations in AOT
-
-- ⚠️ Cannot load external assembly references (but not needed for our use case)
-- ⚠️ Some advanced Roslyn features may not work (runtime compilation, analyzers)
-- ⚠️ CSnakes Python integration may have limitations (needs testing)
-
-## Performance Benefits
-
-AOT compilation provides several benefits for CodeContext:
-
-- **Faster startup times** - No JIT compilation required
-- **Smaller memory footprint** - No JIT overhead
-- **Better deployment** - Self-contained executable with no .NET runtime requirement
-- **Improved security** - Reduced attack surface from JIT compilation
-
-## Deployment Recommendations
-
-### For Production Use
-- ✅ Use AOT compilation for production deployments
-- ✅ Suppress IL2104 warning as it's safe for our use case
-- ✅ Test thoroughly with your specific codebase before deploying
-
-### For Development
-- ✅ Regular (JIT) builds work fine for development
-- ✅ AOT builds recommended for final testing and deployment
-
-## Configuration
-
-To enable AOT compilation, add to your project file:
+Host (`src/CodeContext.Api/CodeContext.Api.csproj`):
 
 ```xml
-<PropertyGroup>
-  <PublishAot>true</PublishAot>
-  <InvariantGlobalization>true</InvariantGlobalization>
-  <!-- Suppress the safe-to-ignore warnings -->
-  <NoWarn>$(NoWarn);IL2104</NoWarn>
-</PropertyGroup>
+<PublishAot>true</PublishAot>
+<OptimizationPreference>Speed</OptimizationPreference>
+<InvariantGlobalization>true</InvariantGlobalization>
+<!-- StripSymbols only on non-Windows RIDs (Windows emits a separate .pdb). -->
 ```
 
-## Build Commands
+Worker (`src/CodeContext.CSharp.Worker/CodeContext.CSharp.Worker.csproj`):
+
+```xml
+<PublishReadyToRun Condition="'$(RuntimeIdentifier)' != ''">true</PublishReadyToRun>
+<TieredCompilation>true</TieredCompilation>
+<TieredPGO>true</TieredPGO>
+<ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
+<ServerGarbageCollection>false</ServerGarbageCollection>  <!-- workstation GC: low per-repo memory -->
+```
+
+`PublishAot` only takes effect on `dotnet publish -r <rid>`; plain `dotnet build` / `dotnet test` stay JIT, so the test suite runs against the same IL the analyzers vet.
+
+## Toolchain prerequisite
+
+A local Native AOT publish needs the C++ link toolchain: **Visual Studio 2022+ with the "Desktop development with C++" workload** (VS 2026 verified for this repo; CI `windows-latest` already carries it). Without it, ILC fails at the link step.
+
+## Publishing
 
 ```bash
-# AOT compilation
-dotnet publish -c Release -r linux-x64 --self-contained true -p:PublishAot=true -p:PublishSingleFile=true
-
-# Regular compilation (for development)
-dotnet build
+# The one supported host publish (single native binary + self-contained JIT/R2R workers):
+scripts/verify-publish.ps1 -RuntimeIdentifier win-x64 -ReleaseVersion <ver> -PublishDirectory out/win-x64
 ```
 
-## Future Considerations
-
-- Monitor Microsoft.CodeAnalysis updates for improved AOT support
-- Test CSnakes Python integration thoroughly in AOT environments
-- Consider pre-compilation strategies for even better performance
-
-## Conclusion
-
-CodeContext is **fully compatible with Native AOT** compilation. The IL2104 warning from Microsoft.CodeAnalysis is expected and does not impact functionality. All core features work correctly, providing significant performance and deployment benefits.
+`verify-publish.ps1` is the AOT acceptance gate: it boots the published binary, waits for `indexing.status=ready`, asserts `contractVersion=1` and all 12 contracted graph edge kinds are emitted by the real workers, checks the packaged skill hash, and asserts **no managed `*.dll` sits next to the host binary** (workers ship their DLLs under `workers/csharp/**` and `workers/typescript/**`).
