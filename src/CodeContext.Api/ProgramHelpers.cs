@@ -6,7 +6,8 @@ using CodeContext.Core.Services;
 using CodeContext.Core.Workers;
 using Microsoft.AspNetCore.OpenApi;
 using Microsoft.Extensions.Logging;
-using Microsoft.OpenApi.Models;
+using Microsoft.OpenApi;
+using System.Net.Http;
 using System.Reflection;
 using System.Text.Json.Serialization;
 
@@ -160,9 +161,13 @@ internal sealed class ParameterDescriptionTransformer : IOpenApiOperationTransfo
         {
             foreach (var parameter in operation.Parameters)
             {
-                if (ParameterDescriptions.TryGetValue(parameter.Name, out var description))
+                // Microsoft.OpenApi 2.0: IOpenApiParameter exposes Description as read-only;
+                // only the concrete OpenApiParameter (as opposed to a $ref) is mutable.
+                if (parameter is OpenApiParameter concrete
+                    && concrete.Name is { } name
+                    && ParameterDescriptions.TryGetValue(name, out var description))
                 {
-                    parameter.Description = description;
+                    concrete.Description = description;
                 }
             }
         }
@@ -201,28 +206,30 @@ internal sealed class OpenApiDocumentTransformer : IOpenApiDocumentTransformer
         // Minimal APIs keep only one schema when several .Produces<T>(200) calls use
         // the same status code. Endpoints expose full view temporarily as a 206 schema
         // anchor; fold that generated schema into the actual 200 union.
-        AddFullViewAlternative(document, "/api/context/complete", OperationType.Get);
-        AddFullViewAlternative(document, "/api/context/multi", OperationType.Post);
+        AddFullViewAlternative(document, "/api/context/complete", HttpMethod.Get);
+        AddFullViewAlternative(document, "/api/context/multi", HttpMethod.Post);
         await Task.CompletedTask;
     }
 
     private static void AddFullViewAlternative(
-        OpenApiDocument document, string path, OperationType operationType)
+        OpenApiDocument document, string path, HttpMethod operationType)
     {
         if (!document.Paths.TryGetValue(path, out var pathItem)
-            || !pathItem.Operations.TryGetValue(operationType, out var operation)
-            || !operation.Responses.TryGetValue("200", out var response)
-            || !operation.Responses.TryGetValue("206", out var fullResponse)
-            || response.Content is null
-            || fullResponse.Content is null
-            || !response.Content.TryGetValue("application/json", out var compactMedia)
-            || !fullResponse.Content.TryGetValue("application/json", out var fullMedia)
+            || pathItem.Operations is not { } operations
+            || !operations.TryGetValue(operationType, out var operation)
+            || operation.Responses is not { } responses
+            || !responses.TryGetValue("200", out var response)
+            || !responses.TryGetValue("206", out var fullResponse)
+            || response.Content is not { } compactContent
+            || fullResponse.Content is not { } fullContent
+            || !compactContent.TryGetValue("application/json", out var compactMedia)
+            || !fullContent.TryGetValue("application/json", out var fullMedia)
             || compactMedia.Schema is not { } current
             || fullMedia.Schema is not { } full)
             return;
 
         compactMedia.Schema = new OpenApiSchema { OneOf = [current, full] };
-        operation.Responses.Remove("206");
+        responses.Remove("206");
     }
 }
 
@@ -240,32 +247,22 @@ internal sealed class CodeNodeArraySchemaTransformer : IOpenApiSchemaTransformer
             context.JsonPropertyInfo?.Name == "methodFamilyMembers" ||
             context.JsonPropertyInfo?.Name == "staticallyBoundTargets")
         {
-            if (schema.Type == "array" && schema.Items != null && !schema.Items.Properties.Any())
+            if (schema.Type == JsonSchemaType.Array
+                && schema.Items is { } items
+                && (items.Properties is null || items.Properties.Count == 0))
             {
-                schema.Items = new OpenApiSchema
-                {
-                    Reference = new OpenApiReference
-                    {
-                        Type = ReferenceType.Schema,
-                        Id = "CodeNode"
-                    }
-                };
+                schema.Items = new OpenApiSchemaReference("CodeNode", null, null);
             }
         }
 
         // Fix TestFileInfo.TestMethods array
         if (context.JsonPropertyInfo?.Name == "testMethods")
         {
-            if (schema.Type == "array" && schema.Items != null && !schema.Items.Properties.Any())
+            if (schema.Type == JsonSchemaType.Array
+                && schema.Items is { } items
+                && (items.Properties is null || items.Properties.Count == 0))
             {
-                schema.Items = new OpenApiSchema
-                {
-                    Reference = new OpenApiReference
-                    {
-                        Type = ReferenceType.Schema,
-                        Id = "CodeNode"
-                    }
-                };
+                schema.Items = new OpenApiSchemaReference("CodeNode", null, null);
             }
         }
 

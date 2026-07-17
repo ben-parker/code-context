@@ -5,7 +5,7 @@
       "name": ".NET Core Debug Startup Code",
       "type": "coreclr",
       "request": "launch",
-      "program": "/home/ben/source/repos/code-context/src/CodeContext.Api/bin/Debug/net9.0/codecontext.dll",
+      "program": "/home/ben/source/repos/code-context/src/CodeContext.Api/bin/Debug/net10.0/codecontext.dll",
       "args": [
         "start",
         // "--path",

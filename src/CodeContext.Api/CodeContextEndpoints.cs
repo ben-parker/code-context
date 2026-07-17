@@ -12,8 +12,9 @@ public static class CodeContextEndpoints
 {
     public static IEndpointRouteBuilder MapCodeContextEndpoints(this IEndpointRouteBuilder app)
     {
+        // .NET 10 deprecates WithOpenApi (ASPDEPR002); endpoint OpenAPI metadata is now
+        // collected automatically by AddOpenApi/MapOpenApi document generation.
         var api = app.MapGroup("/api/v1")
-            .WithOpenApi()
             .WithTags("CodeContext");
 
         // API status endpoint
