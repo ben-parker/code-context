@@ -19,14 +19,25 @@
     <EnableRequestDelegateGenerator>true</EnableRequestDelegateGenerator>
   </PropertyGroup>
 
+  <!-- Phase 3c: OpenAPI is a development-only convenience. ENABLE_OPENAPI is defined only in
+       Debug; the OpenApi packages below are Debug-only too, so Release/published binaries
+       carry no OpenAPI code (and none of its Assembly.GetExecutingAssembly reflection). -->
+  <PropertyGroup Condition="'$(Configuration)' == 'Debug'">
+    <DefineConstants>$(DefineConstants);ENABLE_OPENAPI</DefineConstants>
+  </PropertyGroup>
+
   <ItemGroup>
+    <PackageReference Include="System.CommandLine" Version="2.0.10" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(Configuration)' == 'Debug'">
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.10" />
     <!-- Microsoft.AspNetCore.OpenApi 10.0.10 pulls Microsoft.OpenApi 2.0.0 transitively,
          which carries NU1903 (GHSA-v5pm-xwqc-g5wc, patched in 2.7.5+). Pin a patched 2.x
          explicitly to clear the advisory; the 2.x API surface used by the OpenAPI
-         transformers is unchanged. -->
+         transformers is unchanged. Debug-only: it exists solely for the OpenApi package's
+         vulnerable transitive. -->
     <PackageReference Include="Microsoft.OpenApi" Version="2.11.0" />
-    <PackageReference Include="System.CommandLine" Version="2.0.10" />
   </ItemGroup>
 
   <ItemGroup>
