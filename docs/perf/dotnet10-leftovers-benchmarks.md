@@ -61,3 +61,34 @@ worker csproj comment.
 
 **Phase 1 comparison baseline = config A medians above** (worker allocates ~2.6 GB over
 the 5-rescan + 20-touch workload; touch med 1260 ms; rescan med 3246 ms).
+
+## Phase 1 — Roslyn compilation reuse (July 17 2026, HEAD = de52436, workstation GC)
+
+Persistent `CSharpCompilation` mutated in lockstep with the tree cache
+(`Add/Replace/RemoveSyntaxTrees`) instead of `CSharpCompilation.Create` over all trees
+per batch; shared static metadata references.
+
+| run | indexed ms | rescan med ms | touch med ms | alloc MB | peak heap MB | peak WS MB | GC pause s | gen2 |
+|---|---|---|---|---|---|---|---|---|
+| P1-1 | 6634 | 3008 | 1230 | 2328 | 98.8 | 252.2 | 1.73 | 28 |
+| P1-2 | 5575 | 3194 | 1223 | 2331 | 108.8 | 248.0 | 1.68 | 28 |
+| P1-3 | 5655 | 3121 | 1228 | 2333 | 108.1 | 242.6 | 1.71 | 27 |
+
+Medians vs Phase 0 config A:
+
+| metric | Phase 0 (A) | post-P1 | delta |
+|---|---|---|---|
+| time-to-indexed (ms) | 5646 | 5655 | flat (expected — cold index builds the compilation either way) |
+| rescan batch med (ms) | 3246 | 3121 | −3.9% |
+| incremental touch med (ms) | 1260 | 1228 | −2.5% |
+| total allocated (MB) | 2625 | 2331 | **−11.2%** |
+| peak GC heap (MB) | 102.2 | 108.1 | +6% (retained binding state — accepted) |
+| peak working set (MB) | 250.6 | 248.0 | flat |
+| total GC pause (s) | 2.21 | 1.71 | −23% |
+
+**Interpretation (Phase 6 evidence):** reuse removes the per-batch compilation
+setup/declaration-table rebuild (the allocation win) but the incremental batch remains
+dominated by the whole-workspace semantic re-walk + full re-emission that the v1
+protocol mandates (`ReplacesWorkspace:true`). Note `workspace/index` (rescan) resets the
+compilation by design, so rescans get only the shared-references win. The residual
+~1.2 s touch batch on a 119-file corpus is the protocol-v2 target.
