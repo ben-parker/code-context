@@ -31,7 +31,10 @@ warm-up. Cold `--version`: 10 runs `61.5,62.4,62.5,63.2,63.5,66.8,67.9,79,80.6,8
 - [x] CI: 9.0.x → 10.0.x (release.yml ×3; auto-tag.yml ×2 — plan said 1, but there are genuinely two setup-dotnet steps)
 - [x] Capture MCP `tools/list` snapshot fixture (for Phase 3b parity) → `tests/CodeContext.Core.Tests/Fixtures/mcp-tools-list.snapshot.json` (3 tools: get_multi_context, get_context, get_status)
 - [x] Verify: build warnings-clean (0W/0E); tests 396 passed + 8 ExternalTooling passed; verify-publish win-x64 green; MCP stdio smoke (initialize+tools/list+tools/call get_status) green; CLI smoke green
-- [ ] Opus + Sonnet review; findings fixed
+- [x] Opus + Sonnet review; findings fixed
+  - Fixed: `JsonSchemaType` flags-equality bug in `CodeNodeArraySchemaTransformer` (both reviewers flagged; Sonnet verified nullable lists emit `Null|Array` empirically) — now a bitwise flags test.
+  - Dismissed with evidence: MCP tool-name parity across SDK 0.3.0-preview.2 → 1.4.1 — probed the pre-upgrade binary's `tools/list` over stdio; names were already `get_context`/`get_multi_context`/`get_status`. Snapshot fixture is a valid golden.
+  - Noted for Phase 3d+: MCP-mode stdout logging (pre-existing; observed on the old binary during the parity probe).
 
 ## Phase 2 — Remove in-process parser seam
 - [ ] Delete `ILanguageParser` + `IParserDiagnostics` (all implementers are test fakes — live-graph verified)
@@ -50,6 +53,7 @@ warm-up. Cold `--version`: 10 runs `61.5,62.4,62.5,63.2,63.5,66.8,67.9,79,80.6,8
 - [ ] 3b. McpToolCatalog: explicit ListTools/CallTool handlers; schema literals; tools/list snapshot parity
 - [ ] 3c. OpenAPI dev-only: Debug-conditioned package + `ENABLE_OPENAPI` + OpenApiSupport.cs
 - [ ] 3d. CreateSlimBuilder; delete throwaway LoggerFactory; MCP mode unchanged
+- [ ] 3d+. Pre-existing bug found during Phase 1 review: in `--mcp` mode, console `info:` logs go to **stdout**, interleaved with protocol JSON (verified against pre-upgrade binary too). Route logging to stderr (or off) when MCP transport is active.
 - [ ] Verify: zero warnings; suite; snapshot parity; Debug /openapi vs Release 404; REST smoke
 - [ ] Opus + Sonnet review; findings fixed
 

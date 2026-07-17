@@ -247,7 +247,8 @@ internal sealed class CodeNodeArraySchemaTransformer : IOpenApiSchemaTransformer
             context.JsonPropertyInfo?.Name == "methodFamilyMembers" ||
             context.JsonPropertyInfo?.Name == "staticallyBoundTargets")
         {
-            if (schema.Type == JsonSchemaType.Array
+            // Flags test: nullable list properties carry JsonSchemaType.Null | Array in Microsoft.OpenApi 2.x
+            if (schema.Type is { } type && (type & JsonSchemaType.Array) != 0
                 && schema.Items is { } items
                 && (items.Properties is null || items.Properties.Count == 0))
             {
@@ -258,7 +259,7 @@ internal sealed class CodeNodeArraySchemaTransformer : IOpenApiSchemaTransformer
         // Fix TestFileInfo.TestMethods array
         if (context.JsonPropertyInfo?.Name == "testMethods")
         {
-            if (schema.Type == JsonSchemaType.Array
+            if (schema.Type is { } type && (type & JsonSchemaType.Array) != 0
                 && schema.Items is { } items
                 && (items.Properties is null || items.Properties.Count == 0))
             {
