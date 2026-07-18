@@ -310,6 +310,101 @@ public class ParserProcessSupervisorTests
         Assert.All(nodes, n => Assert.Equal("a.fake", n.FilePath));
     }
 
+    [Fact]
+    public void BuildStartInfo_SpecEnvironment_IsApplied()
+    {
+        var spec = new WorkerLaunchSpec("csharp", "C#", "worker", [],
+            Environment: new Dictionary<string, string>
+            {
+                ["DOTNET_gcServer"] = "1",
+                ["DOTNET_GCDynamicAdaptationMode"] = "1",
+            });
+
+        var startInfo = ParserProcessSupervisor.BuildStartInfo(spec, new ParserWorkerOptions());
+
+        Assert.Equal("1", startInfo.Environment["DOTNET_gcServer"]);
+        Assert.Equal("1", startInfo.Environment["DOTNET_GCDynamicAdaptationMode"]);
+    }
+
+    [Fact]
+    public void BuildStartInfo_NoEnvironmentMaps_LeavesInheritedEnvironmentIntact()
+    {
+        var spec = new WorkerLaunchSpec("csharp", "C#", "worker", []);
+
+        var startInfo = ParserProcessSupervisor.BuildStartInfo(spec, new ParserWorkerOptions());
+
+        // A known inherited variable must survive when no overlay is supplied.
+        Assert.True(startInfo.Environment.ContainsKey("PATH") || startInfo.Environment.ContainsKey("Path"),
+            "Inherited PATH should still be present.");
+    }
+
+    [Fact]
+    public void BuildStartInfo_OptionsEnvironment_AppliesOnlyMatchingParserId()
+    {
+        var spec = new WorkerLaunchSpec("csharp", "C#", "worker", []);
+        var options = new ParserWorkerOptions
+        {
+            WorkerEnvironment = new Dictionary<string, IReadOnlyDictionary<string, string>>
+            {
+                ["csharp"] = new Dictionary<string, string> { ["MINE"] = "yes" },
+                ["typescript"] = new Dictionary<string, string> { ["THEIRS"] = "no" },
+            },
+        };
+
+        var startInfo = ParserProcessSupervisor.BuildStartInfo(spec, options);
+
+        Assert.Equal("yes", startInfo.Environment["MINE"]);
+        Assert.False(startInfo.Environment.ContainsKey("THEIRS"),
+            "A different parser's env must not leak into this worker.");
+    }
+
+    [Fact]
+    public void BuildStartInfo_OptionsEntry_OverridesSpecEntryOnCollision()
+    {
+        var spec = new WorkerLaunchSpec("csharp", "C#", "worker", [],
+            Environment: new Dictionary<string, string> { ["KEY"] = "from-spec" });
+        var options = new ParserWorkerOptions
+        {
+            WorkerEnvironment = new Dictionary<string, IReadOnlyDictionary<string, string>>
+            {
+                ["csharp"] = new Dictionary<string, string> { ["KEY"] = "from-options" },
+            },
+        };
+
+        var startInfo = ParserProcessSupervisor.BuildStartInfo(spec, options);
+
+        Assert.Equal("from-options", startInfo.Environment["KEY"]);
+    }
+
+    [Fact]
+    public void BuildStartInfo_UpsertingInheritedVariable_DoesNotThrowAndTakesNewValue()
+    {
+        // PATH is inherited; upserting it must overwrite, not throw (Add would).
+        var spec = new WorkerLaunchSpec("csharp", "C#", "worker", [],
+            Environment: new Dictionary<string, string> { ["PATH"] = "overridden" });
+
+        var startInfo = ParserProcessSupervisor.BuildStartInfo(spec, new ParserWorkerOptions());
+
+        Assert.Equal("overridden", startInfo.Environment["PATH"]);
+    }
+
+    [Fact]
+    public void BuildStartInfo_PreservesStdioAndWindowInvariants()
+    {
+        var workingDirectory = Path.GetTempPath();
+        var spec = new WorkerLaunchSpec("csharp", "C#", "worker", ["--flag", "value"], workingDirectory);
+
+        var startInfo = ParserProcessSupervisor.BuildStartInfo(spec, new ParserWorkerOptions());
+
+        Assert.True(startInfo.RedirectStandardInput);
+        Assert.True(startInfo.RedirectStandardOutput);
+        Assert.True(startInfo.RedirectStandardError);
+        Assert.False(startInfo.UseShellExecute);
+        Assert.True(startInfo.CreateNoWindow);
+        Assert.Equal(workingDirectory, startInfo.WorkingDirectory);
+        Assert.Equal(["--flag", "value"], startInfo.ArgumentList);
+    }
+
     private static bool HasProcessExited(int pid)
     {
         try

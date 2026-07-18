@@ -143,6 +143,7 @@ public class FileDependencyTests
     private void ConfigureNodes(params CodeNode[] nodes)
     {
         _nodes.GetAllAsync().Returns(nodes.ToList());
+        _nodes.StubFindByFilePathFromGetAll();
         _nodes.GetByIdAsync(Arg.Any<string>()).Returns(call =>
             nodes.SingleOrDefault(node => string.Equals(node.Id, call.Arg<string>(), StringComparison.Ordinal)));
         foreach (var node in nodes)

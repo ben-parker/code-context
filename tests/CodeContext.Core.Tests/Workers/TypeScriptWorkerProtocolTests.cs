@@ -209,4 +209,228 @@ namespace Mixed { public class Service { public string Run() => ""ok""; } }");
         Assert.Equal("typescript-compiler-syntax-v1", result.Format);
         Assert.Equal("SourceFile", result.Tree.GetProperty("kind").GetString());
     }
+
+    // -----------------------------------------------------------------------
+    // Incremental-delta emission (mirrors CSharpWorkerIncrementalDeltaTests):
+    // whole-tree convergence vs a fresh scan, cross-file dirty propagation, the
+    // emitted delta shape, within-file declaration-merging dedup, and no-op
+    // suppression — all through the real node worker process.
+    // -----------------------------------------------------------------------
+
+    /// <summary>Builds a pipeline whose delta sink is recorded, so a test can assert the
+    /// exact shape of what the TypeScript worker emitted while the graph still commits.</summary>
+    private CSharpWorkerPipeline RecordingPipeline(out RecordingDeltaSink recorder)
+    {
+        RecordingDeltaSink? captured = null;
+        var pipeline = new CSharpWorkerPipeline(
+            _tempDir,
+            inner => captured = new RecordingDeltaSink(inner),
+            [TypeScriptWorkerRegistration()]);
+        recorder = captured!;
+        return pipeline;
+    }
+
+    [Fact]
+    public async Task Incremental_CrossFileEditAddDelete_ConvergesToTheSameGraphAsAFreshScan()
+    {
+        var basePath = await WriteFileAsync("base.ts",
+            "export class Base { greet(): string { return 'hi'; } }\n");
+        var derived = await WriteFileAsync("derived.ts",
+            "import { Base } from './base';\n" +
+            "export class Derived extends Base { run(): string { return this.greet(); } }\n");
+        await _pipeline.GraphUpdateService.PerformInitialScanAsync(_tempDir, null, CancellationToken.None);
+
+        // The whole incremental repertoire: a cross-file edit (Base.greet -> Base.salute,
+        // which rebinds Derived's untouched CALLS/heritage facts), an addition, a deletion.
+        await File.WriteAllTextAsync(basePath,
+            "export class Base { salute(): string { return 'hi'; } }\n");
+        await _pipeline.GraphUpdateService.ProcessFileChangeAsync(
+            basePath, FileChangeType.Changed, CancellationToken.None);
+
+        var newcomer = await WriteFileAsync("newcomer.ts",
+            "export function ping(): number { return 42; }\n");
+        await _pipeline.GraphUpdateService.ProcessFileChangeAsync(
+            newcomer, FileChangeType.Created, CancellationToken.None);
+
+        File.Delete(derived);
+        await _pipeline.GraphUpdateService.ProcessFileChangeAsync(
+            derived, FileChangeType.Deleted, CancellationToken.None);
+
+        var incrementalNodes = await _pipeline.RepositoryFactory.CreateNodeRepository().GetAllAsync();
+        var incrementalEdges = await _pipeline.RepositoryFactory.CreateEdgeRepository().GetAllAsync();
+
+        // A fresh full scan of the final on-disk tree must produce the identical graph —
+        // compared on full records so a FilePath/span divergence cannot hide behind equal ids.
+        await using var fresh = new CSharpWorkerPipeline(_tempDir, TypeScriptWorkerRegistration());
+        await fresh.GraphUpdateService.PerformInitialScanAsync(_tempDir, null, CancellationToken.None);
+        var freshNodes = await fresh.RepositoryFactory.CreateNodeRepository().GetAllAsync();
+        var freshEdges = await fresh.RepositoryFactory.CreateEdgeRepository().GetAllAsync();
+
+        Assert.Equal(
+            CSharpWorkerIncrementalDeltaTests.NodeRecords(freshNodes),
+            CSharpWorkerIncrementalDeltaTests.NodeRecords(incrementalNodes));
+        Assert.Equal(
+            CSharpWorkerIncrementalDeltaTests.EdgeRecords(freshEdges),
+            CSharpWorkerIncrementalDeltaTests.EdgeRecords(incrementalEdges));
+    }
+
+    [Fact]
+    public async Task Incremental_CrossFileRebind_EmitsFileScopedReplacementIncludingUntouchedDependent()
+    {
+        await using var pipeline = RecordingPipeline(out var recorder);
+
+        var basePath = await WriteFileAsync("base.ts",
+            "export class Base { greet(): string { return 'hi'; } }\n");
+        var derived = await WriteFileAsync("derived.ts",
+            "import { Base } from './base';\n" +
+            "export class Derived extends Base { run(): string { return this.greet(); } }\n");
+        await pipeline.GraphUpdateService.PerformInitialScanAsync(_tempDir, null, CancellationToken.None);
+        recorder.Clear();
+
+        // Editing ONLY base.ts renames greet; Derived's call no longer resolves to
+        // base.ts#Base.greet(), so derived's bucket hash flips and it joins the dirty set
+        // even though its own bytes never changed — the load-bearing cross-file property.
+        await File.WriteAllTextAsync(basePath,
+            "export class Base { salute(): string { return 'hi'; } }\n");
+        await pipeline.GraphUpdateService.ProcessFileChangeAsync(
+            basePath, FileChangeType.Changed, CancellationToken.None);
+
+        var applyDeltas = recorder.Deltas;
+        Assert.NotEmpty(applyDeltas);
+        // The emission was incremental (never a whole-workspace replacement)...
+        Assert.All(applyDeltas, d => Assert.False(d.ReplacesWorkspace));
+        // ...and its scope pulled in the cross-file dependent alongside the edited file.
+        var replaced = applyDeltas.SelectMany(d => d.ReplacesFiles).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        Assert.Contains(basePath, replaced);
+        Assert.Contains(derived, replaced);
+
+        // The stale cross-file edge is gone from the committed graph.
+        var edges = await pipeline.RepositoryFactory.CreateEdgeRepository().GetAllAsync();
+        Assert.DoesNotContain(edges, e =>
+            e.Type == "CALLS" && e.TargetId == "typescript:default:base.ts#Base.greet()");
+    }
+
+    [Fact]
+    public async Task Incremental_DeltaShape_IndexReplacesWorkspace_ApplyScopesToTheDirtyFileVerbatim()
+    {
+        await using var pipeline = RecordingPipeline(out var recorder);
+
+        var alpha = await WriteFileAsync("alpha.ts", "export class Alpha { m(): void { } }\n");
+        await WriteFileAsync("beta.ts", "export class Beta { n(): void { } }\n");
+        await pipeline.GraphUpdateService.PerformInitialScanAsync(_tempDir, null, CancellationToken.None);
+
+        // Index deltas replace the whole workspace and never scope to files.
+        var indexDeltas = recorder.Deltas;
+        Assert.NotEmpty(indexDeltas);
+        Assert.All(indexDeltas, d =>
+        {
+            Assert.True(d.ReplacesWorkspace);
+            Assert.Empty(d.ReplacesFiles);
+        });
+
+        recorder.Clear();
+        // alpha and beta are independent, so editing alpha dirties exactly alpha.
+        await File.WriteAllTextAsync(alpha, "export class Alpha { renamed(): void { } }\n");
+        await pipeline.GraphUpdateService.ProcessFileChangeAsync(
+            alpha, FileChangeType.Changed, CancellationToken.None);
+
+        var applyDeltas = recorder.Deltas;
+        Assert.NotEmpty(applyDeltas);
+        Assert.All(applyDeltas, d => Assert.False(d.ReplacesWorkspace));
+        var replaced = applyDeltas.SelectMany(d => d.ReplacesFiles).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        Assert.Single(replaced);
+        Assert.Contains(alpha, replaced);
+
+        // Emitted nodes belong only to dirty files, and ReplacesFiles carries the VERBATIM
+        // path string the worker stamped on those nodes' filePath.
+        var emittedNodes = applyDeltas.SelectMany(d => d.Nodes).ToList();
+        Assert.NotEmpty(emittedNodes);
+        Assert.All(emittedNodes, node => Assert.Contains(node.FilePath!, replaced));
+        Assert.Contains(emittedNodes, node => node.Name == "renamed");
+    }
+
+    [Fact]
+    public async Task DeclarationMerging_WithinFile_KeepsOneNodePerId_LastWins_AndEqualsFreshScan()
+    {
+        // Cross-file duplicate ids are IMPOSSIBLE in this worker: every node id and edge
+        // source id embeds the WALKED file's relative path (typescript:<ws>:<fileRel>#...),
+        // so two files can never mint the same id. The dedup that actually bites is
+        // within-file declaration merging: two `interface Shared` in ONE file emit the same
+        // node id twice from one walk, and last-occurrence-wins must collapse them to one.
+        var merge = await WriteFileAsync("merge.ts",
+            "export interface Shared { a(): void; }\n" +
+            "export interface Shared { b(): void; }\n");
+        await _pipeline.GraphUpdateService.PerformInitialScanAsync(_tempDir, null, CancellationToken.None);
+
+        var nodeRepo = _pipeline.RepositoryFactory.CreateNodeRepository();
+        var nodes = await nodeRepo.GetAllAsync();
+        const string sharedId = "typescript:default:merge.ts#Shared";
+        var shared = nodes.Where(n => n.Id == sharedId).ToList();
+        Assert.Single(shared);
+        // Last occurrence wins: the surviving type node is the SECOND declaration. The
+        // worker emits it 1-based on source line 2; the host normalizes lineBase:1 to
+        // 0-based, so the committed StartLine is 1 (the first declaration would be 0).
+        Assert.Equal(1, shared[0].StartLine);
+        // Both merged members survive under their own distinct ids.
+        Assert.Contains(nodes, n => n.Id == "typescript:default:merge.ts#Shared.a()");
+        Assert.Contains(nodes, n => n.Id == "typescript:default:merge.ts#Shared.b()");
+
+        // Editing the file keeps exactly one Shared node (dedup is applied every walk).
+        await File.WriteAllTextAsync(merge,
+            "export interface Shared { a(): void; }\n" +
+            "export interface Shared { c(): void; }\n");
+        await _pipeline.GraphUpdateService.ProcessFileChangeAsync(
+            merge, FileChangeType.Changed, CancellationToken.None);
+        nodes = await nodeRepo.GetAllAsync();
+        Assert.Single(nodes, n => n.Id == sharedId);
+
+        // The incremental end state equals a fresh scan of the same tree (full records).
+        var incrementalNodes = await nodeRepo.GetAllAsync();
+        var incrementalEdges = await _pipeline.RepositoryFactory.CreateEdgeRepository().GetAllAsync();
+        await using var fresh = new CSharpWorkerPipeline(_tempDir, TypeScriptWorkerRegistration());
+        await fresh.GraphUpdateService.PerformInitialScanAsync(_tempDir, null, CancellationToken.None);
+        Assert.Equal(
+            CSharpWorkerIncrementalDeltaTests.NodeRecords(await fresh.RepositoryFactory.CreateNodeRepository().GetAllAsync()),
+            CSharpWorkerIncrementalDeltaTests.NodeRecords(incrementalNodes));
+        Assert.Equal(
+            CSharpWorkerIncrementalDeltaTests.EdgeRecords(await fresh.RepositoryFactory.CreateEdgeRepository().GetAllAsync()),
+            CSharpWorkerIncrementalDeltaTests.EdgeRecords(incrementalEdges));
+    }
+
+    [Fact]
+    public async Task Incremental_NoOpEdit_EmitsSingleEmptyTerminalDelta_AndLeavesGraphUnchanged()
+    {
+        await using var pipeline = RecordingPipeline(out var recorder);
+
+        // A comment on its own line, replaced later with a SAME-LENGTH comment: file bytes
+        // change (so the host forwards the edit) but no emitted fact — not a span, not the
+        // module node's end line — moves, so every bucket hashes the same.
+        var file = await WriteFileAsync("noop.ts",
+            "// aaa\nexport class A { m(): void { } }\n");
+        await pipeline.GraphUpdateService.PerformInitialScanAsync(_tempDir, null, CancellationToken.None);
+
+        var before = CSharpWorkerIncrementalDeltaTests.NodeRecords(
+            await pipeline.RepositoryFactory.CreateNodeRepository().GetAllAsync());
+        recorder.Clear();
+
+        await File.WriteAllTextAsync(file, "// bbb\nexport class A { m(): void { } }\n");
+        await pipeline.GraphUpdateService.ProcessFileChangeAsync(
+            file, FileChangeType.Changed, CancellationToken.None);
+
+        // The worker still emits exactly one terminal delta (the supervisor requires ≥1 per
+        // mutation), but it carries no facts and no replacesFiles.
+        var applyDeltas = recorder.Deltas;
+        Assert.NotEmpty(applyDeltas);
+        Assert.All(applyDeltas, d =>
+        {
+            Assert.False(d.ReplacesWorkspace);
+            Assert.Empty(d.ReplacesFiles);
+            Assert.Empty(d.Nodes);
+            Assert.Empty(d.Edges);
+        });
+
+        var after = CSharpWorkerIncrementalDeltaTests.NodeRecords(
+            await pipeline.RepositoryFactory.CreateNodeRepository().GetAllAsync());
+        Assert.Equal(before, after);
+    }
 }

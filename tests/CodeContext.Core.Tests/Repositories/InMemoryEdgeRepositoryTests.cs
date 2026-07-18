@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -36,8 +37,8 @@ public class InMemoryEdgeRepositoryTests
         var edge1 = CreateTestEdge("edge1", "source1", "target1", "CALLS");
         var edge2 = CreateTestEdge("edge2", "source2", "target2", "INHERITS");
         
-        _database.Edges.TryAdd(edge1.Id!, edge1);
-        _database.Edges.TryAdd(edge2.Id!, edge2);
+        _database.UpsertEdge(edge1);
+        _database.UpsertEdge(edge2);
 
         // Act
         var result = await _repository.GetAllAsync();
@@ -56,9 +57,9 @@ public class InMemoryEdgeRepositoryTests
         var edge2 = CreateTestEdge("edge2", "source1", "target2", "INHERITS");
         var edge3 = CreateTestEdge("edge3", "source2", "target3", "CALLS");
         
-        _database.Edges.TryAdd(edge1.Id!, edge1);
-        _database.Edges.TryAdd(edge2.Id!, edge2);
-        _database.Edges.TryAdd(edge3.Id!, edge3);
+        _database.UpsertEdge(edge1);
+        _database.UpsertEdge(edge2);
+        _database.UpsertEdge(edge3);
 
         // Act
         var result = await _repository.GetBySourceIdAsync("source1");
@@ -76,9 +77,9 @@ public class InMemoryEdgeRepositoryTests
         var edge2 = CreateTestEdge("edge2", "source1", "target2", "INHERITS");
         var edge3 = CreateTestEdge("edge3", "source1", "target3", "CALLS");
         
-        _database.Edges.TryAdd(edge1.Id!, edge1);
-        _database.Edges.TryAdd(edge2.Id!, edge2);
-        _database.Edges.TryAdd(edge3.Id!, edge3);
+        _database.UpsertEdge(edge1);
+        _database.UpsertEdge(edge2);
+        _database.UpsertEdge(edge3);
 
         // Act
         var result = await _repository.GetBySourceIdAsync("source1", type: "CALLS");
@@ -93,7 +94,7 @@ public class InMemoryEdgeRepositoryTests
     {
         // Arrange
         var edge = CreateTestEdge("edge1", "source1", "target1", "CALLS");
-        _database.Edges.TryAdd(edge.Id!, edge);
+        _database.UpsertEdge(edge);
 
         // Act
         var result = await _repository.GetBySourceIdAsync("non-existent-source");
@@ -110,9 +111,9 @@ public class InMemoryEdgeRepositoryTests
         var edge2 = CreateTestEdge("edge2", "source2", "target1", "INHERITS");
         var edge3 = CreateTestEdge("edge3", "source3", "target2", "CALLS");
         
-        _database.Edges.TryAdd(edge1.Id!, edge1);
-        _database.Edges.TryAdd(edge2.Id!, edge2);
-        _database.Edges.TryAdd(edge3.Id!, edge3);
+        _database.UpsertEdge(edge1);
+        _database.UpsertEdge(edge2);
+        _database.UpsertEdge(edge3);
 
         // Act
         var result = await _repository.GetByTargetIdAsync("target1");
@@ -130,9 +131,9 @@ public class InMemoryEdgeRepositoryTests
         var edge2 = CreateTestEdge("edge2", "source2", "target1", "INHERITS");
         var edge3 = CreateTestEdge("edge3", "source3", "target1", "CALLS");
         
-        _database.Edges.TryAdd(edge1.Id!, edge1);
-        _database.Edges.TryAdd(edge2.Id!, edge2);
-        _database.Edges.TryAdd(edge3.Id!, edge3);
+        _database.UpsertEdge(edge1);
+        _database.UpsertEdge(edge2);
+        _database.UpsertEdge(edge3);
 
         // Act
         var result = await _repository.GetByTargetIdAsync("target1", type: "CALLS");
@@ -147,7 +148,7 @@ public class InMemoryEdgeRepositoryTests
     {
         // Arrange
         var edge = CreateTestEdge("edge1", "source1", "target1", "CALLS");
-        _database.Edges.TryAdd(edge.Id!, edge);
+        _database.UpsertEdge(edge);
 
         // Act
         var result = await _repository.GetByTargetIdAsync("non-existent-target");
@@ -166,8 +167,8 @@ public class InMemoryEdgeRepositoryTests
         await _repository.UpsertAsync(edge);
 
         // Assert
-        Assert.True(_database.Edges.ContainsKey("new-edge"));
-        Assert.Equal("CALLS", _database.Edges["new-edge"].Type);
+        Assert.True(_database.ContainsEdge("new-edge"));
+        Assert.Equal("CALLS", _database.GetEdge("new-edge")!.Type);
     }
 
     [Fact]
@@ -175,7 +176,7 @@ public class InMemoryEdgeRepositoryTests
     {
         // Arrange
         var originalEdge = CreateTestEdge("existing-edge", "source1", "target1", "CALLS");
-        _database.Edges.TryAdd(originalEdge.Id!, originalEdge);
+        _database.UpsertEdge(originalEdge);
 
         var updatedEdge = CreateTestEdge("existing-edge", "source1", "target1", "INHERITS");
 
@@ -183,7 +184,7 @@ public class InMemoryEdgeRepositoryTests
         await _repository.UpsertAsync(updatedEdge);
 
         // Assert
-        Assert.Equal("INHERITS", _database.Edges["existing-edge"].Type);
+        Assert.Equal("INHERITS", _database.GetEdge("existing-edge")!.Type);
     }
 
     [Fact]
@@ -197,7 +198,7 @@ public class InMemoryEdgeRepositoryTests
 
         // Assert
         Assert.NotNull(edge.Id);
-        Assert.True(_database.Edges.ContainsKey(edge.Id));
+        Assert.True(_database.ContainsEdge(edge.Id));
     }
 
     [Fact]
@@ -212,7 +213,7 @@ public class InMemoryEdgeRepositoryTests
         // Assert
         Assert.NotNull(edge.Id);
         Assert.NotEmpty(edge.Id);
-        Assert.True(_database.Edges.ContainsKey(edge.Id));
+        Assert.True(_database.ContainsEdge(edge.Id));
     }
 
     [Fact]
@@ -223,17 +224,17 @@ public class InMemoryEdgeRepositoryTests
         var edge2 = CreateTestEdge("edge2", "source1", "node1", "INHERITS");
         var edge3 = CreateTestEdge("edge3", "source2", "target2", "CALLS");
         
-        _database.Edges.TryAdd(edge1.Id!, edge1);
-        _database.Edges.TryAdd(edge2.Id!, edge2);
-        _database.Edges.TryAdd(edge3.Id!, edge3);
+        _database.UpsertEdge(edge1);
+        _database.UpsertEdge(edge2);
+        _database.UpsertEdge(edge3);
 
         // Act
         await _repository.DeleteByNodeIdAsync("node1", CancellationToken.None);
 
         // Assert
-        Assert.False(_database.Edges.ContainsKey("edge1"));
-        Assert.False(_database.Edges.ContainsKey("edge2"));
-        Assert.True(_database.Edges.ContainsKey("edge3"));
+        Assert.False(_database.ContainsEdge("edge1"));
+        Assert.False(_database.ContainsEdge("edge2"));
+        Assert.True(_database.ContainsEdge("edge3"));
     }
 
     [Fact]
@@ -241,7 +242,7 @@ public class InMemoryEdgeRepositoryTests
     {
         // Arrange
         var edge = CreateTestEdge("edge1", "source1", "target1", "CALLS");
-        _database.Edges.TryAdd(edge.Id!, edge);
+        _database.UpsertEdge(edge);
 
         // Act & Assert
         var exception = await Record.ExceptionAsync(() => 
@@ -254,14 +255,14 @@ public class InMemoryEdgeRepositoryTests
     {
         // Arrange
         var edge = CreateTestEdge("edge1", "node1", "target1", "CALLS");
-        _database.Edges.TryAdd(edge.Id!, edge);
+        _database.UpsertEdge(edge);
         using var cts = new CancellationTokenSource();
 
         // Act
         await _repository.DeleteByNodeIdAsync("node1", cts.Token);
 
         // Assert
-        Assert.False(_database.Edges.ContainsKey("edge1"));
+        Assert.False(_database.ContainsEdge("edge1"));
     }
 
     [Fact]
@@ -271,7 +272,7 @@ public class InMemoryEdgeRepositoryTests
         var edge1 = CreateTestEdge("edge1", "source1", "target1", "CALLS");
         var edge2 = CreateTestEdge(null, "source2", "target2", "INHERITS");
         
-        _database.Edges.TryAdd(edge1.Id!, edge1);
+        _database.UpsertEdge(edge1);
         // Note: edge2 with null ID won't be added to database
 
         // Act & Assert
@@ -314,7 +315,7 @@ public class InMemoryEdgeRepositoryTests
             for (int j = 0; j < edgesPerNode; j++)
             {
                 var edge = CreateTestEdge($"edge-{i}-{j}", $"node-{i}", $"target-{j}", "CALLS");
-                _database.Edges.TryAdd(edge.Id!, edge);
+                _database.UpsertEdge(edge);
             }
         }
 
@@ -332,6 +333,47 @@ public class InMemoryEdgeRepositoryTests
         // Assert
         var remainingEdges = await _repository.GetAllAsync();
         Assert.Empty(remainingEdges);
+    }
+
+    [Fact]
+    public async Task GetBySourceIdAsync_NoTypeFilter_ReturnedInstance_IsNotDowncastableToRawBuffer()
+    {
+        _database.UpsertEdge(CreateTestEdge("edge1", "source1", "target1", "CALLS"));
+        _database.UpsertEdge(CreateTestEdge("edge2", "source1", "target2", "INHERITS"));
+
+        var result = await _repository.GetBySourceIdAsync("source1");
+
+        // The keyed lookup's backing bucket is a raw CodeEdge[] shared by every reader (or, multi-shard,
+        // a per-call List). Neither may escape downcastable — a stray .Sort()/index-write would corrupt
+        // the frozen snapshot other readers hold.
+        Assert.Equal(2, result.Count);
+        Assert.Null(result as CodeEdge[]);
+        Assert.Null(result as List<CodeEdge>);
+    }
+
+    [Fact]
+    public async Task GetByTargetIdAsync_NoTypeFilter_ReturnedInstance_IsNotDowncastableToRawBuffer()
+    {
+        _database.UpsertEdge(CreateTestEdge("edge1", "source1", "target1", "CALLS"));
+        _database.UpsertEdge(CreateTestEdge("edge2", "source2", "target1", "INHERITS"));
+
+        var result = await _repository.GetByTargetIdAsync("target1");
+
+        Assert.Equal(2, result.Count);
+        Assert.Null(result as CodeEdge[]);
+        Assert.Null(result as List<CodeEdge>);
+    }
+
+    [Fact]
+    public async Task GetAllAsync_ReturnedInstance_IsNotDowncastableToMutableBackingStore()
+    {
+        _database.UpsertEdge(CreateTestEdge("edge1", "source1", "target1", "CALLS"));
+
+        var result = await _repository.GetAllAsync();
+
+        Assert.Null(result as CodeEdge[]);
+        Assert.Null(result as List<CodeEdge>);
+        Assert.IsType<ReadOnlyCollection<CodeEdge>>(result);
     }
 
     private static CodeEdge CreateTestEdge(string? id, string sourceId, string targetId, string type)

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using CodeContext.Core.Repositories;
 using CodeContext.Core.Repositories.InMemory;
 using CodeContext.Core.Services;
 using Xunit;
@@ -28,19 +29,31 @@ public class GraphAdjacencyTests
         _edges = new InMemoryEdgeRepository(_database);
     }
 
-    private static CodeNode Node(string id, string filePath, string? name = null, string type = "Class")
-        => new() { Id = id, Name = name ?? id, Type = type, FilePath = filePath, StartLine = 1, EndLine = 2 };
+    private static CodeNode Node(string id, string filePath, string? name = null, string type = "Class",
+        string? parserId = null, string? workspaceId = null)
+        => new() { Id = id, Name = name ?? id, Type = type, FilePath = filePath, StartLine = 1, EndLine = 2,
+            Metadata = Meta(parserId, workspaceId) };
 
-    private static CodeEdge Edge(string id, string source, string target, string type = "CALLS")
-        => new() { Id = id, SourceId = source, TargetId = target, Type = type };
+    private static CodeEdge Edge(string id, string source, string target, string type = "CALLS",
+        string? parserId = null, string? workspaceId = null)
+        => new() { Id = id, SourceId = source, TargetId = target, Type = type,
+            Metadata = Meta(parserId, workspaceId) };
+
+    private static Dictionary<string, string>? Meta(string? parserId, string? workspaceId)
+    {
+        if (parserId is null && workspaceId is null) return null;
+        var metadata = new Dictionary<string, string>();
+        if (parserId is not null) metadata["parserId"] = parserId;
+        if (workspaceId is not null) metadata["workspaceId"] = workspaceId;
+        return metadata;
+    }
 
     // ---- Invalidation ------------------------------------------------------
 
     [Fact]
     public void GetAdjacency_CachedWhenVersionUnchanged_ReturnsSameInstance()
     {
-        _database.Nodes.TryAdd("n1", Node("n1", "/a/A.cs"));
-        _database.NotifyMutation();
+        _database.UpsertNode(Node("n1", "/a/A.cs"));
 
         var first = _database.GetAdjacency();
         var second = _database.GetAdjacency();
@@ -98,11 +111,12 @@ public class GraphAdjacencyTests
     [Fact]
     public void GetAdjacency_ReflectsGenerationCommit_ScopeReplacement()
     {
-        // Two parsers own disjoint scopes via node id prefix.
+        // Two parsers own disjoint scopes via ownership metadata shards.
         Assert.True(_database.TryCommitGeneration(1,
-            new[] { Node("p1:a", "/p1/A.cs"), Node("p2:b", "/p2/B.cs") },
-            new[] { Edge("p1:e", "p1:a", "p2:b") },
-            replacesScope: null));
+            new[] { Node("p1:a", "/p1/A.cs", parserId: "p1", workspaceId: "w"),
+                    Node("p2:b", "/p2/B.cs", parserId: "p2", workspaceId: "w") },
+            new[] { Edge("p1:e", "p1:a", "p2:b", parserId: "p1", workspaceId: "w") },
+            scope: null));
 
         var gen1 = _database.GetAdjacency();
         Assert.Equal(2, gen1.Nodes.Count);
@@ -110,9 +124,9 @@ public class GraphAdjacencyTests
 
         // Replace only p1's scope with a new node + edge; p2 must survive.
         Assert.True(_database.TryCommitGeneration(2,
-            new[] { Node("p1:a2", "/p1/A.cs") },
-            new[] { Edge("p1:e2", "p1:a2", "p2:b") },
-            replacesScope: n => n.Id != null && n.Id.StartsWith("p1:", StringComparison.Ordinal)));
+            new[] { Node("p1:a2", "/p1/A.cs", parserId: "p1", workspaceId: "w") },
+            new[] { Edge("p1:e2", "p1:a2", "p2:b", parserId: "p1", workspaceId: "w") },
+            scope: new CommitScope("p1", "w", null)));
 
         var gen2 = _database.GetAdjacency();
         Assert.Contains(gen2.Nodes, n => n.Id == "p1:a2");
@@ -128,7 +142,7 @@ public class GraphAdjacencyTests
         _database.TryCommitGeneration(1,
             new[] { Node("n1", "/a/A.cs"), Node("n2", "/a/B.cs") },
             new[] { Edge("e1", "n1", "n2") },
-            replacesScope: null);
+            scope: null);
         Assert.Equal(2, _database.GetAdjacency().Nodes.Count);
 
         var removed = _database.PruneFilesNotPresent(new[] { "/a/A.cs" });
@@ -146,13 +160,13 @@ public class GraphAdjacencyTests
     public void GetAdjacency_DuringReconciliation_SeesCommittedStateUntilCommit()
     {
         _database.TryCommitGeneration(1,
-            new[] { Node("n1", "/a/A.cs") }, Array.Empty<CodeEdge>(), replacesScope: null);
+            new[] { Node("n1", "/a/A.cs") }, Array.Empty<CodeEdge>(), scope: null);
 
         _database.BeginReconciliation();
         // A null-scope generation commit is a whole-graph replacement; while it is staged in the
         // reconciliation buffer, readers must still observe the previous committed generation.
         _database.TryCommitGeneration(2,
-            new[] { Node("n2", "/a/B.cs") }, Array.Empty<CodeEdge>(), replacesScope: null);
+            new[] { Node("n2", "/a/B.cs") }, Array.Empty<CodeEdge>(), scope: null);
 
         Assert.Single(_database.GetAdjacency().Nodes);
         Assert.Contains(_database.GetAdjacency().Nodes, n => n.Id == "n1");
@@ -168,11 +182,11 @@ public class GraphAdjacencyTests
     public void GetAdjacency_ReconciliationRollback_LeavesCommittedStateIntact()
     {
         _database.TryCommitGeneration(1,
-            new[] { Node("n1", "/a/A.cs") }, Array.Empty<CodeEdge>(), replacesScope: null);
+            new[] { Node("n1", "/a/A.cs") }, Array.Empty<CodeEdge>(), scope: null);
 
         _database.BeginReconciliation();
         _database.TryCommitGeneration(2,
-            new[] { Node("n2", "/a/B.cs") }, Array.Empty<CodeEdge>(), replacesScope: null);
+            new[] { Node("n2", "/a/B.cs") }, Array.Empty<CodeEdge>(), scope: null);
         _database.RollbackReconciliation();
 
         var adj = _database.GetAdjacency();
@@ -190,7 +204,7 @@ public class GraphAdjacencyTests
             Node("n1", "/repo/src/Foo.cs"),
             Node("n2", "/repo/src/Bar.cs"),
             Node("n3", "/repo/tests/Foo.cs"),
-        }, Array.Empty<CodeEdge>(), replacesScope: null);
+        }, Array.Empty<CodeEdge>(), scope: null);
         var adj = _database.GetAdjacency();
 
         // Rooted request -> exact normalized match (case-insensitive, backslash-normalized).
@@ -227,7 +241,7 @@ public class GraphAdjacencyTests
             edges.Add(Edge($"e{i}", nodeIds[rng.Next(nodeIds.Length)], nodeIds[rng.Next(nodeIds.Length)],
                 rng.Next(2) == 0 ? "CALLS" : "REFERENCES"));
 
-        _database.TryCommitGeneration(1, nodes, edges, replacesScope: null);
+        _database.TryCommitGeneration(1, nodes, edges, scope: null);
         var adj = _database.GetAdjacency();
 
         // Edge adjacency set-equal to brute-force scan for every node id.
@@ -262,7 +276,7 @@ public class GraphAdjacencyTests
     {
         _database.TryCommitGeneration(1,
             new[] { Node("a", "/a/A.cs"), Node("b", "/a/B.cs") },
-            new[] { Edge("e0", "a", "b") }, replacesScope: null);
+            new[] { Edge("e0", "a", "b") }, scope: null);
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
         var gen = 1L;
@@ -278,7 +292,7 @@ public class GraphAdjacencyTests
                 _database.TryCommitGeneration(g,
                     new[] { Node(id, "/a/A.cs") },
                     new[] { Edge($"se{id}", id, id) },
-                    replacesScope: null);
+                    scope: null);
             }
         });
 
