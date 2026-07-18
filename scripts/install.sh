@@ -44,8 +44,15 @@ tmp_dir=$(mktemp -d /tmp/codecontext.XXXXXX)
 tmp_zip="$tmp_dir/release.zip"
 trap 'rm -rf "$tmp_dir"' EXIT HUP INT TERM
 echo "Downloading $url..."
-curl -fsSL -o "$tmp_zip" "$url"
+if ! curl -fL --progress-bar \
+    --retry 3 --retry-delay 1 \
+    --connect-timeout 15 --speed-limit 1024 --speed-time 30 \
+    -o "$tmp_zip" "$url"; then
+  echo "Download failed. Check access to github.com and release-assets.githubusercontent.com, then retry." >&2
+  exit 1
+fi
 
+echo "Download complete. Extracting release..."
 stage_dir="$tmp_dir/payload"
 mkdir -p "$stage_dir"
 unzip -oq "$tmp_zip" -d "$stage_dir"

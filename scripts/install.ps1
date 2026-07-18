@@ -45,7 +45,15 @@ try {
     New-Item -ItemType Directory -Force $temporary | Out-Null
     $zipPath = Join-Path $temporary $asset.name
     $stageDir = Join-Path $temporary 'payload'
-    Invoke-WebRequest $asset.browser_download_url -OutFile $zipPath
+    & curl.exe -fL --progress-bar `
+        --retry 3 --retry-delay 1 `
+        --connect-timeout 15 --speed-limit 1024 --speed-time 30 `
+        -o $zipPath $asset.browser_download_url
+    if ($LASTEXITCODE -ne 0) {
+        throw "Download failed. Check access to github.com and release-assets.githubusercontent.com, then retry."
+    }
+
+    Write-Host "Download complete. Extracting release..."
     Expand-Archive -Path $zipPath -DestinationPath $stageDir
 
     $required = @(
