@@ -35,6 +35,27 @@ public class DetachedStartOrchestratorTests
     }
 
     [Fact]
+    public async Task SubdirectoryAttachesToAncestorInstanceWithoutSpawning()
+    {
+        var ancestor = Instance("ancestor", 7000, 10);
+        var registry = new SequencedRegistry([ancestor]);
+        var processStarted = false;
+        var runtime = Runtime(startProcess: _ =>
+        {
+            processStarted = true;
+            return new FakeProcess();
+        });
+
+        var result = await new DetachedStartOrchestrator(registry, runtime).StartAsync(
+            Root + "\\src\\sub", null, 120, null, CancellationToken.None);
+
+        Assert.True(result.Success);
+        Assert.False(result.WasStarted);
+        Assert.Same(ancestor, result.Instance);
+        Assert.False(processStarted);
+    }
+
+    [Fact]
     public async Task ExplicitOccupiedPortFailsBeforeLaunchingProcess()
     {
         var processStarted = false;
@@ -175,7 +196,31 @@ public class DetachedStartOrchestratorTests
 
         public void Register(InstanceRecord record) => throw new NotSupportedException();
         public void Unregister(string rootPath, string? instanceId = null) => throw new NotSupportedException();
-        public InstanceRecord? FindForPath(string path) => throw new NotSupportedException();
+
+        // Applies the same same-or-ancestor/longest-root semantics as InstanceRegistry.FindForPath
+        // for the primary-separator paths these tests use (no alt-separator or root normalization),
+        // while sharing the sequenced read cursor, so the orchestrator's initial existing-instance
+        // lookup consumes the same result slot the old GetAll-based check did.
+        public InstanceRecord? FindForPath(string path)
+        {
+            var target = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+            return GetAll()
+                .Where(i => IsSameOrAncestor(i.RootPath, target))
+                .OrderByDescending(i => i.RootPath.Length)
+                .FirstOrDefault();
+        }
+
+        private static bool IsSameOrAncestor(string root, string path)
+        {
+            var comparison = OperatingSystem.IsWindows()
+                ? StringComparison.OrdinalIgnoreCase
+                : StringComparison.Ordinal;
+            if (string.Equals(root, path, comparison)) return true;
+            var prefix = Path.EndsInDirectorySeparator(root)
+                ? root
+                : root + Path.DirectorySeparatorChar;
+            return path.StartsWith(prefix, comparison);
+        }
     }
 
     private sealed class FakeProcess(int id = 456, bool hasExited = false, int exitCode = 0) : IDetachedProcess

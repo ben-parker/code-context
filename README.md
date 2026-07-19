@@ -83,7 +83,9 @@ substring fallback.
 ## Instance lifecycle
 
 One registered instance watches each repository root. Ports are allocated from 7890
-unless `--port` is supplied.
+unless `--port` is supplied. Running `start` from a subdirectory of an already-running
+session attaches to that ancestor instance, whose recursive scan already covers the
+subdirectory.
 
 ```bash
 codecontext start --path .                  # foreground REST service
