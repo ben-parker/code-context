@@ -176,8 +176,8 @@ jobs:
             "workers/typescript/node-LICENSE" \
             "protocol/parser-protocol.schema.json" \
             "skill/SKILL.md" \
-            "skill/install-skill.sh" \
-            "skill/install-skill.ps1"; do
+            "skill/references/native-syntax.md" \
+            "skill/references/operations.md"; do
             [[ -f "out/${{ matrix.rid }}/$required" ]] \
               || { echo "::error::$required missing from publish output"; exit 1; }
           done

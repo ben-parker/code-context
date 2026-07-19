@@ -77,17 +77,20 @@ if ($strayFiles) {
         ($strayFiles -join ', ') + ". The AOT host must be a single native binary with no shipped symbols.")
 }
 
-$canonicalSkill = Join-Path $repoRoot 'skill/SKILL.md'
-$packagedSkill = Join-Path $publishPath 'skill/SKILL.md'
-if (-not (Test-Path -LiteralPath $packagedSkill -PathType Leaf)) {
-    throw "Packaged skill is missing: $packagedSkill"
-}
-$canonicalHash = [Convert]::ToHexString(
-    [Security.Cryptography.SHA256]::HashData([IO.File]::ReadAllBytes($canonicalSkill)))
-$packagedHash = [Convert]::ToHexString(
-    [Security.Cryptography.SHA256]::HashData([IO.File]::ReadAllBytes($packagedSkill)))
-if ($canonicalHash -cne $packagedHash) {
-    throw 'Packaged skill differs byte-for-byte from canonical skill/SKILL.md.'
+$skillPayloadFiles = @('SKILL.md', 'references/native-syntax.md', 'references/operations.md')
+foreach ($relativeSkillFile in $skillPayloadFiles) {
+    $canonicalSkillFile = Join-Path (Join-Path $repoRoot 'skill') $relativeSkillFile
+    $packagedSkillFile = Join-Path (Join-Path $publishPath 'skill') $relativeSkillFile
+    if (-not (Test-Path -LiteralPath $packagedSkillFile -PathType Leaf)) {
+        throw "Packaged skill file is missing: $packagedSkillFile"
+    }
+    $canonicalHash = [Convert]::ToHexString(
+        [Security.Cryptography.SHA256]::HashData([IO.File]::ReadAllBytes($canonicalSkillFile)))
+    $packagedHash = [Convert]::ToHexString(
+        [Security.Cryptography.SHA256]::HashData([IO.File]::ReadAllBytes($packagedSkillFile)))
+    if ($canonicalHash -cne $packagedHash) {
+        throw "Packaged skill file differs byte-for-byte from canonical skill/$relativeSkillFile."
+    }
 }
 
 $executableName = if ($RuntimeIdentifier -like 'win-*') { 'codecontext.exe' } else { 'codecontext' }

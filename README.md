@@ -54,10 +54,31 @@ curl -fsSL https://raw.githubusercontent.com/ben-parker/code-context/main/script
 ```
 
 The installer places a versioned release under `~/.codecontext` and adds a stable
-`codecontext` launcher. It does not modify agent skill directories; the optional
-CodeContext skill remains in the release payload for manual installation. If the
-installer updates your user `PATH`, open a new terminal before continuing. Stop
-running CodeContext instances before upgrading.
+`codecontext` launcher. After extracting the release, it offers an interactive agent
+skill menu. Use the up/down arrows to move, Space to toggle a destination, and Enter
+to continue. Shared agents is selected by default; the other destinations start
+unchecked:
+
+| Menu destination | Installed folder |
+| --- | --- |
+| Shared agents | `~/.agents/skills/code-context` |
+| Claude Code | `~/.claude/skills/code-context` |
+| Devin Desktop | `~/.codeium/windsurf/skills/code-context` |
+| Codex (legacy) | `$CODEX_HOME/skills/code-context`, or `~/.codex/skills/code-context` when `CODEX_HOME` is unset |
+| Cursor | `~/.cursor/skills/code-context` |
+| Gemini CLI | `~/.gemini/skills/code-context` |
+
+If a selected folder already exists, the installer asks about that destination
+separately. Overwrite defaults to No and a skipped folder is left unchanged. An
+approved overwrite replaces the complete `code-context` folder with the packaged
+`SKILL.md` and `references/` content. Skill-copy failures are reported without
+preventing CodeContext or another selected skill target from being installed.
+
+When no usable interactive terminal is available, such as in an unattended install,
+the installer skips every skill destination and continues installing CodeContext.
+Ctrl+C cancels before the installed release is changed. If the installer updates your
+user `PATH`, open a new terminal before continuing. Stop running CodeContext instances
+before upgrading.
 
 ## Quick start
 
