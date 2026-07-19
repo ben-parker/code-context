@@ -83,8 +83,13 @@ internal sealed class DetachedStartOrchestrator
     {
         await using var startLock = await _runtime.AcquireStartLockAsync(rootPath, ct);
 
-        var existing = _registry.GetAll()
-            .FirstOrDefault(instance => string.Equals(instance.RootPath, rootPath, PathComparison));
+        // Same-or-ancestor match: starting from a subdirectory attaches to the ancestor
+        // instance, whose recursive scan already covers the requested path. Attach is
+        // best-effort under concurrent cold starts: the start lock is keyed per exact
+        // rootPath, so simultaneous first-time starts from an ancestor and its subdirectory
+        // hold different locks and can still fork two instances; this check only deduplicates
+        // once the ancestor is registered.
+        var existing = _registry.FindForPath(rootPath);
         if (existing is not null)
         {
             return DetachedStartResult.Existing(existing);

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.Linq;
 using System.Threading.Tasks;
 
@@ -15,37 +16,47 @@ namespace CodeContext.Core.Repositories.InMemory
         }
 
         // Reads resolve through the version-stamped adjacency index (O(degree)) instead of a full
-        // O(E) scan of the edge table, then return a fresh List so callers keep exclusive ownership.
-        public Task<List<CodeEdge>> GetAllAsync()
+        // O(E) scan of the edge table. GetAll returns the composite's cached, downcast-proof view
+        // (zero copy); keyed lookups without a type filter wrap the shared backing array in a
+        // read-only facade so the raw CodeEdge[] never escapes downcastable.
+        public Task<IReadOnlyList<CodeEdge>> GetAllAsync()
         {
-            return Task.FromResult(new List<CodeEdge>(_database.GetAdjacency().Edges));
+            return Task.FromResult(_database.GetAdjacency().EdgesView);
         }
 
-        public Task<List<CodeEdge>> GetBySourceIdAsync(string sourceId, string? type = null)
+        public Task<IReadOnlyList<CodeEdge>> GetBySourceIdAsync(string sourceId, string? type = null)
         {
             var edges = _database.GetAdjacency().GetEdgesBySource(sourceId);
-            IEnumerable<CodeEdge> query = edges;
 
-            if (type != null)
+            if (type == null)
             {
-                query = query.Where(e => e.Type == type);
+                return Task.FromResult(AsReadOnly(edges));
             }
 
-            return Task.FromResult(query.ToList());
+            return Task.FromResult<IReadOnlyList<CodeEdge>>(
+                edges.Where(e => e.Type == type).ToList());
         }
 
-        public Task<List<CodeEdge>> GetByTargetIdAsync(string targetId, string? type = null)
+        public Task<IReadOnlyList<CodeEdge>> GetByTargetIdAsync(string targetId, string? type = null)
         {
             var edges = _database.GetAdjacency().GetEdgesByTarget(targetId);
-            IEnumerable<CodeEdge> query = edges;
 
-            if (type != null)
+            if (type == null)
             {
-                query = query.Where(e => e.Type == type);
+                return Task.FromResult(AsReadOnly(edges));
             }
 
-            return Task.FromResult(query.ToList());
+            return Task.FromResult<IReadOnlyList<CodeEdge>>(
+                edges.Where(e => e.Type == type).ToList());
         }
+
+        // Wraps a keyed lookup's result — which may be the raw shared CodeEdge[] backing a frozen
+        // shard bucket — in a read-only facade. One tiny wrapper alloc, still cheaper than today's
+        // full List copy, and `as CodeEdge[]` / `as List<CodeEdge>` on the result are both null.
+        private static IReadOnlyList<CodeEdge> AsReadOnly(IReadOnlyList<CodeEdge> edges)
+            => edges is IList<CodeEdge> list
+                ? new ReadOnlyCollection<CodeEdge>(list)
+                : new ReadOnlyCollection<CodeEdge>(edges.ToList());
 
         public Task UpsertAsync(CodeEdge edge)
         {
@@ -54,30 +65,13 @@ namespace CodeContext.Core.Repositories.InMemory
                 edge.Id = Guid.NewGuid().ToString();
             }
 
-            _database.Edges.AddOrUpdate(edge.Id, edge, (key, existing) => edge);
-            _database.NotifyMutation();
+            _database.UpsertEdge(edge);
             return Task.CompletedTask;
         }
 
         public Task DeleteByNodeIdAsync(string nodeId, CancellationToken ct)
         {
-            
-            var edgesToRemove = _database.Edges.Values
-                .Where(e => e.SourceId == nodeId || e.TargetId == nodeId)
-                .Select(e => e.Id)
-                .Where(id => id != null)
-                .ToList();
-
-            foreach (var edgeId in edgesToRemove)
-            {
-                _database.Edges.TryRemove(edgeId!, out _);
-            }
-
-            if (edgesToRemove.Count > 0)
-            {
-                _database.NotifyMutation();
-            }
-
+            _database.RemoveEdgesTouchingNode(nodeId);
             return Task.CompletedTask;
         }
     }

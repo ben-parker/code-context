@@ -169,8 +169,16 @@ public sealed record ProtocolDiagnostic(
 
 /// <summary>
 /// A batch of normalized facts published by a worker (worker → host notification).
-/// The delta replaces either the listed files' facts or — when
-/// <c>replacesWorkspace</c> — every fact this parser owns in the workspace.
+/// workspace/index responses replace every fact this parser owns in the workspace
+/// (<c>replacesWorkspace:true</c>). workspace/applyChanges responses are file-scoped
+/// (<c>replacesWorkspace:false</c>): they carry only the facts of files whose emitted
+/// facts changed — including untouched files whose facts changed through cross-file
+/// resolution — and <c>replacesFiles</c> lists those files plus any removed since the
+/// last emission, as byte-for-byte the same strings the nodes carry in
+/// <c>filePath</c> (the host matches them raw, with no normalization). A file listed
+/// with no facts is deleted. Every chunk of one request must agree on
+/// <c>replacesWorkspace</c> (the host ORs it) and should repeat the full
+/// <c>replacesFiles</c> list (the host unions it).
 /// </summary>
 public sealed record AnalysisDelta(
     [property: JsonPropertyName("parserId")] string ParserId,

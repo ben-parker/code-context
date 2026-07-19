@@ -1,4 +1,5 @@
 using CodeContext.Parser.Protocol;
+using Microsoft.Extensions.Configuration;
 
 namespace CodeContext.Core.Workers;
 
@@ -10,7 +11,8 @@ public sealed record WorkerLaunchSpec(
     IReadOnlyList<string> Arguments,
     string? WorkingDirectory = null,
     int MinProtocolVersion = ParserProtocol.Version,
-    int MaxProtocolVersion = ParserProtocol.Version)
+    int MaxProtocolVersion = ParserProtocol.Version,
+    IReadOnlyDictionary<string, string>? Environment = null)
 {
     /// <summary>
     /// Builds a launch spec from a manifest on disk. Relative commands resolve against
@@ -51,6 +53,46 @@ public sealed class ParserWorkerOptions
 
     public int MinProtocolVersion { get; set; } = ParserProtocol.Version;
     public int MaxProtocolVersion { get; set; } = ParserProtocol.Version;
+
+    /// <summary>
+    /// Host-side environment overlays keyed by parser id (e.g. "csharp"). Applied on top
+    /// of any <see cref="WorkerLaunchSpec.Environment"/> when spawning that parser's
+    /// worker, so a var set here wins on collision. Null (the default) touches nothing.
+    /// Parser ids are matched case-sensitively (ordinal) against the manifest ids, which are
+    /// lowercase (e.g. "csharp"); a key that does not match exactly is a silent no-op.
+    /// </summary>
+    public IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>>? WorkerEnvironment { get; set; }
+
+    /// <summary>
+    /// Builds options from host configuration, reading the <c>CodeContext:WorkerEnvironment</c>
+    /// section: each child key is a parser id and each grandchild a <c>KEY=VALUE</c> environment
+    /// entry (env-var form <c>CodeContext__WorkerEnvironment__csharp__DOTNET_gcServer=1</c>).
+    /// Enumerated by hand rather than reflectively bound so it is Native-AOT safe. An absent or
+    /// empty section leaves <see cref="WorkerEnvironment"/> null, matching the no-config default;
+    /// every other tunable keeps its default.
+    /// </summary>
+    public static ParserWorkerOptions FromConfiguration(IConfiguration configuration)
+    {
+        Dictionary<string, IReadOnlyDictionary<string, string>>? workerEnvironment = null;
+        foreach (var parserSection in configuration.GetSection("CodeContext:WorkerEnvironment").GetChildren())
+        {
+            Dictionary<string, string>? environment = null;
+            foreach (var entry in parserSection.GetChildren())
+            {
+                // A key with no scalar value (a nested object) carries no env var; skip it.
+                if (entry.Value is { } value)
+                {
+                    (environment ??= new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase))[entry.Key] = value;
+                }
+            }
+            if (environment is not null)
+            {
+                (workerEnvironment ??= new Dictionary<string, IReadOnlyDictionary<string, string>>(StringComparer.Ordinal))
+                    [parserSection.Key] = environment;
+            }
+        }
+        return new ParserWorkerOptions { WorkerEnvironment = workerEnvironment };
+    }
 }
 
 /// <summary>The worker process died or its protocol stream broke mid-conversation.</summary>

@@ -27,10 +27,10 @@ namespace CodeContext.Core.Repositories.InMemory
             long generation,
             IReadOnlyList<CodeNode> nodes,
             IReadOnlyList<CodeEdge> edges,
-            Func<CodeNode, bool>? replacesScope = null,
+            CommitScope? scope = null,
             CancellationToken ct = default)
         {
-            return Task.FromResult(_database.TryCommitGeneration(generation, nodes, edges, replacesScope));
+            return Task.FromResult(_database.TryCommitGeneration(generation, nodes, edges, scope));
         }
 
         public Task<int> PruneFilesNotPresentAsync(IReadOnlyCollection<string> presentFilePaths, CancellationToken ct = default)
@@ -69,7 +69,7 @@ namespace CodeContext.Core.Repositories.InMemory
             var nodeDtos = JsonSerializer.Deserialize(nodesJson, CodeContextJsonContext.Default.ListNodeDto)!;
             var edgeDtos = JsonSerializer.Deserialize(edgesJson, CodeContextJsonContext.Default.ListEdgeDto)!;
 
-            var existingNodeCount = _database.Nodes.Count;
+            var existingNodeCount = _database.NodeCount;
 
             var nodes = nodeDtos.Select(dto => new CodeNode
             {
@@ -102,7 +102,7 @@ namespace CodeContext.Core.Repositories.InMemory
                 Metadata = dto.Metadata,
             }).ToList();
 
-            _database.TryCommitGeneration(_database.LastCommittedGeneration + 1, nodes, edges, replacesScope: null);
+            _database.TryCommitGeneration(_database.LastCommittedGeneration + 1, nodes, edges, scope: null);
 
             var stats = new ReconcileStatsDto(
                 NodesMerged: nodeDtos.Count,

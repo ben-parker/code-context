@@ -141,7 +141,7 @@ public class AnalysisDeltaApplierTests
         // Another writer's facts (no worker ownership metadata) already in the store.
         await _store.TryCommitGenerationAsync(1,
             [new CodeNode { Id = "csharp:Other", Name = "Other", Type = "class", Language = "csharp", FilePath = "o.cs" }],
-            [], replacesScope: null);
+            [], scope: null);
 
         await _applier.ApplyAsync(Delta(1, [Node("fake:ws-1:A", "a.fake")], replacesWorkspace: true));
 

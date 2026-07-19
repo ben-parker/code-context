@@ -225,6 +225,7 @@ public class QueryCommandHandlerTests
 
         Assert.Equal(3, exit);
         Assert.Single(handler.Requests);
+        Assert.Contains("did not become ready within 0 seconds", error.ToString());
         Assert.Contains("codecontext status --path", error.ToString());
     }
 
@@ -408,7 +409,7 @@ public class QueryCommandHandlerTests
             error,
             TimeProvider.System,
             (_, _) => Task.CompletedTask,
-            readinessTimeout ?? TimeSpan.FromSeconds(20),
+            readinessTimeout ?? TimeSpan.FromSeconds(30),
             _ => true);
         return (runtime, output, error);
     }

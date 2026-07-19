@@ -238,6 +238,7 @@ public class TestEvidenceClassificationTests
         var files = Substitute.For<IFileMetadataRepository>();
         var allNodes = new[] { cls }.Concat(members).ToList();
         nodeRepository.GetAllAsync().Returns(allNodes);
+        nodeRepository.StubFindByFilePathFromGetAll();
         nodeRepository.GetByIdAsync(Arg.Any<string>()).Returns(call =>
             allNodes.SingleOrDefault(node => node.Id == call.Arg<string>()));
         nodeRepository.GetByIdentifierAsync(Arg.Any<string>()).Returns(call =>
@@ -284,6 +285,7 @@ public class TestEvidenceClassificationTests
         var edgeRepository = Substitute.For<ICodeEdgeRepository>();
         var files = Substitute.For<IFileMetadataRepository>();
         nodeRepository.GetAllAsync().Returns(nodes.ToList());
+        nodeRepository.StubFindByFilePathFromGetAll();
         nodeRepository.GetByIdAsync(Arg.Any<string>()).Returns(call =>
             nodes.SingleOrDefault(node => node.Id == call.Arg<string>()));
         nodeRepository.GetByIdentifierAsync(Arg.Any<string>()).Returns(call =>

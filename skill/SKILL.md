@@ -1,72 +1,57 @@
 ---
 name: code-context
-description: Use BEFORE grep/Read whenever the question is about a symbol's relationships — who calls, implements, or depends on it, the blast radius of changing or deleting it, which tests cover it — or exact syntax structure. Grep finds text matches; this answers dependency questions from a live index in one query.
+description: Use BEFORE grep/Read whenever the question is about a symbol's relationships in C# or TypeScript/JavaScript code — who calls, implements, or depends on it, the blast radius of changing or deleting it, which tests cover it — or exact syntax structure. Grep finds text matches; this answers dependency questions from a live index in one query. ONLY .cs/.ts/.tsx/.js/.jsx files are indexed — for shell scripts, SQL, Python, YAML/config, docs, or any literal-string search, use grep instead.
 ---
 
 # CodeContext
 
-**Pre-read:** Run `codecontext query <identifier>`. Add `--tests` when
-you need test evidence; tests are omitted by default.
+**Scope:** the index contains only C# (`.cs`) and TypeScript/JavaScript (`.ts`,
+`.tsx`, `.js`, `.jsx`). Symbols defined anywhere else — shell scripts, SQL, Python,
+YAML/JSON config, markdown, csproj/MSBuild — are absent by design, so a query for
+them proves nothing; use `rg`. Even in supported languages, `rg` remains the primary
+tool for literal strings, comments, configuration values, filenames, and docs.
 
-## Fast path
+## Query
 
 ```bash
-codecontext query ContextService --tests
-codecontext query multi ContextService StartCommandHandler
+codecontext query ContextService            # relationships, depth 1
+codecontext query ContextService --tests    # add static test evidence (off by default)
+codecontext query multi Foo Bar             # several identifiers, one round trip
 ```
 
-`query` selects the closest registered ancestor of `--path` (the current directory by
-default), starts a detached instance when needed, waits for indexing, and calls the
-compact context API. The default is compact agent-oriented text; use `--human` for
-expanded human output or `--json` for the exact API response. Progress goes to stderr.
-Options include `--depth N`, `--relation
-CALLS,REFERENCES`, `--exact`, and `--path DIR`.
+`query` auto-discovers (or starts) the repo's instance, waits for indexing, and
+prints compact agent-oriented text; progress goes to stderr. Options: `--depth N`
+(`0` = cheap identity lookup), `--relation CALLS,REFERENCES`, `--exact`,
+`--path DIR`, `--human`, `--json`.
 
-A returned `target.identifier` is canonical: pass it back unchanged for an
-unambiguous follow-up. Simple names use exact-first, substring-fallback matching when
-`--exact` is absent. Inspect `matchMode`, ambiguity hints, every total/returned count,
-and truncation flag before treating an omission as absence. `query multi` preserves
-identifier order and duplicates; it reduces HTTP round trips, not response size.
-Zero-only relationship sections are omitted from compact text; every emitted section
-shows returned/total counts and marks truncation.
+Reading results:
 
-Compact results default to depth one with tests, related items, metrics, and content
-off. Add `--tests` when test evidence matters. Empty relationships and truncated
-results are still successful queries; an unmatched identifier exits 2.
+- A returned `target.identifier` is canonical — pass it back unchanged for an
+  unambiguous follow-up. Without `--exact`, simple names match exact-first with
+  substring fallback; check `matchMode` and ambiguity hints.
+- Every emitted section shows returned/total counts and marks truncation — check
+  them before treating an omission as absence. Zero-count sections are omitted.
+- Empty relationships and truncated results are still successful queries; an
+  unmatched identifier exits 2. `query multi` reduces round trips, not response
+  size, and preserves identifier order.
 
 ## Interpret relationships
 
-- `uses` belongs to the selected symbol; sibling implementations do not lend it their
-  outgoing behavior.
+- `uses` is the selected symbol's own outgoing behavior; sibling implementations do
+  not lend it theirs.
 - Method `usedBy` unifies statically known interface, implementation, and override
-  callers. `bindings` identifies the called family role. This is potential dispatch,
-  not runtime certainty.
-- `transitiveUses` and `transitiveUsedBy` are nodes beyond distance one.
-- `fileDependencies` and `fileDependents` aggregate resolved semantic edges crossing
-  the selected file. They exclude unresolved, same-file, and proximity-only links.
-- `relatedItems` is proximity, not dependency evidence. Test evidence is static graph
-  evidence, not runtime coverage; `directlyTested` means a static call to the symbol
-  or, for a type, one of its members.
+  callers; `bindings` identifies the called family role. This is potential
+  dispatch, not runtime certainty.
+- `transitiveUses` / `transitiveUsedBy` are nodes beyond distance one.
+- `fileDependencies` / `fileDependents` aggregate resolved semantic edges crossing
+  the selected file, excluding unresolved, same-file, and proximity-only links.
+- `relatedItems` is proximity, not dependency evidence. Test evidence is static
+  graph evidence, not runtime coverage; `directlyTested` means a static call to
+  the symbol or, for a type, one of its members.
 
-Use `--depth 0` for cheap identity lookup. Use `rg` as the cross-check and as the
-primary tool for literal strings, configuration, comments, filenames, and docs.
+## Going deeper
 
-## Troubleshooting and advanced operations
-
-If results look stale or startup/readiness fails, run `codecontext status --path .`.
-Use `codecontext list --json` to inspect registrations, and only then use
-`codecontext start --detach --path .` for manual lifecycle troubleshooting. Confirm
-contract version 1, the intended root and instance, indexing readiness, and the
-relevant parser session before trusting an unexpected empty result.
-
-For filters and operations not exposed by `query`, get the port from `list --json`
-and use REST, for example:
-
-```bash
-curl "http://localhost:<port>/api/context/complete?identifier=X&type=Method&containingType=C"
-curl -X POST "http://localhost:<port>/api/index/refresh"
-```
-
-After refresh, wait for ready status and an `operationId` at least as new as the
-refresh response. For exact tokens, modifiers, nesting, overloads, accessors, and
-spans, read [Native syntax trees](references/native-syntax.md).
+- Stale results, readiness failures, instance lifecycle, index refresh, REST
+  endpoints: read [Operations](references/operations.md).
+- Exact tokens, modifiers, nesting, overloads, accessors, spans: read
+  [Native syntax trees](references/native-syntax.md).

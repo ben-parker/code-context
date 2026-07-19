@@ -19,7 +19,8 @@ public class GenerationalGraphStoreTests
         _repository = new InMemoryCodeGraphRepository(_database);
     }
 
-    private static CodeNode Node(string id, string filePath = "/repo/a.cs", string type = "Class", string? language = "csharp") => new()
+    private static CodeNode Node(string id, string filePath = "/repo/a.cs", string type = "Class",
+        string? language = "csharp", string? parserId = null, string? workspaceId = null) => new()
     {
         Id = id,
         Name = id,
@@ -37,15 +38,26 @@ public class GenerationalGraphStoreTests
         Parameters = "()",
         Modifiers = "static",
         Metrics = "{}",
-        Metadata = new Dictionary<string, string> { ["k"] = "v" },
+        Metadata = Meta(parserId, workspaceId),
     };
 
-    private static CodeEdge Edge(string id, string source, string target, string type = "CALLS") => new()
+    // Ownership metadata mirrors what AnalysisDeltaApplier stamps; the store routes/partitions on it.
+    private static Dictionary<string, string> Meta(string? parserId, string? workspaceId)
+    {
+        var metadata = new Dictionary<string, string> { ["k"] = "v" };
+        if (parserId is not null) metadata["parserId"] = parserId;
+        if (workspaceId is not null) metadata["workspaceId"] = workspaceId;
+        return metadata;
+    }
+
+    private static CodeEdge Edge(string id, string source, string target, string type = "CALLS",
+        string? parserId = null, string? workspaceId = null) => new()
     {
         Id = id,
         SourceId = source,
         TargetId = target,
         Type = type,
+        Metadata = Meta(parserId, workspaceId),
     };
 
     [Fact]
@@ -56,7 +68,7 @@ public class GenerationalGraphStoreTests
         var node = Node("n1");
         await Store.TryCommitGenerationAsync(1, [node], []);
 
-        var stored = _database.Nodes["n1"];
+        var stored = _database.GetNode("n1")!;
         Assert.Equal("csharp", stored.Language);
         Assert.Equal(2, stored.StartCol);
         Assert.Equal(3, stored.EndCol);
@@ -76,47 +88,49 @@ public class GenerationalGraphStoreTests
         var committed = await Store.TryCommitGenerationAsync(2, [Node("new")], []);
 
         Assert.True(committed);
-        Assert.Single(_database.Nodes);
-        Assert.True(_database.Nodes.ContainsKey("new"));
-        Assert.Empty(_database.Edges);
+        Assert.Equal(1, _database.NodeCount);
+        Assert.True(_database.ContainsNode("new"));
+        Assert.Equal(0, _database.EdgeCount);
     }
 
     [Fact]
     public async Task Commit_WithScope_PreservesNodesOutsideScope()
     {
-        // A C# reparse must not wipe TypeScript facts.
-        var tsNode = Node("ts1", filePath: "/repo/app.ts", language: "typescript");
-        var csNode = Node("cs1", filePath: "/repo/a.cs");
-        var tsEdge = Edge("e-ts", "ts1", "ts2");
+        // A C# reparse must not wipe TypeScript facts; ownership is expressed via metadata shards.
+        var tsNode = Node("ts1", filePath: "/repo/app.ts", language: "typescript", parserId: "ts", workspaceId: "w");
+        var csNode = Node("cs1", filePath: "/repo/a.cs", parserId: "cs", workspaceId: "w");
+        var tsEdge = Edge("e-ts", "ts1", "ts2", parserId: "ts", workspaceId: "w");
         await Store.TryCommitGenerationAsync(1, [tsNode, csNode], [tsEdge]);
 
-        static bool IsCSharp(CodeNode n) => n.FilePath?.EndsWith(".cs", StringComparison.OrdinalIgnoreCase) == true;
-        var committed = await Store.TryCommitGenerationAsync(2, [Node("cs2")], [], IsCSharp);
+        var committed = await Store.TryCommitGenerationAsync(2,
+            [Node("cs2", parserId: "cs", workspaceId: "w")], [], new CommitScope("cs", "w", null));
 
         Assert.True(committed);
-        Assert.True(_database.Nodes.ContainsKey("ts1"), "TypeScript node must survive a C# commit");
-        Assert.True(_database.Nodes.ContainsKey("cs2"));
-        Assert.False(_database.Nodes.ContainsKey("cs1"), "old C# node must be replaced");
-        Assert.True(_database.Edges.ContainsKey("e-ts"), "edge from an out-of-scope node must survive");
+        Assert.True(_database.ContainsNode("ts1"), "TypeScript node must survive a C# commit");
+        Assert.True(_database.ContainsNode("cs2"));
+        Assert.False(_database.ContainsNode("cs1"), "old C# node must be replaced");
+        Assert.True(_database.ContainsEdge("e-ts"), "edge from an out-of-scope node must survive");
     }
 
     [Fact]
     public async Task Commit_WithScope_DropsCarriedEdgesWhoseTargetWasNotReestablished()
     {
         // A TS -> C# edge survives only while the C# target still exists after the commit.
-        var tsNode = Node("ts1", filePath: "/repo/app.ts", language: "typescript");
-        var keptTarget = Node("cs-kept", filePath: "/repo/kept.cs");
-        var goneTarget = Node("cs-gone", filePath: "/repo/gone.cs");
+        var tsNode = Node("ts1", filePath: "/repo/app.ts", language: "typescript", parserId: "ts", workspaceId: "w");
+        var keptTarget = Node("cs-kept", filePath: "/repo/kept.cs", parserId: "cs", workspaceId: "w");
+        var goneTarget = Node("cs-gone", filePath: "/repo/gone.cs", parserId: "cs", workspaceId: "w");
         await Store.TryCommitGenerationAsync(1,
             [tsNode, keptTarget, goneTarget],
-            [Edge("e-kept", "ts1", "cs-kept"), Edge("e-gone", "ts1", "cs-gone")]);
+            [Edge("e-kept", "ts1", "cs-kept", parserId: "ts", workspaceId: "w"),
+             Edge("e-gone", "ts1", "cs-gone", parserId: "ts", workspaceId: "w")]);
 
-        static bool IsCSharp(CodeNode n) => n.FilePath?.EndsWith(".cs", StringComparison.OrdinalIgnoreCase) == true;
         // The new C# generation re-establishes cs-kept but not cs-gone.
-        await Store.TryCommitGenerationAsync(2, [Node("cs-kept", filePath: "/repo/kept.cs")], [], IsCSharp);
+        await Store.TryCommitGenerationAsync(2,
+            [Node("cs-kept", filePath: "/repo/kept.cs", parserId: "cs", workspaceId: "w")], [],
+            new CommitScope("cs", "w", null));
 
-        Assert.True(_database.Edges.ContainsKey("e-kept"), "edge to a re-established target must survive");
-        Assert.False(_database.Edges.ContainsKey("e-gone"), "edge to a vanished target must not dangle");
+        Assert.True(_database.ContainsEdge("e-kept"), "edge to a re-established target must survive");
+        Assert.False(_database.ContainsEdge("e-gone"), "edge to a vanished target must not dangle");
     }
 
     [Fact]
@@ -127,8 +141,8 @@ public class GenerationalGraphStoreTests
         var committed = await Store.TryCommitGenerationAsync(4, [Node("older")], []);
 
         Assert.False(committed);
-        Assert.True(_database.Nodes.ContainsKey("newer"));
-        Assert.False(_database.Nodes.ContainsKey("older"));
+        Assert.True(_database.ContainsNode("newer"));
+        Assert.False(_database.ContainsNode("older"));
         Assert.Equal(5, Store.LastCommittedGeneration);
     }
 
@@ -144,10 +158,10 @@ public class GenerationalGraphStoreTests
         var pruned = await Store.PruneFilesNotPresentAsync(["/repo/kept.cs"]);
 
         Assert.Equal(1, pruned);
-        Assert.True(_database.Nodes.ContainsKey("kept"));
-        Assert.False(_database.Nodes.ContainsKey("gone"));
-        Assert.False(_database.Edges.ContainsKey("e1"), "edges touching pruned nodes must go");
-        Assert.True(_database.Edges.ContainsKey("e2"));
+        Assert.True(_database.ContainsNode("kept"));
+        Assert.False(_database.ContainsNode("gone"));
+        Assert.False(_database.ContainsEdge("e1"), "edges touching pruned nodes must go");
+        Assert.True(_database.ContainsEdge("e2"));
     }
 
     [Fact]
@@ -186,7 +200,7 @@ public class GenerationalGraphStoreTests
         {
             while (!Volatile.Read(ref stop))
             {
-                var count = _database.Nodes.Count;
+                var count = _database.NodeCount;
                 if (count != 500) Volatile.Write(ref sawIncompleteSnapshot, true);
             }
         });

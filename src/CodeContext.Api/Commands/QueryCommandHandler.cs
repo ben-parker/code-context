@@ -31,9 +31,6 @@ internal sealed record QueryRuntime(
 
 public static class QueryCommandHandler
 {
-    private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(250);
-    private const int ExpectedContractVersion = 1;
-
     public static async Task<int> ExecuteAsync(QuerySettings settings, CancellationToken ct)
     {
         var registry = new InstanceRegistry();
@@ -47,7 +44,7 @@ public static class QueryCommandHandler
             Console.Error,
             TimeProvider.System,
             Task.Delay,
-            TimeSpan.FromSeconds(20));
+            TimeSpan.FromSeconds(30));
 
         return await ExecuteAsync(settings, runtime, ct);
     }
@@ -138,10 +135,18 @@ public static class QueryCommandHandler
             instance = discovered;
         }
 
-        ReadinessResult readiness;
+        ReadinessOutcome readiness;
         try
         {
-            readiness = await WaitUntilReadyAsync(instance, lookupPath, runtime, ct);
+            readiness = await ReadinessWaiter.WaitUntilReadyAsync(
+                instance,
+                lookupPath,
+                runtime.Http,
+                runtime.Error,
+                runtime.TimeProvider,
+                runtime.DelayAsync,
+                runtime.ReadinessTimeout,
+                ct);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -152,14 +157,15 @@ public static class QueryCommandHandler
             runtime.Error.WriteLine($"Failed to read instance status: {ex.Message}");
             return 1;
         }
-        if (readiness == ReadinessResult.Timeout)
+        if (readiness.Result == ReadinessResult.Timeout)
         {
             runtime.Error.WriteLine(
-                $"Indexing did not become ready within 20 seconds. Run " +
+                $"Indexing did not become ready within " +
+                $"{runtime.ReadinessTimeout.TotalSeconds:0} seconds. Run " +
                 $"codecontext status --path {QuotePath(lookupPath)} for details.");
             return 3;
         }
-        if (readiness == ReadinessResult.Invalid)
+        if (readiness.Result == ReadinessResult.Invalid)
         {
             return 1;
         }
@@ -178,101 +184,6 @@ public static class QueryCommandHandler
         {
             runtime.Error.WriteLine($"Query failed: {ex.Message}");
             return 1;
-        }
-    }
-
-    private static async Task<ReadinessResult> WaitUntilReadyAsync(
-        InstanceRecord instance,
-        string lookupPath,
-        QueryRuntime runtime,
-        CancellationToken ct)
-    {
-        var deadline = runtime.TimeProvider.GetUtcNow() + runtime.ReadinessTimeout;
-        while (true)
-        {
-            try
-            {
-                using var probeCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                var remaining = deadline - runtime.TimeProvider.GetUtcNow();
-                if (remaining > TimeSpan.Zero)
-                    probeCts.CancelAfter(remaining);
-                using var response = await runtime.Http.GetAsync(
-                    $"http://localhost:{instance.Port}/api/status", probeCts.Token);
-                if (!response.IsSuccessStatusCode)
-                {
-                    var rejection = await response.Content.ReadAsStringAsync(probeCts.Token);
-                    runtime.Error.WriteLine(
-                        $"Status API rejected the request ({(int)response.StatusCode} " +
-                        $"{response.ReasonPhrase}): {rejection}");
-                    return ReadinessResult.Invalid;
-                }
-
-                var body = await response.Content.ReadAsStringAsync(probeCts.Token);
-                var status = JsonSerializer.Deserialize(
-                    body, CodeContextJsonContext.Default.StatusResponseDto);
-                if (status is null
-                    || status.Api is null
-                    || status.Indexing is null
-                    || status.System is null
-                    || string.IsNullOrWhiteSpace(status.Indexing.RootPath))
-                {
-                    runtime.Error.WriteLine("The instance returned an incomplete status response.");
-                    return ReadinessResult.Invalid;
-                }
-
-                if (status.Api.ContractVersion != ExpectedContractVersion)
-                {
-                    runtime.Error.WriteLine(
-                        $"API contract mismatch: expected {ExpectedContractVersion}, " +
-                        $"received {status.Api.ContractVersion}.");
-                    return ReadinessResult.Invalid;
-                }
-
-                if (!PathsEqual(status.Indexing.RootPath, instance.RootPath)
-                    || !IsSameOrAncestor(status.Indexing.RootPath, lookupPath))
-                {
-                    runtime.Error.WriteLine(
-                        $"Instance root mismatch: registry has '{instance.RootPath}', " +
-                        $"status returned '{status.Indexing.RootPath}'.");
-                    return ReadinessResult.Invalid;
-                }
-
-                if (string.IsNullOrEmpty(instance.InstanceId)
-                    || !string.Equals(
-                        status.System.InstanceId, instance.InstanceId, StringComparison.Ordinal))
-                {
-                    runtime.Error.WriteLine(
-                        $"Instance identity mismatch for port {instance.Port}.");
-                    return ReadinessResult.Invalid;
-                }
-
-                if (string.Equals(status.Indexing.Status, "ready", StringComparison.OrdinalIgnoreCase))
-                {
-                    return ReadinessResult.Ready;
-                }
-            }
-            catch (HttpRequestException)
-            {
-                // A newly started instance may not have opened the status endpoint yet.
-            }
-            catch (TaskCanceledException) when (!ct.IsCancellationRequested)
-            {
-                // A probe timed out; the deadline check below decides whether to retry.
-            }
-            catch (JsonException ex)
-            {
-                runtime.Error.WriteLine($"Invalid status response: {ex.Message}");
-                return ReadinessResult.Invalid;
-            }
-
-            if (runtime.TimeProvider.GetUtcNow() >= deadline)
-            {
-                return ReadinessResult.Timeout;
-            }
-
-            var delay = deadline - runtime.TimeProvider.GetUtcNow();
-            if (delay < TimeSpan.Zero) delay = TimeSpan.Zero;
-            await runtime.DelayAsync(delay < PollInterval ? delay : PollInterval, ct);
         }
     }
 
@@ -709,30 +620,6 @@ public static class QueryCommandHandler
             ? []
             : csv.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).ToList();
 
-    private static bool PathsEqual(string first, string second)
-        => string.Equals(
-            StartCommandHandler.NormalizePath(first),
-            StartCommandHandler.NormalizePath(second),
-            OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
-
-    private static bool IsSameOrAncestor(string root, string path)
-    {
-        var normalizedRoot = StartCommandHandler.NormalizePath(root);
-        var normalizedPath = StartCommandHandler.NormalizePath(path);
-        if (PathsEqual(normalizedRoot, normalizedPath)) return true;
-        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
-        return normalizedPath.StartsWith(normalizedRoot + Path.DirectorySeparatorChar, comparison)
-            || (Path.DirectorySeparatorChar != Path.AltDirectorySeparatorChar
-                && normalizedPath.StartsWith(normalizedRoot + Path.AltDirectorySeparatorChar, comparison));
-    }
-
     private static string QuotePath(string path)
         => path.Any(char.IsWhiteSpace) ? $"\"{path}\"" : path;
-
-    private enum ReadinessResult
-    {
-        Ready,
-        Invalid,
-        Timeout,
-    }
 }

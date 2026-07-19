@@ -54,10 +54,31 @@ curl -fsSL https://raw.githubusercontent.com/ben-parker/code-context/main/script
 ```
 
 The installer places a versioned release under `~/.codecontext` and adds a stable
-`codecontext` launcher. It does not modify agent skill directories; the optional
-CodeContext skill remains in the release payload for manual installation. If the
-installer updates your user `PATH`, open a new terminal before continuing. Stop
-running CodeContext instances before upgrading.
+`codecontext` launcher. After extracting the release, it offers an interactive agent
+skill menu. Use the up/down arrows to move, Space to toggle a destination, and Enter
+to continue. Shared agents is selected by default; the other destinations start
+unchecked:
+
+| Menu destination | Installed folder |
+| --- | --- |
+| Shared agents | `~/.agents/skills/code-context` |
+| Claude Code | `~/.claude/skills/code-context` |
+| Devin Desktop | `~/.codeium/windsurf/skills/code-context` |
+| Codex (legacy) | `$CODEX_HOME/skills/code-context`, or `~/.codex/skills/code-context` when `CODEX_HOME` is unset |
+| Cursor | `~/.cursor/skills/code-context` |
+| Gemini CLI | `~/.gemini/skills/code-context` |
+
+If a selected folder already exists, the installer asks about that destination
+separately. Overwrite defaults to No and a skipped folder is left unchanged. An
+approved overwrite replaces the complete `code-context` folder with the packaged
+`SKILL.md` and `references/` content. Skill-copy failures are reported without
+preventing CodeContext or another selected skill target from being installed.
+
+When no usable interactive terminal is available, such as in an unattended install,
+the installer skips every skill destination and continues installing CodeContext.
+Ctrl+C cancels before the installed release is changed. If the installer updates your
+user `PATH`, open a new terminal before continuing. Stop running CodeContext instances
+before upgrading.
 
 ## Quick start
 
@@ -83,12 +104,16 @@ substring fallback.
 ## Instance lifecycle
 
 One registered instance watches each repository root. Ports are allocated from 7890
-unless `--port` is supplied.
+unless `--port` is supplied. Running `start` from a subdirectory of an already-running
+session attaches to that ancestor instance, whose recursive scan already covers the
+subdirectory.
 
 ```bash
 codecontext start --path .                  # foreground REST service
 codecontext start --detach --path .         # background REST service
 codecontext start --path . --port 8080      # fixed port
+codecontext init --path .                   # pre-warm: start the scan ahead of time
+codecontext init --path . --wait            # pre-warm and block until the index is ready
 codecontext query ContextService            # discover/start, wait, and query
 codecontext query multi A B --tests         # ordered multi-query with test evidence
 codecontext list                            # human-readable instances
@@ -97,6 +122,14 @@ codecontext status --path .                 # status for the containing instance
 codecontext stop --path .                   # stop that instance
 codecontext stop --all                      # stop every registered instance
 ```
+
+Run `codecontext init` in a repository before starting agent work to warm the index
+proactively, so the first `query` does not pay the cold-start scan. It discovers or
+starts the background instance (attaching to an ancestor when one already covers the
+path) and returns immediately; add `--wait` to block, up to five minutes, until the
+initial scan reaches ready. Exit codes: `0` running, `1` invalid path or instance
+validation failed, `3` `--wait` timed out, `4` startup failed. `--json` prints the
+instance record to stdout.
 
 Instances shut down after 120 minutes without API activity by default. Set
 `--idle-timeout 0` to disable idle shutdown or pass another number of minutes.

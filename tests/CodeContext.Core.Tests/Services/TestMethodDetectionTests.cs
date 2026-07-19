@@ -21,6 +21,8 @@ namespace CodeContext.Core.Tests.Services
             _edgeRepository = Substitute.For<ICodeEdgeRepository>();
             _fileMetadataRepository = Substitute.For<IFileMetadataRepository>();
             _contextService = new ContextService(_nodeRepository, _edgeRepository, _fileMetadataRepository);
+            // Mirror the real path index over whatever node set each test feeds GetAllAsync.
+            _nodeRepository.StubFindByFilePathFromGetAll();
         }
 
         [Fact]

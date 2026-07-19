@@ -269,9 +269,9 @@ namespace CodeContext.Core.Services
             var candidates = isFilePath
                 ? await FindNodesByFilePathAsync(identifier, type)
                 : await _nodeRepository.FindByNameAsync(identifier, type, exact);
-            candidates = candidates.Where(candidate => CandidateMatchesFilters(
+            var filtered = candidates.Where(candidate => CandidateMatchesFilters(
                 candidate, type, containingType, @namespace, signature, sourceFile)).ToList();
-            return (candidates, isFilePath);
+            return (filtered, isFilePath);
         }
 
         private static bool CandidateMatchesFilters(
@@ -587,14 +587,15 @@ namespace CodeContext.Core.Services
                 }
             }
 
-            List<CodeEdge> directEdges;
+            IReadOnlyList<CodeEdge> directEdges;
             if (string.IsNullOrEmpty(target.Id)) directEdges = [];
             else if (outgoing) directEdges = await _edgeRepository.GetBySourceIdAsync(target.Id);
             else if (family.Count > 0)
             {
-                directEdges = [];
+                var collected = new List<CodeEdge>();
                 foreach (var familyId in family.Keys)
-                    directEdges.AddRange(await _edgeRepository.GetByTargetIdAsync(familyId));
+                    collected.AddRange(await _edgeRepository.GetByTargetIdAsync(familyId));
+                directEdges = collected;
             }
             else directEdges = await _edgeRepository.GetByTargetIdAsync(target.Id);
             var edgesByNode = (directEdges ?? new List<CodeEdge>())
@@ -956,12 +957,12 @@ namespace CodeContext.Core.Services
             relationships.TransitiveUses = uses.Where(item => item.Distance > 1)
                 .Select(item => new ContextTransitiveRelationship
                 {
-                    Node = item.Node, Distance = item.Distance, RelationPath = item.RelationPath
+                    Node = item.Node, Distance = item.Distance, RelationPath = item.RelationPath.ToList()
                 }).ToList();
             relationships.TransitiveUsedBy = usedBy.Where(item => item.Distance > 1)
                 .Select(item => new ContextTransitiveRelationship
                 {
-                    Node = item.Node, Distance = item.Distance, RelationPath = item.RelationPath
+                    Node = item.Node, Distance = item.Distance, RelationPath = item.RelationPath.ToList()
                 }).ToList();
 
             // Get file-level dependencies
@@ -979,8 +980,12 @@ namespace CodeContext.Core.Services
             return relationships;
         }
 
+        // Shared immutable sentinel handed to every TraversedRelationship built with
+        // trackPath:false, so the no-track path allocates zero per-node path lists.
+        private static readonly string[] EmptyPath = [];
+
         private sealed record TraversedRelationship(
-            CodeNode Node, int Distance, List<string> RelationPath);
+            CodeNode Node, int Distance, IReadOnlyList<string> RelationPath);
 
         private async Task<Dictionary<string, CodeNode>> GetMethodFamilyAsync(
             string rootNodeId, CodeNode? rootFallback = null)
@@ -1010,12 +1015,12 @@ namespace CodeContext.Core.Services
         }
 
         private async Task<List<TraversedRelationship>> TraverseInboundFromFamilyAsync(
-            IReadOnlyCollection<string> familyIds, int depth)
+            IReadOnlyCollection<string> familyIds, int depth, bool trackPath = true)
         {
             if (depth == 0) return [];
             var visited = new HashSet<string>(familyIds, StringComparer.Ordinal);
             var result = new Dictionary<string, TraversedRelationship>(StringComparer.Ordinal);
-            var frontier = new List<(string NodeId, List<string> Path)>();
+            var frontier = new List<(string NodeId, List<string>? Path)>();
 
             foreach (var familyId in familyIds)
             {
@@ -1024,10 +1029,10 @@ namespace CodeContext.Core.Services
                     if (string.IsNullOrEmpty(edge.SourceId) || visited.Contains(edge.SourceId)) continue;
                     var node = await _nodeRepository.GetByIdAsync(edge.SourceId);
                     if (node is null) continue;
-                    var path = new List<string> { edge.Type ?? "USES" };
+                    var path = trackPath ? new List<string> { edge.Type ?? "USES" } : null;
                     if (!result.ContainsKey(edge.SourceId))
                     {
-                        result[edge.SourceId] = new TraversedRelationship(node, 1, path);
+                        result[edge.SourceId] = new TraversedRelationship(node, 1, trackPath ? path! : EmptyPath);
                         frontier.Add((edge.SourceId, path));
                     }
                 }
@@ -1036,7 +1041,7 @@ namespace CodeContext.Core.Services
 
             for (var level = 1; level < depth && frontier.Count > 0; level++)
             {
-                var next = new List<(string NodeId, List<string> Path)>();
+                var next = new List<(string NodeId, List<string>? Path)>();
                 foreach (var (current, currentPath) in frontier)
                 {
                     foreach (var edge in OrderForTraversal((await _edgeRepository.GetByTargetIdAsync(current)).Where(IsUsageEdge)))
@@ -1044,8 +1049,8 @@ namespace CodeContext.Core.Services
                         if (string.IsNullOrEmpty(edge.SourceId) || !visited.Add(edge.SourceId)) continue;
                         var node = await _nodeRepository.GetByIdAsync(edge.SourceId);
                         if (node is null) continue;
-                        var path = new List<string>(currentPath) { edge.Type ?? "USES" };
-                        result[edge.SourceId] = new TraversedRelationship(node, level + 1, path);
+                        var path = trackPath ? new List<string>(currentPath!) { edge.Type ?? "USES" } : null;
+                        result[edge.SourceId] = new TraversedRelationship(node, level + 1, trackPath ? path! : EmptyPath);
                         next.Add((edge.SourceId, path));
                     }
                 }
@@ -1068,15 +1073,16 @@ namespace CodeContext.Core.Services
         private async Task<List<TraversedRelationship>> TraverseRelationshipsAsync(
             string rootNodeId,
             int depth,
-            bool outgoing)
+            bool outgoing,
+            bool trackPath = true)
         {
             var result = new List<TraversedRelationship>();
             var visited = new HashSet<string>(StringComparer.Ordinal) { rootNodeId };
-            var frontier = new List<(string NodeId, List<string> Path)> { (rootNodeId, []) };
+            var frontier = new List<(string NodeId, List<string>? Path)> { (rootNodeId, trackPath ? [] : null) };
 
             for (var level = 0; level < depth && frontier.Count > 0; level++)
             {
-                var nextFrontier = new List<(string NodeId, List<string> Path)>();
+                var nextFrontier = new List<(string NodeId, List<string>? Path)>();
                 foreach (var (currentNodeId, currentPath) in frontier)
                 {
                     var edges = outgoing
@@ -1096,11 +1102,10 @@ namespace CodeContext.Core.Services
                         if (node is null)
                             continue;
 
-                        var path = new List<string>(currentPath)
-                        {
-                            edge.Type ?? "USES"
-                        };
-                        result.Add(new TraversedRelationship(node, level + 1, path));
+                        var path = trackPath
+                            ? new List<string>(currentPath!) { edge.Type ?? "USES" }
+                            : null;
+                        result.Add(new TraversedRelationship(node, level + 1, trackPath ? path! : EmptyPath));
                         nextFrontier.Add((relatedNodeId, path));
                     }
                 }
@@ -1163,8 +1168,8 @@ namespace CodeContext.Core.Services
                 // Reverse traversal identifies test methods that reach the target
                 // indirectly. This is static graph evidence, never runtime coverage.
                 var reachedCallers = string.Equals(targetNode.Type, "Method", StringComparison.OrdinalIgnoreCase)
-                    ? await TraverseInboundFromFamilyAsync(family.Keys, depth: 5)
-                    : await TraverseRelationshipsAsync(targetNode.Id, depth: 5, outgoing: false);
+                    ? await TraverseInboundFromFamilyAsync(family.Keys, depth: 5, trackPath: false)
+                    : await TraverseRelationshipsAsync(targetNode.Id, depth: 5, outgoing: false, trackPath: false);
                 foreach (var reached in reachedCallers)
                 {
                     var source = reached.Node;
@@ -1303,20 +1308,8 @@ namespace CodeContext.Core.Services
             return null;
         }
 
-        private async Task<List<CodeNode>> FindNodesByFilePathAsync(string filePath, string? type = null)
-        {
-            var allNodes = await _nodeRepository.GetAllAsync();
-            var matchingNodes = allNodes.Where(n => 
-                FilePathMatches(n.FilePath, filePath));
-
-            if (!string.IsNullOrEmpty(type))
-            {
-                matchingNodes = matchingNodes.Where(n => 
-                    string.Equals(n.Type, type, StringComparison.OrdinalIgnoreCase));
-            }
-
-            return matchingNodes.ToList();
-        }
+        private Task<IReadOnlyList<CodeNode>> FindNodesByFilePathAsync(string filePath, string? type = null)
+            => _nodeRepository.FindByFilePathAsync(filePath, type);
 
         // File-path matching lives in the shared FilePathMatcher so the in-memory adjacency
         // index (GraphAdjacency.NodesByFilePath) resolves paths with byte-identical semantics.

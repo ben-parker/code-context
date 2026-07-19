@@ -57,19 +57,32 @@ public static class StartCommandHandler
             }
             else
             {
+                var detachComparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+                var coversSuffix = string.Equals(result.Instance.RootPath, rootPath, detachComparison)
+                    ? string.Empty
+                    : $"; it covers {rootPath}.";
                 Console.Error.WriteLine(
                     $"CodeContext is already running for {result.Instance.RootPath} " +
-                    $"on port {result.Instance.Port} (pid {result.Instance.Pid}).");
+                    $"on port {result.Instance.Port} (pid {result.Instance.Pid}){coversSuffix}");
             }
             return 0;
         }
 
         var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
-        var existing = registry.GetAll().FirstOrDefault(i => string.Equals(i.RootPath, rootPath, comparison));
+        // Same-or-ancestor match: an agent re-running `start` (or starting from a subdirectory
+        // of an already-indexed root) attaches to the existing instance instead of forking a
+        // duplicate scan, since the ancestor's recursive scan already covers the subdirectory.
+        var existing = registry.FindForPath(rootPath);
         if (existing is not null)
         {
-            // Idempotent start: an agent re-running `start` should not fail or fork a duplicate.
-            Console.Error.WriteLine($"CodeContext is already running for {existing.RootPath} on port {existing.Port} (pid {existing.Pid}).");
+            if (string.Equals(existing.RootPath, rootPath, comparison))
+            {
+                Console.Error.WriteLine($"CodeContext is already running for {existing.RootPath} on port {existing.Port} (pid {existing.Pid}).");
+            }
+            else
+            {
+                Console.Error.WriteLine($"CodeContext is already running for {existing.RootPath} on port {existing.Port} (pid {existing.Pid}); it covers {rootPath}.");
+            }
             Console.WriteLine(JsonSerializer.Serialize(existing, InstanceRegistryJsonContext.Default.InstanceRecord));
             return 0;
         }

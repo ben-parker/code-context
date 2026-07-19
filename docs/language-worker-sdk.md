@@ -51,9 +51,9 @@ Implement this sequence:
    project state.
 3. `workspace/index`: emit one or more `analysis/delta` notifications, then return a
    complete response.
-4. `workspace/applyChanges`: update persistent state and replace every fact whose
-   semantics may have changed. Reanalyze dependents when a changed file can affect
-   their resolution.
+4. `workspace/applyChanges`: update persistent state and emit a **file-scoped**
+   replacement (`replacesWorkspace:false`) covering every file whose emitted facts
+   changed — see "Emit file-scoped deltas" below.
 5. `$/cancel`: cooperatively stop work for the named request.
 6. `shutdown`: answer, then exit when the host closes stdin.
 
@@ -82,6 +82,37 @@ facts.
 Declare the worker's line/column bases and inclusive/exclusive end convention during
 `initialize`. The host normalizes stored graph spans to zero-based, end-exclusive
 coordinates.
+
+## Emit file-scoped deltas
+
+`workspace/index` replaces the whole workspace: every delta carries
+`replacesWorkspace:true` and an empty `replacesFiles`. `workspace/applyChanges` is
+file-scoped: every delta carries `replacesWorkspace:false` and only the changed
+files' facts. The contract:
+
+- **Scope = facts changed, not files edited.** A change to one file can change how an
+  untouched file's facts resolve (cross-file binding). The worker must include every
+  file whose *emitted facts* differ from its previous emission. The reference workers
+  do this by re-analyzing the workspace, hashing each file's fact set, and diffing
+  against the previous emission's hashes — files whose hash changed join the delta.
+- **`replacesFiles` = changed ∪ removed, verbatim.** List each changed file plus each
+  file removed since the last emission, as byte-for-byte the same strings the emitted
+  nodes carry in `filePath` (the host matches them raw — case-insensitively on
+  Windows, no normalization on either side). A listed file with no facts in the
+  request has its facts deleted.
+- **Every fact belongs to the file whose analysis produced it.** Group edges under the
+  file whose walk emitted them (their source is always in that file), never under a
+  resolved target's file. If a language can emit the same node or edge id from more
+  than one file (e.g. C# partial types), pick one deterministic owner that depends
+  only on the current file set — the reference workers use the ordinally smallest
+  owning path — so incremental results never depend on edit order.
+- **Chunks agree.** All chunks of one request carry the same `replacesWorkspace`
+  value (the host ORs the flags) and should repeat the full `replacesFiles` list (the
+  host unions them). Always emit at least one delta per mutation, ending with
+  `isLastForRequest:true`, even when nothing changed.
+- **Commit your diff baseline only after the final chunk is sent.** If emission fails
+  mid-stream the host commits nothing; keeping the previous baseline means the next
+  batch re-emits the same difference and converges.
 
 ## Normalized graph and native trees
 

@@ -21,8 +21,10 @@
     <!-- Workstation + concurrent (background) GC: one worker is resident per watched repo,
          and workstation GC keeps that per-repo heap/commit small. Server GC's per-core heaps
          would multiply resident memory across many watched repos for no throughput win on this
-         single-pipeline workload. Server GC + DATAS is deliberately deferred to the benchmark
-         pass and flipped only if numbers justify it. -->
+         single-pipeline workload. Measured (July 2026 A/B, 3-run medians on the 119-file
+         corpus — docs/perf/dotnet10-leftovers-benchmarks.md): ServerGC+DATAS improved
+         incremental batches only 4.8% (under the 10% flip bar) while regressing peak working
+         set +35% (over the 20% ceiling), so workstation GC stays. -->
     <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
     <ServerGarbageCollection>false</ServerGarbageCollection>
   </PropertyGroup>

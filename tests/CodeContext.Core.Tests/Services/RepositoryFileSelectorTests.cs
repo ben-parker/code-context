@@ -170,4 +170,177 @@ public sealed class RepositoryFileSelectorTests : IDisposable
         Assert.Contains(target, files);
         Assert.DoesNotContain(Path.Combine(linkPath, "target.cs"), files);
     }
+
+    // ---- Memoized include/exclude verdict cache ---------------------------------------------
+
+    // Builds a fixture with nested .gitignore files exercising negation and directory-only rules,
+    // returning both the paths to probe and the ground-truth verdict for each from a cache-cold
+    // selector (one query per fresh instance, so no memoization can influence the reference).
+    private (List<(string Path, bool IsDirectory)> Probes, Dictionary<string, bool> Expected) BuildVerdictFixture()
+    {
+        Write(".gitignore", """
+            build/
+            *.tmp.cs
+            !keep.txt
+            secret/
+            """);
+        Write("src/.gitignore", """
+            *.gen.cs
+            !important.gen.cs
+            """);
+
+        Write("src/app.cs");
+        Write("src/module.gen.cs");
+        Write("src/important.gen.cs");
+        Write("build/output.cs");
+        Write("src/build/nested.cs");
+        Write("data/notes.tmp.cs");
+        Write("keep.txt", "keep");
+        Write("secret/inner/leaf.cs");
+        Write("plain/file.cs");
+
+        var probes = new List<(string Path, bool IsDirectory)>
+        {
+            (Path.Combine(_root, "src", "app.cs"), false),
+            (Path.Combine(_root, "src", "module.gen.cs"), false),
+            (Path.Combine(_root, "src", "important.gen.cs"), false),
+            (Path.Combine(_root, "build"), true),
+            (Path.Combine(_root, "build", "output.cs"), false),
+            (Path.Combine(_root, "src", "build"), true),
+            (Path.Combine(_root, "src", "build", "nested.cs"), false),
+            (Path.Combine(_root, "data", "notes.tmp.cs"), false),
+            (Path.Combine(_root, "keep.txt"), false),
+            (Path.Combine(_root, "secret"), true),
+            (Path.Combine(_root, "secret", "inner"), true),
+            (Path.Combine(_root, "secret", "inner", "leaf.cs"), false),
+            (Path.Combine(_root, "plain"), true),
+            (Path.Combine(_root, "plain", "file.cs"), false),
+            // Same leaf name as a file vs. directory query, to exercise key separation.
+            (Path.Combine(_root, "build", "output.cs"), true),
+        };
+
+        var expected = new Dictionary<string, bool>();
+        foreach (var (path, isDir) in probes)
+        {
+            // Fresh selector per probe: the reference verdict is never memoized.
+            expected[path + "|" + isDir] = CreateSelector().IsIncluded(path, isDir);
+        }
+
+        return (probes, expected);
+    }
+
+    [Fact]
+    public void VerdictCache_RandomizedQueryOrders_MatchCacheColdVerdicts()
+    {
+        var (probes, expected) = BuildVerdictFixture();
+
+        // Two selector instances each queried in a different randomized order. A shared verdict
+        // cache that leaked across file/dir keys or was polluted by query order would diverge from
+        // the per-probe cache-cold reference.
+        var orderA = probes.OrderBy(_ => Guid.NewGuid()).ToList();
+        var orderB = probes.OrderBy(_ => Guid.NewGuid()).ToList();
+
+        var selectorA = CreateSelector();
+        foreach (var (path, isDir) in orderA)
+            Assert.Equal(expected[path + "|" + isDir], selectorA.IsIncluded(path, isDir));
+
+        var selectorB = CreateSelector();
+        foreach (var (path, isDir) in orderB)
+            Assert.Equal(expected[path + "|" + isDir], selectorB.IsIncluded(path, isDir));
+
+        // Re-query the first selector (now fully warm) in yet another order: cached verdicts still
+        // match ground truth.
+        foreach (var (path, isDir) in probes.OrderBy(_ => Guid.NewGuid()))
+            Assert.Equal(expected[path + "|" + isDir], selectorA.IsIncluded(path, isDir));
+    }
+
+    [Fact]
+    public void VerdictCache_StalePersistsWithoutInvalidate_FlipsAfterInvalidate()
+    {
+        var source = Write("generated.cs");
+        var ignore = Write(".gitignore", "generated.cs\n");
+        var selector = CreateSelector();
+
+        Assert.False(selector.IsIncluded(source)); // computes and memoizes the excluded verdict
+
+        // Change the ignore rule on disk WITHOUT invalidating: the memoized verdict must persist,
+        // documenting that verdict staleness is bounded by the existing rules-cache contract.
+        File.WriteAllText(ignore, "!generated.cs\n");
+        Assert.False(selector.IsIncluded(source));
+
+        // Invalidate() is the single clearing point: the verdict now flips.
+        selector.Invalidate();
+        Assert.True(selector.IsIncluded(source));
+    }
+
+    [Fact]
+    public void VerdictCache_CaseInsensitivity_SameVerdictAcrossCasings()
+    {
+        // Windows path semantics are case-insensitive; verdict keys use PathComparer, so differing
+        // casings must resolve to the same cached verdict. On Unix the comparer is ordinal and the
+        // two casings are genuinely distinct paths, so we assert the platform-correct behavior.
+        Write(".gitignore", "Ignored.cs\n");
+        Write("Ignored.cs");
+        var mixed = Path.Combine(_root, "Ignored.cs");
+        var lower = Path.Combine(_root, "ignored.cs");
+
+        var coldMixed = CreateSelector().IsIncluded(mixed);
+        var coldLower = CreateSelector().IsIncluded(lower);
+
+        var selector = CreateSelector();
+        Assert.Equal(coldMixed, selector.IsIncluded(mixed));
+        Assert.Equal(coldLower, selector.IsIncluded(lower));
+        // Warm re-query in the opposite order still matches the cache-cold reference.
+        Assert.Equal(coldMixed, selector.IsIncluded(mixed));
+
+        if (OperatingSystem.IsWindows())
+        {
+            // Case-insensitive: both casings are excluded and share one verdict.
+            Assert.False(coldMixed);
+            Assert.False(coldLower);
+        }
+    }
+
+    [Fact]
+    public void VerdictCache_ConcurrentQueriesRacingInvalidate_StayConsistent()
+    {
+        var (probes, expected) = BuildVerdictFixture();
+        var selector = CreateSelector();
+        var errors = new System.Collections.Concurrent.ConcurrentQueue<Exception>();
+        var mismatches = 0;
+
+        Parallel.For(0, 64, iteration =>
+        {
+            try
+            {
+                if (iteration % 8 == 0)
+                {
+                    // Racing invalidations swap the verdict cache underneath the readers.
+                    selector.Invalidate();
+                    return;
+                }
+
+                foreach (var (path, isDir) in probes)
+                {
+                    var verdict = selector.IsIncluded(path, isDir);
+                    if (verdict != expected[path + "|" + isDir])
+                        Interlocked.Increment(ref mismatches);
+                }
+            }
+            catch (Exception ex)
+            {
+                errors.Enqueue(ex);
+            }
+        });
+
+        Assert.Empty(errors);
+        // Verdicts are order- and race-independent; the rules cache only ever gets cleared and
+        // reloaded from the same on-disk state, so every observed verdict matches ground truth.
+        Assert.Equal(0, mismatches);
+
+        // Post-race, a fresh selector still agrees with a warm one across every probe.
+        var fresh = CreateSelector();
+        foreach (var (path, isDir) in probes)
+            Assert.Equal(fresh.IsIncluded(path, isDir), selector.IsIncluded(path, isDir));
+    }
 }
