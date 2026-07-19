@@ -47,7 +47,7 @@ public static class QueryCommandHandler
             Console.Error,
             TimeProvider.System,
             Task.Delay,
-            TimeSpan.FromSeconds(20));
+            TimeSpan.FromSeconds(30));
 
         return await ExecuteAsync(settings, runtime, ct);
     }
@@ -155,7 +155,8 @@ public static class QueryCommandHandler
         if (readiness == ReadinessResult.Timeout)
         {
             runtime.Error.WriteLine(
-                $"Indexing did not become ready within 20 seconds. Run " +
+                $"Indexing did not become ready within " +
+                $"{runtime.ReadinessTimeout.TotalSeconds:0} seconds. Run " +
                 $"codecontext status --path {QuotePath(lookupPath)} for details.");
             return 3;
         }
