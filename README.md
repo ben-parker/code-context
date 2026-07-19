@@ -91,6 +91,8 @@ subdirectory.
 codecontext start --path .                  # foreground REST service
 codecontext start --detach --path .         # background REST service
 codecontext start --path . --port 8080      # fixed port
+codecontext init --path .                   # pre-warm: start the scan ahead of time
+codecontext init --path . --wait            # pre-warm and block until the index is ready
 codecontext query ContextService            # discover/start, wait, and query
 codecontext query multi A B --tests         # ordered multi-query with test evidence
 codecontext list                            # human-readable instances
@@ -99,6 +101,14 @@ codecontext status --path .                 # status for the containing instance
 codecontext stop --path .                   # stop that instance
 codecontext stop --all                      # stop every registered instance
 ```
+
+Run `codecontext init` in a repository before starting agent work to warm the index
+proactively, so the first `query` does not pay the cold-start scan. It discovers or
+starts the background instance (attaching to an ancestor when one already covers the
+path) and returns immediately; add `--wait` to block, up to five minutes, until the
+initial scan reaches ready. Exit codes: `0` running, `1` invalid path or instance
+validation failed, `3` `--wait` timed out, `4` startup failed. `--json` prints the
+instance record to stdout.
 
 Instances shut down after 120 minutes without API activity by default. Set
 `--idle-timeout 0` to disable idle shutdown or pass another number of minutes.

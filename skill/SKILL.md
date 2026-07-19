@@ -55,7 +55,9 @@ primary tool for literal strings, configuration, comments, filenames, and docs.
 
 If results look stale or startup/readiness fails, run `codecontext status --path .`.
 Use `codecontext list --json` to inspect registrations, and only then use
-`codecontext start --detach --path .` for manual lifecycle troubleshooting. Confirm
+`codecontext start --detach --path .` for manual lifecycle troubleshooting. A human can
+also run `codecontext init --path .` (add `--wait`) to pre-warm the index before agent
+work so the first query skips the cold-start scan. Confirm
 contract version 1, the intended root and instance, indexing readiness, and the
 relevant parser session before trusting an unexpected empty result.
 

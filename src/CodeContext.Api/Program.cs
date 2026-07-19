@@ -100,6 +100,34 @@ public class Program
                     parseResult.GetValue(instanceIdOption)),
                 ct));
 
+        Option<bool> initWaitOption = new("--wait")
+        {
+            Description = "Wait (up to 5 minutes) for the initial scan to reach ready before returning.",
+            DefaultValueFactory = parseResult => false,
+        };
+
+        var initCommand = new Command(
+            "init",
+            "Pre-warms the index: starts the background service and scan before you need it. " +
+            "Exit codes: 0 running, 1 argument/path or instance-validation error, " +
+            "3 --wait timeout, 4 startup failure.")
+        {
+            pathOption,
+            portOption,
+            idleTimeoutOption,
+            initWaitOption,
+            jsonOption,
+        };
+        initCommand.SetAction((ParseResult parseResult, CancellationToken ct) =>
+            InitCommandHandler.ExecuteAsync(
+                new InitSettings(
+                    parseResult.GetValue(pathOption)!,
+                    parseResult.GetValue(portOption),
+                    parseResult.GetValue(idleTimeoutOption),
+                    parseResult.GetValue(initWaitOption),
+                    parseResult.GetValue(jsonOption)),
+                ct));
+
         var stopCommand = new Command("stop", "Stops the instance watching the given (or current) directory.")
         {
             instancePathOption,
@@ -206,6 +234,7 @@ public class Program
         queryCommand.Subcommands.Add(multiQueryCommand);
 
         rootCommand.Subcommands.Add(startCommand);
+        rootCommand.Subcommands.Add(initCommand);
         rootCommand.Subcommands.Add(stopCommand);
         rootCommand.Subcommands.Add(listCommand);
         rootCommand.Subcommands.Add(statusCommand);
