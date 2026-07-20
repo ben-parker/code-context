@@ -243,6 +243,12 @@ public class GraphUpdateService : IGraphUpdateService
         var processedCount = 0;
         var failures = new List<Exception>();
 
+        // Publish the workload before a worker begins its potentially long, atomic
+        // workspace analysis. Otherwise status remains at 0/0 until that worker has
+        // finished every file, leaving callers unable to distinguish discovery from
+        // active indexing.
+        progressReporter?.ReportProgress(0, totalCount, string.Empty);
+
         if (_workerService is not null)
         {
             // Every discovered worker gets a generation, even an empty one: deleting
@@ -263,7 +269,15 @@ public class GraphUpdateService : IGraphUpdateService
                         }, ct);
                     }
 
-                    await _workerService.IndexWorkspaceAsync(parserId, groupFiles, ct);
+                    var completedBeforeWorker = processedCount;
+                    await _workerService.IndexWorkspaceAsync(
+                        parserId, groupFiles, ct,
+                        progress =>
+                        {
+                            processedCount = completedBeforeWorker + progress.FilesProcessed;
+                            progressReporter?.ReportProgress(
+                                processedCount, totalCount, progress.CurrentFile ?? string.Empty);
+                        });
 
                     foreach (var file in groupFiles)
                     {
@@ -274,9 +288,8 @@ public class GraphUpdateService : IGraphUpdateService
                             LastModified = File.GetLastWriteTimeUtc(file),
                             LastScanned = DateTime.UtcNow,
                         }, ct);
-                        var current = Interlocked.Increment(ref processedCount);
-                        progressReporter?.ReportProgress(current, totalCount, file);
                     }
+                    processedCount = completedBeforeWorker + groupFiles.Count;
 
                     if (groupFiles.Count > 0)
                     {
@@ -425,21 +438,37 @@ public class GraphUpdateService : IGraphUpdateService
         }
 
         var workerGroups = PartitionByOwner(filesToProcess.Select(f => f.path));
+        var workerScans = workerGroups.Select(group => (
+            parserId: group.Key,
+            changedFiles: group.Value,
+            ownedFiles: allFiles.Where(f =>
+                TryGetWorkerForPath(f, out var owner)
+                && string.Equals(owner, group.Key, StringComparison.Ordinal)).ToList())).ToList();
         var processedCount = 0;
-        var totalCount = filesToProcess.Count;
+        var totalCount = workerScans.Sum(scan => scan.ownedFiles.Count);
         var failures = new List<Exception>();
+
+        // Expose the full semantic workload before the workers start. On a resumable
+        // scan this can exceed the changed-file count because affected languages walk
+        // their complete approved workspace for cross-file binding correctness.
+        progressReporter?.ReportProgress(0, totalCount, string.Empty);
 
         // Worker-owned languages resolve cross-file semantics inside the worker, so a
         // resumable scan feeds it the complete current file set for the language, not
         // just the changed subset — the graph facts of unchanged files depend on it.
-        foreach (var (parserId, changedFiles) in workerGroups)
+        foreach (var (parserId, changedFiles, ownedFiles) in workerScans)
         {
-            var ownedFiles = allFiles.Where(f =>
-                TryGetWorkerForPath(f, out var owner)
-                && string.Equals(owner, parserId, StringComparison.Ordinal)).ToList();
             try
             {
-                await _workerService!.IndexWorkspaceAsync(parserId, ownedFiles, ct);
+                var completedBeforeWorker = processedCount;
+                await _workerService!.IndexWorkspaceAsync(
+                    parserId, ownedFiles, ct,
+                    progress =>
+                    {
+                        processedCount = completedBeforeWorker + progress.FilesProcessed;
+                        progressReporter?.ReportProgress(
+                            processedCount, totalCount, progress.CurrentFile ?? string.Empty);
+                    });
 
                 foreach (var file in changedFiles)
                 {
@@ -450,9 +479,8 @@ public class GraphUpdateService : IGraphUpdateService
                         LastModified = File.GetLastWriteTimeUtc(file),
                         LastScanned = DateTime.UtcNow,
                     }, ct);
-                    var current = Interlocked.Increment(ref processedCount);
-                    progressReporter?.ReportProgress(current, totalCount, file);
                 }
+                processedCount = completedBeforeWorker + ownedFiles.Count;
                 _logger.LogInformation(
                     "Worker '{ParserId}' reindexed {Total} files ({Changed} changed).",
                     parserId, ownedFiles.Count, changedFiles.Count);

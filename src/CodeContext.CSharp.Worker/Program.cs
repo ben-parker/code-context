@@ -124,7 +124,7 @@ internal sealed class CSharpWorkerHost(JsonRpcConnection connection)
             var workspace = GetWorkspace(index.WorkspaceId);
             workspace.ReplaceFiles(index.Files, ct);
             var deltasEmitted = await PublishFullAsync(
-                workspace, index.WorkspaceId, index.Generation, requestId, ct);
+                workspace, index.WorkspaceId, index.Generation, requestId, index.Files, ct);
 
             var result = new IndexWorkspaceResult(index.WorkspaceId, index.Generation, deltasEmitted, Complete: true);
             return JsonSerializer.SerializeToElement(result, ParserProtocolJsonContext.Default.IndexWorkspaceResult);
@@ -195,9 +195,18 @@ internal sealed class CSharpWorkerHost(JsonRpcConnection connection)
     /// <c>replacesWorkspace</c>), then seeds the per-file hash baseline.
     /// </summary>
     private async Task<int> PublishFullAsync(
-        CSharpWorkspaceAnalyzer workspace, string workspaceId, long generation, long requestId, CancellationToken ct)
+        CSharpWorkspaceAnalyzer workspace, string workspaceId, long generation, long requestId,
+        IReadOnlyList<string> approvedFiles, CancellationToken ct)
     {
-        var analysis = workspace.Analyze(ct);
+        var analysis = await workspace.AnalyzeAsync(
+            (processed, total, currentFile) => new ValueTask(connection.NotifyAsync(
+                ParserProtocolMethods.AnalysisProgressNotification,
+                new AnalysisProgress(
+                    ParserId, ParserVersion, workspaceId, generation, requestId,
+                    processed, total, currentFile),
+                ParserProtocolJsonContext.Default.AnalysisProgress, ct)),
+            ct,
+            approvedFiles);
         var emitted = await PublishAsync(
             workspaceId, generation, requestId,
             analysis.Nodes, analysis.Edges,

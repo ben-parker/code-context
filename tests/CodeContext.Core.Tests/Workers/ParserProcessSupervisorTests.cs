@@ -140,15 +140,93 @@ public class ParserProcessSupervisorTests
 
         await supervisor.EnsureInitializedAsync();
         await supervisor.OpenWorkspaceAsync(new OpenWorkspaceParams("ws-1", "/repo", [], []));
-        var result = await supervisor.IndexWorkspaceAsync(new IndexWorkspaceParams("ws-1", 1, ["a.fake", "b.fake"]));
+        AnalysisProgress? progress = null;
+        var result = await supervisor.IndexWorkspaceAsync(
+            new IndexWorkspaceParams("ws-1", 1, ["a.fake", "b.fake"]),
+            progressHandler: update => progress = update);
 
         Assert.True(result.Complete);
+        Assert.NotNull(progress);
+        Assert.Equal(2, progress!.FilesProcessed);
+        Assert.Equal(2, progress.FilesTotal);
         lock (deltas)
         {
             var delta = Assert.Single(deltas);
             Assert.Equal(0, delta.Nodes[0].StartLine);
             Assert.Equal(1, delta.Nodes[0].EndColumn); // inclusive 1:1 -> exclusive 0:1
         }
+    }
+
+    [Theory]
+    [InlineData("missing-progress")]
+    [InlineData("invalid-progress-total")]
+    [InlineData("regressing-progress")]
+    [InlineData("invalid-progress-file")]
+    [InlineData("invalid-progress-request")]
+    public async Task InvalidIndexProgress_FailsTheWorkerRequest(string behavior)
+    {
+        await using var supervisor = CreateSupervisor(FakeWorkerSpec("--behavior", behavior));
+        supervisor.DeltaHandler = (_, _) => Task.FromResult(true);
+
+        await Assert.ThrowsAsync<ParserWorkerFailedException>(
+            () => supervisor.IndexWorkspaceAsync(
+                new IndexWorkspaceParams("ws-1", 1, ["a.fake", "b.fake"])));
+    }
+
+    [Fact]
+    public async Task IndexWorkspace_DuplicateApprovedPaths_AreRejectedBeforeDispatch()
+    {
+        await using var supervisor = CreateSupervisor(FakeWorkerSpec());
+
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => supervisor.IndexWorkspaceAsync(
+                new IndexWorkspaceParams("ws-1", 1, ["a.fake", "a.fake"])));
+    }
+
+    [Fact]
+    public async Task ProgressObserverException_DoesNotFailWorkerOrIndexRequest()
+    {
+        await using var supervisor = CreateSupervisor(FakeWorkerSpec());
+        supervisor.DeltaHandler = (_, _) => Task.FromResult(true);
+
+        var result = await supervisor.IndexWorkspaceAsync(
+            new IndexWorkspaceParams("ws-1", 1, ["a.fake"]),
+            progressHandler: _ => throw new InvalidOperationException("observer failed"));
+
+        Assert.True(result.Complete);
+        Assert.Equal(ParserSessionState.Ready, supervisor.Snapshot.State);
+    }
+
+    [Fact]
+    public async Task SlowProgressObserver_DoesNotBlockProtocolResponses()
+    {
+        await using var supervisor = CreateSupervisor(FakeWorkerSpec());
+        supervisor.DeltaHandler = (_, _) => Task.FromResult(true);
+        var observerEntered = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        using var releaseObserver = new ManualResetEventSlim();
+
+        var indexing = supervisor.IndexWorkspaceAsync(
+            new IndexWorkspaceParams("ws-1", 1, ["a.fake"]),
+            progressHandler: _ =>
+            {
+                observerEntered.TrySetResult();
+                releaseObserver.Wait(TimeSpan.FromSeconds(10));
+            });
+
+        await observerEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        try
+        {
+            var opened = await supervisor.OpenWorkspaceAsync(
+                new OpenWorkspaceParams("ws-2", "/repo", [], [])).WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.True(opened.Opened);
+        }
+        finally
+        {
+            releaseObserver.Set();
+        }
+
+        Assert.True((await indexing).Complete);
     }
 
     [Fact]

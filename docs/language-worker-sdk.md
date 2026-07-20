@@ -49,8 +49,9 @@ Implement this sequence:
 1. `initialize`: negotiate a protocol version and declare capabilities/span semantics.
 2. `workspace/open`: accept only the host's approved file set and build/reconcile
    project state.
-3. `workspace/index`: emit one or more `analysis/delta` notifications, then return a
-   complete response.
+3. `workspace/index`: emit monotonic `analysis/progress` notifications while walking
+   files, emit one or more `analysis/delta` notifications, then return a complete
+   response.
 4. `workspace/applyChanges`: update persistent state and emit a **file-scoped**
    replacement (`replacesWorkspace:false`) covering every file whose emitted facts
    changed — see "Emit file-scoped deltas" below.
@@ -64,6 +65,19 @@ released as `CodeContext.Worker.Protocol`, `@codecontext/worker-sdk`, and
 [.NET protocol package](../src/CodeContext.Parser.Protocol/README.md),
 [npm SDK](../sdk/npm/README.md), and [Python SDK](../sdk/python/README.md) for the
 language-specific entry points.
+
+### Report indexing progress
+
+For every `workspace/index` request, emit `analysis/progress` notifications correlated
+by `requestId`, `workspaceId`, and `generation`. The request's `files` array is a set:
+paths must be unique under the host platform's path comparer. `filesTotal` is the
+number of approved paths, `filesProcessed` is monotonic, and `currentFile` is the most
+recently attempted path. Unreadable or vanished files still count as processed after
+the worker records their diagnostic. The final notification must report
+`filesTotal/filesTotal` before the successful response; an empty workspace reports
+`0/0` with a null file. Progress describes analysis work only. The host continues
+buffering graph deltas and does not expose the new generation until its terminal delta
+commits.
 
 ## Preserve graph ownership
 

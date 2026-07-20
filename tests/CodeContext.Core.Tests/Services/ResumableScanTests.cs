@@ -120,7 +120,9 @@ public class ResumableScanTests : IAsyncLifetime
         await _service.PerformResumableScanAsync(_tempDir, _mockProgressReporter, CancellationToken.None);
 
         // Assert
-        _mockProgressReporter.Received().ReportComplete(1, Arg.Any<TimeSpan>());
+        // One file changed, but cross-file semantic correctness requires the worker
+        // to walk both approved C# files; progress reports actual analysis work.
+        _mockProgressReporter.Received().ReportComplete(2, Arg.Any<TimeSpan>());
         
         var nodeRepo = _repositoryFactory.CreateNodeRepository();
         var nodes = await nodeRepo.GetAllAsync();
@@ -151,7 +153,9 @@ public class ResumableScanTests : IAsyncLifetime
         await _service.PerformResumableScanAsync(_tempDir, _mockProgressReporter, CancellationToken.None);
 
         // Assert
-        _mockProgressReporter.Received().ReportComplete(1, Arg.Any<TimeSpan>());
+        // The newly added file makes the C# workspace dirty, so both approved files
+        // are walked even though metadata is updated only for the new file.
+        _mockProgressReporter.Received().ReportComplete(2, Arg.Any<TimeSpan>());
         
         var nodeRepo = _repositoryFactory.CreateNodeRepository();
         var nodes = await nodeRepo.GetAllAsync();
@@ -173,7 +177,8 @@ public class ResumableScanTests : IAsyncLifetime
         await _service.PerformResumableScanAsync(_tempDir, _mockProgressReporter, CancellationToken.None);
 
         // Assert
-        _mockProgressReporter.Received(10).ReportProgress(Arg.Any<int>(), 10, Arg.Any<string>());
+        _mockProgressReporter.Received().ReportProgress(0, 10, string.Empty);
+        _mockProgressReporter.Received(11).ReportProgress(Arg.Any<int>(), 10, Arg.Any<string>());
         _mockProgressReporter.Received().ReportComplete(10, Arg.Any<TimeSpan>());
     }
 

@@ -21,7 +21,11 @@ public interface ILanguageWorkerService
 
     /// <summary>Builds (or replaces) the complete workspace generation from
     /// <paramref name="files"/>.</summary>
-    Task IndexWorkspaceAsync(string parserId, IReadOnlyList<string> files, CancellationToken ct = default);
+    Task IndexWorkspaceAsync(
+        string parserId,
+        IReadOnlyList<string> files,
+        CancellationToken ct = default,
+        Action<AnalysisProgress>? progressHandler = null);
 
     /// <summary>
     /// Applies an ordered change batch. <paramref name="approvedFiles"/> is the
@@ -108,7 +112,11 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
     public bool TryGetParserForExtension(string extension, out string parserId)
         => _extensionToParser.TryGetValue(extension, out parserId!);
 
-    public async Task IndexWorkspaceAsync(string parserId, IReadOnlyList<string> files, CancellationToken ct = default)
+    public async Task IndexWorkspaceAsync(
+        string parserId,
+        IReadOnlyList<string> files,
+        CancellationToken ct = default,
+        Action<AnalysisProgress>? progressHandler = null)
     {
         var state = GetWorker(parserId);
         await state.Lock.WaitAsync(ct).ConfigureAwait(false);
@@ -127,7 +135,7 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
                 DefaultWorkspaceId, _options.RootPath,
                 state.Registration.Manifest.ProjectMarkers ?? [], files), ct).ConfigureAwait(false);
             await supervisor.IndexWorkspaceAsync(new IndexWorkspaceParams(
-                DefaultWorkspaceId, generation, files), ct).ConfigureAwait(false);
+                DefaultWorkspaceId, generation, files), ct, progressHandler).ConfigureAwait(false);
             ReplaceApprovedFiles(state, files);
             state.EverIndexed = true;
         }

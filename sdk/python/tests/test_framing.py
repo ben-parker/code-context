@@ -1,9 +1,12 @@
 import unittest
 
-from codecontext_worker_sdk import MessageDecoder, encode_message
+from codecontext_worker_sdk import METHODS, MessageDecoder, encode_message
 
 
 class FramingTests(unittest.TestCase):
+    def test_exports_analysis_progress_notification_method(self) -> None:
+        self.assertEqual("analysis/progress", METHODS["analysis_progress"])
+
     def test_fragmented_and_adjacent_frames(self) -> None:
         first = encode_message({"jsonrpc": "2.0", "id": 1, "result": "héllo"})
         second = encode_message({"jsonrpc": "2.0", "method": "shutdown"})

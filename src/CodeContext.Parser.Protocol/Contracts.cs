@@ -52,6 +52,8 @@ public sealed record OpenWorkspaceResult(
 /// <summary>
 /// Starts (or replaces) a complete generation for a workspace. The worker responds
 /// after emitting all <c>analysis/delta</c> notifications for the generation.
+/// <paramref name="Files"/> is a set and must not contain duplicate paths under the
+/// host platform's path comparer.
 /// </summary>
 public sealed record IndexWorkspaceParams(
     [property: JsonPropertyName("workspaceId")] string WorkspaceId,
@@ -166,6 +168,21 @@ public sealed record ProtocolDiagnostic(
     [property: JsonPropertyName("filePath")] string? FilePath,
     [property: JsonPropertyName("severity")] string Severity,
     [property: JsonPropertyName("message")] string Message);
+
+/// <summary>
+/// Live progress for a <c>workspace/index</c> request. This reports analysis work only;
+/// graph facts remain buffered until the request's terminal delta commits atomically.
+/// </summary>
+public sealed record AnalysisProgress(
+    [property: JsonPropertyName("parserId")] string ParserId,
+    [property: JsonPropertyName("parserVersion")] string ParserVersion,
+    [property: JsonPropertyName("workspaceId")] string WorkspaceId,
+    [property: JsonPropertyName("generation")] long Generation,
+    [property: JsonPropertyName("requestId")] long RequestId,
+    [property: JsonPropertyName("filesProcessed")] int FilesProcessed,
+    [property: JsonPropertyName("filesTotal")] int FilesTotal,
+    [property: JsonPropertyName("currentFile"), JsonIgnore(Condition = JsonIgnoreCondition.Never)]
+    string? CurrentFile);
 
 /// <summary>
 /// A batch of normalized facts published by a worker (worker → host notification).

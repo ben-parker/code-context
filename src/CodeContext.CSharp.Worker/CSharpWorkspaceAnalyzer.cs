@@ -214,6 +214,12 @@ public sealed class CSharpWorkspaceAnalyzer
     /// The result always represents the complete workspace.
     /// </summary>
     public AnalysisResult Analyze(CancellationToken ct)
+        => AnalyzeAsync(progress: null, ct).GetAwaiter().GetResult();
+
+    public async Task<AnalysisResult> AnalyzeAsync(
+        Func<int, int, string?, ValueTask>? progress,
+        CancellationToken ct,
+        IReadOnlyList<string>? progressFiles = null)
     {
         // The compilation is mutated in lockstep with the tree dictionary at every
         // mutation site, so its tree set must match by instance. A count-only check
@@ -244,15 +250,49 @@ public sealed class CSharpWorkspaceAnalyzer
         // _syntaxTrees.Values order to build the flat whole-workspace lists, so each
         // file's nodes/edges stay contiguous in walk order.
         var rawBuckets = new List<FileFacts>(_syntaxTrees.Count);
-        foreach (var tree in _syntaxTrees.Values)
+        var total = progressFiles?.Count ?? _syntaxTrees.Count;
+        var processed = 0;
+        if (total == 0 && progress is not null)
+        {
+            await progress(0, 0, null);
+        }
+        if (progressFiles is null)
+        {
+            foreach (var tree in _syntaxTrees.Values)
+            {
+                rawBuckets.Add(AnalyzeTree(tree));
+            }
+        }
+        else
+        {
+            // Progress is defined over the approved request, including files that
+            // disappeared or could not be read. Those paths produce diagnostics and
+            // no facts, but still count as completed analysis attempts.
+            foreach (var path in progressFiles)
+            {
+                ct.ThrowIfCancellationRequested();
+                if (_syntaxTrees.TryGetValue(path, out var tree))
+                {
+                    rawBuckets.Add(AnalyzeTree(tree));
+                }
+                processed++;
+                if (progress is not null && ShouldReportProgress(processed, total))
+                {
+                    await progress(processed, total, path);
+                }
+            }
+        }
+
+        FileFacts AnalyzeTree(SyntaxTree tree)
         {
             ct.ThrowIfCancellationRequested();
             var semanticModel = compilation.GetSemanticModel(tree);
             var bucketNodes = new List<ProtocolNode>();
             var bucketEdges = new List<ProtocolEdge>();
-            var walker = new GraphWalker(semanticModel, tree.FilePath, _workspaceIdPrefix, bucketNodes, bucketEdges);
+            var walker = new GraphWalker(
+                semanticModel, tree.FilePath, _workspaceIdPrefix, bucketNodes, bucketEdges);
             walker.Visit(tree.GetRoot(ct));
-            rawBuckets.Add(new FileFacts(tree.FilePath, bucketNodes, bucketEdges));
+            return new FileFacts(tree.FilePath, bucketNodes, bucketEdges);
         }
 
         // Duplicate-id canonicalization. A node or edge id can be emitted by more than
@@ -284,6 +324,13 @@ public sealed class CSharpWorkspaceAnalyzer
         var diagnostics = _pendingDiagnostics.ToList();
         _pendingDiagnostics.Clear();
         return new AnalysisResult(nodes, edges, diagnostics, buckets);
+    }
+
+    private static bool ShouldReportProgress(int processed, int total)
+    {
+        if (processed == total) return true;
+        var interval = Math.Max(1, (total + 99) / 100);
+        return processed % interval == 0;
     }
 
     /// <summary>Maps each fact id to the ordinally smallest FilePath that emits it.</summary>
