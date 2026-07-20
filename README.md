@@ -15,7 +15,7 @@ new process performs a fresh scan and leaves no repository database behind.
 Bundled language workers provide semantic analysis for:
 
 - C# (`.cs`) through a long-lived Roslyn worker.
-- TypeScript and JavaScript (`.ts`, `.tsx`, `.js`, `.jsx`) through a long-lived
+- TypeScript and JavaScript (`.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`, `.cjs`) through a long-lived
   TypeScript language-service worker.
 
 Release archives are published for Windows x64, Linux x64, macOS x64, and macOS

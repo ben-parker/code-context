@@ -49,7 +49,7 @@ public class TypeScriptWorkerProtocolTests : IAsyncLifetime
             MinProtocolVersion: ParserProtocol.Version,
             MaxProtocolVersion: ParserProtocol.Version,
             Languages: ["typescript", "javascript"],
-            Extensions: [".ts", ".tsx", ".js", ".jsx"],
+            Extensions: [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"],
             ProjectMarkers: ["tsconfig.json", "package.json"]);
         var spec = new WorkerLaunchSpec(
             "typescript", "TypeScript", "node", ["typescript-worker.js"], WorkingDirectory: workerDir);
@@ -61,6 +61,24 @@ public class TypeScriptWorkerProtocolTests : IAsyncLifetime
         var path = Path.Combine(_tempDir, name);
         await File.WriteAllTextAsync(path, content);
         return path;
+    }
+
+    [Theory]
+    [InlineData("module.mts")]
+    [InlineData("module.cts")]
+    [InlineData("module.mjs")]
+    [InlineData("module.cjs")]
+    public async Task CompilerNativeModuleExtension_IsIndexed(string fileName)
+    {
+        await WriteFileAsync(fileName, "export class NativeModule {}\n");
+
+        await _pipeline.GraphUpdateService.PerformInitialScanAsync(
+            _tempDir, null, CancellationToken.None);
+
+        var nodes = await _pipeline.RepositoryFactory.CreateNodeRepository().GetAllAsync();
+        Assert.Contains(nodes, node =>
+            node.FilePath?.EndsWith(fileName, StringComparison.OrdinalIgnoreCase) == true
+            && node.Name == "NativeModule");
     }
 
     [Fact]

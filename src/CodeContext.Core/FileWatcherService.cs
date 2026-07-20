@@ -2,6 +2,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using CodeContext.Core.Services;
+using CodeContext.Core.Workers;
 
 namespace CodeContext.Core;
 
@@ -18,6 +19,7 @@ public class FileWatcherService : IHostedService, IDisposable
     private readonly IIndexCoordinator _coordinator;
     private readonly IScanStateService _scanState;
     private readonly IRepositoryFileSelector _fileSelector;
+    private readonly ILanguageWorkerService _workerService;
     private FileSystemWatcher? _watcher;
     private readonly CancellationTokenSource _lifetimeCts = new();
     private Task? _watcherRecovery;
@@ -28,12 +30,14 @@ public class FileWatcherService : IHostedService, IDisposable
         ILogger<FileWatcherService> logger,
         IIndexCoordinator coordinator,
         IScanStateService scanState,
+        ILanguageWorkerService workerService,
         IRepositoryFileSelector? fileSelector = null)
     {
         _options = options.Value;
         _logger = logger;
         _coordinator = coordinator;
         _scanState = scanState;
+        _workerService = workerService;
         _fileSelector = fileSelector ?? new RepositoryFileSelector(options);
     }
 
@@ -166,8 +170,7 @@ public class FileWatcherService : IHostedService, IDisposable
         if (_fileSelector.IsIgnoreFile(path)) return false;
 
         var extension = Path.GetExtension(path);
-        if (_options.FilePatterns.Any()
-            && !_options.FilePatterns.Contains(extension, StringComparer.OrdinalIgnoreCase))
+        if (!_workerService.OwnedExtensions.Contains(extension, StringComparer.OrdinalIgnoreCase))
         {
             return true;
         }

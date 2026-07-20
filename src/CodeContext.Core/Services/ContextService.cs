@@ -1,4 +1,5 @@
 using CodeContext.Core.Repositories;
+using CodeContext.Core.Workers;
 using Microsoft.Extensions.Options;
 using System.Collections.Frozen;
 using System.Collections.Generic;
@@ -15,17 +16,20 @@ namespace CodeContext.Core.Services
         private readonly ICodeEdgeRepository _edgeRepository;
         private readonly IFileMetadataRepository _fileMetadataRepository;
         private readonly string? _rootPath;
+        private readonly ILanguageWorkerService? _workerService;
 
         public ContextService(
             ICodeNodeRepository nodeRepository,
             ICodeEdgeRepository edgeRepository,
             IFileMetadataRepository fileMetadataRepository,
-            IOptions<CodeContextOptions>? options = null)
+            IOptions<CodeContextOptions>? options = null,
+            ILanguageWorkerService? workerService = null)
         {
             _nodeRepository = nodeRepository;
             _edgeRepository = edgeRepository;
             _fileMetadataRepository = fileMetadataRepository;
             _rootPath = options?.Value.RootPath;
+            _workerService = workerService;
         }
 
         public async Task<CompleteContextResponse> GetCompleteContextAsync(
@@ -1558,19 +1562,14 @@ namespace CodeContext.Core.Services
             return baseComplexity + (linesOfCode / 10); // Add complexity for every 10 lines
         }
 
-        private static bool IsFilePath(string identifier)
+        private bool IsFilePath(string identifier)
         {
             if (identifier.Contains('/') || identifier.Contains('\\'))
                 return true;
 
             var extension = Path.GetExtension(identifier);
-            return extension.Equals(".cs", StringComparison.OrdinalIgnoreCase) ||
-                extension.Equals(".ts", StringComparison.OrdinalIgnoreCase) ||
-                extension.Equals(".tsx", StringComparison.OrdinalIgnoreCase) ||
-                extension.Equals(".js", StringComparison.OrdinalIgnoreCase) ||
-                extension.Equals(".jsx", StringComparison.OrdinalIgnoreCase) ||
-                extension.Equals(".py", StringComparison.OrdinalIgnoreCase) ||
-                extension.Equals(".pyw", StringComparison.OrdinalIgnoreCase);
+            return _workerService?.OwnedExtensions.Contains(
+                extension, StringComparer.OrdinalIgnoreCase) == true;
         }
     }
 }

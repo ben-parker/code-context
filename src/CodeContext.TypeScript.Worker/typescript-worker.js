@@ -32,6 +32,7 @@ try {
 
 const PROTOCOL_VERSION = 1;
 const PARSER_ID = 'typescript';
+const SOURCE_EXTENSIONS = ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs'];
 const PARSER_VERSION = (() => {
     try {
         return require(path.join(__dirname, 'package.json')).version || '1.0.0';
@@ -1021,7 +1022,7 @@ handlers.set('initialize', async (_id, params) => {
         displayName: 'TypeScript',
         protocolVersion: PROTOCOL_VERSION,
         languages: ['typescript', 'javascript'],
-        extensions: ['.ts', '.tsx', '.js', '.jsx'],
+        extensions: SOURCE_EXTENSIONS,
         projectMarkers: ['tsconfig.json', 'package.json'],
         capabilities: {
             workspaceAnalysis: true,
