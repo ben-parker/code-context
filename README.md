@@ -15,8 +15,12 @@ new process performs a fresh scan and leaves no repository database behind.
 Bundled language workers provide semantic analysis for:
 
 - C# (`.cs`) through a long-lived Roslyn worker.
-- TypeScript and JavaScript (`.ts`, `.tsx`, `.js`, `.jsx`) through a long-lived
+- TypeScript, JavaScript, and Vue SFCs (`.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`, `.cjs`, `.vue`) through a long-lived
   TypeScript language-service worker.
+
+For Vue SFCs, CodeContext semantically indexes JavaScript and TypeScript in both
+`<script>` and `<script setup>` blocks. Templates and styles remain outside the
+normalized code graph. Source spans and file paths refer to the original `.vue` file.
 
 Release archives are published for Windows x64, Linux x64, macOS x64, and macOS
 Arm64. The archives are self-contained: they include the .NET host, the C# worker,

@@ -329,9 +329,14 @@ public class StatusService : IStatusService
         {
             ".cs" => "C#",
             ".js" => "JavaScript",
+            ".mjs" => "JavaScript",
+            ".cjs" => "JavaScript",
             ".ts" => "TypeScript",
+            ".mts" => "TypeScript",
+            ".cts" => "TypeScript",
             ".jsx" => "JavaScript",
             ".tsx" => "TypeScript",
+            ".vue" => "Vue",
             ".py" => "Python",
             ".pyw" => "Python",
             _ => ""

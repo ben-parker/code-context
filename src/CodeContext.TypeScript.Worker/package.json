@@ -5,6 +5,7 @@
   "private": true,
   "main": "typescript-worker.js",
   "dependencies": {
+    "@vue/compiler-sfc": "^3.5.40",
     "typescript": "^5.7.2"
   }
 }

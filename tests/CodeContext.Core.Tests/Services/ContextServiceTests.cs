@@ -1,6 +1,7 @@
 using CodeContext.Core;
 using CodeContext.Core.Repositories;
 using CodeContext.Core.Services;
+using CodeContext.Core.Workers;
 using NSubstitute;
 using Microsoft.Extensions.Options;
 using System.Collections.Generic;
@@ -21,7 +22,10 @@ namespace CodeContext.Core.Tests.Services
             _nodeRepository = Substitute.For<ICodeNodeRepository>();
             _edgeRepository = Substitute.For<ICodeEdgeRepository>();
             _fileMetadataRepository = Substitute.For<IFileMetadataRepository>();
-            _contextService = new ContextService(_nodeRepository, _edgeRepository, _fileMetadataRepository);
+            var workerService = Substitute.For<ILanguageWorkerService>();
+            workerService.OwnedExtensions.Returns([".cs", ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"]);
+            _contextService = new ContextService(
+                _nodeRepository, _edgeRepository, _fileMetadataRepository, workerService: workerService);
             // Mirror the real path index over whatever node set each test feeds GetAllAsync.
             _nodeRepository.StubFindByFilePathFromGetAll();
         }

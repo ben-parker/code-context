@@ -7,6 +7,7 @@ using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Logging;
 using NSubstitute;
 using CodeContext.Core.Services;
+using CodeContext.Core.Workers;
 
 namespace CodeContext.Core.Tests
 {
@@ -15,6 +16,7 @@ namespace CodeContext.Core.Tests
         private readonly IOptions<CodeContextOptions> _mockOptions;
         private readonly ILogger<FileWatcherService> _mockLogger;
         private readonly IIndexCoordinator _mockCoordinator;
+        private readonly ILanguageWorkerService _mockWorkerService;
         private readonly ScanStateService _scanState = new();
 
         public FileWatcherServiceTests()
@@ -22,6 +24,8 @@ namespace CodeContext.Core.Tests
             _mockOptions = Substitute.For<IOptions<CodeContextOptions>>();
             _mockLogger = Substitute.For<ILogger<FileWatcherService>>();
             _mockCoordinator = Substitute.For<IIndexCoordinator>();
+            _mockWorkerService = Substitute.For<ILanguageWorkerService>();
+            _mockWorkerService.OwnedExtensions.Returns([".cs", ".mts"]);
         }
 
         [Fact]
@@ -33,7 +37,8 @@ namespace CodeContext.Core.Tests
 
             _mockOptions.Value.Returns(new CodeContextOptions { RootPath = tempDir });
 
-            var watcherService = new FileWatcherService(_mockOptions, _mockLogger, _mockCoordinator, _scanState);
+            var watcherService = new FileWatcherService(
+                _mockOptions, _mockLogger, _mockCoordinator, _scanState, _mockWorkerService);
 
             // Act & Assert
             await watcherService.StartAsync(CancellationToken.None);
@@ -62,7 +67,8 @@ namespace CodeContext.Core.Tests
                     return ValueTask.CompletedTask;
                 });
 
-            var watcherService = new FileWatcherService(_mockOptions, _mockLogger, _mockCoordinator, _scanState);
+            var watcherService = new FileWatcherService(
+                _mockOptions, _mockLogger, _mockCoordinator, _scanState, _mockWorkerService);
             await watcherService.StartAsync(CancellationToken.None);
             try
             {
@@ -76,6 +82,38 @@ namespace CodeContext.Core.Tests
             {
                 await watcherService.StopAsync(CancellationToken.None);
                 Directory.Delete(tempDir, true);
+            }
+        }
+
+        [Fact]
+        public async Task WorkerOwnedExtension_IsForwardedWithoutASeparateOptionsAllowList()
+        {
+            var tempDir = Directory.CreateTempSubdirectory("cc-watcher-extension-").FullName;
+            _mockOptions.Value.Returns(new CodeContextOptions { RootPath = tempDir });
+
+            var forwarded = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _mockCoordinator
+                .NotifyFileChangedAsync(Arg.Any<string>(), Arg.Any<FileChangeType>(), Arg.Any<CancellationToken>())
+                .Returns(callInfo =>
+                {
+                    forwarded.TrySetResult(callInfo.ArgAt<string>(0));
+                    return ValueTask.CompletedTask;
+                });
+
+            var watcherService = new FileWatcherService(
+                _mockOptions, _mockLogger, _mockCoordinator, _scanState, _mockWorkerService);
+            await watcherService.StartAsync(CancellationToken.None);
+            try
+            {
+                var filePath = Path.Combine(tempDir, "module.mts");
+                await File.WriteAllTextAsync(filePath, "export const value = 1;\n");
+
+                Assert.Equal(filePath, await forwarded.Task.WaitAsync(TimeSpan.FromSeconds(10)));
+            }
+            finally
+            {
+                await watcherService.StopAsync(CancellationToken.None);
+                Directory.Delete(tempDir, recursive: true);
             }
         }
 
@@ -94,7 +132,8 @@ namespace CodeContext.Core.Tests
                     return ValueTask.CompletedTask;
                 });
 
-            var watcherService = new FileWatcherService(_mockOptions, _mockLogger, _mockCoordinator, _scanState);
+            var watcherService = new FileWatcherService(
+                _mockOptions, _mockLogger, _mockCoordinator, _scanState, _mockWorkerService);
             await watcherService.StartAsync(CancellationToken.None);
             try
             {

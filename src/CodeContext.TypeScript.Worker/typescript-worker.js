@@ -21,17 +21,20 @@ const path = require('path');
 const crypto = require('crypto');
 
 let ts;
+let parseVueSfc;
 try {
     ts = require('typescript');
+    ({ parse: parseVueSfc } = require('@vue/compiler-sfc'));
 } catch (error) {
     process.stderr.write(
-        'typescript-worker: cannot load the "typescript" package. ' +
+        'typescript-worker: cannot load its TypeScript/Vue compiler dependencies. ' +
         'Run "npm install" next to typescript-worker.js.\n');
     process.exit(2);
 }
 
 const PROTOCOL_VERSION = 1;
 const PARSER_ID = 'typescript';
+const SOURCE_EXTENSIONS = ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs', '.vue'];
 const PARSER_VERSION = (() => {
     try {
         return require(path.join(__dirname, 'package.json')).version || '1.0.0';
@@ -197,10 +200,73 @@ function canonicalKey(p) {
     return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
 }
 
+// ---------------------------------------------------------------------------
+// Embedded-language adapters
+// ---------------------------------------------------------------------------
+
+/** Replaces non-newline characters with spaces so embedded code retains the physical
+ * file's offsets, line numbers, and columns when TypeScript parses it. */
+function sourceShapedWhitespace(source) {
+    return source.replace(/[^\r\n]/g, ' ');
+}
+
+function scriptKindForLanguage(language) {
+    switch ((language || 'js').toLowerCase()) {
+        case 'ts': return ts.ScriptKind.TS;
+        case 'tsx': return ts.ScriptKind.TSX;
+        case 'jsx': return ts.ScriptKind.JSX;
+        case 'js': return ts.ScriptKind.JS;
+        default: return undefined;
+    }
+}
+
+function vueErrorMessage(error) {
+    if (typeof error === 'string') return error;
+    return error?.message || String(error);
+}
+
+const embeddedLanguageAdapters = new Map([
+    ['.vue', {
+        transform(fileName, source) {
+            const parsed = parseVueSfc(source, { filename: fileName, sourceMap: false });
+            const blocks = [parsed.descriptor.script, parsed.descriptor.scriptSetup].filter(Boolean);
+            let text = sourceShapedWhitespace(source);
+            let scriptKind = ts.ScriptKind.JS;
+            const diagnostics = parsed.errors.map(error => ({
+                filePath: fileName,
+                severity: 'warning',
+                message: `Vue SFC parse error: ${vueErrorMessage(error)}`,
+            }));
+
+            for (const block of blocks) {
+                const blockKind = scriptKindForLanguage(block.lang);
+                if (blockKind === undefined) {
+                    diagnostics.push({
+                        filePath: fileName,
+                        severity: 'warning',
+                        message: `Vue <script> language '${block.lang}' is not supported by the TypeScript worker.`,
+                    });
+                    continue;
+                }
+                // Prefer the most expressive grammar when an SFC has both script blocks.
+                if (blockKind === ts.ScriptKind.TSX || blockKind === ts.ScriptKind.TS
+                    || (blockKind === ts.ScriptKind.JSX && scriptKind === ts.ScriptKind.JS)) {
+                    scriptKind = blockKind;
+                }
+                const start = block.loc.start.offset;
+                text = text.substring(0, start) + block.content + text.substring(start + block.content.length);
+            }
+
+            return { text, scriptKind, diagnostics };
+        },
+    }],
+]);
+
 class Workspace {
     constructor(rootPath) {
         this.rootPath = rootPath;
         this.files = new Map(); // canonicalKey -> { path, version }
+        this.embeddedSources = new Map(); // canonicalKey -> { version, text, scriptKind, diagnostics }
         // Per-file content hash of the facts last emitted for that file, keyed by
         // canonicalKey (so lookups survive Windows casing) with the verbatim bucket path
         // stored alongside. This is the sole record of "what the host currently holds per
@@ -218,26 +284,114 @@ class Workspace {
             getScriptFileNames: () => [...self.files.values()].map(f => f.path),
             getScriptVersion: fileName => String(self.files.get(canonicalKey(fileName))?.version ?? 0),
             getScriptSnapshot: fileName => {
-                try {
-                    return ts.ScriptSnapshot.fromString(fs.readFileSync(fileName, 'utf8'));
-                } catch {
-                    return undefined;
-                }
+                const source = self.getScriptSource(fileName);
+                return source ? ts.ScriptSnapshot.fromString(source.text) : undefined;
             },
+            getScriptKind: fileName => self.getScriptSource(fileName)?.scriptKind
+                ?? ts.getScriptKindFromFileName(fileName),
             getCurrentDirectory: () => self.rootPath,
             getCompilationSettings: () => self.compilerOptions,
             getDefaultLibFileName: options => ts.getDefaultLibFilePath(options),
-            fileExists: ts.sys.fileExists,
-            readFile: ts.sys.readFile,
+            fileExists: fileName => self.hasFile(fileName) || ts.sys.fileExists(fileName),
+            readFile: fileName => self.getScriptSource(fileName)?.text ?? ts.sys.readFile(fileName),
             readDirectory: ts.sys.readDirectory,
             directoryExists: ts.sys.directoryExists,
             getDirectories: ts.sys.getDirectories,
+            resolveModuleNames: (moduleNames, containingFile) => moduleNames.map(
+                moduleName => self.resolveModule(moduleName, containingFile)),
         };
         this.service = ts.createLanguageService(this.serviceHost, ts.createDocumentRegistry());
     }
 
     hasFile(p) {
         return this.files.has(canonicalKey(p));
+    }
+
+    getScriptSource(fileName) {
+        const key = canonicalKey(fileName);
+        const entry = this.files.get(key);
+        const adapter = embeddedLanguageAdapters.get(path.extname(fileName).toLowerCase());
+        if (!entry || !adapter) {
+            try {
+                const text = fs.readFileSync(fileName, 'utf8');
+                return { text, scriptKind: ts.getScriptKindFromFileName(fileName), diagnostics: [] };
+            } catch {
+                return undefined;
+            }
+        }
+
+        const cached = this.embeddedSources.get(key);
+        if (cached?.version === entry.version) return cached;
+        let physicalSource;
+        try {
+            physicalSource = fs.readFileSync(entry.path, 'utf8');
+            const transformed = adapter.transform(entry.path, physicalSource);
+            const result = { version: entry.version, ...transformed };
+            this.embeddedSources.set(key, result);
+            return result;
+        } catch (error) {
+            const result = {
+                version: entry.version,
+                text: physicalSource === undefined ? '' : sourceShapedWhitespace(physicalSource),
+                scriptKind: ts.ScriptKind.TS,
+                diagnostics: [{
+                    filePath: entry.path,
+                    severity: 'warning',
+                    message: `Embedded source extraction failed: ${error.message}`,
+                }],
+            };
+            this.embeddedSources.set(key, result);
+            return result;
+        }
+    }
+
+    getEmbeddedDiagnostics(fileName) {
+        return this.getScriptSource(fileName)?.diagnostics || [];
+    }
+
+    resolveModule(moduleName, containingFile) {
+        const resolved = ts.resolveModuleName(
+            moduleName, containingFile, this.compilerOptions, this.serviceHost).resolvedModule;
+        if (resolved) return resolved;
+
+        for (const candidate of this.embeddedModuleCandidates(moduleName, containingFile)) {
+            if (!this.hasFile(candidate)) continue;
+            const scriptKind = this.getScriptSource(candidate)?.scriptKind ?? ts.ScriptKind.TS;
+            const extension = scriptKind === ts.ScriptKind.JS ? ts.Extension.Js
+                : scriptKind === ts.ScriptKind.JSX ? ts.Extension.Jsx
+                    : scriptKind === ts.ScriptKind.TSX ? ts.Extension.Tsx
+                        : ts.Extension.Ts;
+            return { resolvedFileName: path.resolve(candidate), extension, isExternalLibraryImport: false };
+        }
+        return undefined;
+    }
+
+    embeddedModuleCandidates(moduleName, containingFile) {
+        const candidates = [];
+        const addCandidate = candidate => {
+            candidates.push(candidate);
+            if (!path.extname(candidate)) candidates.push(candidate + '.vue');
+        };
+        if (moduleName.startsWith('.') || path.isAbsolute(moduleName)) {
+            addCandidate(path.resolve(path.dirname(containingFile), moduleName));
+            return candidates;
+        }
+
+        const baseUrl = this.compilerOptions.baseUrl
+            ? path.resolve(this.rootPath, this.compilerOptions.baseUrl)
+            : this.rootPath;
+        for (const [pattern, replacements] of Object.entries(this.compilerOptions.paths || {})) {
+            const star = pattern.indexOf('*');
+            const prefix = star < 0 ? pattern : pattern.substring(0, star);
+            const suffix = star < 0 ? '' : pattern.substring(star + 1);
+            if (!moduleName.startsWith(prefix) || !moduleName.endsWith(suffix)) continue;
+            if (star < 0 && moduleName !== pattern) continue;
+            const matched = moduleName.substring(prefix.length, moduleName.length - suffix.length);
+            for (const replacement of replacements) {
+                addCandidate(path.resolve(baseUrl, replacement.replace('*', matched)));
+            }
+        }
+        return candidates;
     }
 
     /** Re-roots the workspace (and reloads tsconfig options) if the host opens it
@@ -265,7 +419,10 @@ class Workspace {
     syncApproved(approvedFiles) {
         const approved = new Set(approvedFiles.map(canonicalKey));
         for (const known of [...this.files.keys()]) {
-            if (!approved.has(known)) this.files.delete(known);
+            if (!approved.has(known)) {
+                this.files.delete(known);
+                this.embeddedSources.delete(known);
+            }
         }
         for (const file of approvedFiles) {
             if (!this.files.has(canonicalKey(file))) this.bump(file);
@@ -280,6 +437,9 @@ class Workspace {
             const existing = previous.get(key);
             this.files.set(key, { path: path.resolve(file), version: (existing?.version ?? 0) + 1 });
         }
+        for (const key of this.embeddedSources.keys()) {
+            if (!this.files.has(key)) this.embeddedSources.delete(key);
+        }
     }
 
     applyChanges(changes) {
@@ -288,9 +448,11 @@ class Workspace {
             touched.push(path.resolve(change.path));
             if (change.changeType === 'deleted') {
                 this.files.delete(canonicalKey(change.path));
+                this.embeddedSources.delete(canonicalKey(change.path));
             } else {
                 if (change.changeType === 'renamed' && change.oldPath) {
                     this.files.delete(canonicalKey(change.oldPath));
+                    this.embeddedSources.delete(canonicalKey(change.oldPath));
                     // The old path must be inside the delta's replacement scope or
                     // the renamed file's previous facts would linger in the graph.
                     touched.push(path.resolve(change.oldPath));
@@ -378,6 +540,8 @@ class Workspace {
 function loadCompilerOptions(rootPath) {
     const defaults = {
         allowJs: true,
+        allowNonTsExtensions: true,
+        allowArbitraryExtensions: true,
         checkJs: false,
         target: ts.ScriptTarget.Latest,
         module: ts.ModuleKind.ESNext,
@@ -905,6 +1069,7 @@ async function analyzeWorkspace(workspace, workspaceId, token, progressContext =
         throwIfCancelled(token);
         let result;
         try {
+            diagnostics.push(...workspace.getEmbeddedDiagnostics(file));
             result = analyzeFile(workspace, workspaceId, program, checker, file, diagnostics);
         } catch (error) {
             diagnostics.push({
@@ -1021,7 +1186,7 @@ handlers.set('initialize', async (_id, params) => {
         displayName: 'TypeScript',
         protocolVersion: PROTOCOL_VERSION,
         languages: ['typescript', 'javascript'],
-        extensions: ['.ts', '.tsx', '.js', '.jsx'],
+        extensions: SOURCE_EXTENSIONS,
         projectMarkers: ['tsconfig.json', 'package.json'],
         capabilities: {
             workspaceAnalysis: true,

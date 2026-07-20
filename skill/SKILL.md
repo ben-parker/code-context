@@ -1,12 +1,13 @@
 ---
 name: code-context
-description: Use BEFORE grep/Read whenever the question is about a symbol's relationships in C# or TypeScript/JavaScript code — who calls, implements, or depends on it, the blast radius of changing or deleting it, which tests cover it — or exact syntax structure. Grep finds text matches; this answers dependency questions from a live index in one query. ONLY .cs/.ts/.tsx/.js/.jsx files are indexed — for shell scripts, SQL, Python, YAML/config, docs, or any literal-string search, use grep instead.
+description: Use BEFORE grep/Read whenever the question is about a symbol's relationships in C# or TypeScript/JavaScript code — who calls, implements, or depends on it, the blast radius of changing or deleting it, which tests cover it — or exact syntax structure. Grep finds text matches; this answers dependency questions from a live index in one query. ONLY worker-supported source files are indexed — for shell scripts, SQL, Python, YAML/config, docs, or any literal-string search, use grep instead.
 ---
 
 # CodeContext
 
-**Scope:** the index contains only C# (`.cs`) and TypeScript/JavaScript (`.ts`,
-`.tsx`, `.js`, `.jsx`). Symbols defined anywhere else — shell scripts, SQL, Python,
+**Scope:** the bundled index contains C# (`.cs`) and TypeScript/JavaScript (`.ts`,
+`.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`, `.cjs`) plus JavaScript/TypeScript
+embedded in Vue SFCs (`.vue`). Symbols defined anywhere else — shell scripts, SQL, Python,
 YAML/JSON config, markdown, csproj/MSBuild — are absent by design, so a query for
 them proves nothing; use `rg`. Even in supported languages, `rg` remains the primary
 tool for literal strings, comments, configuration values, filenames, and docs.
