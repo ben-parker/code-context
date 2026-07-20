@@ -104,7 +104,7 @@
       "properties": {
         "workspaceId": { "type": "string" },
         "generation": { "type": "integer", "description": "Host-assigned, monotonically increasing per workspace. Deltas for a stale generation are discarded." },
-        "files": { "type": "array", "items": { "type": "string" } }
+        "files": { "type": "array", "uniqueItems": true, "items": { "type": "string" } }
       }
     },
     "indexWorkspaceResult": {
@@ -241,6 +241,20 @@
         "isLastForRequest": { "type": "boolean", "description": "True on the final chunk for this request. The host buffers chunks and atomically commits only after this marker." }
       }
     },
+    "analysisProgress": {
+      "type": "object",
+      "required": ["parserId", "parserVersion", "workspaceId", "generation", "requestId", "filesProcessed", "filesTotal", "currentFile"],
+      "properties": {
+        "parserId": { "type": "string" },
+        "parserVersion": { "type": "string" },
+        "workspaceId": { "type": "string" },
+        "generation": { "type": "integer" },
+        "requestId": { "type": "integer", "description": "Id of the workspace/index request whose analysis is in progress." },
+        "filesProcessed": { "type": "integer", "minimum": 0 },
+        "filesTotal": { "type": "integer", "minimum": 0 },
+        "currentFile": { "type": ["string", "null"], "description": "The most recently analyzed host-approved file, or null for an empty workspace." }
+      }
+    },
     "workerManifest": {
       "type": "object",
       "required": ["manifestVersion", "parserId", "displayName", "version", "command", "minProtocolVersion", "maxProtocolVersion"],
@@ -273,6 +287,7 @@
   },
   "notifications": {
     "$/cancel": { "direction": "host->worker", "params": { "$ref": "#/$defs/cancelParams" } },
-    "analysis/delta": { "direction": "worker->host", "params": { "$ref": "#/$defs/analysisDelta" } }
+    "analysis/delta": { "direction": "worker->host", "params": { "$ref": "#/$defs/analysisDelta" } },
+    "analysis/progress": { "direction": "worker->host", "params": { "$ref": "#/$defs/analysisProgress" } }
   }
 }

@@ -14,6 +14,7 @@ METHODS = {
     "get_native_syntax_tree": "syntaxTree/get",
     "cancel": "$/cancel",
     "analysis_delta": "analysis/delta",
+    "analysis_progress": "analysis/progress",
     "shutdown": "shutdown",
 }
 

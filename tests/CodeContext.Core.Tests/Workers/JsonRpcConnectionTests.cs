@@ -86,6 +86,40 @@ public class JsonRpcConnectionTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task ProgressNotification_RoundTripsTypedPayload()
+    {
+        var received = new TaskCompletionSource<AnalysisProgress>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        _host.AddNotificationHandler(ParserProtocolMethods.AnalysisProgressNotification, p =>
+        {
+            received.TrySetResult(
+                p!.Value.Deserialize(ParserProtocolJsonContext.Default.AnalysisProgress)!);
+            return Task.CompletedTask;
+        });
+        StartBoth();
+
+        var progress = new AnalysisProgress(
+            "fake", "1.0", "ws-1", 3, 7, 5, 10, "/repo/Five.fake");
+        await _worker.NotifyAsync(
+            ParserProtocolMethods.AnalysisProgressNotification, progress,
+            ParserProtocolJsonContext.Default.AnalysisProgress);
+
+        Assert.Equal(progress, await received.Task.WaitAsync(TimeSpan.FromSeconds(5)));
+    }
+
+    [Fact]
+    public void EmptyProgress_SerializesRequiredNullCurrentFile()
+    {
+        var progress = new AnalysisProgress("fake", "1.0", "ws-1", 1, 1, 0, 0, null);
+
+        var json = JsonSerializer.Serialize(
+            progress, ParserProtocolJsonContext.Default.AnalysisProgress);
+
+        using var document = JsonDocument.Parse(json);
+        Assert.Equal(JsonValueKind.Null, document.RootElement.GetProperty("currentFile").ValueKind);
+    }
+
+    [Fact]
     public async Task Cancel_ReachesHandlerToken_AndInvokerObservesCancellation()
     {
         var handlerSawCancel = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);

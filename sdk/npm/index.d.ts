@@ -7,6 +7,7 @@ export const METHODS: Readonly<{
     getNativeSyntaxTree: string;
     cancel: string;
     analysisDelta: string;
+    analysisProgress: string;
     shutdown: string;
 }>;
 

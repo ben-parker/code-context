@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Collections.Concurrent;
 using System.Text.Json;
+using System.Threading.Channels;
 using CodeContext.Parser.Protocol;
 using Microsoft.Extensions.Logging;
 
@@ -19,13 +20,86 @@ namespace CodeContext.Core.Workers;
 /// </summary>
 public sealed class ParserProcessSupervisor : IAsyncDisposable
 {
-    private sealed class ActiveMutation(string workspaceId, long generation)
+    private sealed class ActiveMutation
     {
-        public string WorkspaceId { get; } = workspaceId;
-        public long Generation { get; } = generation;
+        private readonly Channel<AnalysisProgress>? _progressUpdates;
+        private readonly Task _progressDispatch;
+
+        public ActiveMutation(
+            string workspaceId,
+            long generation,
+            HashSet<string>? expectedFiles = null,
+            Action<AnalysisProgress>? progressHandler = null,
+            Action<Exception>? progressErrorHandler = null)
+        {
+            WorkspaceId = workspaceId;
+            Generation = generation;
+            ExpectedFiles = expectedFiles;
+            _progressUpdates = progressHandler is null
+                ? null
+                : Channel.CreateBounded<AnalysisProgress>(new BoundedChannelOptions(16)
+                {
+                    SingleReader = true,
+                    SingleWriter = true,
+                    AllowSynchronousContinuations = false,
+                    FullMode = BoundedChannelFullMode.DropOldest,
+                });
+            _progressDispatch = progressHandler is null
+                ? Task.CompletedTask
+                : DispatchProgressAsync(progressHandler, progressErrorHandler);
+        }
+
+        public string WorkspaceId { get; }
+        public long Generation { get; }
+        public HashSet<string>? ExpectedFiles { get; }
+        public int LastFilesProcessed { get; set; } = -1;
+        public bool SawTerminalProgress { get; set; }
         public int DeltasReceived { get; set; }
         public bool SawLastDelta { get; set; }
+
+        public void PublishProgress(AnalysisProgress progress)
+        {
+            if (_progressUpdates is not null && !_progressUpdates.Writer.TryWrite(progress))
+            {
+                throw new InvalidOperationException("The progress observer queue is closed.");
+            }
+        }
+
+        public async Task CompleteProgressAsync()
+        {
+            if (_progressUpdates is null) return;
+            _progressUpdates.Writer.TryComplete();
+            await _progressDispatch.ConfigureAwait(false);
+        }
+
+        private async Task DispatchProgressAsync(
+            Action<AnalysisProgress> handler,
+            Action<Exception>? errorHandler)
+        {
+            await foreach (var progress in _progressUpdates!.Reader.ReadAllAsync())
+            {
+                try
+                {
+                    handler(progress);
+                }
+                catch (Exception ex)
+                {
+                    try
+                    {
+                        errorHandler?.Invoke(ex);
+                    }
+                    catch
+                    {
+                        // Diagnostics must never turn an observer failure into a
+                        // parser-protocol failure.
+                    }
+                }
+            }
+        }
     }
+
+    private static readonly StringComparer PathComparer =
+        OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
 
     private readonly WorkerLaunchSpec _spec;
     private readonly ParserWorkerOptions _options;
@@ -262,6 +336,7 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
             process.StandardOutput.BaseStream,
             process.StandardInput.BaseStream);
         connection.AddNotificationHandler(ParserProtocolMethods.AnalysisDeltaNotification, OnDeltaNotificationAsync);
+        connection.AddNotificationHandler(ParserProtocolMethods.AnalysisProgressNotification, OnProgressNotificationAsync);
         _connection = connection;
         _client = new ParserWorkerClient(connection);
 
@@ -399,6 +474,68 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
         active.SawLastDelta = delta.IsLastForRequest;
     }
 
+    private Task OnProgressNotificationAsync(JsonElement? paramsElement)
+    {
+        if (paramsElement is not { } element)
+        {
+            throw new ParserProtocolViolationException("analysis/progress notification carried no params.");
+        }
+        var progress = element.Deserialize(ParserProtocolJsonContext.Default.AnalysisProgress)
+            ?? throw new ParserProtocolViolationException("analysis/progress deserialized to null.");
+        var initialized = _initializeResult
+            ?? throw new ParserProtocolViolationException(
+                "Worker emitted analysis/progress before initialization completed.");
+        if (!string.Equals(progress.ParserId, initialized.ParserId, StringComparison.Ordinal)
+            || !string.Equals(progress.ParserVersion, initialized.ParserVersion, StringComparison.Ordinal))
+        {
+            throw new ParserProtocolViolationException(
+                $"analysis/progress identity '{progress.ParserId}' {progress.ParserVersion} does not match " +
+                $"the initialized worker '{initialized.ParserId}' {initialized.ParserVersion}.");
+        }
+        if (!_activeMutations.TryGetValue(progress.RequestId, out var active)
+            || active.ExpectedFiles is null)
+        {
+            throw new ParserProtocolViolationException(
+                $"analysis/progress references unknown, completed, or non-index request {progress.RequestId}.");
+        }
+        if (!string.Equals(progress.WorkspaceId, active.WorkspaceId, StringComparison.Ordinal)
+            || progress.Generation != active.Generation)
+        {
+            throw new ParserProtocolViolationException(
+                $"analysis/progress for request {progress.RequestId} reported workspace/generation " +
+                $"'{progress.WorkspaceId}'/{progress.Generation}, expected " +
+                $"'{active.WorkspaceId}'/{active.Generation}.");
+        }
+
+        var expectedTotal = active.ExpectedFiles.Count;
+        if (progress.FilesTotal != expectedTotal
+            || progress.FilesProcessed < 0
+            || progress.FilesProcessed > progress.FilesTotal
+            || progress.FilesProcessed < active.LastFilesProcessed)
+        {
+            throw new ParserProtocolViolationException(
+                $"analysis/progress for request {progress.RequestId} reported invalid or non-monotonic " +
+                $"count {progress.FilesProcessed}/{progress.FilesTotal}; expected total {expectedTotal}.");
+        }
+        if (progress.FilesProcessed > 0
+            && (string.IsNullOrEmpty(progress.CurrentFile)
+                || !active.ExpectedFiles.Contains(progress.CurrentFile)))
+        {
+            throw new ParserProtocolViolationException(
+                $"analysis/progress for request {progress.RequestId} named a file outside the approved set.");
+        }
+        if (expectedTotal == 0 && progress.CurrentFile is not null)
+        {
+            throw new ParserProtocolViolationException(
+                $"analysis/progress for empty request {progress.RequestId} must have a null currentFile.");
+        }
+
+        active.LastFilesProcessed = progress.FilesProcessed;
+        active.SawTerminalProgress = progress.FilesProcessed == progress.FilesTotal;
+        active.PublishProgress(progress);
+        return Task.CompletedTask;
+    }
+
     private static AnalysisDelta NormalizeSpans(AnalysisDelta delta, SpanSemantics semantics)
     {
         if (semantics.LineBase == 0 && semantics.ColumnBase == 0 && !semantics.EndIsInclusive)
@@ -522,8 +659,12 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
         return await RunRequestAsync(() => client.OpenWorkspaceAsync(parameters, ct)).ConfigureAwait(false);
     }
 
-    public async Task<IndexWorkspaceResult> IndexWorkspaceAsync(IndexWorkspaceParams parameters, CancellationToken ct = default)
+    public async Task<IndexWorkspaceResult> IndexWorkspaceAsync(
+        IndexWorkspaceParams parameters,
+        CancellationToken ct = default,
+        Action<AnalysisProgress>? progressHandler = null)
     {
+        var expectedFiles = CreateExpectedFileSet(parameters.Files);
         var client = await GetReadyClientAsync(ct).ConfigureAwait(false);
         Transition(ParserSessionState.Indexing, $"generation {parameters.Generation} ({parameters.Files.Count} files)");
         ActiveMutation? active = null;
@@ -533,7 +674,11 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
             var result = await RunRequestAsync(() => client.IndexWorkspaceAsync(parameters, ct, id =>
             {
                 requestId = id;
-                active = new ActiveMutation(parameters.WorkspaceId, parameters.Generation);
+                active = new ActiveMutation(
+                    parameters.WorkspaceId, parameters.Generation, expectedFiles, progressHandler,
+                    ex => _logger.LogWarning(ex,
+                        "Progress observer failed for parser '{ParserId}', generation {Generation}.",
+                        _spec.ParserId, parameters.Generation));
                 if (!_activeMutations.TryAdd(id, active))
                 {
                     throw new InvalidOperationException($"Request id {id} is already active.");
@@ -548,8 +693,24 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
         }
         finally
         {
+            if (active is not null) await active.CompleteProgressAsync().ConfigureAwait(false);
             if (requestId != 0) _activeMutations.TryRemove(requestId, out _);
         }
+    }
+
+    private static HashSet<string> CreateExpectedFileSet(IReadOnlyList<string> files)
+    {
+        var unique = new HashSet<string>(PathComparer);
+        foreach (var file in files)
+        {
+            if (!unique.Add(file))
+            {
+                throw new ArgumentException(
+                    $"workspace/index files must be unique; duplicate path: '{file}'.",
+                    nameof(files));
+            }
+        }
+        return unique;
     }
 
     public async Task<ApplyChangesResult> ApplyChangesAsync(ApplyChangesParams parameters, CancellationToken ct = default)
@@ -631,6 +792,10 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
         else if (!active.SawLastDelta)
         {
             failure = $"{method} returned before marking its final analysis/delta chunk.";
+        }
+        else if (active.ExpectedFiles is not null && !active.SawTerminalProgress)
+        {
+            failure = $"{method} returned before reporting terminal analysis/progress.";
         }
 
         if (failure is not null)

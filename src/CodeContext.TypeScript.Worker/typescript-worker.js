@@ -883,7 +883,7 @@ function computeBucketHash(bucket) {
  * duplicate-id canonicalization so the deduped buckets feed BOTH the flat whole-workspace
  * emission and the per-file hashes by construction. Returns { buckets, diagnostics }.
  */
-async function analyzeWorkspace(workspace, workspaceId, token) {
+async function analyzeWorkspace(workspace, workspaceId, token, progressContext = null) {
     const program = workspace.service.getProgram();
     const checker = program.getTypeChecker();
 
@@ -893,7 +893,15 @@ async function analyzeWorkspace(workspace, workspaceId, token) {
     }
 
     const rawBuckets = [];
-    for (const file of workspace.filePaths()) {
+    const files = workspace.filePaths();
+    const total = files.length;
+    const progressInterval = Math.max(1, Math.ceil(total / 100));
+    if (total === 0 && progressContext) {
+        await emitAnalysisProgress(progressContext.requestId, workspaceId,
+            progressContext.generation, 0, 0, null, token);
+    }
+    let processed = 0;
+    for (const file of files) {
         throwIfCancelled(token);
         let result;
         try {
@@ -909,6 +917,11 @@ async function analyzeWorkspace(workspace, workspaceId, token) {
         // bucket.path is the verbatim filePaths() entry — the same string analyzeFile
         // stamped on each node's filePath and the same string ReplacesFiles must carry.
         rawBuckets.push({ path: file, nodes: result.nodes, edges: result.edges });
+        processed++;
+        if (progressContext && (processed === total || processed % progressInterval === 0)) {
+            await emitAnalysisProgress(progressContext.requestId, workspaceId,
+                progressContext.generation, processed, total, file, token);
+        }
         await breathe(); // let $/cancel land between files
     }
 
@@ -922,6 +935,21 @@ async function analyzeWorkspace(workspace, workspaceId, token) {
     }));
 
     return { buckets, diagnostics };
+}
+
+async function emitAnalysisProgress(requestId, workspaceId, generation,
+    filesProcessed, filesTotal, currentFile, token) {
+    throwIfCancelled(token);
+    await notify('analysis/progress', {
+        parserId: PARSER_ID,
+        parserVersion: PARSER_VERSION,
+        workspaceId,
+        generation,
+        requestId,
+        filesProcessed,
+        filesTotal,
+        currentFile,
+    });
 }
 
 /**
@@ -1022,7 +1050,8 @@ handlers.set('workspace/index', async (id, params, token) => {
     // Whole-workspace (index/reset) path: walk everything, seed the per-file hash
     // baseline, and replace the whole workspace (replacesWorkspace:true, empty
     // replacesFiles). The deduped buckets feed both the flat emission and the seed.
-    const { buckets, diagnostics } = await analyzeWorkspace(workspace, index.workspaceId, token);
+    const { buckets, diagnostics } = await analyzeWorkspace(
+        workspace, index.workspaceId, token, { requestId: id, generation: index.generation });
     const nodes = [];
     const edges = [];
     for (const bucket of buckets) {

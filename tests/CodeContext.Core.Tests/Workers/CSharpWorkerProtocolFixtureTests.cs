@@ -2,6 +2,7 @@ using CodeContext.Core.Repositories;
 using CodeContext.Core.Repositories.InMemory;
 using CodeContext.Core.Services;
 using CodeContext.Core.Workers;
+using CodeContext.Parser.Protocol;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace CodeContext.Core.Tests.Workers;
@@ -100,6 +101,25 @@ namespace Fixture
             Assert.Equal("csharp", n.Language);
             Assert.Equal("csharp", n.Metadata?["parserId"]);
         });
+    }
+
+    [Fact]
+    public async Task InitialIndex_UnreadableApprovedFile_ReportsProgressAndCommitsReadableFiles()
+    {
+        var readable = await WriteFileAsync(
+            "Readable.cs", "namespace Fixture { public class Readable { } }");
+        var missing = Path.Combine(_tempDir, "Disappeared.cs");
+        var progress = new List<AnalysisProgress>();
+
+        await _pipeline.WorkerService.IndexWorkspaceAsync(
+            "csharp", [readable, missing], CancellationToken.None,
+            update => progress.Add(update));
+
+        var terminal = Assert.Single(progress, update => update.FilesProcessed == 2);
+        Assert.Equal(2, terminal.FilesTotal);
+        Assert.Equal(missing, terminal.CurrentFile);
+        var nodes = await _pipeline.RepositoryFactory.CreateNodeRepository().GetAllAsync();
+        Assert.Contains(nodes, node => node.Name == "Readable");
     }
 
     [Fact]

@@ -37,6 +37,9 @@ public static class ParserProtocolMethods
     /// <summary>Notification (worker → host): a batch of normalized graph facts.</summary>
     public const string AnalysisDeltaNotification = "analysis/delta";
 
+    /// <summary>Notification (worker → host): live file-analysis progress for workspace/index.</summary>
+    public const string AnalysisProgressNotification = "analysis/progress";
+
     /// <summary>Optional capability: language-native syntax tree for one file.</summary>
     public const string GetNativeSyntaxTree = "syntaxTree/get";
 }

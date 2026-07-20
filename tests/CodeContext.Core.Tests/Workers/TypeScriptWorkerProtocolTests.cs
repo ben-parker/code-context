@@ -64,6 +64,20 @@ public class TypeScriptWorkerProtocolTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task InitialScan_ReportsTypeScriptFileProgressBeforeCompletion()
+    {
+        await WriteFileAsync("one.ts", "export class One {}\n");
+        await WriteFileAsync("two.ts", "export class Two {}\n");
+        var reporter = new RecordingProgressReporter();
+
+        await _pipeline.GraphUpdateService.PerformInitialScanAsync(
+            _tempDir, reporter, CancellationToken.None);
+
+        Assert.Contains((1, 2), reporter.Progress);
+        Assert.Equal((2, 2), reporter.Progress[^1]);
+    }
+
+    [Fact]
     public async Task MixedCSharpAndTypeScriptFixture_ReachesReadyWithBothLanguagesIndexed()
     {
         await WriteFileAsync("Service.cs", @"
@@ -80,6 +94,17 @@ namespace Mixed { public class Service { public string Run() => ""ok""; } }");
         var sessions = _pipeline.SessionRegistry.GetSnapshots();
         Assert.Equal(ParserSessionState.Ready, sessions.Single(s => s.ParserId == "csharp").State);
         Assert.Equal(ParserSessionState.Ready, sessions.Single(s => s.ParserId == "typescript").State);
+    }
+
+    private sealed class RecordingProgressReporter : IScanProgressReporter
+    {
+        public List<(int Processed, int Total)> Progress { get; } = [];
+
+        public void ReportProgress(int processed, int total, string currentFile)
+            => Progress.Add((processed, total));
+
+        public void ReportComplete(int totalProcessed, TimeSpan elapsed) { }
+        public void ReportError(string filePath, string error) { }
     }
 
     [Fact]

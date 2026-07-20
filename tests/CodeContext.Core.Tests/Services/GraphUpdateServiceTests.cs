@@ -236,8 +236,24 @@ namespace TestNamespace
             await _service.PerformInitialScanAsync(_tempDir, reporter, CancellationToken.None);
 
             Assert.True(reporter.Completed);
+            Assert.Equal((0, 2), reporter.Progress[0]);
             Assert.Equal(2, reporter.LastTotal);
             Assert.Equal(2, reporter.LastProcessed);
+        }
+
+        [Fact]
+        public async Task PerformResumableScanAsync_ReportsWorkloadBeforeCompletedFiles()
+        {
+            await File.WriteAllTextAsync(Path.Combine(_tempDir, "A.cs"), "public class A { }");
+            await File.WriteAllTextAsync(Path.Combine(_tempDir, "B.cs"), "public class B { }");
+            var reporter = new RecordingProgressReporter();
+
+            await _service.PerformResumableScanAsync(_tempDir, reporter, CancellationToken.None);
+
+            Assert.True(reporter.Completed);
+            Assert.Equal((0, 2), reporter.Progress[0]);
+            Assert.Contains((1, 2), reporter.Progress);
+            Assert.Equal((2, 2), reporter.Progress[^1]);
         }
 
         [Fact]
@@ -287,9 +303,11 @@ namespace TestNamespace
             public int LastProcessed;
             public int LastTotal;
             public bool Completed;
+            public List<(int Processed, int Total)> Progress { get; } = [];
 
             public void ReportProgress(int processed, int total, string currentFile)
             {
+                Progress.Add((processed, total));
                 LastProcessed = processed;
                 LastTotal = total;
             }

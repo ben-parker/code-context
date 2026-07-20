@@ -9,6 +9,7 @@ const METHODS = Object.freeze({
     getNativeSyntaxTree: 'syntaxTree/get',
     cancel: '$/cancel',
     analysisDelta: 'analysis/delta',
+    analysisProgress: 'analysis/progress',
     shutdown: 'shutdown',
 });
 

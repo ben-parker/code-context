@@ -25,6 +25,7 @@ namespace CodeContext.Parser.Protocol;
 [JsonSerializable(typeof(NativeSyntaxTreeParams))]
 [JsonSerializable(typeof(NativeSyntaxTreeResult))]
 [JsonSerializable(typeof(AnalysisDelta))]
+[JsonSerializable(typeof(AnalysisProgress))]
 [JsonSerializable(typeof(ProtocolNode))]
 [JsonSerializable(typeof(ProtocolEdge))]
 [JsonSerializable(typeof(UnresolvedReference))]

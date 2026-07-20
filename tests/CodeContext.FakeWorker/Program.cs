@@ -13,6 +13,11 @@ using CodeContext.Parser.Protocol;
 //   crash-once        crash-on-index only while the --marker file does not exist yet
 //   stderr-flood      writes 5000 stderr lines during startup, then behaves normally
 //   slow-index        workspace/index takes 30s unless cancelled via $/cancel
+//   missing-progress  workspace/index omits its required terminal progress notification
+//   invalid-progress-total reports a total different from the approved file count
+//   regressing-progress reports a smaller processed count after a larger one
+//   invalid-progress-file reports a current file outside the approved set
+//   invalid-progress-request reports progress for an unknown request id
 //   native-advertised-missing advertises native trees but omits the handler
 
 var behavior = GetOption(args, "--behavior") ?? "normal";
@@ -132,6 +137,25 @@ internal sealed class WorkerState(string behavior, string? markerPath)
             await Task.Delay(TimeSpan.FromSeconds(30), ct);
         }
 
+        if (behavior != "missing-progress")
+        {
+            if (behavior == "regressing-progress" && index.Files.Count > 0)
+            {
+                await SendProgressAsync(1, index.Files.Count, index.Files[0]);
+                await SendProgressAsync(0, index.Files.Count, null);
+            }
+            else
+            {
+                var total = behavior == "invalid-progress-total"
+                    ? index.Files.Count + 1
+                    : index.Files.Count;
+                var currentFile = behavior == "invalid-progress-file"
+                    ? Path.Combine(Path.GetTempPath(), "outside.fake")
+                    : index.Files.LastOrDefault();
+                await SendProgressAsync(index.Files.Count, total, currentFile);
+            }
+        }
+
         var delta = BuildDelta(index.WorkspaceId, index.Generation, requestId,
             replacesWorkspace: true, index.Files);
         await connection.NotifyAsync(
@@ -140,6 +164,20 @@ internal sealed class WorkerState(string behavior, string? markerPath)
 
         var result = new IndexWorkspaceResult(index.WorkspaceId, index.Generation, DeltasEmitted: 1, Complete: true);
         return JsonSerializer.SerializeToElement(result, ParserProtocolJsonContext.Default.IndexWorkspaceResult);
+
+        Task SendProgressAsync(int processed, int total, string? currentFile)
+        {
+            var progress = new AnalysisProgress(
+                ParserId, ParserVersion, index.WorkspaceId, index.Generation, requestId,
+                processed, total, currentFile);
+            var progressRequestId = behavior == "invalid-progress-request"
+                ? requestId + 999
+                : requestId;
+            progress = progress with { RequestId = progressRequestId };
+            return connection.NotifyAsync(
+                ParserProtocolMethods.AnalysisProgressNotification, progress,
+                ParserProtocolJsonContext.Default.AnalysisProgress, ct);
+        }
     }
 
     public async Task<JsonElement?> HandleApplyChangesAsync(

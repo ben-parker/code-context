@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { MessageDecoder, encodeMessage } = require('..');
+const { METHODS, MessageDecoder, encodeMessage } = require('..');
 
 test('decodes fragmented and adjacent frames', () => {
     const first = encodeMessage({ jsonrpc: '2.0', id: 1, result: 'héllo' });
@@ -15,4 +15,8 @@ test('decodes fragmented and adjacent frames', () => {
         { jsonrpc: '2.0', id: 1, result: 'héllo' },
         { jsonrpc: '2.0', method: 'shutdown' },
     ]);
+});
+
+test('exports analysis progress notification method', () => {
+    assert.equal(METHODS.analysisProgress, 'analysis/progress');
 });
