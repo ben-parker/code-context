@@ -49,7 +49,7 @@ public class TypeScriptWorkerProtocolTests : IAsyncLifetime
             MinProtocolVersion: ParserProtocol.Version,
             MaxProtocolVersion: ParserProtocol.Version,
             Languages: ["typescript", "javascript"],
-            Extensions: [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"],
+            Extensions: [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".vue"],
             ProjectMarkers: ["tsconfig.json", "package.json"]);
         var spec = new WorkerLaunchSpec(
             "typescript", "TypeScript", "node", ["typescript-worker.js"], WorkingDirectory: workerDir);
@@ -79,6 +79,105 @@ public class TypeScriptWorkerProtocolTests : IAsyncLifetime
         Assert.Contains(nodes, node =>
             node.FilePath?.EndsWith(fileName, StringComparison.OrdinalIgnoreCase) == true
             && node.Name == "NativeModule");
+    }
+
+    [Fact]
+    public async Task VueScriptAndScriptSetup_AreIndexedAtOriginalSourceLocations()
+    {
+        await WriteFileAsync("Component.vue", """
+            <template>
+              <button @click="increment">{{ count }}</button>
+            </template>
+            <script setup lang="ts">
+            const count: number = 0;
+            function increment(): number { return count + 1; }
+            </script>
+            <style scoped>button { color: red; }</style>
+            """);
+
+        await _pipeline.GraphUpdateService.PerformInitialScanAsync(
+            _tempDir, null, CancellationToken.None);
+
+        var nodes = await _pipeline.RepositoryFactory.CreateNodeRepository().GetAllAsync();
+        var increment = Assert.Single(nodes, node =>
+            node.FilePath?.EndsWith("Component.vue", StringComparison.OrdinalIgnoreCase) == true
+            && node.Name == "increment");
+        // Protocol spans are normalized to the host's zero-based representation.
+        Assert.Equal(5, increment.StartLine);
+        Assert.DoesNotContain(nodes, node => node.Name is "button" or "style");
+    }
+
+    [Fact]
+    public async Task VueImports_ParticipateInCrossFileSemanticRelationships()
+    {
+        await WriteFileAsync("Base.vue", """
+            <script lang="ts">
+            export class Base {
+              greet(): string { return 'hello'; }
+            }
+            </script>
+            """);
+        await WriteFileAsync("Derived.vue", """
+            <template><div /></template>
+            <script lang="ts">
+            import { Base } from './Base.vue';
+            export class Derived extends Base {
+              run(): string { return this.greet(); }
+            }
+            </script>
+            """);
+
+        await _pipeline.GraphUpdateService.PerformInitialScanAsync(
+            _tempDir, null, CancellationToken.None);
+
+        var edges = await _pipeline.RepositoryFactory.CreateEdgeRepository().GetAllAsync();
+        Assert.Contains(edges, edge =>
+            edge.Type == "EXTENDS"
+            && edge.SourceId == "typescript:default:Derived.vue#Derived"
+            && edge.TargetId == "typescript:default:Base.vue#Base");
+        Assert.Contains(edges, edge =>
+            edge.Type == "CALLS"
+            && edge.SourceId == "typescript:default:Derived.vue#Derived.run()"
+            && edge.TargetId == "typescript:default:Base.vue#Base.greet()");
+    }
+
+    [Fact]
+    public async Task VueScriptEdit_ReplacesEmbeddedFactsIncrementally()
+    {
+        var component = await WriteFileAsync("Editable.vue", """
+            <template><div /></template>
+            <script lang="ts">export class Before {}</script>
+            """);
+        await _pipeline.GraphUpdateService.PerformInitialScanAsync(
+            _tempDir, null, CancellationToken.None);
+
+        await File.WriteAllTextAsync(component, """
+            <template><div /></template>
+            <script lang="ts">export class After {}</script>
+            """);
+        await _pipeline.GraphUpdateService.ProcessFileChangeAsync(
+            component, FileChangeType.Changed, CancellationToken.None);
+
+        var nodes = await _pipeline.RepositoryFactory.CreateNodeRepository().GetAllAsync();
+        Assert.Contains(nodes, node => node.Id == "typescript:default:Editable.vue#After");
+        Assert.DoesNotContain(nodes, node => node.Id == "typescript:default:Editable.vue#Before");
+    }
+
+    [Fact]
+    public async Task MalformedVueSfc_ReportsFrameworkDiagnostic()
+    {
+        await using var pipeline = RecordingPipeline(out var recorder);
+        await WriteFileAsync("Broken.vue", """
+            <template><div></template>
+            <script setup lang="ts">const value = 1;</script>
+            """);
+
+        await pipeline.GraphUpdateService.PerformInitialScanAsync(
+            _tempDir, null, CancellationToken.None);
+
+        Assert.Contains(
+            recorder.Deltas.SelectMany(delta => delta.Diagnostics ?? []),
+            diagnostic => diagnostic.Message.Contains("Vue SFC parse error", StringComparison.Ordinal));
     }
 
     [Fact]

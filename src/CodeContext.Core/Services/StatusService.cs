@@ -336,6 +336,7 @@ public class StatusService : IStatusService
             ".cts" => "TypeScript",
             ".jsx" => "JavaScript",
             ".tsx" => "TypeScript",
+            ".vue" => "Vue",
             ".py" => "Python",
             ".pyw" => "Python",
             _ => ""

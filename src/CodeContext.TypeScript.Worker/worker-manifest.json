@@ -8,6 +8,6 @@
   "minProtocolVersion": 1,
   "maxProtocolVersion": 1,
   "languages": ["typescript", "javascript"],
-  "extensions": [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"],
+  "extensions": [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".vue"],
   "projectMarkers": ["tsconfig.json", "package.json"]
 }

@@ -6,7 +6,8 @@ description: Use BEFORE grep/Read whenever the question is about a symbol's rela
 # CodeContext
 
 **Scope:** the bundled index contains C# (`.cs`) and TypeScript/JavaScript (`.ts`,
-`.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`, `.cjs`). Symbols defined anywhere else — shell scripts, SQL, Python,
+`.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`, `.cjs`) plus JavaScript/TypeScript
+embedded in Vue SFCs (`.vue`). Symbols defined anywhere else — shell scripts, SQL, Python,
 YAML/JSON config, markdown, csproj/MSBuild — are absent by design, so a query for
 them proves nothing; use `rg`. Even in supported languages, `rg` remains the primary
 tool for literal strings, comments, configuration values, filenames, and docs.
