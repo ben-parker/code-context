@@ -52,12 +52,25 @@ draw_skill_menu() {
 }
 
 select_skill_targets() {
-  skill_shared=true
+  # Pre-select targets that already have a code-context skill installed, so an upgrade
+  # refreshes exactly what's there instead of re-asking about every possible agent. Only
+  # when nothing is detected anywhere do we fall back to the original default (shared only).
+  skill_shared=false
   skill_claude=false
   skill_devin=false
   skill_codex=false
   skill_cursor=false
   skill_gemini=false
+  any_existing_skill=false
+  target_exists "$HOME/.agents/skills/code-context" && { skill_shared=true; any_existing_skill=true; }
+  target_exists "$HOME/.claude/skills/code-context" && { skill_claude=true; any_existing_skill=true; }
+  target_exists "$HOME/.codeium/windsurf/skills/code-context" && { skill_devin=true; any_existing_skill=true; }
+  target_exists "$codex_home/skills/code-context" && { skill_codex=true; any_existing_skill=true; }
+  target_exists "$HOME/.cursor/skills/code-context" && { skill_cursor=true; any_existing_skill=true; }
+  target_exists "$HOME/.gemini/skills/code-context" && { skill_gemini=true; any_existing_skill=true; }
+  if [ "$any_existing_skill" = false ]; then
+    skill_shared=true
+  fi
   menu_cursor=0
   menu_drawn=false
 
@@ -292,6 +305,7 @@ unzip -oq "$tmp_zip" -d "$stage_dir"
 [ -f "$stage_dir/skill/references/operations.md" ] || { echo "Release is missing skill/references/operations.md." >&2; exit 1; }
 
 # Gather every interactive choice before changing the installed release or launcher.
+codex_home=${CODEX_HOME:-"$HOME/.codex"}
 select_skill_targets
 selected_skill_count=0
 skill_action_shared=none
@@ -300,7 +314,6 @@ skill_action_devin=none
 skill_action_codex=none
 skill_action_cursor=none
 skill_action_gemini=none
-codex_home=${CODEX_HOME:-"$HOME/.codex"}
 if [ "$skills_interactive" = true ]; then
   plan_skill_target shared 'Shared agents' "$HOME/.agents/skills/code-context" "$skill_shared"
   plan_skill_target claude 'Claude Code' "$HOME/.claude/skills/code-context" "$skill_claude"

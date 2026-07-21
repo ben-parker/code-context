@@ -179,13 +179,30 @@ Write-Host "Downloading $($asset.name) ($($release.tag_name))..."
 $temporary = Join-Path ([System.IO.Path]::GetTempPath()) ("codecontext-install-" + [Guid]::NewGuid().ToString('N'))
 $codexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $HOME '.codex' }
 $skillTargets = @(
-    [pscustomobject]@{ Label = 'Shared agents'; Hint = '~/.agents/skills'; Path = (Join-Path $HOME '.agents/skills/code-context'); Selected = $true; Action = 'None' },
+    [pscustomobject]@{ Label = 'Shared agents'; Hint = '~/.agents/skills'; Path = (Join-Path $HOME '.agents/skills/code-context'); Selected = $false; Action = 'None' },
     [pscustomobject]@{ Label = 'Claude Code'; Hint = '~/.claude/skills'; Path = (Join-Path $HOME '.claude/skills/code-context'); Selected = $false; Action = 'None' },
     [pscustomobject]@{ Label = 'Devin Desktop'; Hint = '~/.codeium/windsurf/skills'; Path = (Join-Path $HOME '.codeium/windsurf/skills/code-context'); Selected = $false; Action = 'None' },
     [pscustomobject]@{ Label = 'Codex (legacy)'; Hint = '~/.codex/skills'; Path = (Join-Path $codexHome 'skills/code-context'); Selected = $false; Action = 'None' },
     [pscustomobject]@{ Label = 'Cursor'; Hint = '~/.cursor/skills'; Path = (Join-Path $HOME '.cursor/skills/code-context'); Selected = $false; Action = 'None' },
     [pscustomobject]@{ Label = 'Gemini CLI'; Hint = '~/.gemini/skills'; Path = (Join-Path $HOME '.gemini/skills/code-context'); Selected = $false; Action = 'None' }
 )
+
+# Pre-select targets that already have a code-context skill installed, so an upgrade
+# refreshes exactly what's there instead of re-asking about every possible agent. Only
+# when nothing is detected anywhere do we fall back to the original default (shared only).
+$anyExistingSkill = $false
+foreach ($target in $skillTargets) {
+    if (Test-PathEntry $target.Path) {
+        $target.Selected = $true
+        $anyExistingSkill = $true
+    }
+}
+if (-not $anyExistingSkill) {
+    foreach ($target in $skillTargets) {
+        if ($target.Label -eq 'Shared agents') { $target.Selected = $true }
+    }
+}
+
 $skillsInteractive = $false
 $cancelled = $false
 try {
