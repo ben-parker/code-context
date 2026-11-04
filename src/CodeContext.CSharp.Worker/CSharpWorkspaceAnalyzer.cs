@@ -414,13 +414,35 @@ public sealed class CSharpWorkspaceAnalyzer
         var nodeOwner = ComputeOwners(rawBuckets, static b => b.Nodes, static n => n.Id);
         var edgeOwner = ComputeOwners(rawBuckets, static b => b.Edges, static e => e.Id);
 
+        // A bucket must hold exactly what the host replaces as one unit, and the host
+        // removes an edge along with its source node. So an edge belongs to the file that
+        // owns its source node, not the file whose walk found it: `partial class C` in two
+        // files has one node in one file, yet both walks emit edges from it. Bucketing
+        // those under the file that found them would let an edit of the node's file lose
+        // the other file's edges, and an edit of the other file leave its old edges behind.
+        // With this rule any change to such an edge flips the owning file's hash, so both
+        // directions re-emit through the ordinary dirty diff.
+        var edgesByFile = new Dictionary<string, List<ProtocolEdge>>(StringComparer.Ordinal);
+        foreach (var raw in rawBuckets)
+        {
+            foreach (var edge in FilterOwned(raw.Edges, static e => e.Id, edgeOwner, raw.FilePath))
+            {
+                var file = nodeOwner.GetValueOrDefault(edge.SourceId, raw.FilePath);
+                if (!edgesByFile.TryGetValue(file, out var fileEdges))
+                {
+                    edgesByFile[file] = fileEdges = [];
+                }
+                fileEdges.Add(edge);
+            }
+        }
+
         var buckets = new List<FileFacts>(rawBuckets.Count);
         var nodes = new List<ProtocolNode>();
         var edges = new List<ProtocolEdge>();
         foreach (var raw in rawBuckets)
         {
             var keptNodes = FilterOwned(raw.Nodes, static n => n.Id, nodeOwner, raw.FilePath);
-            var keptEdges = FilterOwned(raw.Edges, static e => e.Id, edgeOwner, raw.FilePath);
+            var keptEdges = edgesByFile.GetValueOrDefault(raw.FilePath) ?? [];
             nodes.AddRange(keptNodes);
             edges.AddRange(keptEdges);
             buckets.Add(new FileFacts(raw.FilePath, keptNodes, keptEdges));
@@ -490,9 +512,10 @@ public sealed class CSharpWorkspaceAnalyzer
         return kept.Count == items.Count ? items : kept;
     }
 
-    /// <summary>The nodes and edges a single walked file contributed. <see cref="FilePath"/>
-    /// is the verbatim <c>tree.FilePath</c> string; the bucket's node <c>FilePath</c>s and
-    /// the <c>ReplacesFiles</c> entries derived from it are all this same string.</summary>
+    /// <summary>The facts the host holds under one file: the nodes it owns and the edges
+    /// sourced at those nodes, wherever they were found. <see cref="FilePath"/> is the
+    /// verbatim <c>tree.FilePath</c> string; the bucket's node <c>FilePath</c>s and the
+    /// <c>ReplacesFiles</c> entries derived from it are all this same string.</summary>
     public sealed record FileFacts(
         string FilePath,
         List<ProtocolNode> Nodes,
@@ -502,7 +525,10 @@ public sealed class CSharpWorkspaceAnalyzer
         List<ProtocolNode> Nodes,
         List<ProtocolEdge> Edges,
         List<ProtocolDiagnostic> Diagnostics,
-        IReadOnlyList<FileFacts> Buckets);
+        IReadOnlyList<FileFacts> Buckets)
+    {
+        public IReadOnlySet<string> NodeIds { get; } = Nodes.Select(n => n.Id).ToHashSet(StringComparer.Ordinal);
+    }
 
     /// <summary>
     /// The scoped emission for one incremental apply: the facts of the DIRTY buckets only
@@ -552,7 +578,7 @@ public sealed class CSharpWorkspaceAnalyzer
         _factHashes.Clear();
         foreach (var bucket in analysis.Buckets)
         {
-            _factHashes[bucket.FilePath] = ComputeBucketHash(bucket);
+            _factHashes[bucket.FilePath] = ComputeBucketHash(bucket, analysis.NodeIds);
         }
     }
 
@@ -578,7 +604,7 @@ public sealed class CSharpWorkspaceAnalyzer
         foreach (var bucket in analysis.Buckets)
         {
             currentPaths.Add(bucket.FilePath);
-            var hash = ComputeBucketHash(bucket);
+            var hash = ComputeBucketHash(bucket, analysis.NodeIds);
             pendingHashes[bucket.FilePath] = hash;
             if (!_factHashes.TryGetValue(bucket.FilePath, out var stored)
                 || !stored.AsSpan().SequenceEqual(hash))
@@ -617,9 +643,12 @@ public sealed class CSharpWorkspaceAnalyzer
     /// sorted by Id and edges by Id first (so the hash is independent of walk order), then
     /// every emission-affecting field is fed to SHA-256 in a fixed order with explicit
     /// length/null framing, so no two distinct fact sets can collide by field-boundary
-    /// ambiguity.
+    /// ambiguity. Whether each edge's target has a node counts as well: the host drops an
+    /// edge when its target node goes, yet the walk can keep emitting the same edge, as it
+    /// does for an unresolved base type in the global namespace. Re-emitting it is what
+    /// keeps it, and what brings it back if the host dropped it.
     /// </summary>
-    private static byte[] ComputeBucketHash(FileFacts bucket)
+    private static byte[] ComputeBucketHash(FileFacts bucket, IReadOnlySet<string> nodeIds)
     {
         using var hasher = new FactHasher();
         hasher.Int(bucket.Nodes.Count);
@@ -651,6 +680,7 @@ public sealed class CSharpWorkspaceAnalyzer
             hasher.Str(edge.TargetId);
             hasher.Str(edge.Kind);
             hasher.Metadata(edge.Metadata);
+            hasher.Int(nodeIds.Contains(edge.TargetId) ? 1 : 0);
         }
         return hasher.GetHashAndReset();
     }

@@ -197,12 +197,70 @@ public sealed class CSharpWorkerIncrementalAnalyzerTests : IDisposable
         File.WriteAllText(b, "namespace Fx { public partial class Foo { public void FromBRenamed() { } } }");
         var emission = Apply(analyzer, new FileChangeDto(b, FileChangeKinds.Changed));
 
-        // B's member facts changed so B is dirty, but the type node stays owned by A —
-        // the emission must not carry a competing copy of the id that would flip the
+        // B's member facts changed so B is dirty, and the HAS_METHOD edge from Foo changed
+        // with them, which dirties A, where that edge lives. The type node stays owned by
+        // A: the emission must not carry a competing copy of the id that would flip the
         // stored node's FilePath to B.
         var fooId = CSharpWorkspaceAnalyzer.IdPrefix + "test:Fx.Foo";
+        Assert.Contains(a, emission.ReplacesFiles);
         Assert.Contains(b, emission.ReplacesFiles);
-        Assert.DoesNotContain(emission.Nodes, n => n.Id == fooId);
+        Assert.Equal(a, Assert.Single(emission.Nodes, n => n.Id == fooId).FilePath);
+    }
+
+    [Fact]
+    public void EdgeFromASplitSymbol_LivesWithItsSourceNode()
+    {
+        var analyzer = new CSharpWorkspaceAnalyzer("test");
+        var a = Write("PartA.cs", "namespace Fx { public partial class Foo { partial void Hook(); } }");
+        var b = Write("PartB.cs", """
+            namespace Fx
+            {
+                public class Dep { public static void Run() { } }
+                public partial class Foo
+                {
+                    private Dep _d;
+                    public void FromB() { Dep.Run(); }
+                    partial void Hook() { Dep.Run(); }
+                }
+            }
+            """);
+        analyzer.ReplaceFiles([a, b], CancellationToken.None);
+
+        var analysis = analyzer.Analyze(CancellationToken.None);
+
+        // The host removes an edge with its source node, so that node's file holds the
+        // edge even though only PartB.cs mentions Dep or FromB. An edge sourced at a node
+        // PartB.cs owns stays in PartB.cs.
+        var prefix = CSharpWorkspaceAnalyzer.IdPrefix + "test:";
+        var bucketA = analysis.Buckets.Single(bucket => bucket.FilePath == a);
+        var bucketB = analysis.Buckets.Single(bucket => bucket.FilePath == b);
+        Assert.Contains(bucketA.Edges, e => e.SourceId == prefix + "Fx.Foo" && e.TargetId == prefix + "Fx.Dep");
+        Assert.Contains(bucketA.Edges, e => e.SourceId == prefix + "Fx.Foo" && e.TargetId == prefix + "Fx.Foo.FromB()");
+        Assert.Contains(bucketA.Edges, e => e.SourceId == prefix + "Fx.Foo.Hook()" && e.Kind == "CALLS");
+        Assert.Contains(bucketB.Edges, e => e.SourceId == prefix + "Fx.Foo.FromB()" && e.Kind == "CALLS");
+
+        var nodeFiles = analysis.Nodes.ToDictionary(n => n.Id, n => n.FilePath);
+        foreach (var bucket in analysis.Buckets)
+        {
+            Assert.All(bucket.Edges, e => Assert.Equal(bucket.FilePath, nodeFiles[e.SourceId]));
+        }
+    }
+
+    [Fact]
+    public void SameNamedTypesInSeparateProjects_ShareOneNodeAndKeepTheirEdgesTogether()
+    {
+        // One compilation serves the workspace, so a name declared in two projects is one
+        // symbol with one id, without either declaration being partial.
+        var analyzer = new CSharpWorkspaceAnalyzer("test");
+        var a = Write("ToolA.cs", "public class Dep { } public class Settings { }");
+        var b = Write("ToolB.cs", "public class Settings { private Dep _d; }");
+        Index(analyzer, [a, b]);
+
+        File.WriteAllText(b, "public class Settings { }");
+        var emission = Apply(analyzer, new FileChangeDto(b, FileChangeKinds.Changed));
+
+        Assert.Contains(a, emission.ReplacesFiles);
+        Assert.DoesNotContain(emission.Edges, e => e.Kind == "REFERENCES");
     }
 
     [Fact]
