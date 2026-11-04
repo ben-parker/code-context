@@ -288,6 +288,318 @@ namespace Mixed { public class Service { public string Run() => ""ok""; } }");
     }
 
     [Fact]
+    public async Task HocWrappedArrowVariable_AttributesNestedCallsToItsOwnNameNotFileScope()
+    {
+        // A handler wrapped by a single-level HOC (`guard(fn)`) has an initializer of
+        // kind CallExpression, not ArrowFunction: naively that isn't recognized as an
+        // enclosing declaration, so a call nested inside the wrapped arrow (here,
+        // post()) fell through all the way to file scope instead of attributing to
+        // `revoke`, and `revoke` itself was never queryable as a Function node.
+        await WriteFileAsync("handlers.ts", """
+            function guard(fn: () => Promise<void>): () => Promise<void> {
+                return fn;
+            }
+            function post(): Promise<void> {
+                return Promise.resolve();
+            }
+
+            const revoke = guard(async () => {
+                await post();
+            });
+            """);
+
+        await _pipeline.GraphUpdateService.PerformInitialScanAsync(_tempDir, null, CancellationToken.None);
+
+        var nodes = await _pipeline.RepositoryFactory.CreateNodeRepository().GetAllAsync();
+        var edges = await _pipeline.RepositoryFactory.CreateEdgeRepository().GetAllAsync();
+
+        Assert.Contains(nodes, node =>
+            node.Id == "typescript:default:handlers.ts#revoke" && node.Type == "Function");
+        Assert.Contains(edges, edge =>
+            edge.Type == "CALLS"
+            && edge.SourceId == "typescript:default:handlers.ts#revoke"
+            && edge.TargetId == "typescript:default:handlers.ts#post()");
+        Assert.DoesNotContain(edges, edge =>
+            edge.Type == "CALLS"
+            && edge.SourceId == "typescript:default:handlers.ts"
+            && edge.TargetId == "typescript:default:handlers.ts#post()");
+    }
+
+    [Fact]
+    public async Task HocWrappedArrowClassField_AttributesNestedCallsToItsOwnNameNotFileScope()
+    {
+        // Same HOC-wrapping gap, but for the common Express-controller shape: a route
+        // handler held in a class field (`revoke = guard(async () => {...})`) rather
+        // than a top-level const.
+        await WriteFileAsync("controller.ts", """
+            function guard(fn: () => Promise<void>): () => Promise<void> {
+                return fn;
+            }
+            function post(): Promise<void> {
+                return Promise.resolve();
+            }
+
+            export class KeysController {
+                revoke = guard(async () => {
+                    await post();
+                });
+            }
+            """);
+
+        await _pipeline.GraphUpdateService.PerformInitialScanAsync(_tempDir, null, CancellationToken.None);
+
+        var edges = await _pipeline.RepositoryFactory.CreateEdgeRepository().GetAllAsync();
+
+        Assert.Contains(edges, edge =>
+            edge.Type == "CALLS"
+            && edge.SourceId == "typescript:default:controller.ts#KeysController.revoke"
+            && edge.TargetId == "typescript:default:controller.ts#post()");
+        Assert.DoesNotContain(edges, edge =>
+            edge.Type == "CALLS"
+            && edge.SourceId == "typescript:default:controller.ts"
+            && edge.TargetId == "typescript:default:controller.ts#post()");
+    }
+
+    [Fact]
+    public async Task MethodChainEndingInAnArrow_IsNotMistakenForAHocWrappedHandler()
+    {
+        // Guards against a regression in the HOC-unwrap above: `.map(fn)` has a
+        // CallExpression initializer whose last argument is an arrow, exactly like
+        // `guard(fn)` does — but its callee is a PropertyAccessExpression, not a bare
+        // name, and its result (an array) is a value, never itself callable. `ids`
+        // must NOT become a phantom Function node, and the nested `lookup()` call
+        // must NOT be attributed to it.
+        await WriteFileAsync("mapped.ts", """
+            function lookup(id: string): string {
+                return id;
+            }
+            const users: string[] = [];
+
+            const ids = users.map(u => {
+                return lookup(u);
+            });
+            """);
+
+        await _pipeline.GraphUpdateService.PerformInitialScanAsync(_tempDir, null, CancellationToken.None);
+
+        var nodes = await _pipeline.RepositoryFactory.CreateNodeRepository().GetAllAsync();
+        var edges = await _pipeline.RepositoryFactory.CreateEdgeRepository().GetAllAsync();
+
+        Assert.DoesNotContain(nodes, node =>
+            node.Id == "typescript:default:mapped.ts#ids" && node.Type == "Function");
+        Assert.DoesNotContain(edges, edge =>
+            edge.Type == "CALLS" && edge.SourceId == "typescript:default:mapped.ts#ids");
+    }
+
+    [Fact]
+    public async Task BarrelReExport_ProducesAnImportsEdgeLikeARegularImport()
+    {
+        await WriteFileAsync("origin.ts", "export function ping(): number { return 42; }\n");
+        await WriteFileAsync("barrel.ts", "export * from './origin';\n");
+
+        await _pipeline.GraphUpdateService.PerformInitialScanAsync(_tempDir, null, CancellationToken.None);
+
+        var edges = await _pipeline.RepositoryFactory.CreateEdgeRepository().GetAllAsync();
+        Assert.Contains(edges, edge =>
+            edge.Type == "IMPORTS"
+            && edge.SourceId == "typescript:default:barrel.ts"
+            && edge.TargetId == "typescript:default:origin.ts");
+    }
+
+    [Fact]
+    public async Task AnonymousDefaultExportedFunction_GetsARealNodeAndAttributesNestedCalls()
+    {
+        await WriteFileAsync("default-fn.ts", """
+            function callee(): void { }
+
+            export default function () {
+                callee();
+            }
+            """);
+
+        await _pipeline.GraphUpdateService.PerformInitialScanAsync(_tempDir, null, CancellationToken.None);
+
+        var nodes = await _pipeline.RepositoryFactory.CreateNodeRepository().GetAllAsync();
+        var edges = await _pipeline.RepositoryFactory.CreateEdgeRepository().GetAllAsync();
+        Assert.Contains(nodes, node =>
+            node.Id == "typescript:default:default-fn.ts#default()" && node.Type == "Function");
+        Assert.Contains(edges, edge =>
+            edge.Type == "CALLS"
+            && edge.SourceId == "typescript:default:default-fn.ts#default()"
+            && edge.TargetId == "typescript:default:default-fn.ts#callee()");
+    }
+
+    [Fact]
+    public async Task AnonymousDefaultExportedArrow_GetsARealNodeAndAttributesNestedCalls()
+    {
+        await WriteFileAsync("default-arrow.ts", """
+            function callee(): void { }
+
+            export default () => {
+                callee();
+            };
+            """);
+
+        await _pipeline.GraphUpdateService.PerformInitialScanAsync(_tempDir, null, CancellationToken.None);
+
+        var nodes = await _pipeline.RepositoryFactory.CreateNodeRepository().GetAllAsync();
+        var edges = await _pipeline.RepositoryFactory.CreateEdgeRepository().GetAllAsync();
+        Assert.Contains(nodes, node =>
+            node.Id == "typescript:default:default-arrow.ts#default" && node.Type == "Function");
+        Assert.Contains(edges, edge =>
+            edge.Type == "CALLS"
+            && edge.SourceId == "typescript:default:default-arrow.ts#default"
+            && edge.TargetId == "typescript:default:default-arrow.ts#callee()");
+    }
+
+    [Fact]
+    public async Task ExportEqualsArrow_IsNotMistakenForADefaultExportedArrow()
+    {
+        // `export = () => {...}` (TS's legacy CommonJS-style export) has the identical
+        // ExportAssignment/arrow AST shape as `export default () => {...}`, but node
+        // creation deliberately skips it (isExportEquals). Guards against reintroducing
+        // the dangling-edge bug fixed above: attribution must NOT compute a "#default"
+        // id for something no node was ever emitted for.
+        await WriteFileAsync("export-equals.ts", """
+            function helper(): void { }
+
+            export = () => {
+                helper();
+            };
+            """);
+
+        await _pipeline.GraphUpdateService.PerformInitialScanAsync(_tempDir, null, CancellationToken.None);
+
+        var nodes = await _pipeline.RepositoryFactory.CreateNodeRepository().GetAllAsync();
+        var edges = await _pipeline.RepositoryFactory.CreateEdgeRepository().GetAllAsync();
+        Assert.DoesNotContain(nodes, node =>
+            node.Id == "typescript:default:export-equals.ts#default" && node.Type == "Function");
+        Assert.DoesNotContain(edges, edge =>
+            edge.Type == "CALLS" && edge.SourceId == "typescript:default:export-equals.ts#default");
+    }
+
+    [Fact]
+    public async Task AnonymousDefaultExportedClass_GetsARealNodeForItsMethods()
+    {
+        // Before the fix, an anonymous default-exported class was never emitted as a
+        // node (guarded on tsNode.name), so its HAS_METHOD edge's source id was
+        // computed from an empty qualified name — dangling, pointing at a node that
+        // was never emitted either.
+        await WriteFileAsync("default-class.ts", """
+            export default class {
+                method(): void { }
+            }
+            """);
+
+        await _pipeline.GraphUpdateService.PerformInitialScanAsync(_tempDir, null, CancellationToken.None);
+
+        var nodes = await _pipeline.RepositoryFactory.CreateNodeRepository().GetAllAsync();
+        var edges = await _pipeline.RepositoryFactory.CreateEdgeRepository().GetAllAsync();
+        Assert.Contains(nodes, node =>
+            node.Id == "typescript:default:default-class.ts#default" && node.Type == "Class");
+        Assert.Contains(edges, edge =>
+            edge.Type == "HAS_METHOD"
+            && edge.SourceId == "typescript:default:default-class.ts#default"
+            && edge.TargetId == "typescript:default:default-class.ts#default.method()");
+    }
+
+    [Fact]
+    public async Task OverloadedCall_ResolvesToTheOverloadTheArgumentsActuallyMatch()
+    {
+        await WriteFileAsync("overloads.ts", """
+            function convert(value: string): string;
+            function convert(value: number): string;
+            function convert(value: string | number): string {
+                return String(value);
+            }
+
+            function useConvert(): string {
+                return convert(5);
+            }
+            """);
+
+        await _pipeline.GraphUpdateService.PerformInitialScanAsync(_tempDir, null, CancellationToken.None);
+
+        var edges = await _pipeline.RepositoryFactory.CreateEdgeRepository().GetAllAsync();
+        Assert.Contains(edges, edge =>
+            edge.Type == "CALLS"
+            && edge.SourceId == "typescript:default:overloads.ts#useConvert()"
+            && edge.TargetId == "typescript:default:overloads.ts#convert(number)");
+        Assert.DoesNotContain(edges, edge =>
+            edge.Type == "CALLS"
+            && edge.SourceId == "typescript:default:overloads.ts#useConvert()"
+            && edge.TargetId == "typescript:default:overloads.ts#convert(string)");
+    }
+
+    [Fact]
+    public async Task CallInsideAStaticBlock_AttributesToTheClassNotFileScope()
+    {
+        await WriteFileAsync("staticblock.ts", """
+            function init(): void { }
+
+            class Config {
+                static {
+                    init();
+                }
+            }
+            """);
+
+        await _pipeline.GraphUpdateService.PerformInitialScanAsync(_tempDir, null, CancellationToken.None);
+
+        var edges = await _pipeline.RepositoryFactory.CreateEdgeRepository().GetAllAsync();
+        Assert.Contains(edges, edge =>
+            edge.Type == "CALLS"
+            && edge.SourceId == "typescript:default:staticblock.ts#Config"
+            && edge.TargetId == "typescript:default:staticblock.ts#init()");
+        Assert.DoesNotContain(edges, edge =>
+            edge.Type == "CALLS"
+            && edge.SourceId == "typescript:default:staticblock.ts"
+            && edge.TargetId == "typescript:default:staticblock.ts#init()");
+    }
+
+    [Fact]
+    public async Task NewExpression_WithAnExplicitConstructor_TargetsTheConstructorOverload()
+    {
+        await WriteFileAsync("construct.ts", """
+            class Service {
+                constructor(name: string) { }
+            }
+
+            function build(): Service {
+                return new Service('x');
+            }
+            """);
+
+        await _pipeline.GraphUpdateService.PerformInitialScanAsync(_tempDir, null, CancellationToken.None);
+
+        var edges = await _pipeline.RepositoryFactory.CreateEdgeRepository().GetAllAsync();
+        Assert.Contains(edges, edge =>
+            edge.Type == "CALLS"
+            && edge.SourceId == "typescript:default:construct.ts#build()"
+            && edge.TargetId == "typescript:default:construct.ts#Service.constructor(string)");
+    }
+
+    [Fact]
+    public async Task NewExpression_WithoutAnExplicitConstructor_FallsBackToTheClassItself()
+    {
+        await WriteFileAsync("construct2.ts", """
+            class Widget { }
+
+            function build(): Widget {
+                return new Widget();
+            }
+            """);
+
+        await _pipeline.GraphUpdateService.PerformInitialScanAsync(_tempDir, null, CancellationToken.None);
+
+        var edges = await _pipeline.RepositoryFactory.CreateEdgeRepository().GetAllAsync();
+        Assert.Contains(edges, edge =>
+            edge.Type == "CALLS"
+            && edge.SourceId == "typescript:default:construct2.ts#build()"
+            && edge.TargetId == "typescript:default:construct2.ts#Widget");
+    }
+
+    [Fact]
     public async Task OneFileEdit_ReusesTheWorkerProcessAndUpdatesFacts()
     {
         var basePath = await WriteFileAsync("base.ts", "export class Base { }\n");

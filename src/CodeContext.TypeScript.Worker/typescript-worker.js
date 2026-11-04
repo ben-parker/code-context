@@ -607,9 +607,31 @@ function signatureOf(node, sourceFile) {
     return text.split('\n', 1)[0].trim();
 }
 
+/** True for a FunctionDeclaration/ClassDeclaration carrying an `export default` modifier. */
+function hasDefaultModifier(node) {
+    const modifiers = ts.canHaveModifiers(node) ? ts.getModifiers(node) : undefined;
+    return !!modifiers?.some(modifier => modifier.kind === ts.SyntaxKind.DefaultKeyword);
+}
+
+/**
+ * True for the arrow function directly assigned by `export default () => {...}`.
+ * `export = () => {...}` (isExportEquals — TS's legacy CommonJS-style export) has
+ * the identical ExportAssignment/arrow shape but is deliberately NOT emitted as a
+ * node below, so it must be excluded here too or this returns true for an arrow
+ * with no emitted node — the same dangling-edge-source bug this fix closes.
+ */
+function isDefaultExportedArrow(node) {
+    return ts.isArrowFunction(node) && node.parent && ts.isExportAssignment(node.parent)
+        && !node.parent.isExportEquals && node.parent.expression === node;
+}
+
 /**
  * Builds the container-qualified name of a declaration inside its file
- * (namespaces + class/interface chain + own name), used for stable IDs.
+ * (namespaces + class/interface chain + own name), used for stable IDs. An
+ * anonymous `export default function(){}` / `class {}` / `() => {}` has no
+ * name of its own; it's given the synthetic segment "default" so that a node
+ * IS emitted for it and any edge walking up to it (e.g. enclosingDeclarationId)
+ * lands on that same id instead of an empty-string id nothing ever emits.
  */
 function qualifiedNameOf(node, sourceFile) {
     const parts = [];
@@ -620,8 +642,14 @@ function qualifiedNameOf(node, sourceFile) {
             || ts.isTypeAliasDeclaration(current))
             && current.name) {
             parts.unshift(current.name.getText(sourceFile));
+        } else if (ts.isClassDeclaration(current) && !current.name && hasDefaultModifier(current)) {
+            parts.unshift('default');
         } else if (ts.isFunctionDeclaration(current) && current.name) {
             parts.unshift(`${current.name.getText(sourceFile)}${parameterKey(current, sourceFile)}`);
+        } else if (ts.isFunctionDeclaration(current) && !current.name && hasDefaultModifier(current)) {
+            parts.unshift(`default${parameterKey(current, sourceFile)}`);
+        } else if (isDefaultExportedArrow(current)) {
+            parts.unshift('default');
         } else if (ts.isConstructorDeclaration(current)) {
             parts.unshift(`constructor${parameterKey(current, sourceFile)}`);
         } else if ((ts.isMethodDeclaration(current) || ts.isMethodSignature(current)) && current.name) {
@@ -637,6 +665,33 @@ function qualifiedNameOf(node, sourceFile) {
         current = current.parent;
     }
     return parts.join('.');
+}
+
+/**
+ * The arrow function actually held by a declaration's initializer: itself, or
+ * — for a handler wrapped by a single-level HOC called by a bare name, like
+ * `guard(fn)` / `withAuth(fn)` — the arrow function passed as its last
+ * argument. Without this unwrap, a route handler such as `const revoke =
+ * guard(async () => {...})` has an initializer of kind CallExpression, not
+ * ArrowFunction, so calls nested inside it (and the declaration's own node)
+ * fall through to file scope instead of attributing to `revoke`.
+ *
+ * The callee is required to be a bare identifier specifically to exclude
+ * method calls like `.map(fn)` / `.filter(fn)` / `.then(fn)` — their callee is
+ * a PropertyAccessExpression, and their trailing-arrow result is a value
+ * (array/promise), never itself callable. Without this guard, `const ids =
+ * users.map(u => lookup(u.id))` would wrongly mint a Function node for `ids`
+ * and attribute `lookup`'s CALLS edge to it.
+ */
+function arrowFunctionInitializer(initializer) {
+    if (!initializer) return undefined;
+    if (ts.isArrowFunction(initializer)) return initializer;
+    if (ts.isCallExpression(initializer) && ts.isIdentifier(initializer.expression)
+        && initializer.arguments.length > 0) {
+        const lastArg = initializer.arguments[initializer.arguments.length - 1];
+        if (ts.isArrowFunction(lastArg)) return lastArg;
+    }
+    return undefined;
 }
 
 /** Stable overload discriminator without relying on source offsets. */
@@ -679,9 +734,29 @@ function analyzeFile(workspace, workspaceId, program, checker, fileName, diagnos
         return `${graphPrefix}${relPath(root, declFile.fileName)}#${qualifiedNameOf(decl, declFile)}`;
     };
 
-    /** Resolves a name expression to a declaration inside the project, if any. */
-    const resolveToProjectDeclaration = expression => {
+    /**
+     * Resolves a name expression to a declaration inside the project, if any.
+     * When `callLikeExpression` (the enclosing CallExpression/NewExpression) is
+     * given, an overloaded target first tries the checker's own resolved
+     * signature for that specific call site — otherwise an overloaded function
+     * always resolves to declarations[0], i.e. whichever overload was declared
+     * first in source order, regardless of which one the arguments actually
+     * matched.
+     */
+    const resolveToProjectDeclaration = (expression, callLikeExpression) => {
         try {
+            if (callLikeExpression) {
+                const signatureDecl = checker.getResolvedSignature(callLikeExpression)?.declaration;
+                // Restricted to declaration kinds this file always emits a node for
+                // (regardless of overload count), so this can never target a kind —
+                // e.g. a bare CallSignatureDeclaration — that addNode never visits.
+                if (signatureDecl
+                    && (ts.isFunctionDeclaration(signatureDecl) || ts.isMethodDeclaration(signatureDecl)
+                        || ts.isMethodSignature(signatureDecl) || ts.isConstructorDeclaration(signatureDecl))
+                    && workspace.hasFile(signatureDecl.getSourceFile().fileName)) {
+                    return signatureDecl;
+                }
+            }
             let symbol = checker.getSymbolAtLocation(expression);
             if (!symbol) return null;
             if (symbol.flags & ts.SymbolFlags.Alias) {
@@ -766,8 +841,21 @@ function analyzeFile(workspace, workspaceId, program, checker, fileName, diagnos
                 || ts.isSetAccessor(current)) {
                 return nodeId(qualifiedNameOf(current, sourceFile));
             }
-            if (ts.isVariableDeclaration(current) && current.initializer
-                && ts.isArrowFunction(current.initializer)) {
+            if (ts.isVariableDeclaration(current) && arrowFunctionInitializer(current.initializer)) {
+                return nodeId(qualifiedNameOf(current, sourceFile));
+            }
+            if (ts.isPropertyDeclaration(current) && arrowFunctionInitializer(current.initializer)) {
+                return nodeId(qualifiedNameOf(current, sourceFile));
+            }
+            if (isDefaultExportedArrow(current)) {
+                return nodeId(qualifiedNameOf(current, sourceFile));
+            }
+            // Falls back to the class itself for anything in its body with no closer
+            // match above: static blocks (`static { init(); }`), decorator factories
+            // (`@Component({...})`), and non-arrow field initializers. A nearer
+            // MethodDeclaration/PropertyDeclaration-arrow always wins first, since the
+            // walk checks the closest ancestor before this one.
+            if (ts.isClassDeclaration(current) && (current.name || hasDefaultModifier(current))) {
                 return nodeId(qualifiedNameOf(current, sourceFile));
             }
             current = current.parent;
@@ -832,6 +920,9 @@ function analyzeFile(workspace, workspaceId, program, checker, fileName, diagnos
                 if (tsNode.name) {
                     const classNode = addNode(tsNode.name.getText(sourceFile), 'Class', tsNode);
                     handleHeritage(classNode, tsNode);
+                } else if (hasDefaultModifier(tsNode)) {
+                    const classNode = addNode('default', 'Class', tsNode);
+                    handleHeritage(classNode, tsNode);
                 }
                 break;
             }
@@ -845,13 +936,22 @@ function analyzeFile(workspace, workspaceId, program, checker, fileName, diagnos
             case ts.SyntaxKind.FunctionDeclaration: {
                 if (tsNode.name) {
                     addNode(tsNode.name.getText(sourceFile), 'Function', tsNode);
+                } else if (hasDefaultModifier(tsNode)) {
+                    addNode('default', 'Function', tsNode);
+                }
+                break;
+            }
+            case ts.SyntaxKind.ExportAssignment: {
+                // `export default () => {...}` — `export = foo` (isExportEquals) is a
+                // different (CommonJS-style) construct and is left alone.
+                if (!tsNode.isExportEquals && tsNode.expression && ts.isArrowFunction(tsNode.expression)) {
+                    addNode('default', 'Function', tsNode.expression);
                 }
                 break;
             }
             case ts.SyntaxKind.VariableStatement: {
                 for (const declaration of tsNode.declarationList?.declarations ?? []) {
-                    if (declaration.name && declaration.initializer
-                        && ts.isArrowFunction(declaration.initializer)) {
+                    if (declaration.name && arrowFunctionInitializer(declaration.initializer)) {
                         addNode(declaration.name.getText(sourceFile), 'Function', declaration);
                     }
                 }
@@ -862,8 +962,8 @@ function analyzeFile(workspace, workspaceId, program, checker, fileName, diagnos
                 if (tsNode.name) {
                     const methodNode = addNode(tsNode.name.getText(sourceFile), 'Method', tsNode);
                     const container = tsNode.parent;
-                    if (container && (ts.isClassDeclaration(container) || ts.isInterfaceDeclaration(container))
-                        && container.name) {
+                    if (container && ((ts.isClassDeclaration(container) && (container.name || hasDefaultModifier(container)))
+                        || (ts.isInterfaceDeclaration(container) && container.name))) {
                         addEdge(nodeId(qualifiedNameOf(container, sourceFile)), methodNode.id, 'HAS_METHOD');
                     }
                 }
@@ -872,7 +972,7 @@ function analyzeFile(workspace, workspaceId, program, checker, fileName, diagnos
             case ts.SyntaxKind.Constructor: {
                 const ctorNode = addNode('constructor', 'Method', tsNode);
                 const container = tsNode.parent;
-                if (container && ts.isClassDeclaration(container) && container.name) {
+                if (container && ts.isClassDeclaration(container) && (container.name || hasDefaultModifier(container))) {
                     addEdge(nodeId(qualifiedNameOf(container, sourceFile)), ctorNode.id, 'HAS_METHOD');
                 }
                 break;
@@ -881,7 +981,7 @@ function analyzeFile(workspace, workspaceId, program, checker, fileName, diagnos
                 if (tsNode.name) {
                     const propertyNode = addNode(tsNode.name.getText(sourceFile), 'Field', tsNode);
                     const container = tsNode.parent;
-                    if (container && ts.isClassDeclaration(container) && container.name) {
+                    if (container && ts.isClassDeclaration(container) && (container.name || hasDefaultModifier(container))) {
                         addEdge(nodeId(qualifiedNameOf(container, sourceFile)), propertyNode.id, 'HAS_FIELD');
                     }
                 }
@@ -892,7 +992,7 @@ function analyzeFile(workspace, workspaceId, program, checker, fileName, diagnos
                 if (tsNode.name) {
                     const propertyNode = addNode(tsNode.name.getText(sourceFile), 'Property', tsNode);
                     const container = tsNode.parent;
-                    if (container && ts.isClassDeclaration(container) && container.name) {
+                    if (container && ts.isClassDeclaration(container) && (container.name || hasDefaultModifier(container))) {
                         addEdge(nodeId(qualifiedNameOf(container, sourceFile)), propertyNode.id, 'HAS_PROPERTY');
                     }
                 }
@@ -916,7 +1016,11 @@ function analyzeFile(workspace, workspaceId, program, checker, fileName, diagnos
                 if (tsNode.name) addNode(tsNode.name.getText(sourceFile), 'Enum', tsNode);
                 break;
             }
-            case ts.SyntaxKind.ImportDeclaration: {
+            case ts.SyntaxKind.ImportDeclaration:
+            case ts.SyntaxKind.ExportDeclaration: {
+                // Re-exports (`export { x } from './y'`, `export * from './y'`) are a file
+                // dependency exactly like an import — without this, barrel/index files that
+                // only re-export look dependency-free.
                 if (tsNode.moduleSpecifier) {
                     const moduleName = tsNode.moduleSpecifier.getText(sourceFile).replace(/['"]/g, '');
                     const resolved = resolveToProjectDeclaration(tsNode.moduleSpecifier);
@@ -924,19 +1028,24 @@ function analyzeFile(workspace, workspaceId, program, checker, fileName, diagnos
                         ? `${graphPrefix}${relPath(root, resolved.getSourceFile().fileName)}`
                         : moduleName;
                     const metadata = { moduleSpecifier: moduleName, isFileImport: 'true' };
+                    if (tsNode.kind === ts.SyntaxKind.ExportDeclaration) metadata.isReExport = 'true';
                     if (!resolved) metadata.unresolved = 'true'; // external package or unresolvable path
                     addEdge(`${graphPrefix}${fileRel}`, targetId, 'IMPORTS', metadata);
                 }
                 break;
             }
-            case ts.SyntaxKind.CallExpression: {
+            case ts.SyntaxKind.CallExpression:
+            case ts.SyntaxKind.NewExpression: {
+                // `new Foo()` reuses the CALLS edge kind (construction is a call to the
+                // constructor) rather than minting an unregistered edge kind no consumer
+                // filters/queries recognize yet.
                 const expression = tsNode.expression;
                 if (expression) {
                     const nameNode = ts.isPropertyAccessExpression(expression) ? expression.name : expression;
                     const callTarget = nameNode.getText(sourceFile);
                     if (callTarget) {
                         const position = sourceFile.getLineAndCharacterOfPosition(tsNode.getStart(sourceFile));
-                        const targetDecl = resolveToProjectDeclaration(nameNode);
+                        const targetDecl = resolveToProjectDeclaration(nameNode, tsNode);
                         const targetId = targetDecl ? idOfDeclaration(targetDecl) : callTarget;
                         const metadata = {
                             callTarget,
