@@ -110,6 +110,8 @@ namespace Fixture
         await WriteFileAsync("Directory.Build.props",
             "<Project><PropertyGroup><ImplicitUsings>enable</ImplicitUsings></PropertyGroup></Project>");
         Directory.CreateDirectory(Path.Combine(_tempDir, "src"));
+        await WriteFileAsync(Path.Combine("src", "App.csproj"),
+            "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>");
         await WriteFileAsync(Path.Combine("src", "Code.cs"), """
             namespace Fixture;
             public class Item { public int Weigh() => 1; }
@@ -119,7 +121,7 @@ namespace Fixture
         await _pipeline.GraphUpdateService.PerformInitialScanAsync(_tempDir, null, CancellationToken.None);
 
         var edges = await _pipeline.RepositoryFactory.CreateEdgeRepository().GetAllAsync();
-        Assert.Contains(edges, e => e.Type == "CALLS" && e.TargetId == CSharpWorkerPipeline.Id("Fixture.Item.Weigh()"));
+        Assert.Contains(edges, e => e.Type == "CALLS" && e.TargetId!.EndsWith(":Fixture.Item.Weigh()", StringComparison.Ordinal));
     }
 
     [Fact]

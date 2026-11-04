@@ -178,7 +178,7 @@ public sealed class ProjectEvaluator
 
     private XElement Load(string file)
     {
-        _inputs.Add(file);
+        if (!_inputs.Contains(file, PathComparer)) _inputs.Add(file);
         using var reader = XmlReader.Create(file, ReaderSettings);
         return XDocument.Load(reader).Root
             ?? throw new XmlException($"'{file}' has no root element.");
@@ -251,7 +251,7 @@ public sealed class ProjectEvaluator
         {
             if (!Passes(property, file)) continue;
             var expander = Expander(file);
-            var value = expander.Expand(property.Value.Trim());
+            var value = expander.Expand(property.Value);
             if (expander.Uncertain) NoteUncertain(property.Value);
             SetProperty(property.Name.LocalName, value);
         }
@@ -419,6 +419,9 @@ public sealed class ProjectEvaluator
         for (string? directory = _projectDirectory; directory is not null; directory = Path.GetDirectoryName(directory))
         {
             var candidate = Path.Combine(directory, fileName);
+
+            // A file created here later changes what this project means.
+            _inputs.Add(candidate);
             if (File.Exists(candidate)) return candidate;
             if (MsBuildExpander.SamePath(directory, _boundary)) break;
         }
@@ -595,7 +598,8 @@ public sealed class ProjectEvaluator
 
     private void AddImplicitUsings()
     {
-        var value = (Get("ImplicitUsings") ?? string.Empty).Trim();
+        // The SDK compares the raw value, ignoring case, so padding turns the setting off.
+        var value = Get("ImplicitUsings") ?? string.Empty;
         if (!value.Equals("enable", StringComparison.OrdinalIgnoreCase)
             && !value.Equals("true", StringComparison.OrdinalIgnoreCase))
         {

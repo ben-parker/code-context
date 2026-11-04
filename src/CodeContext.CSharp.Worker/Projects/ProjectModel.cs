@@ -37,6 +37,9 @@ public sealed class ProjectInfo
     /// <summary>The text of a <c>global using</c> file for this project, or empty.</summary>
     public required string GlobalUsings { get; init; }
 
+    /// <summary>Assemblies given access by project items rather than by source.</summary>
+    public required IReadOnlyList<string> InternalsVisibleTo { get; init; }
+
     public IReadOnlyList<string> MetadataReferences { get; internal set; } = [];
 
     /// <summary>Referenced projects in the model, transitively, as a build passes them.</summary>
@@ -116,7 +119,20 @@ public sealed class ProjectModel
 
     /// <summary>The projects compiling a file, fact owner first.</summary>
     public IReadOnlyList<ProjectInfo> ProjectsCompiling(string file)
-        => _compiledBy.TryGetValue(file, out var projects) ? projects : [];
+    {
+        if (_compiledBy.TryGetValue(file, out var known)) return known;
+
+        // A file created since the model was read: the same operations decide.
+        var compiling = OwnerOrder(Projects.Where(project => project.CompileItems.Contains(file)), project => project.ProjectPath);
+        if (compiling.Count > 0) _compiledBy[file] = compiling;
+        return compiling;
+    }
+
+    /// <summary>The deepest project owns a shared file; between equals, the first by path.</summary>
+    private static List<T> OwnerOrder<T>(IEnumerable<T> projects, Func<T, string> path)
+        => projects.OrderByDescending(project => Path.GetDirectoryName(path(project))!.Length)
+            .ThenBy(path, StringComparer.Ordinal)
+            .ToList();
 
     /// <summary>The project whose facts include this file, or null when no project compiles it.</summary>
     public ProjectInfo? OwnerOf(string file) => ProjectsCompiling(file).FirstOrDefault();
@@ -192,11 +208,7 @@ public sealed class ProjectModel
             var compiledBy = new Dictionary<string, List<ProjectInfo>>(PathComparer);
             foreach (var (file, owners) in compiling)
             {
-                compiledBy[file] = owners
-                    .OrderByDescending(path => Path.GetDirectoryName(path)!.Length)
-                    .ThenBy(path => path, StringComparer.Ordinal)
-                    .Select(path => infos[path])
-                    .ToList();
+                compiledBy[file] = OwnerOrder(owners, path => path).Select(path => infos[path]).ToList();
             }
 
             var inputs = new Dictionary<string, DateTime>(PathComparer);
@@ -500,6 +512,7 @@ public sealed class ProjectModel
                 PreprocessorSymbols = Symbols(evaluated.Property("DefineConstants")),
                 LanguageVersion = evaluated.Property("LangVersion") is { Length: > 0 } version ? version : null,
                 GlobalUsings = ReadGlobalUsings(candidate),
+                InternalsVisibleTo = evaluated.ItemsOf("InternalsVisibleTo").Select(item => item.Include).ToList(),
                 MetadataReferences = references.Distinct(PathComparer).ToList(),
                 MissingReferences = missing.Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
                 AnalyzerPackages = target?.AnalyzerPackages ?? [],

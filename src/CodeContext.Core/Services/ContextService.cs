@@ -282,7 +282,42 @@ namespace CodeContext.Core.Services
                     CandidateMatchesFilters(candidate, type, containingType, @namespace, signature, sourceFile))
                     .ToList();
             }
+            if (filtered.Count == 0 && !isFilePath)
+            {
+                filtered = (await FindOwnersOfBareIdentifierAsync(identifier, type)).Where(candidate =>
+                    CandidateMatchesFilters(candidate, type, containingType, @namespace, signature, sourceFile))
+                    .ToList();
+            }
             return (filtered, isFilePath);
+        }
+
+        /// <summary>
+        /// When a name is declared in several projects each owner's identifier carries its
+        /// project, as <c>csharp:Project#Name</c>. The bare form is then not one symbol, so it
+        /// answers with all of them rather than quietly choosing or claiming nothing is there.
+        /// </summary>
+        private async Task<List<CodeNode>> FindOwnersOfBareIdentifierAsync(string identifier, string? type)
+        {
+            var colon = identifier.IndexOf(':');
+            if (colon <= 0 || identifier.Contains('#')) return [];
+
+            var display = identifier[(colon + 1)..];
+            var scheme = identifier[..(colon + 1)];
+            var segments = WithoutTypeArgumentsOrParameters(display).Split('.');
+
+            // A constructor's node is named for what it is, so the type name would miss it.
+            var names = new List<string> { segments[^1] };
+            if (segments.Length > 1 && segments[^1] == segments[^2]) names.Add("constructor");
+
+            var owners = new List<CodeNode>();
+            foreach (var name in names)
+            {
+                owners.AddRange((await _nodeRepository.FindByNameAsync(name, type, exact: true)).Where(node =>
+                    PublicIdentifier(node) is var candidate
+                    && candidate.StartsWith(scheme, StringComparison.Ordinal)
+                    && candidate.EndsWith("#" + display, StringComparison.Ordinal)));
+            }
+            return owners;
         }
 
         /// <summary>

@@ -37,6 +37,57 @@ namespace CodeContext.Core.Tests.Services
         private static CodeNode Member(string identifier, string name, string type = "Method")
             => new() { Id = identifier, Identifier = identifier, Name = name, Type = type };
 
+        [Fact]
+        public async Task BareIdentifierWithSeveralOwners_ReturnsThemAllAsAmbiguous()
+        {
+            Stub("Main",
+                Member("csharp:ToolA#Program.Main()", "Main"),
+                Member("csharp:ToolB#Program.Main()", "Main"),
+                Member("csharp:ToolB#Other.Main()", "Main"));
+
+            var response = await _service.GetCompactContextAsync("csharp:Program.Main()");
+
+            Assert.True(response.Ambiguous);
+            Assert.Equal(2, response.TotalMatches);
+            Assert.Equal(
+                ["csharp:ToolA#Program.Main()", "csharp:ToolB#Program.Main()"],
+                response.Matches.Select(match => match.Target.Identifier).Order());
+        }
+
+        [Fact]
+        public async Task BareIdentifierOfAConstructorWithSeveralOwners_FindsTheConstructors()
+        {
+            Stub("constructor",
+                Member("csharp:A#Thing.Thing()", "constructor"),
+                Member("csharp:B#Thing.Thing()", "constructor"));
+
+            var response = await _service.GetCompactContextAsync("csharp:Thing.Thing()");
+
+            Assert.Equal(2, response.TotalMatches);
+        }
+
+        [Fact]
+        public async Task QualifiedIdentifierOfAnotherScheme_IsNotAnOwner()
+        {
+            Stub("Main", Member("typescript:a.ts#Program.Main()", "Main"));
+
+            var response = await _service.GetCompactContextAsync("csharp:Program.Main()");
+
+            Assert.Equal(0, response.TotalMatches);
+        }
+
+        [Fact]
+        public async Task DottedName_FindsEveryProjectsMember()
+        {
+            Stub("Main",
+                Member("csharp:ToolA#Program.Main()", "Main"),
+                Member("csharp:ToolB#Program.Main()", "Main"));
+
+            var response = await _service.GetCompactContextAsync("Program.Main");
+
+            Assert.Equal(2, response.TotalMatches);
+        }
+
         [Theory]
         [InlineData("Wilderness.Generate")]
         [InlineData("wilderness.generate")]
