@@ -250,7 +250,11 @@ public class CSharpWorkerImplicitUsingsTests : IDisposable
     // Project files whose setting is on.
     [InlineData(true, "<Project><PropertyGroup><ImplicitUsings Condition=\"'$(TargetFramework)' == 'net10.0'\">enable</ImplicitUsings></PropertyGroup></Project>")]
     [InlineData(true, "<Project><PropertyGroup Condition=\"'$(TargetFramework)' == 'net10.0'\"><ImplicitUsings>enable</ImplicitUsings></PropertyGroup></Project>")]
-    [InlineData(true, "<Project><PropertyGroup><ImplicitUsings> Enable </ImplicitUsings></PropertyGroup></Project>")]
+    [InlineData(true, "<Project><PropertyGroup><ImplicitUsings>ENABLE</ImplicitUsings></PropertyGroup></Project>")]
+    [InlineData(true, "<Project><Choose><When Condition=\"'$(X)' == ''\"><PropertyGroup><ImplicitUsings>enable</ImplicitUsings></PropertyGroup></When></Choose></Project>")]
+    // A value that cannot be evaluated counts as on: wrongly off loses a whole project's
+    // LINQ and collections, wrongly on costs only a name clash.
+    [InlineData(true, "<Project><PropertyGroup><ImplicitUsings>$(UseImplicitUsings)</ImplicitUsings></PropertyGroup></Project>")]
     [InlineData(true, "<Project xmlns=\"http://schemas.microsoft.com/developer/msbuild/2003\"><PropertyGroup><ImplicitUsings>true</ImplicitUsings></PropertyGroup></Project>")]
     [InlineData(true, "<Project><PropertyGroup><ImplicitUsings>disable</ImplicitUsings></PropertyGroup><PropertyGroup><ImplicitUsings>enable</ImplicitUsings></PropertyGroup></Project>")]
     // A target that turns them off leaves the code other targets compile relying on them.
@@ -261,6 +265,8 @@ public class CSharpWorkerImplicitUsingsTests : IDisposable
     [InlineData(false, "<Project><PropertyGroup><ImplicitUsings>enable</ImplicitUsings></PropertyGroup><PropertyGroup><ImplicitUsings>false</ImplicitUsings></PropertyGroup></Project>")]
     [InlineData(false, "<Project><Target Name=\"X\"><PropertyGroup><ImplicitUsings>enable</ImplicitUsings></PropertyGroup></Target></Project>")]
     [InlineData(false, "<Project><PropertyGroup><ImplicitUsings>enable</PropertyGroup>")]
+    // MSBuild compares the raw value, so padding turns the setting off.
+    [InlineData(false, "<Project><PropertyGroup><ImplicitUsings> enable </ImplicitUsings></PropertyGroup></Project>")]
     public void TheSettingIsReadFromTheProjectFilesStructure(bool expected, string project)
         => Assert.Equal(expected, SawUsings(Analyze(("src/App.csproj", project), ("src/Code.cs", NeedsUsings))));
 
@@ -287,6 +293,110 @@ public class CSharpWorkerImplicitUsingsTests : IDisposable
             ("src/Directory.Build.props", inner),
             ("src/App/App.csproj", Silent),
             ("src/App/Code.cs", NeedsUsings))));
+
+    private const string ImportsCommon = "<Project><Import Project=\"..\\..\\build\\Common.props\" /></Project>";
+
+    [Theory]
+    [InlineData(ImportsCommon, true)]
+    [InlineData("<Project><Import Project=\"$(MSBuildThisFileDirectory)..\\..\\build\\Common.props\" /></Project>", true)]
+    [InlineData("<Project><ImportGroup><Import Project=\"..\\..\\build\\Common.props\" /></ImportGroup></Project>", true)]
+    [InlineData("<Project><Import Project=\"..\\..\\build\\Common.props\" /><PropertyGroup><ImplicitUsings>disable</ImplicitUsings></PropertyGroup></Project>", false)]
+    [InlineData("<Project><PropertyGroup><ImplicitUsings>disable</ImplicitUsings></PropertyGroup><Import Project=\"..\\..\\build\\Common.props\" /></Project>", true)]
+    [InlineData("<Project><Import Project=\"$(SomewhereUnknown)\\Common.props\" /></Project>", false)]
+    public void ImportsOfLiteralPaths_AreFollowedInDocumentOrder(string project, bool expected)
+        => Assert.Equal(expected, SawUsings(Analyze(
+            ("build/Common.props", Enabled), ("src/App/App.csproj", project), ("src/App/Code.cs", NeedsUsings))));
+
+    [Fact]
+    public void ImportsOutsideTheWorkspaceRoot_AreIgnored()
+    {
+        Directory.CreateDirectory(Root);
+        File.WriteAllText(Path.Combine(_tempDir, "Outer.props"), Enabled);
+
+        Assert.False(SawUsings(Analyze(
+            ("App.csproj", "<Project><Import Project=\"..\\Outer.props\" /></Project>"), ("Code.cs", NeedsUsings))));
+    }
+
+    [Fact]
+    public void AnImportCycle_EndsWithoutAnAnswerFromIt()
+        => Assert.False(SawUsings(Analyze(
+            ("a.props", "<Project><Import Project=\"b.props\" /></Project>"),
+            ("b.props", "<Project><Import Project=\"a.props\" /></Project>"),
+            ("App.csproj", "<Project><Import Project=\"a.props\" /></Project>"),
+            ("Code.cs", NeedsUsings))));
+
+    [Fact]
+    public void AChainInsideAnImportGroup_IsFollowed()
+        => Assert.True(SawUsings(Analyze(
+            ("Directory.Build.props", Enabled),
+            ("src/Directory.Build.props", $"<Project><ImportGroup>{ChainsToParent}</ImportGroup></Project>"),
+            ("src/App/App.csproj", Silent),
+            ("src/App/Code.cs", NeedsUsings))));
+
+    [Theory]
+    [InlineData(Silent, Enabled, true)]
+    [InlineData(Enabled, Disabled, false)]
+    public void DirectoryBuildTargets_HaveTheLastWord(string project, string targets, bool expected)
+        => Assert.Equal(expected, SawUsings(Analyze(
+            ("Directory.Build.targets", targets), ("src/App.csproj", project), ("src/Code.cs", NeedsUsings))));
+
+    private const string EnablesWhenUnset =
+        "<Project><PropertyGroup><ImplicitUsings Condition=\"'$(ImplicitUsings)' == ''\">enable</ImplicitUsings></PropertyGroup></Project>";
+
+    [Theory]
+    [InlineData(Disabled, EnablesWhenUnset, false)]
+    [InlineData(Silent, EnablesWhenUnset, true)]
+    [InlineData(EnablesWhenUnset, Disabled, false)]
+    public void ADefaultGuardedOnTheSettingItself_YieldsToAnEarlierValue(string props, string project, bool expected)
+        => Assert.Equal(expected, SawUsings(Analyze(
+            ("Directory.Build.props", props), ("src/App.csproj", project), ("src/Code.cs", NeedsUsings))));
+
+    [Fact]
+    public void AFileUnderNoProject_FollowsAProjectThatEnablesThem()
+    {
+        // Typically linked in by a .csproj elsewhere, which cannot be seen from here.
+        var result = Analyze(
+            ("ProjA/ProjA.csproj", Enabled),
+            ("ProjA/Other.cs", "namespace Other; public class Thing { }"),
+            ("Shared/Code.cs", NeedsUsings));
+
+        Assert.True(SawUsings(result));
+    }
+
+    [Fact]
+    public void AFileUnderNoProject_GetsNothingWhenNoProjectEnablesThem()
+        => Assert.False(SawUsings(Analyze(
+            ("ProjA/ProjA.csproj", Silent),
+            ("ProjA/Other.cs", "namespace Other; public class Thing { }"),
+            ("Shared/Code.cs", NeedsUsings))));
+
+    [Fact]
+    public void EveryDefaultNamespaceOfTheSdk_IsInScope()
+    {
+        var result = Analyze(("App.csproj", Enabled), ("Code.cs", """
+            namespace App;
+            public static class Extensions { public static int Fetch(this System.Net.Http.HttpClient client) => 1; }
+            public class User { public int Calls(HttpClient client) => client.Fetch(); }
+            """));
+
+        AssertEdge(result, "App.User.Calls(System.Net.Http.HttpClient)",
+            "App.Extensions.Fetch(System.Net.Http.HttpClient)", "CALLS");
+    }
+
+    [Fact]
+    public void TypesOfOneNameAndDifferentKinds_KeepTheUsersOfTheirOneNode()
+    {
+        var result = Analyze(
+            ("A/A.csproj", Silent),
+            ("A/Options.cs", "namespace App; public class Options { public int Size; }"),
+            ("A/UseA.cs", "namespace Use; public class UseA { public App.Options Get(App.Options o) => o; }"),
+            ("B/B.csproj", Silent),
+            ("B/Options.cs", "namespace App; public record Options(int Width);"),
+            ("B/UseB.cs", "namespace Use; public class UseB { public App.Options Get(App.Options o) => new App.Options(1); }"));
+
+        AssertEdge(result, "Use.UseA.Get(App.Options)", "App.Options", "REFERENCES");
+        AssertEdge(result, "Use.UseB.Get(App.Options)", "App.Options", "REFERENCES");
+    }
 
     [Fact]
     public void TheNearestProjectOwnsAFile()

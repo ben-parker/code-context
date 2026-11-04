@@ -64,7 +64,7 @@ public sealed class CSharpWorkspaceAnalyzer
     /// </summary>
     private const string ImplicitUsings =
         "using System;using System.Collections.Generic;using System.IO;using System.Linq;" +
-        "using System.Threading;using System.Threading.Tasks;";
+        "using System.Net.Http;using System.Threading;using System.Threading.Tasks;";
 
     private readonly Dictionary<string, SyntaxTree> _syntaxTrees = new(PathComparer);
 
@@ -173,7 +173,7 @@ public sealed class CSharpWorkspaceAnalyzer
     /// </summary>
     public void SyncApprovedFiles(IReadOnlyList<string> approvedFiles, CancellationToken ct)
     {
-        _implicitUsings.Reset();
+        _implicitUsings.Refresh(approvedFiles);
         var approved = new HashSet<string>(approvedFiles, PathComparer);
         foreach (var stale in _syntaxTrees.Keys.Where(path => !approved.Contains(path)).ToList())
         {
@@ -199,7 +199,7 @@ public sealed class CSharpWorkspaceAnalyzer
     {
         // Deliberate full reset: drop every tree and start from a fresh compilation
         // rather than diffing. Every file below then takes the AddSyntaxTrees path.
-        _implicitUsings.Reset();
+        _implicitUsings.Refresh(files);
         _syntaxTrees.Clear();
         _compilation = CreateCompilation([]);
         foreach (var path in files)
@@ -1423,15 +1423,17 @@ public sealed class CSharpWorkspaceAnalyzer
         /// against a newer framework than the project targets, which is how a project's own
         /// <c>Range</c> meets one it has never seen, or beside another project's
         /// <c>global using</c>. The rare wrong pick is a spurious user, which costs far less
-        /// than the empty answer of refusing. Between two repository symbols nothing says
-        /// which is meant, so that stays unresolved. This rescues the name only: the value's
-        /// type stays an error type, so its members still do not bind.
+        /// than the empty answer of refusing. Two repository symbols stay unresolved, since
+        /// nothing says which is meant, unless they are one node: a class and a record that
+        /// share a full name in two projects. This rescues the name only: the value's type
+        /// stays an error type, so its members still do not bind.
         /// </summary>
         private static ISymbol? OnlySourceCandidate(SymbolInfo info)
         {
             if (info.CandidateReason != CandidateReason.Ambiguous) return null;
             var inSource = info.CandidateSymbols
                 .Where(candidate => candidate.Locations.Any(location => location.IsInSource))
+                .DistinctBy(DisplayName, StringComparer.Ordinal)
                 .Take(2)
                 .ToList();
             return inSource.Count == 1 ? inSource[0] : null;
