@@ -72,11 +72,28 @@ anything else, cross-check with `rg -w <Name>`.
   deconstruction, implicit base constructor calls, or the calls `using`, `foreach` and
   collection initializers imply. A read of a virtual or interface property is recorded
   on the member named at the read, not on its overrides or implementations. The
-  analysis sees repository source, the .NET libraries and the SDK's default implicit
-  usings, not NuGet or engine assemblies or custom `<Using>` items. Usage reached
-  through a value of such a type is missing: `GetNode<Item>("x").Weigh()` records the
-  reference to `Item` but not the call to `Weigh`, and the same goes for a local holding
-  that value or a lambda parameter of that type.
+  analysis sees repository source, the .NET libraries and, per project, the SDK's default
+  implicit usings, not NuGet or engine assemblies or `<Using>` items added or removed by
+  hand. Usage reached through a value of such a type is missing:
+  `GetNode<Item>("x").Weigh()` records the reference to `Item` but not the call to
+  `Weigh`, and the same goes for a local holding that value or a lambda parameter of
+  that type.
+- **C# is blind to these, so an empty `usedBy` proves nothing here; run `rg -w <Name>`:**
+  - **`#if` branches.** Files are parsed with no preprocessor symbols beyond the file's
+    own `#define`, so code under `#if DEBUG`, `#if TOOLS` or `#if UNITY_EDITOR` is unseen
+    and the `#else` branch is recorded instead.
+  - **Usage from non-C# files**: `.razor` markup, XAML, Godot `.tscn` signal connections,
+    Unity serialized references in scenes and prefabs.
+  - **Same-named types in different projects.** All projects share one analysis, so two
+    types with the same namespace and name become one node: `usedBy` is the union of
+    both, and a caller can be attributed to the wrong file. If their kinds differ, such as
+    a class and a record, uses of the type are kept but its members lose theirs.
+  - **Name clashes the build never sees.** When a repository type shares its name with a
+    .NET type its project cannot see, because the project targets an older framework or
+    the other type comes from another project's `global using`, uses of the name are
+    recorded but members reached through it are not. An extension method clashing the
+    same way is not recorded at all. Nor is a name that another project's `global using`
+    makes ambiguous between two repository types: which one is meant is not guessed.
 - **TypeScript/JavaScript** records calls, construction, imports and inheritance. It
   **does not record** property reads and writes or type references.
 
