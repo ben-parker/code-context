@@ -222,6 +222,28 @@ public class ProjectModelTests : IDisposable
     }
 
     [Fact]
+    public void WithoutRestoreDataWhatAReferenceLacksIsAGapHereToo()
+    {
+        InstallCoreFramework();
+        Write("Lib/Lib.csproj", """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup>
+              <ItemGroup><PackageReference Include="Absent" Version="1.0.0" /></ItemGroup>
+            </Project>
+            """);
+        Write("App/App.csproj", """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup>
+              <ItemGroup><ProjectReference Include="..\Lib\Lib.csproj" /></ItemGroup>
+            </Project>
+            """);
+
+        var model = Load(Source("Lib/L.cs"), Source("App/A.cs"));
+
+        Assert.Equal(ProjectCoverageState.Partial, model.Projects.Single(project => project.Name == "App").State);
+    }
+
+    [Fact]
     public void ABuildOnlyPackageIsFoundEvenThoughItHasNothingToCompileAgainst()
     {
         InstallCoreFramework();

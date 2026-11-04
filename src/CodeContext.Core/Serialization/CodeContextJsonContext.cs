@@ -145,7 +145,14 @@ public record StatusResponseDto(
     // Backward compatibility fields
     [property: JsonPropertyName("indexed")] bool Indexed,
     [property: JsonPropertyName("fileCount")] int FileCount,
-    [property: JsonPropertyName("nodeCount")] int NodeCount
+    [property: JsonPropertyName("nodeCount")] int NodeCount,
+    [property: JsonPropertyName("coverage")] CoverageStatusDto? Coverage = null
+);
+
+/// <summary>How much of the workspace's declared context the workers found.</summary>
+public record CoverageStatusDto(
+    [property: JsonPropertyName("state")] string State,
+    [property: JsonPropertyName("projects")] IReadOnlyList<ProjectCoverage> Projects
 );
 
 public record SystemStatusDto(
@@ -260,6 +267,9 @@ public record NativeSyntaxTreeRequestDto(
 [JsonSerializable(typeof(CountResponseDto))]
 [JsonSerializable(typeof(ReconcileStatsDto))]
 [JsonSerializable(typeof(StatusResponseDto))]
+[JsonSerializable(typeof(CoverageStatusDto))]
+[JsonSerializable(typeof(ProjectCoverage))]
+[JsonSerializable(typeof(CoverageSummary))]
 [JsonSerializable(typeof(SystemStatusDto))]
 [JsonSerializable(typeof(IndexingStatusDto))]
 [JsonSerializable(typeof(DatabaseStatusDto))]

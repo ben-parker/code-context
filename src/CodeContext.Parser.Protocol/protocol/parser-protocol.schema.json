@@ -176,7 +176,7 @@
         "name": { "type": "string" },
         "kind": { "type": "string", "description": "Versioned string ('class', 'method', ...), not a closed enum." },
         "language": { "type": "string" },
-        "filePath": { "type": "string", "description": "The verbatim path string the host supplied for the walked file. Emit it unmodified: file-scoped replacement (analysisDelta.replacesFiles) matches these strings byte-for-byte (case-insensitively on Windows), with no normalization on either side." },
+        "filePath": { "type": "string", "description": "The verbatim path string the host supplied for the walked file, or a virtual external: path for a stub of a symbol from outside the workspace (metadata.external is \"true\"). Emit it unmodified: file-scoped replacement (analysisDelta.replacesFiles) matches these strings byte-for-byte (case-insensitively on Windows), with no normalization on either side." },
         "startLine": { "type": "integer", "description": "Worker-native base on the wire; host storage normalizes to zero-based." },
         "endLine": { "type": "integer" },
         "startColumn": { "type": "integer" },
@@ -199,6 +199,23 @@
         "targetId": { "type": "string" },
         "kind": { "type": "string", "description": "Versioned string ('calls', 'implements', ...), not a closed enum." },
         "metadata": { "type": "object", "additionalProperties": { "type": "string" } }
+      }
+    },
+    "projectCoverage": {
+      "type": "object",
+      "required": ["name", "state", "files"],
+      "properties": {
+        "name": { "type": "string" },
+        "path": { "type": "string", "description": "The project file relative to the workspace root, when there is one." },
+        "state": { "type": "string", "enum": ["complete", "partial", "fallback"], "description": "complete: everything the project declares was found. partial: analyzed as its own project, with something missing. fallback: analyzed without knowing its project." },
+        "files": { "type": "integer" },
+        "targetFramework": { "type": "string" },
+        "inactiveTargetFrameworks": { "type": "array", "items": { "type": "string" } },
+        "missingReferences": { "type": "array", "items": { "type": "string" } },
+        "analyzerPackages": { "type": "array", "items": { "type": "string" }, "description": "Packages carrying analyzers or source generators, which are never run, so code they generate is unseen." },
+        "unresolvedNames": { "type": "integer", "description": "Names in this project's code that failed to bind." },
+        "commonUnresolvedNames": { "type": "array", "items": { "type": "string" } },
+        "notes": { "type": "array", "items": { "type": "string" } }
       }
     },
     "analysisDelta": {
@@ -225,6 +242,11 @@
               "kind": { "type": "string" }
             }
           }
+        },
+        "coverage": {
+          "type": "array",
+          "description": "Optional. How much of each project's declared context was found, for workers with a notion of a project. Replaces the worker's previous report when the request commits. Send it on the first chunk.",
+          "items": { "$ref": "#/$defs/projectCoverage" }
         },
         "diagnostics": {
           "type": "array",

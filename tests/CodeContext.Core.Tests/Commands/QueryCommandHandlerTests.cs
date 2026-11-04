@@ -428,6 +428,28 @@ public class QueryCommandHandlerTests
         Assert.Contains(matches, output.ToString());
     }
 
+    [Theory]
+    [InlineData(false, "coverage\tpartial\t2 of 9 projects analyzed without all they declare: Game, Tools.")]
+    [InlineData(true, "Coverage (partial): 2 of 9 projects analyzed without all they declare: Game, Tools.")]
+    public async Task AMissingResultSaysWhatWasNotSeen(bool human, string expected)
+    {
+        var response = JsonSerializer.Serialize(new
+        {
+            totalMatches = 0,
+            matches = Array.Empty<object>(),
+            coverage = new { state = "partial", incompleteProjects = 2, totalProjects = 9, names = new[] { "Game", "Tools" } },
+        });
+        var handler = new RecordingHandler(request => request.RequestUri!.AbsolutePath == "/api/status"
+            ? Json(Status("ready")) : Json(response));
+        var (runtime, output, _) = Runtime(handler, new FakeRegistry(Instance()));
+
+        await QueryCommandHandler.ExecuteAsync(
+            new QuerySettings(["Node3D"], Root, 1, false, null, false, false, false, Human: human),
+            runtime, CancellationToken.None);
+
+        Assert.Contains(expected, output.ToString());
+    }
+
     [Fact]
     public async Task ExternalIsAskedForOnlyWhenRequested()
     {

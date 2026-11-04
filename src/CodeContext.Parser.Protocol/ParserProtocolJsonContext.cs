@@ -30,6 +30,7 @@ namespace CodeContext.Parser.Protocol;
 [JsonSerializable(typeof(ProtocolEdge))]
 [JsonSerializable(typeof(UnresolvedReference))]
 [JsonSerializable(typeof(ProtocolDiagnostic))]
+[JsonSerializable(typeof(ProjectCoverage))]
 [JsonSerializable(typeof(WorkerManifest))]
 [JsonSerializable(typeof(List<string>))]
 [JsonSerializable(typeof(List<FileChangeDto>))]
@@ -37,6 +38,7 @@ namespace CodeContext.Parser.Protocol;
 [JsonSerializable(typeof(List<ProtocolEdge>))]
 [JsonSerializable(typeof(List<UnresolvedReference>))]
 [JsonSerializable(typeof(List<ProtocolDiagnostic>))]
+[JsonSerializable(typeof(List<ProjectCoverage>))]
 [JsonSerializable(typeof(Dictionary<string, string>))]
 [JsonSerializable(typeof(IReadOnlyDictionary<string, string>))]
 [JsonSourceGenerationOptions(

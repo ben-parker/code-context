@@ -2,6 +2,7 @@ using CodeContext.Core.Models;
 using CodeContext.Core.Repositories;
 using CodeContext.Core.Serialization;
 using CodeContext.Core.Workers;
+using CodeContext.Parser.Protocol;
 using Microsoft.Extensions.Options;
 using System.Globalization;
 using System.Reflection;
@@ -19,6 +20,7 @@ public class StatusService : IStatusService
     private readonly IParserSessionRegistry _sessionRegistry;
     private readonly IApiMetrics _apiMetrics;
     private readonly IRepositoryFileSelector? _fileSelector;
+    private readonly IAnalysisCoverageRegistry? _coverage;
     private readonly DateTimeOffset _startTime;
 
     public StatusService(
@@ -31,7 +33,8 @@ public class StatusService : IStatusService
         IParserSessionRegistry sessionRegistry,
         IApiMetrics apiMetrics,
         IRepositoryFileSelector? fileSelector = null,
-        ApplicationStartTime? applicationStartTime = null)
+        ApplicationStartTime? applicationStartTime = null,
+        IAnalysisCoverageRegistry? coverage = null)
     {
         _nodeRepository = nodeRepository;
         _edgeRepository = edgeRepository;
@@ -42,6 +45,7 @@ public class StatusService : IStatusService
         _sessionRegistry = sessionRegistry;
         _apiMetrics = apiMetrics;
         _fileSelector = fileSelector;
+        _coverage = coverage;
         _startTime = (applicationStartTime ?? new ApplicationStartTime(DateTimeOffset.UtcNow)).Value;
     }
 
@@ -73,8 +77,15 @@ public class StatusService : IStatusService
             Api: apiStatus,
             Indexed: indexed,
             FileCount: fileAggregates.FileCount,
-            NodeCount: graphStatistics.NodeCount
+            NodeCount: graphStatistics.NodeCount,
+            Coverage: GetCoverage()
         );
+    }
+
+    private CoverageStatusDto? GetCoverage()
+    {
+        var projects = _coverage?.GetProjects() ?? [];
+        return projects.Count == 0 ? null : new CoverageStatusDto(ContextService.OverallState(projects), projects);
     }
 
     private sealed record FileMetadataAggregates(

@@ -842,6 +842,14 @@ public sealed class ProjectModel
                 own.AddRange(info.ProjectReferences.SelectMany(project => project.MetadataReferences)
                     .Where(path => path.Contains(".nuget", StringComparison.OrdinalIgnoreCase)));
                 info.MetadataReferences = own.Distinct(PathComparer).ToList();
+
+                // What a reference lacks would have reached this project too.
+                var lacking = info.ProjectReferences.Where(project => project.MissingReferences.Count > 0).ToList();
+                if (lacking.Count > 0)
+                {
+                    info.Gaps.Add($"No restore data, and {string.Join(", ", lacking.Select(project => project.Name))} "
+                        + "has references that are missing here too.");
+                }
             }
         }
 

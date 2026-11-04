@@ -89,7 +89,25 @@ namespace CodeContext.Core.Services
         public int ExternalMatchesHidden { get; set; }
 
         public CompactMatchFacets? Facets { get; set; }
+
+        /// <summary>
+        /// Set when this answer may be short because some project was analyzed without all
+        /// it declares. Absent means no such doubt, not that nothing was checked.
+        /// </summary>
+        public CoverageSummary? Coverage { get; set; }
+
         public List<CompactContextMatch> Matches { get; set; } = new();
+    }
+
+    /// <summary>Which projects were analyzed without all they declare.</summary>
+    public class CoverageSummary
+    {
+        public string State { get; set; } = string.Empty;
+        public int IncompleteProjects { get; set; }
+        public int TotalProjects { get; set; }
+
+        /// <summary>The first few of them, by name.</summary>
+        public List<string> Names { get; set; } = new();
     }
 
     public class CompactMatchFacets

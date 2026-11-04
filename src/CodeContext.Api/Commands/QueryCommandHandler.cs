@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
@@ -327,6 +328,7 @@ public static class QueryCommandHandler
         if (response.TotalMatches == 0 || response.Matches.Count == 0)
         {
             output.WriteLine($"missing\t{Clean(requestedIdentifier)}");
+            WriteCoverage(response.Coverage, "coverage\t{0}\t", output);
             return;
         }
 
@@ -343,6 +345,7 @@ public static class QueryCommandHandler
         }
         if (response.ExternalMatchesHidden > 0)
             output.WriteLine($"externalMatches\t{response.ExternalMatchesHidden}\t--external lists them");
+        WriteCoverage(response.Coverage, "coverage\t{0}\t", output);
 
         foreach (var match in response.Matches)
         {
@@ -478,6 +481,17 @@ public static class QueryCommandHandler
         }
     }
 
+    /// <summary>Why an empty answer may not mean nothing is there.</summary>
+    private static void WriteCoverage(CoverageSummary? coverage, string prefix, TextWriter output)
+    {
+        if (coverage is null) return;
+        var more = coverage.IncompleteProjects - coverage.Names.Count;
+        var names = string.Join(", ", coverage.Names.Select(Clean)) + (more > 0 ? $" and {more} more" : string.Empty);
+        output.WriteLine(string.Format(CultureInfo.InvariantCulture, prefix, coverage.State)
+            + $"{coverage.IncompleteProjects} of {coverage.TotalProjects} projects analyzed without all they declare: {names}. "
+            + "This answer may be incomplete; codecontext status has details.");
+    }
+
     private static string? Location(CompactCodeNode node)
         => node.External is { } assembly ? $"external {assembly}"
             : string.IsNullOrEmpty(node.File) ? null
@@ -508,6 +522,7 @@ public static class QueryCommandHandler
         if (response.TotalMatches == 0 || response.Matches.Count == 0)
         {
             output.WriteLine($"No match: {requestedIdentifier}");
+            WriteCoverage(response.Coverage, "Coverage ({0}): ", output);
             return;
         }
 
@@ -521,6 +536,7 @@ public static class QueryCommandHandler
         }
         if (response.ExternalMatchesHidden > 0)
             output.WriteLine($"Library symbols of this name: {response.ExternalMatchesHidden} (--external lists them)");
+        WriteCoverage(response.Coverage, "Coverage ({0}): ", output);
 
         for (var index = 0; index < response.Matches.Count; index++)
         {

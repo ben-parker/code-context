@@ -129,7 +129,23 @@ namespace CodeContext.Core.Tests.Services
 
             var relationships = (await _service.GetCompactContextAsync("IDisposable.Dispose")).Matches.Single().Relationships!;
 
-            Assert.Equal(["CallsA", "CallsLibrary"], relationships.UsedBy!.Select(node => node.Identifier).Order());
+            Assert.Equal(
+                ["A.Dispose", "B.Dispose", "CallsA", "CallsLibrary"],
+                relationships.UsedBy!.Select(node => node.Identifier).Order());
+            Assert.Equal(["IMPLEMENTS_MEMBER"], relationships.UsedBy!.Single(node => node.Identifier == "A.Dispose").Relations);
+        }
+
+        [Fact]
+        public async Task AVirtualOverriddenButNeverCalledStillShowsItsOverriders()
+        {
+            Source("Player._Ready", "/repo/Player.cs");
+            External("Node._Ready");
+            Edge("Player._Ready", "Node._Ready", "OVERRIDES_MEMBER");
+
+            var relationships = (await _service.GetCompactContextAsync("Node._Ready")).Matches.Single().Relationships!;
+
+            Assert.Equal(["Player._Ready"], relationships.UsedBy!.Select(node => node.Identifier));
+            Assert.Equal(1, relationships.UsedByCount);
         }
 
         [Fact]

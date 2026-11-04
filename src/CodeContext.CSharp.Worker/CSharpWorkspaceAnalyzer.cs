@@ -47,6 +47,8 @@ public sealed class CSharpWorkspaceAnalyzer
 
     private static readonly Lazy<ToolchainLocations> Toolchain = new(ToolchainLocations.Detect);
 
+    private const int MaxCommonUnresolvedNames = 5;
+
     /// <summary>
     /// Assemblies by path, shared across projects and workspaces. A shared instance is what
     /// lets Roslyn reuse the symbols it read from an assembly across compilations.
@@ -350,6 +352,7 @@ public sealed class CSharpWorkspaceAnalyzer
         // flat whole-workspace lists, so each file's nodes/edges stay contiguous in walk order.
         var rawBuckets = new List<FileFacts>(_owners.Count);
         var walked = new List<ExternalSymbols>(_owners.Count);
+        var unresolved = new Dictionary<ProjectCompilation, Dictionary<string, int>>();
         var total = progressFiles?.Count ?? _owners.Count;
         var processed = 0;
         if (total == 0 && progress is not null)
@@ -396,6 +399,7 @@ public sealed class CSharpWorkspaceAnalyzer
                 semanticModel, tree.FilePath, unit.IdPrefix, _owners, externals, bucketNodes, bucketEdges);
             walker.Visit(tree.GetRoot(ct));
             walked.Add(externals);
+            walker.AddUnresolvedNamesTo(unresolved, unit);
             return new FileFacts(tree.FilePath, bucketNodes, bucketEdges);
         }
 
@@ -453,8 +457,62 @@ public sealed class CSharpWorkspaceAnalyzer
 
         var diagnostics = _pendingDiagnostics.ToList();
         _pendingDiagnostics.Clear();
-        return new AnalysisResult(nodes, edges, diagnostics, buckets);
+        return new AnalysisResult(nodes, edges, diagnostics, buckets) { Coverage = BuildCoverage(unresolved) };
     }
+
+    private List<ProjectCoverage> BuildCoverage(Dictionary<ProjectCompilation, Dictionary<string, int>> unresolved)
+    {
+        var files = _owners.Values.GroupBy(unit => unit).ToDictionary(group => group.Key, group => group.Count());
+        var coverage = new List<ProjectCoverage>();
+        foreach (var unit in _units)
+        {
+            var count = files.GetValueOrDefault(unit);
+            var names = unresolved.GetValueOrDefault(unit);
+            var total = names?.Values.Sum() ?? 0;
+            var common = names?.OrderByDescending(name => name.Value)
+                .ThenBy(name => name.Key, StringComparer.Ordinal)
+                .Take(MaxCommonUnresolvedNames)
+                .Select(name => name.Key)
+                .ToList();
+
+            if (unit.Project is not { } project)
+            {
+                if (count == 0) continue;
+                var notes = new List<string>
+                {
+                    _model is { Projects.Count: > 0 }
+                        ? "These files are compiled by no project, so they bind against the worker's runtime and the workspace's projects."
+                        : "No project compiles these files, so they bind against the worker's runtime with no constants or packages.",
+                };
+                notes.AddRange((_model?.Failures ?? []).Select(failure => $"{failure.RelativePath} could not be read: {failure.Reason}"));
+                coverage.Add(new ProjectCoverage(
+                    unit.Qualifier, null, ProjectCoverageStates.Fallback, count,
+                    UnresolvedNames: total, CommonUnresolvedNames: common, Notes: notes));
+                continue;
+            }
+
+            coverage.Add(new ProjectCoverage(
+                project.Name,
+                project.RelativePath,
+                project.State switch
+                {
+                    ProjectCoverageState.Complete => ProjectCoverageStates.Complete,
+                    ProjectCoverageState.Partial => ProjectCoverageStates.Partial,
+                    _ => ProjectCoverageStates.Fallback,
+                },
+                count,
+                project.TargetFramework,
+                NullIfEmpty(project.InactiveTargetFrameworks),
+                NullIfEmpty(project.MissingReferences),
+                NullIfEmpty(project.AnalyzerPackages),
+                total,
+                common,
+                NullIfEmpty(project.Notes.ToList())));
+        }
+        return coverage;
+    }
+
+    private static IReadOnlyList<string>? NullIfEmpty(IReadOnlyList<string> items) => items.Count == 0 ? null : items;
 
     /// <summary>The public identifiers more than one symbol would carry.</summary>
     private static HashSet<string> ContestedIdentifiers(List<FileFacts> buckets)
@@ -574,6 +632,9 @@ public sealed class CSharpWorkspaceAnalyzer
         IReadOnlyList<FileFacts> Buckets)
     {
         public IReadOnlySet<string> NodeIds { get; } = Nodes.Select(n => n.Id).ToHashSet(StringComparer.Ordinal);
+
+        /// <summary>What each project could and could not see.</summary>
+        public IReadOnlyList<ProjectCoverage> Coverage { get; init; } = [];
     }
 
     /// <summary>
@@ -922,6 +983,7 @@ public sealed class CSharpWorkspaceAnalyzer
         private readonly string _idPrefix;
         private readonly IReadOnlyDictionary<string, ProjectCompilation> _owners;
         private readonly ExternalSymbols _externals;
+        private readonly Dictionary<string, int> _unresolved = new(StringComparer.Ordinal);
         private readonly List<ProtocolNode> _nodes;
         private readonly List<ProtocolEdge> _edges;
         private bool _hasTopLevelEntry;
@@ -1467,6 +1529,7 @@ public sealed class CSharpWorkspaceAnalyzer
         private void AddNameReference(SimpleNameSyntax node)
         {
             var symbol = ResolveSymbol(node);
+            if (symbol is null) NoteIfUnresolved(node);
             switch (symbol)
             {
                 case INamedTypeSymbol type:
@@ -1484,6 +1547,33 @@ public sealed class CSharpWorkspaceAnalyzer
                 case IPropertySymbol or IFieldSymbol or IEventSymbol:
                     AddMemberReference(node, symbol.OriginalDefinition);
                     break;
+            }
+        }
+
+        /// <summary>
+        /// A name that binds to nothing is what a project with something missing looks like
+        /// from inside, including one that looks complete: code a source generator would
+        /// have written, or a reference that was never declared.
+        /// </summary>
+        private void NoteIfUnresolved(SimpleNameSyntax node)
+        {
+            var info = _semanticModel.GetSymbolInfo(node);
+            if (info.CandidateSymbols.Length > 0 || node.IsVar || node.Parent is NameColonSyntax or NameEqualsSyntax) return;
+            if (node.Identifier.ValueText is "nameof" or "unmanaged" or "notnull") return;
+            if (_semanticModel.GetTypeInfo(node).Type is { TypeKind: not TypeKind.Error }) return;
+            if (_semanticModel.GetConstantValue(node).HasValue) return;
+
+            var name = node.Identifier.ValueText;
+            _unresolved[name] = _unresolved.GetValueOrDefault(name) + 1;
+        }
+
+        public void AddUnresolvedNamesTo(Dictionary<ProjectCompilation, Dictionary<string, int>> byUnit, ProjectCompilation unit)
+        {
+            if (_unresolved.Count == 0) return;
+            if (!byUnit.TryGetValue(unit, out var names)) byUnit[unit] = names = new Dictionary<string, int>(StringComparer.Ordinal);
+            foreach (var (name, count) in _unresolved)
+            {
+                names[name] = names.GetValueOrDefault(name) + count;
             }
         }
 

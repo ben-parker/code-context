@@ -1,5 +1,5 @@
 {
-  "openapi": "3.0.1",
+  "openapi": "3.1.1",
   "info": {
     "title": "CodeContext API",
     "description": "Local code context API for LLMs - provides dependency graph and code relationships",
@@ -16,6 +16,21 @@
     }
   ],
   "paths": {
+    "/api/schema": {
+      "get": {
+        "tags": [
+          "codecontext"
+        ],
+        "summary": "Get OpenAPI 3.0 specification",
+        "description": "Returns the OpenAPI 3.0 specification for the CodeContext API",
+        "operationId": "GetOpenApiSchema",
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
     "/api/status": {
       "get": {
         "tags": [
@@ -61,8 +76,7 @@
             "in": "query",
             "description": "Filter by type (Class, Method, Interface, Property, etc.)",
             "schema": {
-              "type": "string",
-              "default": null
+              "type": "string"
             }
           },
           {
@@ -70,7 +84,11 @@
             "in": "query",
             "description": "How many relationship levels to traverse (0-10)",
             "schema": {
-              "type": "integer",
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": [
+                "integer",
+                "string"
+              ],
               "format": "int32",
               "default": 1
             }
@@ -98,8 +116,7 @@
             "in": "query",
             "description": "Exact matching; omit for exact-first matching with substring fallback",
             "schema": {
-              "type": "boolean",
-              "default": null
+              "type": "boolean"
             }
           },
           {
@@ -125,7 +142,11 @@
             "in": "query",
             "description": "Maximum ambiguous candidate summaries to return (1-50)",
             "schema": {
-              "type": "integer",
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": [
+                "integer",
+                "string"
+              ],
               "format": "int32",
               "default": 5
             }
@@ -135,7 +156,11 @@
             "in": "query",
             "description": "Maximum entries returned per relationship list (1-100)",
             "schema": {
-              "type": "integer",
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": [
+                "integer",
+                "string"
+              ],
               "format": "int32",
               "default": 10
             }
@@ -145,7 +170,11 @@
             "in": "query",
             "description": "Maximum locations returned per aggregated relationship (0-100)",
             "schema": {
-              "type": "integer",
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": [
+                "integer",
+                "string"
+              ],
               "format": "int32",
               "default": 3
             }
@@ -155,7 +184,11 @@
             "in": "query",
             "description": "Maximum test files returned; zero is count-only (0-100)",
             "schema": {
-              "type": "integer",
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": [
+                "integer",
+                "string"
+              ],
               "format": "int32",
               "default": 5
             }
@@ -165,7 +198,11 @@
             "in": "query",
             "description": "Maximum test methods returned per file; zero is count-only (0-100)",
             "schema": {
-              "type": "integer",
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": [
+                "integer",
+                "string"
+              ],
               "format": "int32",
               "default": 5
             }
@@ -184,8 +221,7 @@
             "in": "query",
             "description": "Filter members by containing type",
             "schema": {
-              "type": "string",
-              "default": null
+              "type": "string"
             }
           },
           {
@@ -193,8 +229,7 @@
             "in": "query",
             "description": "Filter by exact namespace or module",
             "schema": {
-              "type": "string",
-              "default": null
+              "type": "string"
             }
           },
           {
@@ -202,8 +237,7 @@
             "in": "query",
             "description": "Filter by exact signature",
             "schema": {
-              "type": "string",
-              "default": null
+              "type": "string"
             }
           },
           {
@@ -211,17 +245,14 @@
             "in": "query",
             "description": "Filter by repository-relative or absolute source file",
             "schema": {
-              "type": "string",
-              "default": null
+              "type": "string"
             }
           },
           {
             "name": "relation",
             "in": "query",
-            "description": "Compact view only: comma-separated, case-insensitive edge kinds that filter the 'uses' and 'usedBy' lists. Valid kinds: CALLS, MOCK_CALLS, REFERENCES, IMPLEMENTS, INHERITS, EXTENDS, IMPORTS, USES (USES matches null-typed edges). An unknown kind returns 400 listing the valid kinds; combining with view=full returns 400. When set, usesCount/usedByCount and the returned/truncated fields describe the filtered set (filtered-to-zero yields an empty list plus zero counts, distinct from an omitted section). transitiveUses/transitiveUsedBy, fileDependencies/fileDependents, and relatedItems are not filtered.",
             "schema": {
-              "type": "string",
-              "default": null
+              "type": "string"
             }
           },
           {
@@ -231,6 +262,14 @@
             "schema": {
               "type": "string",
               "default": "compact"
+            }
+          },
+          {
+            "name": "includeExternal",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": false
             }
           }
         ],
@@ -320,8 +359,7 @@
             "in": "query",
             "description": "Path to the file to refresh. If omitted, performs full scan.",
             "schema": {
-              "type": "string",
-              "default": null
+              "type": "string"
             }
           }
         ],
@@ -434,8 +472,7 @@
             "name": "instanceId",
             "in": "query",
             "schema": {
-              "type": "string",
-              "default": null
+              "type": "string"
             }
           }
         ],
@@ -452,21 +489,6 @@
           },
           "403": {
             "description": "Forbidden"
-          }
-        }
-      }
-    },
-    "/api/schema": {
-      "get": {
-        "tags": [
-          "codecontext"
-        ],
-        "summary": "Get OpenAPI 3.0 specification",
-        "description": "Returns the OpenAPI 3.0 specification for the CodeContext API",
-        "operationId": "GetOpenApiSchema",
-        "responses": {
-          "200": {
-            "description": "OK"
           }
         }
       }
@@ -490,14 +512,22 @@
             }
           },
           "requestCount": {
-            "type": "integer",
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
             "format": "int32"
           },
           "averageResponseTime": {
             "type": "string"
           },
           "contractVersion": {
-            "type": "integer",
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
             "format": "int32"
           }
         }
@@ -506,78 +536,120 @@
         "type": "object",
         "properties": {
           "id": {
-            "type": "string",
-            "nullable": true
+            "type": [
+              "null",
+              "string"
+            ]
           },
           "identifier": {
             "type": "string"
           },
           "name": {
-            "type": "string",
-            "nullable": true
+            "type": [
+              "null",
+              "string"
+            ]
           },
           "type": {
-            "type": "string",
-            "nullable": true
+            "type": [
+              "null",
+              "string"
+            ]
           },
           "filePath": {
-            "type": "string",
-            "nullable": true
+            "type": [
+              "null",
+              "string"
+            ]
           },
           "startLine": {
-            "type": "integer",
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
             "format": "int32"
           },
           "endLine": {
-            "type": "integer",
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
             "format": "int32"
           },
           "startCol": {
-            "type": "integer",
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
             "format": "int32"
           },
           "endCol": {
-            "type": "integer",
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
             "format": "int32"
           },
           "namespace": {
-            "type": "string",
-            "nullable": true
+            "type": [
+              "null",
+              "string"
+            ]
           },
           "visibility": {
-            "type": "string",
-            "nullable": true
+            "type": [
+              "null",
+              "string"
+            ]
           },
           "signature": {
-            "type": "string",
-            "nullable": true
+            "type": [
+              "null",
+              "string"
+            ]
           },
           "language": {
-            "type": "string",
-            "nullable": true
+            "type": [
+              "null",
+              "string"
+            ]
           },
           "returnType": {
-            "type": "string",
-            "nullable": true
+            "type": [
+              "null",
+              "string"
+            ]
           },
           "parameters": {
-            "type": "string",
-            "nullable": true
+            "type": [
+              "null",
+              "string"
+            ]
           },
           "modifiers": {
-            "type": "string",
-            "nullable": true
+            "type": [
+              "null",
+              "string"
+            ]
           },
           "metrics": {
-            "type": "string",
-            "nullable": true
+            "type": [
+              "null",
+              "string"
+            ]
           },
           "metadata": {
-            "type": "object",
+            "type": [
+              "null",
+              "object"
+            ],
             "additionalProperties": {
               "type": "string"
-            },
-            "nullable": true
+            }
           }
         }
       },
@@ -585,74 +657,116 @@
         "type": "object",
         "properties": {
           "name": {
-            "type": "string",
-            "nullable": true
+            "type": [
+              "null",
+              "string"
+            ]
           },
           "type": {
-            "type": "string",
-            "nullable": true
+            "type": [
+              "null",
+              "string"
+            ]
           },
           "file": {
-            "type": "string",
-            "nullable": true
+            "type": [
+              "null",
+              "string"
+            ]
           },
           "line": {
-            "type": "integer",
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
             "format": "int32"
           },
           "signature": {
-            "type": "string",
-            "nullable": true
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "external": {
+            "type": [
+              "null",
+              "string"
+            ]
           },
           "relations": {
-            "type": "array",
+            "type": [
+              "null",
+              "array"
+            ],
             "items": {
               "type": "string"
-            },
-            "nullable": true
+            }
           },
           "occurrences": {
-            "type": "integer",
-            "format": "int32",
-            "nullable": true
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
           },
           "lines": {
-            "type": "array",
+            "type": [
+              "null",
+              "array"
+            ],
             "items": {
-              "type": "integer",
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": [
+                "integer",
+                "string"
+              ],
               "format": "int32"
-            },
-            "nullable": true
+            }
           },
           "callSiteCount": {
-            "type": "integer",
-            "format": "int32",
-            "nullable": true
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
           },
           "callSitesTruncated": {
             "type": "boolean"
           },
           "distance": {
-            "type": "integer",
-            "format": "int32",
-            "nullable": true
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
           },
           "relationPath": {
-            "type": "array",
+            "type": [
+              "null",
+              "array"
+            ],
             "items": {
               "type": "string"
-            },
-            "nullable": true
+            }
           },
           "identifier": {
             "type": "string"
           },
           "bindings": {
-            "type": "array",
+            "type": [
+              "null",
+              "array"
+            ],
             "items": {
               "type": "string"
-            },
-            "nullable": true
+            }
           }
         }
       },
@@ -663,17 +777,40 @@
             "$ref": "#/components/schemas/CompactCodeNode"
           },
           "relationships": {
-            "$ref": "#/components/schemas/CompactRelationships"
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CompactRelationships"
+              }
+            ]
           },
           "testing": {
-            "$ref": "#/components/schemas/CompactTesting"
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CompactTesting"
+              }
+            ]
           },
           "metrics": {
-            "$ref": "#/components/schemas/ContextMetrics2"
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ContextMetrics"
+              }
+            ]
           },
           "content": {
-            "type": "string",
-            "nullable": true
+            "type": [
+              "null",
+              "string"
+            ]
           }
         }
       },
@@ -690,11 +827,19 @@
             "type": "boolean"
           },
           "totalMatches": {
-            "type": "integer",
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
             "format": "int32"
           },
           "returnedMatches": {
-            "type": "integer",
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
             "format": "int32"
           },
           "truncated": {
@@ -704,11 +849,38 @@
             "type": "boolean"
           },
           "disambiguationHint": {
-            "type": "string",
-            "nullable": true
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "externalMatchesHidden": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
           },
           "facets": {
-            "$ref": "#/components/schemas/CompactMatchFacets"
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CompactMatchFacets"
+              }
+            ]
+          },
+          "coverage": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CoverageSummary"
+              }
+            ]
           },
           "matches": {
             "type": "array",
@@ -724,159 +896,252 @@
           "types": {
             "type": "object",
             "additionalProperties": {
-              "type": "integer",
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": [
+                "integer",
+                "string"
+              ],
               "format": "int32"
             }
           },
           "files": {
             "type": "object",
             "additionalProperties": {
-              "type": "integer",
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": [
+                "integer",
+                "string"
+              ],
               "format": "int32"
             }
           },
           "totalFiles": {
-            "type": "integer",
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
             "format": "int32"
           }
-        },
-        "nullable": true
+        }
       },
       "CompactRelationships": {
         "type": "object",
         "properties": {
           "uses": {
-            "type": "array",
+            "type": [
+              "null",
+              "array"
+            ],
             "items": {
               "$ref": "#/components/schemas/CompactCodeNode"
-            },
-            "nullable": true
+            }
           },
           "usesCount": {
-            "type": "integer",
-            "format": "int32",
-            "nullable": true
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
           },
           "usesReturnedCount": {
-            "type": "integer",
-            "format": "int32",
-            "nullable": true
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
           },
           "usesTruncated": {
             "type": "boolean"
           },
+          "usesExternalHidden": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
           "usedBy": {
-            "type": "array",
+            "type": [
+              "null",
+              "array"
+            ],
             "items": {
-              "$ref": "#/components/schemas/CodeNode"
-            },
-            "nullable": true
+              "$ref": "#/components/schemas/CompactCodeNode"
+            }
           },
           "usedByCount": {
-            "type": "integer",
-            "format": "int32",
-            "nullable": true
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
           },
           "usedByReturnedCount": {
-            "type": "integer",
-            "format": "int32",
-            "nullable": true
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
           },
           "usedByTruncated": {
             "type": "boolean"
           },
           "transitiveUses": {
-            "type": "array",
-            "items": { },
-            "nullable": true
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/CompactCodeNode"
+            }
           },
           "transitiveUsesCount": {
-            "type": "integer",
-            "format": "int32",
-            "nullable": true
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
           },
           "transitiveUsesReturnedCount": {
-            "type": "integer",
-            "format": "int32",
-            "nullable": true
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
           },
           "transitiveUsesTruncated": {
             "type": "boolean"
           },
           "transitiveUsedBy": {
-            "type": "array",
-            "items": { },
-            "nullable": true
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/CompactCodeNode"
+            }
           },
           "transitiveUsedByCount": {
-            "type": "integer",
-            "format": "int32",
-            "nullable": true
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
           },
           "transitiveUsedByReturnedCount": {
-            "type": "integer",
-            "format": "int32",
-            "nullable": true
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
           },
           "transitiveUsedByTruncated": {
             "type": "boolean"
           },
           "fileDependencies": {
-            "type": "array",
+            "type": [
+              "null",
+              "array"
+            ],
             "items": {
               "type": "string"
-            },
-            "nullable": true
+            }
           },
           "fileDependenciesCount": {
-            "type": "integer",
-            "format": "int32",
-            "nullable": true
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
           },
           "fileDependenciesReturnedCount": {
-            "type": "integer",
-            "format": "int32",
-            "nullable": true
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
           },
           "fileDependenciesTruncated": {
             "type": "boolean"
           },
           "fileDependents": {
-            "type": "array",
+            "type": [
+              "null",
+              "array"
+            ],
             "items": {
               "type": "string"
-            },
-            "nullable": true
+            }
           },
           "fileDependentsCount": {
-            "type": "integer",
-            "format": "int32",
-            "nullable": true
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
           },
           "fileDependentsReturnedCount": {
-            "type": "integer",
-            "format": "int32",
-            "nullable": true
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
           },
           "fileDependentsTruncated": {
             "type": "boolean"
           },
           "relatedItems": {
-            "type": "array",
+            "type": [
+              "null",
+              "array"
+            ],
             "items": {
-              "$ref": "#/components/schemas/CodeNode"
-            },
-            "nullable": true
+              "$ref": "#/components/schemas/CompactCodeNode"
+            }
           },
           "relatedItemsCount": {
-            "type": "integer",
-            "format": "int32",
-            "nullable": true
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
           },
           "relatedItemsReturnedCount": {
-            "type": "integer",
-            "format": "int32",
-            "nullable": true
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
           },
           "relatedItemsTruncated": {
             "type": "boolean"
@@ -884,8 +1149,7 @@
           "truncated": {
             "type": "boolean"
           }
-        },
-        "nullable": true
+        }
       },
       "CompactTestFile": {
         "type": "object",
@@ -894,17 +1158,25 @@
             "type": "string"
           },
           "testCount": {
-            "type": "integer",
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
             "format": "int32"
           },
           "testMethodsReturnedCount": {
-            "type": "integer",
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
             "format": "int32"
           },
           "testMethods": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/CodeNode"
+              "$ref": "#/components/schemas/CompactCodeNode"
             }
           },
           "evidence": {
@@ -928,23 +1200,43 @@
             "type": "boolean"
           },
           "testReferenceCount": {
-            "type": "integer",
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
             "format": "int32"
           },
           "testImplementerCount": {
-            "type": "integer",
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
             "format": "int32"
           },
           "heuristicMatchCount": {
-            "type": "integer",
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
             "format": "int32"
           },
           "testFileCount": {
-            "type": "integer",
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
             "format": "int32"
           },
           "testFilesReturnedCount": {
-            "type": "integer",
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
             "format": "int32"
           },
           "testFiles": {
@@ -956,8 +1248,7 @@
           "testFilesTruncated": {
             "type": "boolean"
           }
-        },
-        "nullable": true
+        }
       },
       "CompleteContextResponse": {
         "type": "object",
@@ -969,8 +1260,10 @@
             }
           },
           "disambiguationHint": {
-            "type": "string",
-            "nullable": true
+            "type": [
+              "null",
+              "string"
+            ]
           }
         }
       },
@@ -990,8 +1283,10 @@
             "$ref": "#/components/schemas/ContextMetrics"
           },
           "content": {
-            "type": "string",
-            "nullable": true
+            "type": [
+              "null",
+              "string"
+            ]
           }
         }
       },
@@ -999,48 +1294,50 @@
         "type": "object",
         "properties": {
           "complexity": {
-            "type": "integer",
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
             "format": "int32"
           },
           "linesOfCode": {
-            "type": "integer",
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
             "format": "int32"
           },
           "dependencyCount": {
-            "type": "integer",
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
             "format": "int32"
           },
           "dependentCount": {
-            "type": "integer",
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
             "format": "int32"
           }
         }
       },
-      "ContextMetrics2": {
-        "type": "object",
-        "properties": {
-          "complexity": {
-            "type": "integer",
-            "format": "int32"
-          },
-          "linesOfCode": {
-            "type": "integer",
-            "format": "int32"
-          },
-          "dependencyCount": {
-            "type": "integer",
-            "format": "int32"
-          },
-          "dependentCount": {
-            "type": "integer",
-            "format": "int32"
-          }
-        },
-        "nullable": true
-      },
       "ContextRelationships": {
         "type": "object",
         "properties": {
+          "externalUsesHidden": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
           "uses": {
             "type": "array",
             "items": {
@@ -1061,7 +1358,9 @@
           },
           "transitiveUsedBy": {
             "type": "array",
-            "items": { }
+            "items": {
+              "$ref": "#/components/schemas/ContextTransitiveRelationship"
+            }
           },
           "fileDependencies": {
             "type": "array",
@@ -1117,23 +1416,43 @@
             "type": "boolean"
           },
           "testReferenceCount": {
-            "type": "integer",
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
             "format": "int32"
           },
           "testImplementerCount": {
-            "type": "integer",
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
             "format": "int32"
           },
           "heuristicMatchCount": {
-            "type": "integer",
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
             "format": "int32"
           },
           "testFileCount": {
-            "type": "integer",
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
             "format": "int32"
           },
           "testFilesReturnedCount": {
-            "type": "integer",
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
             "format": "int32"
           },
           "testFilesTruncated": {
@@ -1148,10 +1467,62 @@
             "$ref": "#/components/schemas/CodeNode"
           },
           "distance": {
-            "type": "integer",
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
             "format": "int32"
           },
           "relationPath": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "CoverageStatusDto": {
+        "required": [
+          "state",
+          "projects"
+        ],
+        "type": "object",
+        "properties": {
+          "state": {
+            "type": "string"
+          },
+          "projects": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProjectCoverage"
+            }
+          }
+        }
+      },
+      "CoverageSummary": {
+        "type": "object",
+        "properties": {
+          "state": {
+            "type": "string"
+          },
+          "incompleteProjects": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "totalProjects": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "names": {
             "type": "array",
             "items": {
               "type": "string"
@@ -1171,28 +1542,48 @@
         "type": "object",
         "properties": {
           "fileCount": {
-            "type": "integer",
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
             "format": "int32"
           },
           "nodeCount": {
-            "type": "integer",
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
             "format": "int32"
           },
           "edgeCount": {
-            "type": "integer",
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
             "format": "int32"
           },
           "nodeTypes": {
             "type": "object",
             "additionalProperties": {
-              "type": "integer",
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": [
+                "integer",
+                "string"
+              ],
               "format": "int32"
             }
           },
           "languageBreakdown": {
             "type": "object",
             "additionalProperties": {
-              "type": "integer",
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": [
+                "integer",
+                "string"
+              ],
               "format": "int32"
             }
           },
@@ -1200,13 +1591,18 @@
             "type": "string"
           },
           "edgeTypes": {
-            "type": "object",
+            "type": [
+              "null",
+              "object"
+            ],
             "additionalProperties": {
-              "type": "integer",
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": [
+                "integer",
+                "string"
+              ],
               "format": "int32"
-            },
-            "default": null,
-            "nullable": true
+            }
           }
         }
       },
@@ -1239,12 +1635,16 @@
             "type": "string"
           },
           "lastScanAt": {
-            "type": "string",
-            "nullable": true
+            "type": [
+              "null",
+              "string"
+            ]
           },
           "scanDuration": {
-            "type": "string",
-            "nullable": true
+            "type": [
+              "null",
+              "string"
+            ]
           },
           "rootPath": {
             "type": "string"
@@ -1252,33 +1652,50 @@
           "filesByStatus": {
             "type": "object",
             "additionalProperties": {
-              "type": "integer",
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": [
+                "integer",
+                "string"
+              ],
               "format": "int32"
             }
           },
           "filesProcessed": {
-            "type": "integer",
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
             "format": "int32",
             "default": 0
           },
           "filesTotal": {
-            "type": "integer",
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
             "format": "int32",
             "default": 0
           },
           "lastError": {
-            "type": "string",
-            "default": null,
-            "nullable": true
+            "type": [
+              "null",
+              "string"
+            ]
           },
           "operationId": {
-            "type": "integer",
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
             "format": "int64",
             "default": 0
           }
         }
       },
-      "JsonElement": { },
+      "JsonElement": {},
       "MultiContextRequest": {
         "type": "object",
         "properties": {
@@ -1289,11 +1706,17 @@
             }
           },
           "type": {
-            "type": "string",
-            "nullable": true
+            "type": [
+              "null",
+              "string"
+            ]
           },
           "depth": {
-            "type": "integer",
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
             "format": "int32"
           },
           "view": {
@@ -1306,8 +1729,10 @@
             "type": "boolean"
           },
           "exact": {
-            "type": "boolean",
-            "nullable": true
+            "type": [
+              "null",
+              "boolean"
+            ]
           },
           "includeRelated": {
             "type": "boolean"
@@ -1315,51 +1740,81 @@
           "includeMetrics": {
             "type": "boolean"
           },
+          "includeExternal": {
+            "type": "boolean"
+          },
           "maxMatches": {
-            "type": "integer",
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
             "format": "int32"
           },
           "maxRelationships": {
-            "type": "integer",
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
             "format": "int32"
           },
           "maxCallSites": {
-            "type": "integer",
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
             "format": "int32"
           },
           "maxTestFiles": {
-            "type": "integer",
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
             "format": "int32"
           },
           "maxTestMethods": {
-            "type": "integer",
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
             "format": "int32"
           },
           "expandAmbiguous": {
             "type": "boolean"
           },
           "containingType": {
-            "type": "string",
-            "nullable": true
+            "type": [
+              "null",
+              "string"
+            ]
           },
           "namespace": {
-            "type": "string",
-            "nullable": true
+            "type": [
+              "null",
+              "string"
+            ]
           },
           "signature": {
-            "type": "string",
-            "nullable": true
+            "type": [
+              "null",
+              "string"
+            ]
           },
           "sourceFile": {
-            "type": "string",
-            "nullable": true
+            "type": [
+              "null",
+              "string"
+            ]
           },
           "relationshipTypes": {
             "type": "array",
             "items": {
               "type": "string"
-            },
-            "description": "Compact view only: edge kinds applied as the 'relation' filter to each identifier's uses/usedBy lists (same valid kinds as the 'relation' query parameter on /api/context/complete). Empty means no filter; a non-empty value combined with view=full returns 400."
+            }
           }
         }
       },
@@ -1373,19 +1828,29 @@
             "type": "string"
           },
           "start": {
-            "type": "integer",
-            "format": "int32",
-            "default": null,
-            "nullable": true
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
           },
           "length": {
-            "type": "integer",
-            "format": "int32",
-            "default": null,
-            "nullable": true
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
           },
           "maxDepth": {
-            "type": "integer",
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
             "format": "int32",
             "default": 2
           },
@@ -1459,30 +1924,48 @@
             "type": "string"
           },
           "message": {
-            "type": "string",
-            "nullable": true
+            "type": [
+              "null",
+              "string"
+            ]
           },
           "lastError": {
-            "type": "string",
-            "nullable": true
+            "type": [
+              "null",
+              "string"
+            ]
           },
           "pid": {
-            "type": "integer",
-            "format": "int32",
-            "nullable": true
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
           },
           "restartCount": {
-            "type": "integer",
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
             "format": "int32"
           },
           "parserVersion": {
-            "type": "string",
-            "nullable": true
+            "type": [
+              "null",
+              "string"
+            ]
           },
           "protocolVersion": {
-            "type": "integer",
-            "format": "int32",
-            "nullable": true
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
           },
           "updatedAt": {
             "type": "string"
@@ -1516,12 +1999,104 @@
             }
           },
           "sessions": {
-            "type": "array",
+            "type": [
+              "null",
+              "array"
+            ],
             "items": {
               "$ref": "#/components/schemas/ParserSessionDto"
-            },
-            "default": null,
-            "nullable": true
+            }
+          }
+        }
+      },
+      "ProjectCoverage": {
+        "required": [
+          "name",
+          "path",
+          "state",
+          "files"
+        ],
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "path": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "state": {
+            "type": "string"
+          },
+          "files": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "targetFramework": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "inactiveTargetFrameworks": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "missingReferences": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "analyzerPackages": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "unresolvedNames": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32",
+            "default": 0
+          },
+          "commonUnresolvedNames": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "notes": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
           }
         }
       },
@@ -1547,7 +2122,11 @@
             "type": "string"
           },
           "operationId": {
-            "type": "integer",
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
             "format": "int64"
           }
         }
@@ -1599,12 +2178,30 @@
             "type": "boolean"
           },
           "fileCount": {
-            "type": "integer",
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
             "format": "int32"
           },
           "nodeCount": {
-            "type": "integer",
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
             "format": "int32"
+          },
+          "coverage": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CoverageStatusDto"
+              }
+            ]
           }
         }
       },
@@ -1638,9 +2235,10 @@
             "type": "string"
           },
           "instanceId": {
-            "type": "string",
-            "default": null,
-            "nullable": true
+            "type": [
+              "null",
+              "string"
+            ]
           }
         }
       },
@@ -1657,20 +2255,32 @@
             }
           },
           "testCount": {
-            "type": "integer",
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
             "format": "int32"
           },
           "testMethodsReturnedCount": {
-            "type": "integer",
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
             "format": "int32"
           },
           "testMethodsTruncated": {
             "type": "boolean"
           },
           "coverage": {
-            "type": "number",
-            "format": "double",
-            "nullable": true
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "null",
+              "number",
+              "string"
+            ],
+            "format": "double"
           },
           "evidence": {
             "type": "array",
@@ -1705,26 +2315,39 @@
             }
           },
           "pendingChanges": {
-            "type": "integer",
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
             "format": "int32"
           },
           "ignoreSourceCount": {
-            "type": "integer",
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
             "format": "int32",
             "default": 0
           },
           "ignoredPathCount": {
-            "type": "integer",
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
             "format": "int32",
             "default": 0
           },
           "mandatoryExclusions": {
-            "type": "array",
+            "type": [
+              "null",
+              "array"
+            ],
             "items": {
               "type": "string"
-            },
-            "default": null,
-            "nullable": true
+            }
           }
         }
       }

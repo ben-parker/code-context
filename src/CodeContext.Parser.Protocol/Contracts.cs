@@ -173,6 +173,35 @@ public sealed record ProtocolDiagnostic(
     [property: JsonPropertyName("message")] string Message);
 
 /// <summary>
+/// How much of one project's declared context a worker found. A worker with no notion of a
+/// project sends nothing. <c>state</c> is one of <see cref="ProjectCoverageStates"/>.
+/// </summary>
+public sealed record ProjectCoverage(
+    [property: JsonPropertyName("name")] string Name,
+    [property: JsonPropertyName("path")] string? Path,
+    [property: JsonPropertyName("state")] string State,
+    [property: JsonPropertyName("files")] int Files,
+    [property: JsonPropertyName("targetFramework")] string? TargetFramework = null,
+    [property: JsonPropertyName("inactiveTargetFrameworks")] IReadOnlyList<string>? InactiveTargetFrameworks = null,
+    [property: JsonPropertyName("missingReferences")] IReadOnlyList<string>? MissingReferences = null,
+    [property: JsonPropertyName("analyzerPackages")] IReadOnlyList<string>? AnalyzerPackages = null,
+    [property: JsonPropertyName("unresolvedNames")] int UnresolvedNames = 0,
+    [property: JsonPropertyName("commonUnresolvedNames")] IReadOnlyList<string>? CommonUnresolvedNames = null,
+    [property: JsonPropertyName("notes")] IReadOnlyList<string>? Notes = null);
+
+public static class ProjectCoverageStates
+{
+    /// <summary>Everything the project declares was found.</summary>
+    public const string Complete = "complete";
+
+    /// <summary>Analyzed as its own project, but some of what it declares was not found.</summary>
+    public const string Partial = "partial";
+
+    /// <summary>Analyzed without knowing its project, against the worker's own defaults.</summary>
+    public const string Fallback = "fallback";
+}
+
+/// <summary>
 /// Live progress for a <c>workspace/index</c> request. This reports analysis work only;
 /// graph facts remain buffered until the request's terminal delta commits atomically.
 /// </summary>
@@ -212,4 +241,5 @@ public sealed record AnalysisDelta(
     [property: JsonPropertyName("edges")] IReadOnlyList<ProtocolEdge> Edges,
     [property: JsonPropertyName("isLastForRequest")] bool IsLastForRequest,
     [property: JsonPropertyName("unresolvedReferences")] IReadOnlyList<UnresolvedReference>? UnresolvedReferences = null,
-    [property: JsonPropertyName("diagnostics")] IReadOnlyList<ProtocolDiagnostic>? Diagnostics = null);
+    [property: JsonPropertyName("diagnostics")] IReadOnlyList<ProtocolDiagnostic>? Diagnostics = null,
+    [property: JsonPropertyName("coverage")] IReadOnlyList<ProjectCoverage>? Coverage = null);

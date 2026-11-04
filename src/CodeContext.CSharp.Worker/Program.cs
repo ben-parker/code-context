@@ -211,7 +211,7 @@ internal sealed class CSharpWorkerHost(JsonRpcConnection connection)
             workspaceId, generation, requestId,
             analysis.Nodes, analysis.Edges,
             replacesWorkspace: true, replacesFiles: [],
-            analysis.Diagnostics, ct);
+            analysis.Diagnostics, analysis.Coverage, ct);
         // Seed only after every chunk was sent, mirroring the incremental path's
         // commit-after-send rule: a cancelled mid-index emission must not leave the
         // hash baseline claiming facts the host never received.
@@ -235,7 +235,7 @@ internal sealed class CSharpWorkerHost(JsonRpcConnection connection)
             workspaceId, generation, requestId,
             emission.Nodes, emission.Edges,
             replacesWorkspace: false, replacesFiles: emission.ReplacesFiles,
-            analysis.Diagnostics, ct);
+            analysis.Diagnostics, analysis.Coverage, ct);
         workspace.CommitIncremental(emission);
         return emitted;
     }
@@ -244,13 +244,13 @@ internal sealed class CSharpWorkerHost(JsonRpcConnection connection)
     /// Streams a node/edge set as one or more <c>analysis/delta</c> notifications, chunked
     /// at <see cref="MaxItemsPerDelta"/>. Always emits at least one delta (the supervisor
     /// requires ≥1 per mutation), so an empty incremental batch still sends a single
-    /// terminal delta with no facts. Diagnostics ride on the first chunk only.
+    /// terminal delta with no facts. Diagnostics and coverage ride on the first chunk only.
     /// </summary>
     private async Task<int> PublishAsync(
         string workspaceId, long generation, long requestId,
         List<ProtocolNode> allNodes, List<ProtocolEdge> allEdges,
         bool replacesWorkspace, IReadOnlyList<string> replacesFiles,
-        List<ProtocolDiagnostic> diagnostics, CancellationToken ct)
+        List<ProtocolDiagnostic> diagnostics, IReadOnlyList<ProjectCoverage> coverage, CancellationToken ct)
     {
         var nodeChunks = Chunk(allNodes, MaxItemsPerDelta);
         var edgeChunks = Chunk(allEdges, MaxItemsPerDelta);
@@ -276,7 +276,8 @@ internal sealed class CSharpWorkerHost(JsonRpcConnection connection)
                 Nodes: nodes,
                 Edges: edges,
                 IsLastForRequest: i == totalChunks - 1,
-                Diagnostics: i == 0 && diagnostics.Count > 0 ? diagnostics : null);
+                Diagnostics: i == 0 && diagnostics.Count > 0 ? diagnostics : null,
+                Coverage: i == 0 ? coverage : null);
 
             await connection.NotifyAsync(
                 ParserProtocolMethods.AnalysisDeltaNotification, delta,

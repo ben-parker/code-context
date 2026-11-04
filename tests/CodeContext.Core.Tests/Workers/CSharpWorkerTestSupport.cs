@@ -34,6 +34,11 @@ public sealed class CSharpWorkerPipeline : IAsyncDisposable
     {
     }
 
+    public CSharpWorkerPipeline(string rootPath, IAnalysisCoverageRegistry coverage)
+        : this(rootPath, null, [], coverage)
+    {
+    }
+
     /// <summary>
     /// <paramref name="decorateSink"/> wraps the real applier before it is handed to the
     /// worker service, letting delta-shape tests observe exactly what the worker emits.
@@ -41,7 +46,8 @@ public sealed class CSharpWorkerPipeline : IAsyncDisposable
     public CSharpWorkerPipeline(
         string rootPath,
         Func<IAnalysisDeltaSink, IAnalysisDeltaSink>? decorateSink,
-        RegisteredWorker[] additionalWorkers)
+        RegisteredWorker[] additionalWorkers,
+        IAnalysisCoverageRegistry? coverage = null)
     {
         RepositoryFactory = new InMemoryRepositoryFactory(NullLogger<InMemoryRepositoryFactory>.Instance);
         RepositoryFactory.InitializeAsync(rootPath).Wait();
@@ -52,7 +58,7 @@ public sealed class CSharpWorkerPipeline : IAsyncDisposable
         var store = (IGenerationalGraphStore)RepositoryFactory.CreateGraphRepository();
         // The applier is the real commit path; tests that assert delta shape wrap it with
         // a recording decorator so they observe exactly what the worker emitted.
-        IAnalysisDeltaSink sink = new AnalysisDeltaApplier(store, NullLogger<AnalysisDeltaApplier>.Instance);
+        IAnalysisDeltaSink sink = new AnalysisDeltaApplier(store, NullLogger<AnalysisDeltaApplier>.Instance, coverage);
         if (decorateSink is not null)
         {
             sink = decorateSink(sink);

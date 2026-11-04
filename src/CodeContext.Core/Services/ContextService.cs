@@ -1,5 +1,6 @@
 using CodeContext.Core.Repositories;
 using CodeContext.Core.Workers;
+using CodeContext.Parser.Protocol;
 using Microsoft.Extensions.Options;
 using System.Collections.Frozen;
 using System.Collections.Generic;
@@ -18,19 +19,54 @@ namespace CodeContext.Core.Services
         private readonly IFileMetadataRepository _fileMetadataRepository;
         private readonly string? _rootPath;
         private readonly ILanguageWorkerService? _workerService;
+        private readonly IAnalysisCoverageRegistry? _coverage;
+
+        private const int MaxCoverageNames = 5;
 
         public ContextService(
             ICodeNodeRepository nodeRepository,
             ICodeEdgeRepository edgeRepository,
             IFileMetadataRepository fileMetadataRepository,
             IOptions<CodeContextOptions>? options = null,
-            ILanguageWorkerService? workerService = null)
+            ILanguageWorkerService? workerService = null,
+            IAnalysisCoverageRegistry? coverage = null)
         {
             _nodeRepository = nodeRepository;
             _edgeRepository = edgeRepository;
             _fileMetadataRepository = fileMetadataRepository;
             _rootPath = options?.Value.RootPath;
             _workerService = workerService;
+            _coverage = coverage;
+        }
+
+        /// <summary>The worst state among projects.</summary>
+        internal static string OverallState(IReadOnlyList<ProjectCoverage> projects)
+            => projects.Any(project => project.State == ProjectCoverageStates.Fallback) ? ProjectCoverageStates.Fallback
+                : projects.Any(project => project.State == ProjectCoverageStates.Partial) ? ProjectCoverageStates.Partial
+                : ProjectCoverageStates.Complete;
+
+        /// <summary>
+        /// An answer of nothing means something only if the code was all seen. Where a project
+        /// was not, say which, so "no users" cannot be read as a fact it is not.
+        /// </summary>
+        private CoverageSummary? CoverageFor(CompactContextResponse response)
+        {
+            var nothingFound = response.TotalMatches == 0
+                || response.Matches.Exists(match => match.Relationships is { } relationships
+                    && (relationships.UsedByCount ?? 0) == 0);
+            if (!nothingFound || _coverage is null) return null;
+
+            var projects = _coverage.GetProjects();
+            var incomplete = projects.Where(project => project.State != ProjectCoverageStates.Complete).ToList();
+            return incomplete.Count == 0
+                ? null
+                : new CoverageSummary
+                {
+                    State = OverallState(projects),
+                    IncompleteProjects = incomplete.Count,
+                    TotalProjects = projects.Count,
+                    Names = incomplete.Take(MaxCoverageNames).Select(project => project.Name).ToList(),
+                };
         }
 
         public async Task<CompleteContextResponse> GetCompleteContextAsync(
@@ -169,6 +205,7 @@ namespace CodeContext.Core.Services
             {
                 response.DisambiguationHint = await BuildNoMatchHintAsync(
                     identifier, matchMode == "exact", type, containingType, @namespace, signature, sourceFile);
+                response.Coverage = CoverageFor(response);
                 return response;
             }
 
@@ -195,6 +232,7 @@ namespace CodeContext.Core.Services
 
             response.ReturnedMatches = response.Matches.Count;
             response.Truncated = response.ReturnedMatches < response.TotalMatches;
+            response.Coverage = CoverageFor(response);
             return response;
         }
 
@@ -694,7 +732,8 @@ namespace CodeContext.Core.Services
             }
             else directEdges = await _edgeRepository.GetByTargetIdAsync(target.Id);
             var edgesByNode = (directEdges ?? new List<CodeEdge>())
-                .Where(IsUsageEdge)
+                .Where(edge => IsUsageEdge(edge)
+                    || (!outgoing && IsExternal(target) && edge.Type is not null && MethodFamilyEdgeKinds.Contains(edge.Type)))
                 .Where(edge => !string.IsNullOrEmpty(outgoing ? edge.TargetId : edge.SourceId))
                 .GroupBy(edge => outgoing ? edge.TargetId! : edge.SourceId!, StringComparer.Ordinal)
                 .ToDictionary(group => group.Key, group => group.ToList(), StringComparer.Ordinal);
@@ -1056,6 +1095,15 @@ namespace CodeContext.Core.Services
                     .ToList();
                 usedBy = await TraverseInboundFromFamilyAsync(family.Keys, depth);
                 relationships.StaticallyBoundTargets = await GetStaticallyBoundTargetsAsync(family);
+
+                // Overriding a library method is the project's use of it, and often the only one.
+                if (IsExternal(targetNode))
+                {
+                    var listed = usedBy.Select(item => item.Node.Id).ToHashSet(StringComparer.Ordinal);
+                    usedBy.AddRange(relationships.MethodFamilyMembers
+                        .Where(member => !listed.Contains(member.Id))
+                        .Select(member => new TraversedRelationship(member, 1, EmptyPath)));
+                }
             }
             else
             {

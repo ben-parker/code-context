@@ -491,4 +491,101 @@ public class CSharpWorkerProjectCompilationTests : IDisposable
         Assert.Contains(result.Nodes, node => node.Id == "csharp:test:Code");
         Assert.True(HasEdge(result, "Code.Run()", "Other.Go()", "CALLS"));
     }
+
+    private static ProjectCoverage Coverage(CSharpWorkspaceAnalyzer.AnalysisResult result, string name)
+        => Assert.Single(result.Coverage, project => project.Name == name);
+
+    [Fact]
+    public void ACompleteProjectSaysSo()
+    {
+        var result = Analyze(("App/App.csproj", Project()), ("App/Code.cs", "public class Code { public string Run() => ToString(); }"));
+
+        var coverage = Coverage(result, "App");
+        Assert.Equal(ProjectCoverageStates.Complete, coverage.State);
+        Assert.Equal("App/App.csproj", coverage.Path);
+        Assert.Equal("net10.0", coverage.TargetFramework);
+        Assert.Equal(1, coverage.Files);
+        Assert.Equal(0, coverage.UnresolvedNames);
+    }
+
+    [Fact]
+    public void AMissingPackageIsPartialAndWhatItCostsIsCounted()
+    {
+        var result = Analyze(
+            ("App/App.csproj", Project("""<PackageReference Include="No.Such.Package" Version="1.0.0" />""")),
+            ("App/Code.cs", "public class Code { public void Run(Widget widget, Widget other) => Tool.Go(widget); }"));
+
+        var coverage = Coverage(result, "App");
+        Assert.Equal(ProjectCoverageStates.Partial, coverage.State);
+        Assert.Equal(["No.Such.Package"], coverage.MissingReferences);
+        Assert.True(coverage.UnresolvedNames >= 3);
+        Assert.Contains("Widget", coverage.CommonUnresolvedNames!);
+        Assert.Contains(coverage.Notes!, note => note.Contains("No restore data", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void AnotherTargetIsReportedAsInactive()
+    {
+        var result = Analyze(
+            ("Lib/Lib.csproj", """
+                <Project Sdk="Microsoft.NET.Sdk">
+                  <PropertyGroup><TargetFrameworks>net10.0;net48</TargetFrameworks></PropertyGroup>
+                </Project>
+                """),
+            ("Lib/Code.cs", "public class Code { }"));
+
+        var coverage = Coverage(result, "Lib");
+        Assert.Equal("net10.0", coverage.TargetFramework);
+        Assert.Equal(["net48"], coverage.InactiveTargetFrameworks);
+    }
+
+    [Fact]
+    public void AWorkspaceWithoutProjectsSaysItIsAFallback()
+    {
+        var result = Analyze(("Loose.cs", "public class Loose { }"));
+
+        var coverage = Coverage(result, "<workspace>");
+        Assert.Equal(ProjectCoverageStates.Fallback, coverage.State);
+        Assert.Equal(1, coverage.Files);
+        Assert.Null(coverage.Path);
+    }
+
+    [Fact]
+    public void AnUnreadableProjectIsNamedInTheFallback()
+    {
+        var result = Analyze(("App/App.csproj", "<Project><broken"), ("App/Code.cs", "public class Code { }"));
+
+        var coverage = Coverage(result, "<workspace>");
+        Assert.Contains(coverage.Notes!, note => note.Contains("App/App.csproj", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void ContextualKeywordsAreNotUnresolved()
+    {
+        var result = Analyze(("App/App.csproj", Project()), ("App/Code.cs", """
+            public class Code<T> where T : unmanaged
+            {
+                public string Name(int value) => nameof(value);
+                public void Named() => Take(count: 1);
+                private void Take(int count) { var local = count; }
+            }
+            """));
+
+        Assert.Equal(0, Coverage(result, "App").UnresolvedNames);
+    }
+
+    [Fact]
+    public async Task CoverageReachesTheHostWhenAGenerationCommits()
+    {
+        Write("App/App.csproj", Project());
+        Write("App/Code.cs", "public class Code { }");
+        var coverage = new CodeContext.Core.Workers.AnalysisCoverageRegistry();
+        await using var pipeline = new CSharpWorkerPipeline(_root, coverage);
+
+        await pipeline.GraphUpdateService.PerformInitialScanAsync(_root, null, CancellationToken.None);
+
+        var project = Assert.Single(coverage.GetProjects());
+        Assert.Equal("App", project.Name);
+        Assert.Equal(ProjectCoverageStates.Complete, project.State);
+    }
 }

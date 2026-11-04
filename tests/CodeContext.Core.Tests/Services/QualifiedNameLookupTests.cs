@@ -2,6 +2,7 @@ using CodeContext.Core;
 using CodeContext.Core.Repositories;
 using CodeContext.Core.Services;
 using CodeContext.Core.Workers;
+using CodeContext.Parser.Protocol;
 using NSubstitute;
 using Xunit;
 
@@ -47,6 +48,51 @@ namespace CodeContext.Core.Tests.Services
                 FilePath = "external:Lib",
                 Metadata = new Dictionary<string, string> { ["external"] = "true", ["assembly"] = assembly },
             };
+
+        private ContextService WithCoverage(params ProjectCoverage[] projects)
+        {
+            var coverage = new AnalysisCoverageRegistry();
+            coverage.Report("csharp", "default", projects);
+            var workers = Substitute.For<ILanguageWorkerService>();
+            workers.OwnedExtensions.Returns([".cs"]);
+            return new ContextService(
+                _nodes, Substitute.For<ICodeEdgeRepository>(), Substitute.For<IFileMetadataRepository>(),
+                workerService: workers, coverage: coverage);
+        }
+
+        private static readonly ProjectCoverage Complete = new("A", "A/A.csproj", ProjectCoverageStates.Complete, 3);
+        private static readonly ProjectCoverage Partial = new("B", "B/B.csproj", ProjectCoverageStates.Partial, 3);
+        private static readonly ProjectCoverage Fallback = new("<workspace>", null, ProjectCoverageStates.Fallback, 1);
+
+        [Fact]
+        public async Task ANameNotFound_NamesTheProjectsThatWereNotFullySeen()
+        {
+            var response = await WithCoverage(Complete, Partial, Fallback).GetCompactContextAsync("Node3D");
+
+            Assert.Equal(0, response.TotalMatches);
+            Assert.Equal("fallback", response.Coverage!.State);
+            Assert.Equal(2, response.Coverage.IncompleteProjects);
+            Assert.Equal(3, response.Coverage.TotalProjects);
+            Assert.Equal(["B", "<workspace>"], response.Coverage.Names);
+        }
+
+        [Fact]
+        public async Task NoUsers_NamesThemToo()
+        {
+            Stub("Quiet", Member("csharp:App.Quiet", "Quiet"));
+
+            var response = await WithCoverage(Partial).GetCompactContextAsync("Quiet");
+
+            Assert.NotNull(response.Coverage);
+        }
+
+        [Fact]
+        public async Task EverythingSeen_AddsNothing()
+        {
+            var response = await WithCoverage(Complete).GetCompactContextAsync("Node3D");
+
+            Assert.Null(response.Coverage);
+        }
 
         [Fact]
         public async Task LibrarySymbolsOfAName_GiveWayToProjectCodeAndAreCounted()
