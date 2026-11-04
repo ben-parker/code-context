@@ -99,7 +99,7 @@ background when necessary, waits for indexing, and queries the compact API. Comp
 line-oriented agent text is the default. Use `--human` for expanded human-readable
 output or `--json` for the exact API response; progress stays on stderr. Test evidence
 is omitted by default, so add `--tests` whenever it matters. Other options include
-`--path DIR`, `--depth N`, `--relation CSV`, and `--exact`.
+`--path DIR`, `--depth N`, `--relation CSV`, `--exact`, and `--limit N`.
 
 Returned targets include canonical identifiers that can be passed back as
 `identifier` without modification. Name searches use exact-first matching with a

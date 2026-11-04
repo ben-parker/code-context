@@ -167,6 +167,7 @@ public class Program
         Option<bool> queryExactOption = CreateExactOption();
         Option<bool> queryJsonOption = CreateQueryJsonOption();
         Option<bool> queryHumanOption = CreateQueryHumanOption();
+        Option<int?> queryLimitOption = CreateLimitOption();
         foreach (var option in new Option[]
                  {
                      queryPathOption,
@@ -176,6 +177,7 @@ public class Program
                      queryExactOption,
                      queryJsonOption,
                      queryHumanOption,
+                     queryLimitOption,
                  })
         {
             option.Recursive = true;
@@ -191,6 +193,7 @@ public class Program
         queryCommand.Options.Add(queryExactOption);
         queryCommand.Options.Add(queryJsonOption);
         queryCommand.Options.Add(queryHumanOption);
+        queryCommand.Options.Add(queryLimitOption);
         queryCommand.Options.Add(queryHelpOption);
         queryCommand.SetAction((ParseResult parseResult, CancellationToken ct) =>
             QueryCommandHandler.ExecuteAsync(
@@ -203,7 +206,8 @@ public class Program
                     parseResult.GetValue(queryExactOption),
                     parseResult.GetValue(queryJsonOption),
                     Multi: false,
-                    parseResult.GetValue(queryHumanOption)),
+                    parseResult.GetValue(queryHumanOption),
+                    parseResult.GetValue(queryLimitOption)),
                 ct));
 
         var multiQueryCommand = new Command(
@@ -229,7 +233,8 @@ public class Program
                     parseResult.GetValue(queryExactOption),
                     parseResult.GetValue(queryJsonOption),
                     Multi: true,
-                    parseResult.GetValue(queryHumanOption)),
+                    parseResult.GetValue(queryHumanOption),
+                    parseResult.GetValue(queryLimitOption)),
                 ct));
         queryCommand.Subcommands.Add(multiQueryCommand);
 
@@ -261,6 +266,21 @@ public class Program
         {
             if (result.GetValueOrDefault<int>() < 0)
                 result.AddError("Depth must be non-negative.");
+        });
+        return option;
+    }
+
+    private static Option<int?> CreateLimitOption()
+    {
+        Option<int?> option = new("--limit")
+        {
+            Description = "Maximum entries per relationship list "
+                + $"(1-{QueryCommandHandler.MaxRelationshipLimit}, default 10).",
+        };
+        option.Validators.Add(result =>
+        {
+            if (result.GetValueOrDefault<int?>() is < 1 or > QueryCommandHandler.MaxRelationshipLimit)
+                result.AddError($"Limit must be between 1 and {QueryCommandHandler.MaxRelationshipLimit}.");
         });
         return option;
     }

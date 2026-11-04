@@ -5,6 +5,7 @@ using System.Collections.Frozen;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 
@@ -275,7 +276,52 @@ namespace CodeContext.Core.Services
                 : await _nodeRepository.FindByNameAsync(identifier, type, exact);
             var filtered = candidates.Where(candidate => CandidateMatchesFilters(
                 candidate, type, containingType, @namespace, signature, sourceFile)).ToList();
+            if (filtered.Count == 0 && !isFilePath)
+            {
+                filtered = (await FindByQualifiedNameAsync(identifier, type)).Where(candidate =>
+                    CandidateMatchesFilters(candidate, type, containingType, @namespace, signature, sourceFile))
+                    .ToList();
+            }
             return (filtered, isFilePath);
+        }
+
+        /// <summary>
+        /// Resolves <c>Type.Member</c> or a longer dotted suffix of a symbol's qualified
+        /// name, whole segments only. A canonical identifier that failed its identity
+        /// lookup is not retried here: it names one symbol, and that symbol is gone.
+        /// </summary>
+        private async Task<List<CodeNode>> FindByQualifiedNameAsync(string identifier, string? type)
+        {
+            var qualified = WithoutTypeArgumentsOrParameters(identifier);
+            var lastDot = qualified.LastIndexOf('.');
+            if (identifier.Contains(':') || lastDot <= 0 || lastDot == qualified.Length - 1)
+                return [];
+
+            var members = await _nodeRepository.FindByNameAsync(qualified[(lastDot + 1)..], type, exact: true);
+            return members.Where(member => HasQualifiedName(member, qualified)).ToList();
+        }
+
+        private static bool HasQualifiedName(CodeNode node, string qualified)
+        {
+            var identifier = PublicIdentifier(node);
+            var hash = identifier.LastIndexOf('#');
+            var name = WithoutTypeArgumentsOrParameters(
+                identifier[(hash >= 0 ? hash + 1 : identifier.IndexOf(':') + 1)..]);
+            return name.Equals(qualified, StringComparison.OrdinalIgnoreCase)
+                || name.EndsWith("." + qualified, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string WithoutTypeArgumentsOrParameters(string value)
+        {
+            var result = new StringBuilder(value.Length);
+            var depth = 0;
+            foreach (var character in value)
+            {
+                if (character is '<' or '(') depth++;
+                else if (character is '>' or ')') depth = Math.Max(0, depth - 1);
+                else if (depth == 0) result.Append(character);
+            }
+            return result.ToString();
         }
 
         private static bool CandidateMatchesFilters(
@@ -823,9 +869,16 @@ namespace CodeContext.Core.Services
             new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
             {
                 ["class"] = 0,
+                ["record"] = 0,
+                ["struct"] = 0,
                 ["interface"] = 1,
+                ["enum"] = 1,
+                ["delegate"] = 1,
                 ["method"] = 2,
                 ["property"] = 3,
+                ["field"] = 3,
+                ["event"] = 3,
+                ["enummember"] = 3,
             }.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
 
         private static readonly FrozenDictionary<string, int> RelationshipRanks =
@@ -1551,7 +1604,7 @@ namespace CodeContext.Core.Services
             // Simple complexity calculation based on node type and lines
             var baseComplexity = node.Type switch
             {
-                "Class" => 5,
+                "Class" or "Record" or "Struct" => 5,
                 "Interface" => 3,
                 "Method" => 2,
                 "Property" => 1,

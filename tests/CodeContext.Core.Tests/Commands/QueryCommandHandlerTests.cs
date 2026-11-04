@@ -326,11 +326,11 @@ public class QueryCommandHandlerTests
             $"target\tcsharp:T.Target()\tMethod\tsrc/T.cs:7{newline}" +
             $"uses\t1/4\ttruncated{newline}" +
             $"\tCALLS\tDep\tClass\tsrc/D.cs:2{newline}" +
+            $"usedBy\t0/0{newline}" +
             $"tests\t1/1\tdirect\trefs=2\timpl=0\theuristic=0{newline}" +
             $"\ttests/TTests.cs\t1/1\tdirectCall{newline}" +
             $"\t\tCoversTarget\tMethod\ttests/TTests.cs:9{newline}",
             output.ToString());
-        Assert.DoesNotContain("usedBy", output.ToString());
     }
 
     [Fact]
@@ -359,7 +359,141 @@ public class QueryCommandHandlerTests
             new QuerySettings(["Target"], Root, 1, false, null, false, false, false), runtime, CancellationToken.None);
 
         Assert.Equal(0, exit);
-        Assert.Contains("relationships\tnone", output.ToString());
+        Assert.Contains("usedBy\t0/0", output.ToString());
+        Assert.DoesNotContain("none", output.ToString());
+    }
+
+    [Theory]
+    [InlineData(false, "relationships\tnot loaded\tambiguous: re-query with a target identifier")]
+    [InlineData(true, "Relationships: not loaded (ambiguous: re-query with a target identifier)")]
+    public async Task AmbiguousMatchesNeverReportRelationshipsAsNone(bool human, string expected)
+    {
+        var response = JsonSerializer.Serialize(new
+        {
+            view = "compact",
+            matchMode = "exact",
+            totalMatches = 2,
+            returnedMatches = 2,
+            ambiguous = true,
+            matches = new[]
+            {
+                new { target = new { name = "Target", type = "Method", identifier = "csharp:A.Target()" } },
+                new { target = new { name = "Target", type = "Method", identifier = "csharp:B.Target()" } },
+            },
+        });
+        var handler = new RecordingHandler(request => request.RequestUri!.AbsolutePath == "/api/status"
+            ? Json(Status("ready")) : Json(response));
+        var (runtime, output, _) = Runtime(handler, new FakeRegistry(Instance()));
+
+        await QueryCommandHandler.ExecuteAsync(
+            new QuerySettings(["Target"], Root, 1, false, null, false, false, false, Human: human),
+            runtime, CancellationToken.None);
+
+        Assert.Contains(expected, output.ToString());
+        Assert.DoesNotContain("none", output.ToString(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData(false, "relationships\tnot loaded\tdepth 0")]
+    [InlineData(true, "Relationships: not loaded (depth 0)")]
+    public async Task DepthZeroDoesNotClaimThereAreNoRelationships(bool human, string expected)
+    {
+        var handler = new RecordingHandler(request => request.RequestUri!.AbsolutePath == "/api/status"
+            ? Json(Status("ready")) : Json(Matched("Target")));
+        var (runtime, output, _) = Runtime(handler, new FakeRegistry(Instance()));
+
+        await QueryCommandHandler.ExecuteAsync(
+            new QuerySettings(["Target"], Root, 0, false, null, false, false, false, Human: human),
+            runtime, CancellationToken.None);
+
+        Assert.Contains(expected, output.ToString());
+        Assert.DoesNotContain("usedBy", output.ToString(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData(false, "fileDependents\t2/9\ttruncated\tof src/T.cs", "fileDependencies\t1/1\tof src/T.cs", "usedBy\t0/0")]
+    [InlineData(true, "File dependents of src/T.cs (2/9, truncated):", "File dependencies of src/T.cs (1/1):", "Used by (0/0):")]
+    public async Task FileSectionsNameTheFileTheyDescribe(
+        bool human, string dependents, string dependencies, string usedBy)
+    {
+        const string response = """
+            {"view":"compact","matchMode":"exact","totalMatches":1,"returnedMatches":1,"matches":[{"target":{"name":"Interior","type":"Property","file":"src/T.cs","line":3,"identifier":"csharp:T.Interior"},"relationships":{"fileDependencies":["src/A.cs"],"fileDependenciesCount":1,"fileDependenciesReturnedCount":1,"fileDependents":["src/B.cs","src/C.cs"],"fileDependentsCount":9,"fileDependentsReturnedCount":2,"fileDependentsTruncated":true,"truncated":true}}]}
+            """;
+        var handler = new RecordingHandler(request => request.RequestUri!.AbsolutePath == "/api/status"
+            ? Json(Status("ready")) : Json(response));
+        var (runtime, output, _) = Runtime(handler, new FakeRegistry(Instance()));
+
+        await QueryCommandHandler.ExecuteAsync(
+            new QuerySettings(["Interior"], Root, 1, false, null, false, false, false, Human: human),
+            runtime, CancellationToken.None);
+
+        Assert.Contains(dependents, output.ToString());
+        Assert.Contains(dependencies, output.ToString());
+        Assert.Contains(usedBy, output.ToString());
+    }
+
+    [Fact]
+    public async Task LimitIsSentToTheSingleQueryAndOmittedByDefault()
+    {
+        var handler = new RecordingHandler(request => request.RequestUri!.AbsolutePath == "/api/status"
+            ? Json(Status("ready")) : Json(Matched("Target")));
+        var (runtime, _, _) = Runtime(handler, new FakeRegistry(Instance()));
+
+        await QueryCommandHandler.ExecuteAsync(
+            new QuerySettings(["Target"], Root, 1, false, null, false, false, false, Limit: 50),
+            runtime, CancellationToken.None);
+        await QueryCommandHandler.ExecuteAsync(
+            new QuerySettings(["Target"], Root, 1, false, null, false, false, false),
+            runtime, CancellationToken.None);
+
+        var queries = handler.Requests.Where(request => request.RequestUri.AbsolutePath == "/api/context/complete").ToList();
+        Assert.Contains("maxRelationships=50", queries[0].RequestUri.Query);
+        Assert.DoesNotContain("maxRelationships", queries[1].RequestUri.Query);
+    }
+
+    [Theory]
+    [InlineData(null, 10)]
+    [InlineData(40, 40)]
+    public async Task MultiQueryUsesTheSameRelationshipCapAsASingleQuery(int? limit, int expected)
+    {
+        var response = "[" + Matched("Target") + "]";
+        var handler = new RecordingHandler(request => request.RequestUri!.AbsolutePath == "/api/status"
+            ? Json(Status("ready")) : Json(response));
+        var (runtime, _, _) = Runtime(handler, new FakeRegistry(Instance()));
+
+        await QueryCommandHandler.ExecuteAsync(
+            new QuerySettings(["Target"], Root, 1, false, null, false, false, true, Limit: limit),
+            runtime, CancellationToken.None);
+
+        var body = handler.Requests.Single(request => request.RequestUri.AbsolutePath == "/api/context/multi").Body!;
+        using var document = JsonDocument.Parse(body);
+        Assert.Equal(expected, document.RootElement.GetProperty("maxRelationships").GetInt32());
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(101)]
+    public async Task LimitOutsideTheApiRangeIsRejected(int limit)
+    {
+        var (runtime, _, error) = Runtime(
+            new RecordingHandler(_ => throw new InvalidOperationException()), new FakeRegistry(Instance()));
+
+        var exit = await QueryCommandHandler.ExecuteAsync(
+            new QuerySettings(["Target"], Root, 1, false, null, false, false, false, Limit: limit),
+            runtime, CancellationToken.None);
+
+        Assert.Equal(1, exit);
+        Assert.Contains("between 1 and 100", error.ToString());
+        Assert.NotEmpty(Program.CreateRootCommand().Parse(["query", "Target", "--limit", limit.ToString()]).Errors);
+    }
+
+    [Fact]
+    public void LimitIsAcceptedOnBothQueryForms()
+    {
+        var root = Program.CreateRootCommand();
+
+        Assert.Empty(root.Parse(["query", "Target", "--limit", "25"]).Errors);
+        Assert.Empty(root.Parse(["query", "multi", "A", "B", "--limit", "25"]).Errors);
     }
 
     [Fact]

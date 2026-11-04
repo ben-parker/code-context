@@ -16,7 +16,8 @@ public sealed record QuerySettings(
     bool Exact,
     bool Json,
     bool Multi,
-    bool Human = false);
+    bool Human = false,
+    int? Limit = null);
 
 internal sealed record QueryRuntime(
     IInstanceRegistry Registry,
@@ -31,6 +32,12 @@ internal sealed record QueryRuntime(
 
 public static class QueryCommandHandler
 {
+    /// <summary>The API's per-list cap for a single query. <c>query multi</c> sends it
+    /// explicitly, because the multi endpoint defaults to a smaller one.</summary>
+    private const int DefaultRelationshipLimit = 10;
+
+    internal const int MaxRelationshipLimit = 100;
+
     public static async Task<int> ExecuteAsync(QuerySettings settings, CancellationToken ct)
     {
         var registry = new InstanceRegistry();
@@ -63,6 +70,12 @@ public static class QueryCommandHandler
         if (settings.Depth < 0)
         {
             runtime.Error.WriteLine("Depth must be non-negative.");
+            return 1;
+        }
+
+        if (settings.Limit is < 1 or > MaxRelationshipLimit)
+        {
+            runtime.Error.WriteLine($"Limit must be between 1 and {MaxRelationshipLimit}.");
             return 1;
         }
 
@@ -200,6 +213,7 @@ public static class QueryCommandHandler
         if (!string.IsNullOrWhiteSpace(settings.Relation))
             query.Append("&relation=").Append(Uri.EscapeDataString(settings.Relation));
         if (settings.Exact) query.Append("&exact=true");
+        if (settings.Limit is { } limit) query.Append("&maxRelationships=").Append(limit);
 
         using var request = new HttpRequestMessage(
             HttpMethod.Get,
@@ -219,6 +233,7 @@ public static class QueryCommandHandler
             Depth = settings.Depth,
             IncludeTests = settings.IncludeTests,
             Exact = settings.Exact ? true : null,
+            MaxRelationships = settings.Limit ?? DefaultRelationshipLimit,
             RelationshipTypes = ParseRelations(settings.Relation),
         };
         var body = JsonSerializer.Serialize(
@@ -291,9 +306,9 @@ public static class QueryCommandHandler
                 }
 
                 if (settings.Human)
-                    WriteHumanResult(results[index], settings.Identifiers[index], runtime.Output);
+                    WriteHumanResult(results[index], settings.Identifiers[index], settings.Depth, runtime.Output);
                 else
-                    WriteAgentResult(results[index], settings.Identifiers[index], runtime.Output);
+                    WriteAgentResult(results[index], settings.Identifiers[index], settings.Depth, runtime.Output);
             }
         }
 
@@ -303,6 +318,7 @@ public static class QueryCommandHandler
     private static void WriteAgentResult(
         CompactContextResponse response,
         string requestedIdentifier,
+        int depth,
         TextWriter output)
     {
         if (response.TotalMatches == 0 || response.Matches.Count == 0)
@@ -334,23 +350,37 @@ public static class QueryCommandHandler
             WriteOptionalField(output, AgentSignature(target));
             output.WriteLine();
 
-            WriteAgentRelationships(match.Relationships, output);
+            WriteAgentRelationships(match.Relationships, target.File, depth, output);
             if (match.Testing is not null) WriteAgentTesting(match.Testing, output);
         }
     }
 
-    private static void WriteAgentRelationships(CompactRelationships? relationships, TextWriter output)
+    /// <summary>
+    /// Why relationships were never fetched, or null when they were. An ambiguous match
+    /// returns none and depth 0 skips traversal, so printing "none" there would state
+    /// something the query never looked at.
+    /// </summary>
+    private static string? NotLoadedReason(CompactRelationships? relationships, int depth)
+        => relationships is null ? "ambiguous: re-query with a target identifier"
+            : depth == 0 ? "depth 0"
+            : null;
+
+    private static void WriteAgentRelationships(
+        CompactRelationships? relationships,
+        string? targetFile,
+        int depth,
+        TextWriter output)
     {
-        if (relationships is null || !HasAgentRelationships(relationships))
+        if (relationships is null || NotLoadedReason(relationships, depth) is not null)
         {
-            output.WriteLine("relationships\tnone");
+            output.WriteLine($"relationships\tnot loaded\t{NotLoadedReason(relationships, depth)}");
             return;
         }
 
         WriteAgentNodeCategory("uses", relationships.Uses, relationships.UsesReturnedCount,
             relationships.UsesCount, relationships.UsesTruncated, output);
         WriteAgentNodeCategory("usedBy", relationships.UsedBy, relationships.UsedByReturnedCount,
-            relationships.UsedByCount, relationships.UsedByTruncated, output);
+            relationships.UsedByCount, relationships.UsedByTruncated, output, showEmpty: true);
         WriteAgentNodeCategory("transitiveUses", relationships.TransitiveUses,
             relationships.TransitiveUsesReturnedCount, relationships.TransitiveUsesCount,
             relationships.TransitiveUsesTruncated, output);
@@ -359,31 +389,14 @@ public static class QueryCommandHandler
             relationships.TransitiveUsedByTruncated, output);
         WriteAgentFileCategory("fileDependencies", relationships.FileDependencies,
             relationships.FileDependenciesReturnedCount, relationships.FileDependenciesCount,
-            relationships.FileDependenciesTruncated, output);
+            relationships.FileDependenciesTruncated, targetFile, output);
         WriteAgentFileCategory("fileDependents", relationships.FileDependents,
             relationships.FileDependentsReturnedCount, relationships.FileDependentsCount,
-            relationships.FileDependentsTruncated, output);
+            relationships.FileDependentsTruncated, targetFile, output);
         WriteAgentNodeCategory("relatedItems", relationships.RelatedItems,
             relationships.RelatedItemsReturnedCount, relationships.RelatedItemsCount,
             relationships.RelatedItemsTruncated, output);
     }
-
-    private static bool HasAgentRelationships(CompactRelationships relationships)
-        => CategoryHasValues(relationships.Uses, relationships.UsesCount, relationships.UsesTruncated)
-            || CategoryHasValues(relationships.UsedBy, relationships.UsedByCount, relationships.UsedByTruncated)
-            || CategoryHasValues(relationships.TransitiveUses, relationships.TransitiveUsesCount,
-                relationships.TransitiveUsesTruncated)
-            || CategoryHasValues(relationships.TransitiveUsedBy, relationships.TransitiveUsedByCount,
-                relationships.TransitiveUsedByTruncated)
-            || CategoryHasValues(relationships.FileDependencies, relationships.FileDependenciesCount,
-                relationships.FileDependenciesTruncated)
-            || CategoryHasValues(relationships.FileDependents, relationships.FileDependentsCount,
-                relationships.FileDependentsTruncated)
-            || CategoryHasValues(relationships.RelatedItems, relationships.RelatedItemsCount,
-                relationships.RelatedItemsTruncated);
-
-    private static bool CategoryHasValues<T>(IReadOnlyList<T>? items, int? total, bool truncated)
-        => items is { Count: > 0 } || total is > 0 || truncated;
 
     private static void WriteAgentNodeCategory(
         string name,
@@ -391,11 +404,12 @@ public static class QueryCommandHandler
         int? returned,
         int? total,
         bool truncated,
-        TextWriter output)
+        TextWriter output,
+        bool showEmpty = false)
     {
         var returnedCount = returned ?? nodes?.Count ?? 0;
         var totalCount = total ?? nodes?.Count ?? 0;
-        if (returnedCount == 0 && totalCount == 0 && !truncated) return;
+        if (returnedCount == 0 && totalCount == 0 && !truncated && !showEmpty) return;
 
         output.WriteLine($"{name}\t{returnedCount}/{totalCount}{(truncated ? "\ttruncated" : string.Empty)}");
         foreach (var node in nodes ?? [])
@@ -416,13 +430,18 @@ public static class QueryCommandHandler
         int? returned,
         int? total,
         bool truncated,
+        string? targetFile,
         TextWriter output)
     {
         var returnedCount = returned ?? files?.Count ?? 0;
         var totalCount = total ?? files?.Count ?? 0;
         if (returnedCount == 0 && totalCount == 0 && !truncated) return;
 
-        output.WriteLine($"{name}\t{returnedCount}/{totalCount}{(truncated ? "\ttruncated" : string.Empty)}");
+        // These describe the whole file, so say which: on a member query they are
+        // otherwise easy to read as that member's own users.
+        output.WriteLine(
+            $"{name}\t{returnedCount}/{totalCount}{(truncated ? "\ttruncated" : string.Empty)}" +
+            (string.IsNullOrEmpty(targetFile) ? string.Empty : $"\tof {Clean(targetFile)}"));
         foreach (var file in files ?? []) output.WriteLine($"\t{Clean(file)}");
     }
 
@@ -476,6 +495,7 @@ public static class QueryCommandHandler
     private static void WriteHumanResult(
         CompactContextResponse response,
         string requestedIdentifier,
+        int depth,
         TextWriter output)
     {
         if (response.TotalMatches == 0 || response.Matches.Count == 0)
@@ -505,33 +525,38 @@ public static class QueryCommandHandler
             if (!string.IsNullOrEmpty(target.Signature))
                 output.WriteLine($"  Signature: {target.Signature}");
 
-            WriteRelationships(match.Relationships, output);
+            WriteRelationships(match.Relationships, target.File, depth, output);
             if (match.Testing is not null) WriteTesting(match.Testing, output);
         }
     }
 
-    private static void WriteRelationships(CompactRelationships? relationships, TextWriter output)
+    private static void WriteRelationships(
+        CompactRelationships? relationships,
+        string? targetFile,
+        int depth,
+        TextWriter output)
     {
-        if (relationships is null || !HasRelationships(relationships))
+        if (relationships is null || NotLoadedReason(relationships, depth) is not null)
         {
-            output.WriteLine("  Relationships: none");
+            output.WriteLine($"  Relationships: not loaded ({NotLoadedReason(relationships, depth)})");
             return;
         }
 
         WriteNodeCategory("Uses", relationships.Uses, relationships.UsesReturnedCount,
             relationships.UsesCount, relationships.UsesTruncated, output);
         WriteNodeCategory("Used by", relationships.UsedBy, relationships.UsedByReturnedCount,
-            relationships.UsedByCount, relationships.UsedByTruncated, output);
+            relationships.UsedByCount ?? 0, relationships.UsedByTruncated, output);
         WriteNodeCategory("Transitive uses", relationships.TransitiveUses,
             relationships.TransitiveUsesReturnedCount, relationships.TransitiveUsesCount,
             relationships.TransitiveUsesTruncated, output);
         WriteNodeCategory("Transitive used by", relationships.TransitiveUsedBy,
             relationships.TransitiveUsedByReturnedCount, relationships.TransitiveUsedByCount,
             relationships.TransitiveUsedByTruncated, output);
-        WriteFileCategory("File dependencies", relationships.FileDependencies,
+        var ofFile = string.IsNullOrEmpty(targetFile) ? string.Empty : $" of {targetFile}";
+        WriteFileCategory($"File dependencies{ofFile}", relationships.FileDependencies,
             relationships.FileDependenciesReturnedCount, relationships.FileDependenciesCount,
             relationships.FileDependenciesTruncated, output);
-        WriteFileCategory("File dependents", relationships.FileDependents,
+        WriteFileCategory($"File dependents{ofFile}", relationships.FileDependents,
             relationships.FileDependentsReturnedCount, relationships.FileDependentsCount,
             relationships.FileDependentsTruncated, output);
         WriteNodeCategory("Related items", relationships.RelatedItems,
@@ -540,22 +565,6 @@ public static class QueryCommandHandler
         if (relationships.Truncated)
             output.WriteLine("  Relationship result is truncated.");
     }
-
-    private static bool HasRelationships(CompactRelationships relationships)
-        => relationships.UsesCount is not null
-            || relationships.UsedByCount is not null
-            || relationships.TransitiveUsesCount is not null
-            || relationships.TransitiveUsedByCount is not null
-            || relationships.FileDependenciesCount is not null
-            || relationships.FileDependentsCount is not null
-            || relationships.RelatedItemsCount is not null
-            || relationships.Uses is { Count: > 0 }
-            || relationships.UsedBy is { Count: > 0 }
-            || relationships.TransitiveUses is { Count: > 0 }
-            || relationships.TransitiveUsedBy is { Count: > 0 }
-            || relationships.FileDependencies is { Count: > 0 }
-            || relationships.FileDependents is { Count: > 0 }
-            || relationships.RelatedItems is { Count: > 0 };
 
     private static void WriteNodeCategory(
         string name,

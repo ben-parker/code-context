@@ -11,6 +11,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 
 namespace CodeContext.CSharp.Worker;
 
@@ -48,7 +49,63 @@ public sealed class CSharpWorkspaceAnalyzer
     private static readonly Lazy<ImmutableArray<MetadataReference>> SharedReferences =
         new(ResolveReferences);
 
+    /// <summary>
+    /// Framework assemblies bound beside CoreLib. An unresolved call binds its lambda
+    /// arguments with error-typed parameters, so without System.Linq every call and member
+    /// access inside <c>items.Select(item =&gt; ...)</c> would be lost; these are the
+    /// libraries analyzed code most often hands lambdas to. The list is deliberately not
+    /// the whole framework, which cost three times as much on every workspace walk.
+    /// System.Runtime is here because the others reach CoreLib through its type forwards,
+    /// and System.Linq.Expressions because Queryable's overloads would otherwise take an
+    /// error type and leave chained Enumerable calls ambiguous.
+    /// </summary>
+    private static readonly string[] FrameworkAssemblies =
+    [
+        "System.Runtime",
+        "System.Console",
+        "System.Linq",
+        "System.Linq.Expressions",
+        "System.Linq.Queryable",
+        "System.Collections",
+        "System.Collections.Concurrent",
+        "System.Collections.Immutable",
+        "System.Memory",
+        "System.ObjectModel",
+        "System.Text.RegularExpressions",
+        "System.Threading",
+        "System.Threading.Tasks.Parallel",
+    ];
+
+    /// <summary>
+    /// The SDK's default implicit usings, which live in a generated file under
+    /// <c>obj/</c> that is never indexed. Without them a project that enables the setting
+    /// has no System.Linq or System.Collections.Generic in scope at all. Kept outside
+    /// <see cref="_syntaxTrees"/>: it contributes bindings but no facts.
+    /// </summary>
+    private static readonly SyntaxTree ImplicitUsingsTree = CSharpSyntaxTree.ParseText(
+        """
+        global using System;
+        global using System.Collections.Generic;
+        global using System.IO;
+        global using System.Linq;
+        global using System.Threading;
+        global using System.Threading.Tasks;
+        """);
+
+    private static readonly Regex ImplicitUsingsEnabled = new(
+        @"<ImplicitUsings>\s*(enable|true)\s*</ImplicitUsings>", RegexOptions.IgnoreCase);
+
     private readonly Dictionary<string, SyntaxTree> _syntaxTrees = new(PathComparer);
+
+    /// <summary>Directories already searched for a project enabling implicit usings.</summary>
+    private readonly HashSet<string> _inspectedDirectories = new(PathComparer);
+
+    /// <summary>
+    /// Whether the compilation carries <see cref="ImplicitUsingsTree"/>. It is added only
+    /// for a workspace that asks for it, because in any other project those usings would
+    /// make a repository type named <c>Task</c> or <c>Timer</c> ambiguous.
+    /// </summary>
+    private bool _usesImplicitUsings;
     private readonly List<ProtocolDiagnostic> _pendingDiagnostics = [];
     private readonly string _workspaceIdPrefix;
 
@@ -89,11 +146,15 @@ public sealed class CSharpWorkspaceAnalyzer
             if (!string.IsNullOrEmpty(objectAssembly) && File.Exists(objectAssembly))
             {
                 references.Add(MetadataReference.CreateFromFile(objectAssembly));
-            }
-            var consoleAssembly = typeof(Console).Assembly.Location;
-            if (!string.IsNullOrEmpty(consoleAssembly) && File.Exists(consoleAssembly))
-            {
-                references.Add(MetadataReference.CreateFromFile(consoleAssembly));
+                var directory = Path.GetDirectoryName(objectAssembly)!;
+                foreach (var name in FrameworkAssemblies)
+                {
+                    var path = Path.Combine(directory, name + ".dll");
+                    if (File.Exists(path))
+                    {
+                        references.Add(MetadataReference.CreateFromFile(path));
+                    }
+                }
             }
         }
         catch
@@ -131,6 +192,45 @@ public sealed class CSharpWorkspaceAnalyzer
                 TryLoadFile(path);
             }
         }
+        DetectImplicitUsings(approvedFiles);
+    }
+
+    /// <summary>
+    /// Adds the SDK usings when a project over any of these files enables them. One
+    /// compilation serves the whole workspace, so one such project enables them for all.
+    /// </summary>
+    private void DetectImplicitUsings(IEnumerable<string> files)
+    {
+        if (_usesImplicitUsings) return;
+        foreach (var file in files)
+        {
+            for (var directory = Path.GetDirectoryName(file);
+                 !string.IsNullOrEmpty(directory) && _inspectedDirectories.Add(directory);
+                 directory = Path.GetDirectoryName(directory))
+            {
+                if (EnablesImplicitUsings(directory))
+                {
+                    _usesImplicitUsings = true;
+                    _compilation = _compilation.AddSyntaxTrees(ImplicitUsingsTree);
+                    return;
+                }
+            }
+        }
+    }
+
+    private static bool EnablesImplicitUsings(string directory)
+    {
+        try
+        {
+            return Directory.EnumerateFiles(directory, "*.csproj")
+                .Append(Path.Combine(directory, "Directory.Build.props"))
+                .Where(File.Exists)
+                .Any(project => ImplicitUsingsEnabled.IsMatch(File.ReadAllText(project)));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
     }
 
     /// <summary>Replaces the workspace file set entirely and reparses everything.</summary>
@@ -139,13 +239,20 @@ public sealed class CSharpWorkspaceAnalyzer
         // Deliberate full reset: drop every tree and start from a fresh compilation
         // rather than diffing. Every file below then takes the AddSyntaxTrees path.
         _syntaxTrees.Clear();
-        _compilation = CSharpCompilation.Create(CompilationName, references: SharedReferences.Value);
+        _compilation = CreateCompilation([]);
         foreach (var path in files)
         {
             ct.ThrowIfCancellationRequested();
             TryLoadFile(path);
         }
+        DetectImplicitUsings(files);
     }
+
+    private CSharpCompilation CreateCompilation(IEnumerable<SyntaxTree> trees)
+        => CSharpCompilation.Create(
+            CompilationName,
+            _usesImplicitUsings ? trees.Append(ImplicitUsingsTree) : trees,
+            SharedReferences.Value);
 
     /// <summary>Applies an ordered change batch: deleted files drop their tree, all
     /// other change kinds re-read the file from disk.</summary>
@@ -231,14 +338,14 @@ public sealed class CSharpWorkspaceAnalyzer
         // self-heal in release by rebuilding from the trees, recording a diagnostic so the
         // correction surfaces rather than hiding forever.
         var compiledTrees = new HashSet<SyntaxTree>(_compilation.SyntaxTrees);
+        compiledTrees.Remove(ImplicitUsingsTree);
         if (compiledTrees.Count != _syntaxTrees.Count
             || !_syntaxTrees.Values.All(compiledTrees.Contains))
         {
             Debug.Assert(false,
                 $"Compilation drifted from tree cache: {_compilation.SyntaxTrees.Count()} tree(s) " +
                 $"in compilation vs {_syntaxTrees.Count} cached.");
-            _compilation = CSharpCompilation.Create(
-                CompilationName, _syntaxTrees.Values, SharedReferences.Value);
+            _compilation = CreateCompilation(_syntaxTrees.Values);
             _pendingDiagnostics.Add(new ProtocolDiagnostic(
                 null, "warning",
                 "Internal compilation cache drifted from the tree set and was rebuilt."));
@@ -734,6 +841,7 @@ public sealed class CSharpWorkspaceAnalyzer
         private readonly string _idPrefix;
         private readonly List<ProtocolNode> _nodes;
         private readonly List<ProtocolEdge> _edges;
+        private bool _hasTopLevelEntry;
 
         public GraphWalker(SemanticModel semanticModel, string filePath, string idPrefix, List<ProtocolNode> nodes, List<ProtocolEdge> edges)
         {
@@ -744,22 +852,42 @@ public sealed class CSharpWorkspaceAnalyzer
             _edges = edges;
         }
 
-        private string NodeId(ISymbol symbol) => _idPrefix + symbol.ToDisplayString();
+        private string NodeId(ISymbol symbol) => _idPrefix + DisplayName(symbol);
         private static string PublicIdentifier(ISymbol symbol)
-            => "csharp:" + symbol.ToDisplayString();
+            => "csharp:" + DisplayName(symbol);
+
+        /// <summary>
+        /// The symbol's semantic identity. A static constructor displays exactly like a
+        /// parameterless instance constructor, so it carries a marker or the two would
+        /// collapse into a single node.
+        /// </summary>
+        private static string DisplayName(ISymbol symbol)
+            => symbol is IMethodSymbol { MethodKind: MethodKind.StaticConstructor }
+                ? symbol.ToDisplayString() + "[static]"
+                : symbol.ToDisplayString();
+
+        /// <summary>
+        /// Identity of the file's synthetic top-level entry point. Each project's
+        /// <c>Program.cs</c> compiles to the same <c>Program.&lt;Main&gt;$</c> symbol, so
+        /// the file path is what keeps two tools in one workspace apart.
+        /// </summary>
+        private string TopLevelIdentity => $"<Main>@{_filePath.Replace('\\', '/')}";
+
+        private string TopLevelNodeId => _idPrefix + TopLevelIdentity;
 
         private ProtocolNode BuildNode(
             ISymbol symbol,
             SyntaxNode syntax,
             string kind,
             string signature,
-            IReadOnlyDictionary<string, string>? metadata = null)
+            IReadOnlyDictionary<string, string>? metadata = null,
+            string? name = null)
         {
             var span = syntax.GetLocation().GetLineSpan();
             return new ProtocolNode(
                 Id: NodeId(symbol),
                 Identifier: PublicIdentifier(symbol),
-                Name: symbol.Name,
+                Name: name ?? symbol.Name,
                 Kind: kind,
                 Language: "csharp",
                 FilePath: _filePath,
@@ -789,9 +917,9 @@ public sealed class CSharpWorkspaceAnalyzer
         /// Emits a containment edge (HAS_METHOD / HAS_PROPERTY / HAS_FIELD) from the
         /// member's directly containing type to the member node, mirroring the
         /// TypeScript worker's convention. The edge is only emitted when the containing
-        /// type itself produces a node (a class or interface declared in source), so we
-        /// never point at a node that was never created. <c>ContainingType</c> is the
-        /// direct declaring type, so nested members attach to their own type only.
+        /// type itself produces a node (a type declared in source), so we never point at
+        /// a node that was never created. <c>ContainingType</c> is the direct declaring
+        /// type, so nested members attach to their own type only.
         /// </summary>
         private void AddContainmentEdge(ISymbol member, string kind)
         {
@@ -801,25 +929,134 @@ public sealed class CSharpWorkspaceAnalyzer
             }
         }
 
+        public override void VisitCompilationUnit(CompilationUnitSyntax node)
+        {
+            // Text that is not C# at all parses as a run of broken global statements, so
+            // only a statement that parsed cleanly shows the file really has an entry point.
+            var statements = node.Members.OfType<GlobalStatementSyntax>().ToList();
+            _hasTopLevelEntry = statements.Any(statement => !statement.ContainsDiagnostics);
+            if (_hasTopLevelEntry)
+            {
+                var start = statements[0].GetLocation().GetLineSpan().StartLinePosition;
+                var end = statements[^1].GetLocation().GetLineSpan().EndLinePosition;
+                _nodes.Add(new ProtocolNode(
+                    Id: TopLevelNodeId,
+                    Identifier: "csharp:" + TopLevelIdentity,
+                    Name: "<Main>",
+                    Kind: "Method",
+                    Language: "csharp",
+                    FilePath: _filePath,
+                    StartLine: start.Line,
+                    EndLine: end.Line,
+                    StartColumn: start.Character,
+                    EndColumn: end.Character,
+                    Namespace: string.Empty,
+                    Visibility: "internal",
+                    Signature: "<Main>"));
+            }
+            base.VisitCompilationUnit(node);
+        }
+
         public override void VisitClassDeclaration(ClassDeclarationSyntax node)
+        {
+            AddTypeNode(node, "Class", parameters: null);
+            base.VisitClassDeclaration(node);
+        }
+
+        public override void VisitExtensionBlockDeclaration(ExtensionBlockDeclarationSyntax node)
+        {
+            AddTypeNode(node, "Extension", node.ParameterList, name: "extension");
+            base.VisitExtensionBlockDeclaration(node);
+        }
+
+        public override void VisitStructDeclaration(StructDeclarationSyntax node)
+        {
+            AddTypeNode(node, "Struct", parameters: null);
+            base.VisitStructDeclaration(node);
+        }
+
+        public override void VisitRecordDeclaration(RecordDeclarationSyntax node)
+        {
+            var kind = node.ClassOrStructKeyword.IsKind(SyntaxKind.StructKeyword) ? "Struct" : "Record";
+            if (AddTypeNode(node, kind, node.ParameterList) is { } symbol && node.ParameterList is { } parameters)
+            {
+                foreach (var parameter in parameters.Parameters)
+                {
+                    AddPositionalProperty(symbol, parameter);
+                }
+            }
+            base.VisitRecordDeclaration(node);
+        }
+
+        /// <summary>
+        /// Emits the property a positional record parameter compiles to. A parameter the
+        /// record redeclares as an ordinary property is left to
+        /// <see cref="VisitPropertyDeclaration"/>, which owns that declaration.
+        /// </summary>
+        private void AddPositionalProperty(INamedTypeSymbol record, ParameterSyntax parameter)
+        {
+            var property = record.GetMembers(parameter.Identifier.ValueText)
+                .OfType<IPropertySymbol>()
+                .FirstOrDefault(candidate => candidate.DeclaringSyntaxReferences
+                    .Any(reference => reference.GetSyntax() == parameter));
+            if (property is null) return;
+
+            _nodes.Add(BuildNode(property, parameter, "Property", parameter.Identifier.ToString()));
+            AddContainmentEdge(property, "HAS_PROPERTY");
+        }
+
+        /// <summary>Adds the node and base/interface edges for a class, struct or record.</summary>
+        private INamedTypeSymbol? AddTypeNode(
+            TypeDeclarationSyntax node, string kind, ParameterListSyntax? parameters, string? name = null)
+        {
+            if (_semanticModel.GetDeclaredSymbol(node) is not { } symbol) return null;
+
+            var signature = (name ?? node.Identifier.ToString())
+                + (node.TypeParameterList?.ToString() ?? "")
+                + (parameters?.ToString() ?? "")
+                + (node.BaseList?.ToString() ?? "");
+            _nodes.Add(BuildNode(symbol, node, kind, signature, name: name));
+
+            if (symbol.BaseType is { SpecialType: not (SpecialType.System_Object or SpecialType.System_ValueType) } baseType)
+            {
+                AddEdge(NodeId(symbol), NodeId(baseType.OriginalDefinition), "INHERITS");
+            }
+            foreach (var interfaceSymbol in symbol.AllInterfaces)
+            {
+                AddEdge(NodeId(symbol), NodeId(interfaceSymbol.OriginalDefinition), "IMPLEMENTS");
+            }
+            return symbol;
+        }
+
+        public override void VisitEnumDeclaration(EnumDeclarationSyntax node)
+        {
+            if (_semanticModel.GetDeclaredSymbol(node) is { } symbol)
+            {
+                _nodes.Add(BuildNode(symbol, node, "Enum", node.Identifier.ToString()));
+            }
+            base.VisitEnumDeclaration(node);
+        }
+
+        public override void VisitEnumMemberDeclaration(EnumMemberDeclarationSyntax node)
+        {
+            if (_semanticModel.GetDeclaredSymbol(node) is { } symbol)
+            {
+                _nodes.Add(BuildNode(symbol, node, "EnumMember", node.Identifier.ToString()));
+                AddContainmentEdge(symbol, "HAS_FIELD");
+            }
+            base.VisitEnumMemberDeclaration(node);
+        }
+
+        public override void VisitDelegateDeclaration(DelegateDeclarationSyntax node)
         {
             if (_semanticModel.GetDeclaredSymbol(node) is { } symbol)
             {
                 var signature = node.Identifier.ToString()
                     + (node.TypeParameterList?.ToString() ?? "")
-                    + (node.BaseList?.ToString() ?? "");
-                _nodes.Add(BuildNode(symbol, node, "Class", signature));
-
-                if (symbol.BaseType is { } baseType && baseType.SpecialType != SpecialType.System_Object)
-                {
-                    AddEdge(NodeId(symbol), NodeId(baseType), "INHERITS");
-                }
-                foreach (var interfaceSymbol in symbol.AllInterfaces)
-                {
-                    AddEdge(NodeId(symbol), NodeId(interfaceSymbol), "IMPLEMENTS");
-                }
+                    + node.ParameterList.ToString();
+                _nodes.Add(BuildNode(symbol, node, "Delegate", signature));
             }
-            base.VisitClassDeclaration(node);
+            base.VisitDelegateDeclaration(node);
         }
 
         public override void VisitInterfaceDeclaration(InterfaceDeclarationSyntax node)
@@ -833,7 +1070,7 @@ public sealed class CSharpWorkspaceAnalyzer
 
                 foreach (var baseInterface in symbol.Interfaces)
                 {
-                    AddEdge(NodeId(symbol), NodeId(baseInterface), "INHERITS");
+                    AddEdge(NodeId(symbol), NodeId(baseInterface.OriginalDefinition), "INHERITS");
                 }
             }
             base.VisitInterfaceDeclaration(node);
@@ -891,25 +1128,149 @@ public sealed class CSharpWorkspaceAnalyzer
             base.VisitPropertyDeclaration(node);
         }
 
+        public override void VisitIndexerDeclaration(IndexerDeclarationSyntax node)
+        {
+            if (_semanticModel.GetDeclaredSymbol(node) is { } symbol)
+            {
+                _nodes.Add(BuildNode(symbol, node, "Property", "this" + node.ParameterList));
+                AddContainmentEdge(symbol, "HAS_PROPERTY");
+            }
+            base.VisitIndexerDeclaration(node);
+        }
+
+        public override void VisitFieldDeclaration(FieldDeclarationSyntax node)
+        {
+            AddVariableNodes(node, "Field");
+            base.VisitFieldDeclaration(node);
+        }
+
+        public override void VisitEventFieldDeclaration(EventFieldDeclarationSyntax node)
+        {
+            AddVariableNodes(node, "Event");
+            base.VisitEventFieldDeclaration(node);
+        }
+
+        private void AddVariableNodes(BaseFieldDeclarationSyntax node, string kind)
+        {
+            foreach (var variable in node.Declaration.Variables)
+            {
+                if (_semanticModel.GetDeclaredSymbol(variable) is { } symbol)
+                {
+                    _nodes.Add(BuildNode(symbol, variable, kind, variable.Identifier.ToString()));
+                    AddContainmentEdge(symbol, "HAS_FIELD");
+                }
+            }
+        }
+
+        public override void VisitEventDeclaration(EventDeclarationSyntax node)
+        {
+            if (_semanticModel.GetDeclaredSymbol(node) is { } symbol)
+            {
+                _nodes.Add(BuildNode(symbol, node, "Event", node.Identifier.ToString()));
+                AddContainmentEdge(symbol, "HAS_FIELD");
+            }
+            base.VisitEventDeclaration(node);
+        }
+
+        public override void VisitConstructorDeclaration(ConstructorDeclarationSyntax node)
+        {
+            // Named like the TypeScript worker's constructors, not after the type: an
+            // exact query for the type must keep resolving to the type alone.
+            AddMethodLikeNode(node, "constructor", node.Identifier + node.ParameterList.ToString());
+            base.VisitConstructorDeclaration(node);
+        }
+
+        public override void VisitDestructorDeclaration(DestructorDeclarationSyntax node)
+        {
+            AddMethodLikeNode(node, "destructor", "~" + node.Identifier + node.ParameterList);
+            base.VisitDestructorDeclaration(node);
+        }
+
+        public override void VisitOperatorDeclaration(OperatorDeclarationSyntax node)
+        {
+            var name = $"operator {node.OperatorToken}";
+            AddMethodLikeNode(node, name, name + node.ParameterList);
+            base.VisitOperatorDeclaration(node);
+        }
+
+        public override void VisitConversionOperatorDeclaration(ConversionOperatorDeclarationSyntax node)
+        {
+            var name = $"{node.ImplicitOrExplicitKeyword} operator {node.Type}";
+            AddMethodLikeNode(node, name, name + node.ParameterList);
+            base.VisitConversionOperatorDeclaration(node);
+        }
+
+        private void AddMethodLikeNode(BaseMethodDeclarationSyntax node, string name, string signature)
+        {
+            if (_semanticModel.GetDeclaredSymbol(node) is { } symbol)
+            {
+                _nodes.Add(BuildNode(symbol, node, "Method", signature, name: name));
+                AddContainmentEdge(symbol, "HAS_METHOD");
+            }
+        }
+
         public override void VisitInvocationExpression(InvocationExpressionSyntax node)
         {
-            var calleeSymbol = ResolveMethodSymbol(node);
-            var enclosingMethod = node.Ancestors().OfType<MethodDeclarationSyntax>().FirstOrDefault();
-            if (enclosingMethod is not null
-                && calleeSymbol is not null
-                && _semanticModel.GetDeclaredSymbol(enclosingMethod) is { } callerSymbol)
+            if (ResolveMethodSymbol(node) is { } calleeSymbol && FindEnclosingNodeId(node) is { } callerId)
             {
-                var position = node.GetLocation().GetLineSpan().StartLinePosition;
-                var kind = IsMockOrFluentTestInvocation(node, enclosingMethod)
+                var enclosingMethod = node.Ancestors().OfType<MethodDeclarationSyntax>().FirstOrDefault();
+                var kind = enclosingMethod is not null && IsMockOrFluentTestInvocation(node, enclosingMethod)
                     ? "MOCK_CALLS"
                     : "CALLS";
-                AddEdge(NodeId(callerSymbol), NodeId(calleeSymbol), kind, new Dictionary<string, string>
-                {
-                    ["line"] = position.Line.ToString(),
-                    ["column"] = position.Character.ToString(),
-                });
+                AddLocatedEdge(callerId, NodeId(calleeSymbol), kind, node);
             }
             base.VisitInvocationExpression(node);
+        }
+
+        public override void VisitObjectCreationExpression(ObjectCreationExpressionSyntax node)
+        {
+            AddConstructorCall(node);
+            base.VisitObjectCreationExpression(node);
+        }
+
+        public override void VisitImplicitObjectCreationExpression(ImplicitObjectCreationExpressionSyntax node)
+        {
+            AddConstructorCall(node);
+            base.VisitImplicitObjectCreationExpression(node);
+        }
+
+        public override void VisitConstructorInitializer(ConstructorInitializerSyntax node)
+        {
+            AddConstructorCall(node);
+            base.VisitConstructorInitializer(node);
+        }
+
+        public override void VisitPrimaryConstructorBaseType(PrimaryConstructorBaseTypeSyntax node)
+        {
+            AddConstructorCall(node);
+            base.VisitPrimaryConstructorBaseType(node);
+        }
+
+        /// <summary>
+        /// Records construction as a call, like the TypeScript worker: to the declared
+        /// constructor when there is one, otherwise to the type itself.
+        /// </summary>
+        private void AddConstructorCall(SyntaxNode node)
+        {
+            if (ResolveSymbol(node) is not IMethodSymbol constructor
+                || FindEnclosingNodeId(node) is not { } sourceId)
+            {
+                return;
+            }
+
+            var definition = constructor.OriginalDefinition;
+            var type = definition.ContainingType;
+            if (IsIndexedSourceMember(definition))
+            {
+                AddLocatedEdge(sourceId, NodeId(definition), "CALLS", node);
+                // `new(...)` names no type, so no identifier will reference it.
+                if (node is ImplicitObjectCreationExpressionSyntax)
+                    AddLocatedEdge(sourceId, NodeId(type), "REFERENCES", node);
+            }
+            else if (IsIndexedSourceType(type) && sourceId != NodeId(type))
+            {
+                AddLocatedEdge(sourceId, NodeId(type), "CALLS", node);
+            }
         }
 
         private IMethodSymbol? ResolveMethodSymbol(InvocationExpressionSyntax invocation)
@@ -958,63 +1319,179 @@ public sealed class CSharpWorkspaceAnalyzer
 
         public override void VisitIdentifierName(IdentifierNameSyntax node)
         {
-            AddTypeReference(node);
+            AddNameReference(node);
             base.VisitIdentifierName(node);
         }
 
         public override void VisitGenericName(GenericNameSyntax node)
         {
-            AddTypeReference(node);
+            AddNameReference(node);
             base.VisitGenericName(node);
         }
 
-        private void AddTypeReference(NameSyntax node)
+        public override void VisitElementAccessExpression(ElementAccessExpressionSyntax node)
         {
-            // Base-list relationships already have the more specific INHERITS or
-            // IMPLEMENTS edge; emitting REFERENCES as well only duplicates them.
-            if (node.Ancestors().Any(ancestor => ancestor is BaseListSyntax) ||
-                _semanticModel.GetSymbolInfo(node).Symbol is not INamedTypeSymbol referencedType ||
+            AddIndexerReference(node);
+            base.VisitElementAccessExpression(node);
+        }
+
+        public override void VisitElementBindingExpression(ElementBindingExpressionSyntax node)
+        {
+            AddIndexerReference(node);
+            base.VisitElementBindingExpression(node);
+        }
+
+        public override void VisitImplicitElementAccess(ImplicitElementAccessSyntax node)
+        {
+            AddIndexerReference(node);
+            base.VisitImplicitElementAccess(node);
+        }
+
+        private void AddIndexerReference(ExpressionSyntax node)
+        {
+            if (ResolveSymbol(node) is IPropertySymbol { IsIndexer: true } indexer)
+                AddMemberReference(node, indexer.OriginalDefinition);
+        }
+
+        private void AddNameReference(SimpleNameSyntax node)
+        {
+            var symbol = ResolveSymbol(node);
+            switch (symbol)
+            {
+                case INamedTypeSymbol type:
+                    AddTypeReference(node, type);
+                    break;
+                // An attribute name binds to the attribute's constructor, not its class.
+                case IMethodSymbol { MethodKind: MethodKind.Constructor } constructor
+                    when node.Ancestors().Any(ancestor => ancestor is AttributeSyntax):
+                    AddTypeReference(node, constructor.ContainingType);
+                    break;
+                case IMethodSymbol { MethodKind: MethodKind.Ordinary or MethodKind.ReducedExtension } method
+                    when !IsInvokedName(node):
+                    AddMemberReference(node, NormalizeMethod(method));
+                    break;
+                case IPropertySymbol or IFieldSymbol or IEventSymbol:
+                    AddMemberReference(node, symbol.OriginalDefinition);
+                    break;
+            }
+        }
+
+        /// <summary>
+        /// The bound symbol, or the only candidate when binding failed. Engine and package
+        /// types are unresolved here, so <c>timer.Timeout += OnTimeout</c> fails to bind
+        /// yet still names one method; a choice between candidates would be a guess.
+        /// </summary>
+        private ISymbol? ResolveSymbol(SyntaxNode node)
+        {
+            var info = _semanticModel.GetSymbolInfo(node);
+            return info.Symbol ?? (info.CandidateSymbols.Length == 1 ? info.CandidateSymbols[0] : null);
+        }
+
+        /// <summary>
+        /// True when this name is the method an invocation calls, which the CALLS edge
+        /// already records. Any other use of a method name is a method group.
+        /// </summary>
+        private static bool IsInvokedName(SimpleNameSyntax node)
+        {
+            SyntaxNode invoked = node.Parent switch
+            {
+                MemberAccessExpressionSyntax access when access.Name == node => access,
+                MemberBindingExpressionSyntax binding when binding.Name == node => binding,
+                _ => node,
+            };
+            return invoked.Parent is InvocationExpressionSyntax invocation && invocation.Expression == invoked;
+        }
+
+        private void AddTypeReference(SimpleNameSyntax node, INamedTypeSymbol referencedType)
+        {
+            // A base type already has the more specific INHERITS or IMPLEMENTS edge;
+            // emitting REFERENCES as well only duplicates it. Its type arguments do not.
+            if (IsBaseTypeName(node) ||
                 !IsIndexedSourceType(referencedType) ||
-                FindEnclosingIndexedSymbol(node) is not { } sourceSymbol)
+                FindEnclosingNodeId(node) is not { } sourceId)
             {
                 return;
             }
 
-            var sourceId = NodeId(sourceSymbol);
             var targetId = NodeId(referencedType.OriginalDefinition);
-            if (sourceId == targetId)
+            if (sourceId != targetId)
+                AddLocatedEdge(sourceId, targetId, "REFERENCES", node);
+        }
+
+        private static bool IsBaseTypeName(SyntaxNode node)
+        {
+            while (node.Parent is QualifiedNameSyntax qualified && qualified.Right == node)
+                node = qualified;
+            return node.Parent is BaseTypeSyntax;
+        }
+
+        private void AddMemberReference(ExpressionSyntax node, ISymbol member)
+        {
+            if (!IsIndexedSourceMember(member) || FindEnclosingNodeId(node) is not { } sourceId)
                 return;
 
-            var position = node.GetLocation().GetLineSpan().StartLinePosition;
-            AddEdge(sourceId, targetId, "REFERENCES", new Dictionary<string, string>
+            var targetId = NodeId(member);
+            if (sourceId != targetId)
+                AddLocatedEdge(sourceId, targetId, "REFERENCES", node);
+        }
+
+        private void AddLocatedEdge(string sourceId, string targetId, string kind, SyntaxNode location)
+        {
+            var position = location.GetLocation().GetLineSpan().StartLinePosition;
+            AddEdge(sourceId, targetId, kind, new Dictionary<string, string>
             {
                 ["line"] = position.Line.ToString(),
                 ["column"] = position.Character.ToString(),
             });
         }
 
-        private ISymbol? FindEnclosingIndexedSymbol(SyntaxNode node)
+        /// <summary>
+        /// The node an edge from this syntax belongs to: the nearest declaration the
+        /// walker emits a node for. Accessors resolve through their property, indexer or
+        /// event; lambdas and local functions through the member that holds them.
+        /// </summary>
+        private string? FindEnclosingNodeId(SyntaxNode node)
         {
-            if (node.Ancestors().OfType<MethodDeclarationSyntax>().FirstOrDefault() is { } method &&
-                _semanticModel.GetDeclaredSymbol(method) is { } methodSymbol)
+            foreach (var ancestor in node.Ancestors())
             {
-                return methodSymbol;
+                switch (ancestor)
+                {
+                    case GlobalStatementSyntax:
+                        return _hasTopLevelEntry ? TopLevelNodeId : null;
+                    case BaseMethodDeclarationSyntax:
+                    case BasePropertyDeclarationSyntax:
+                    case EnumMemberDeclarationSyntax:
+                    case BaseTypeDeclarationSyntax:
+                    case DelegateDeclarationSyntax:
+                    case VariableDeclaratorSyntax { Parent.Parent: BaseFieldDeclarationSyntax }:
+                        if (_semanticModel.GetDeclaredSymbol(ancestor) is { } symbol)
+                            return NodeId(symbol);
+                        break;
+                }
             }
-
-            if (node.Ancestors().OfType<PropertyDeclarationSyntax>().FirstOrDefault() is { } property &&
-                _semanticModel.GetDeclaredSymbol(property) is { } propertySymbol)
-            {
-                return propertySymbol;
-            }
-
-            var type = node.Ancestors().OfType<TypeDeclarationSyntax>().FirstOrDefault();
-            return type is null ? null : _semanticModel.GetDeclaredSymbol(type);
+            return null;
         }
 
         private static bool IsIndexedSourceType(INamedTypeSymbol symbol)
             => symbol.Locations.Any(location => location.IsInSource) &&
                symbol.DeclaringSyntaxReferences.Any(reference =>
-                   reference.GetSyntax() is ClassDeclarationSyntax or InterfaceDeclarationSyntax);
+                   reference.GetSyntax() is BaseTypeDeclarationSyntax or DelegateDeclarationSyntax);
+
+        /// <summary>
+        /// True when the walker emits a node for this member, which excludes anonymous
+        /// type and tuple members, compiler-generated backing fields, and implicit or
+        /// primary constructors: all of those report source locations but have no node.
+        /// </summary>
+        private static bool IsIndexedSourceMember(ISymbol symbol)
+            => symbol is not IFieldSymbol { AssociatedSymbol: not null } &&
+               symbol.ContainingType is { } containingType &&
+               IsIndexedSourceType(containingType) &&
+               symbol.DeclaringSyntaxReferences.Any(reference => reference.GetSyntax()
+                   is BaseMethodDeclarationSyntax
+                   or BasePropertyDeclarationSyntax
+                   or EnumMemberDeclarationSyntax
+                   or VariableDeclaratorSyntax
+                   or ParameterSyntax);
 
         private static bool IsTestMethod(MethodDeclarationSyntax method)
         {

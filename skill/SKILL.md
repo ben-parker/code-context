@@ -23,15 +23,22 @@ codecontext query multi Foo Bar             # several identifiers, one round tri
 `query` auto-discovers (or starts) the repo's instance, waits for indexing, and
 prints compact agent-oriented text; progress goes to stderr. Options: `--depth N`
 (`0` = cheap identity lookup), `--relation CALLS,REFERENCES`, `--exact`,
-`--path DIR`, `--human`, `--json`.
+`--limit N` (entries per relationship list, 1-100, default 10), `--path DIR`,
+`--human`, `--json`.
 
 Reading results:
 
 - A returned `target.identifier` is canonical — pass it back unchanged for an
   unambiguous follow-up. Without `--exact`, simple names match exact-first with
-  substring fallback; check `matchMode` and ambiguity hints.
+  substring fallback; check `matchMode` and ambiguity hints. `Type.Member` and
+  longer dotted suffixes of a qualified name also match.
 - Every emitted section shows returned/total counts and marks truncation — check
-  them before treating an omission as absence. Zero-count sections are omitted.
+  them before treating an omission as absence, and raise `--limit` for the rest of
+  a truncated list. `usedBy` is always printed; other zero-count sections are
+  omitted.
+- `relationships not loaded` means nothing was fetched: the name was ambiguous
+  (re-query with a target's identifier) or the depth was 0. It says nothing about
+  whether the symbol has users.
 - Empty relationships and truncated results are still successful queries; an
   unmatched identifier exits 2. `query multi` reduces round trips, not response
   size, and preserves identifier order.
@@ -46,9 +53,30 @@ Reading results:
 - `transitiveUses` / `transitiveUsedBy` are nodes beyond distance one.
 - `fileDependencies` / `fileDependents` aggregate resolved semantic edges crossing
   the selected file, excluding unresolved, same-file, and proximity-only links.
+  They describe the whole file named after `of`, not the queried member: a file
+  listed there is not evidence that it uses that member.
 - `relatedItems` is proximity, not dependency evidence. Test evidence is static
   graph evidence, not runtime coverage; `directlyTested` means a static call to
   the symbol or, for a type, one of its members.
+
+## What is recorded
+
+An empty `usedBy` is evidence of no users only for usage the index records. For
+anything else, cross-check with `rg -w <Name>`.
+
+- **C#** records calls, construction, type references, inheritance, method groups,
+  attribute usage, and reads and writes of properties, fields, events and enum
+  members (as `REFERENCES`). Code in constructors, accessors, initializers, operators
+  and top-level statements is attributed to that member, or to the file's `<Main>`.
+- **C# does not record** use of user-defined operators and implicit conversions,
+  deconstruction, implicit base constructor calls, or the calls `using`, `foreach` and
+  collection initializers imply. A read of a virtual or interface property is recorded
+  on the member named at the read, not on its overrides or implementations. The
+  analysis sees repository source, the core .NET libraries and the SDK's default
+  implicit usings, not NuGet or engine assemblies or custom `<Using>` items, so a call
+  or member access inside a lambda passed to such an API can be missing.
+- **TypeScript/JavaScript** records calls, construction, imports and inheritance. It
+  **does not record** property reads and writes or type references.
 
 ## Going deeper
 

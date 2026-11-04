@@ -353,7 +353,7 @@ namespace TestNamespace
             Assert.Single(inheritsEdges);
             var inheritsEdge = inheritsEdges.First();
             Assert.Equal(Id("TestNamespace.IUserRepository"), inheritsEdge.SourceId);
-            Assert.Equal(Id("TestNamespace.IRepository<string>"), inheritsEdge.TargetId);
+            Assert.Equal(Id("TestNamespace.IRepository<T>"), inheritsEdge.TargetId);
             Assert.Equal("INHERITS", inheritsEdge.Type);
         }
 
