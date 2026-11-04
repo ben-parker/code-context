@@ -7,11 +7,11 @@ using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Immutable;
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using System.Text.RegularExpressions;
 
 namespace CodeContext.CSharp.Worker;
 
@@ -52,33 +52,30 @@ public sealed class CSharpWorkspaceAnalyzer
     /// <summary>
     /// The SDK's default implicit usings, which live in a generated file under
     /// <c>obj/</c> that is never indexed. Without them a project that enables the setting
-    /// has no System.Linq or System.Collections.Generic in scope at all. Kept outside
-    /// <see cref="_syntaxTrees"/>: it contributes bindings but no facts.
+    /// has no System.Linq or System.Collections.Generic in scope at all.
+    ///
+    /// They enter each file of such a project as ordinary usings rather than as one
+    /// <c>global using</c> file, because one compilation serves every project here and a
+    /// global using would reach all of them. In a project that never asked for it,
+    /// <c>using Game.Model;</c> would then make a repository <c>Timer</c> ambiguous with
+    /// System.Threading's, and everything reached through a value of that type would be
+    /// lost with it. A using at the top of a file has the same meaning as a global one.
+    /// One line, so that every line number in the file stands.
     /// </summary>
-    private static readonly SyntaxTree ImplicitUsingsTree = CSharpSyntaxTree.ParseText(
-        """
-        global using System;
-        global using System.Collections.Generic;
-        global using System.IO;
-        global using System.Linq;
-        global using System.Threading;
-        global using System.Threading.Tasks;
-        """);
-
-    private static readonly Regex ImplicitUsingsEnabled = new(
-        @"<ImplicitUsings>\s*(enable|true)\s*</ImplicitUsings>", RegexOptions.IgnoreCase);
+    private const string ImplicitUsings =
+        "using System;using System.Collections.Generic;using System.IO;using System.Linq;" +
+        "using System.Threading;using System.Threading.Tasks;";
 
     private readonly Dictionary<string, SyntaxTree> _syntaxTrees = new(PathComparer);
 
-    /// <summary>Directories already searched for a project enabling implicit usings.</summary>
-    private readonly HashSet<string> _inspectedDirectories = new(PathComparer);
+    private readonly ImplicitUsingsSettings _implicitUsings;
 
     /// <summary>
-    /// Whether the compilation carries <see cref="ImplicitUsingsTree"/>. It is added only
-    /// for a workspace that asks for it, because in any other project those usings would
-    /// make a repository type named <c>Task</c> or <c>Timer</c> ambiguous.
+    /// Where each tree that carries <see cref="ImplicitUsings"/> has them. Keyed by tree
+    /// instance, so an entry goes when its tree does and a replaced tree cannot inherit one.
     /// </summary>
-    private bool _usesImplicitUsings;
+    private readonly ConditionalWeakTable<SyntaxTree, InsertedUsings> _insertedUsings = [];
+
     private readonly List<ProtocolDiagnostic> _pendingDiagnostics = [];
     private readonly string _workspaceIdPrefix;
 
@@ -101,10 +98,16 @@ public sealed class CSharpWorkspaceAnalyzer
     /// </summary>
     private CSharpCompilation _compilation;
 
-    public CSharpWorkspaceAnalyzer(string workspaceId)
+    /// <param name="workspaceId">Identity of the workspace, part of every fact id.</param>
+    /// <param name="rootPath">
+    /// The workspace root, which bounds the search for project files. Without one, only
+    /// project files beside a source file are read.
+    /// </param>
+    public CSharpWorkspaceAnalyzer(string workspaceId, string? rootPath = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(workspaceId);
         _workspaceIdPrefix = IdPrefix + Uri.EscapeDataString(workspaceId) + ":";
+        _implicitUsings = new ImplicitUsingsSettings(rootPath);
         _compilation = CSharpCompilation.Create(CompilationName, references: SharedReferences.Value);
     }
 
@@ -163,10 +166,14 @@ public sealed class CSharpWorkspaceAnalyzer
     /// approved are dropped, newly approved files are loaded from disk. Cached trees
     /// for still-approved files are kept as-is (changes arrive via
     /// <see cref="ApplyChanges"/>). This runs on every workspace/open, which the host
-    /// sends before each mutation, so a restarted worker self-heals its state here.
+    /// sends before each mutation, so a restarted worker self-heals its state here. It
+    /// also re-reads the project files, which the host does not watch: a file whose
+    /// project changed its implicit usings setting is reparsed, and the fact diff then
+    /// re-emits it like any other file whose bindings moved.
     /// </summary>
     public void SyncApprovedFiles(IReadOnlyList<string> approvedFiles, CancellationToken ct)
     {
+        _implicitUsings.Reset();
         var approved = new HashSet<string>(approvedFiles, PathComparer);
         foreach (var stale in _syntaxTrees.Keys.Where(path => !approved.Contains(path)).ToList())
         {
@@ -179,49 +186,11 @@ public sealed class CSharpWorkspaceAnalyzer
         foreach (var path in approvedFiles)
         {
             ct.ThrowIfCancellationRequested();
-            if (!_syntaxTrees.ContainsKey(path))
+            if (!_syntaxTrees.TryGetValue(path, out var tree)
+                || _insertedUsings.TryGetValue(tree, out _) != _implicitUsings.AppliesTo(path))
             {
                 TryLoadFile(path);
             }
-        }
-        DetectImplicitUsings(approvedFiles);
-    }
-
-    /// <summary>
-    /// Adds the SDK usings when a project over any of these files enables them. One
-    /// compilation serves the whole workspace, so one such project enables them for all.
-    /// </summary>
-    private void DetectImplicitUsings(IEnumerable<string> files)
-    {
-        if (_usesImplicitUsings) return;
-        foreach (var file in files)
-        {
-            for (var directory = Path.GetDirectoryName(file);
-                 !string.IsNullOrEmpty(directory) && _inspectedDirectories.Add(directory);
-                 directory = Path.GetDirectoryName(directory))
-            {
-                if (EnablesImplicitUsings(directory))
-                {
-                    _usesImplicitUsings = true;
-                    _compilation = _compilation.AddSyntaxTrees(ImplicitUsingsTree);
-                    return;
-                }
-            }
-        }
-    }
-
-    private static bool EnablesImplicitUsings(string directory)
-    {
-        try
-        {
-            return Directory.EnumerateFiles(directory, "*.csproj")
-                .Append(Path.Combine(directory, "Directory.Build.props"))
-                .Where(File.Exists)
-                .Any(project => ImplicitUsingsEnabled.IsMatch(File.ReadAllText(project)));
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            return false;
         }
     }
 
@@ -230,6 +199,7 @@ public sealed class CSharpWorkspaceAnalyzer
     {
         // Deliberate full reset: drop every tree and start from a fresh compilation
         // rather than diffing. Every file below then takes the AddSyntaxTrees path.
+        _implicitUsings.Reset();
         _syntaxTrees.Clear();
         _compilation = CreateCompilation([]);
         foreach (var path in files)
@@ -237,14 +207,10 @@ public sealed class CSharpWorkspaceAnalyzer
             ct.ThrowIfCancellationRequested();
             TryLoadFile(path);
         }
-        DetectImplicitUsings(files);
     }
 
-    private CSharpCompilation CreateCompilation(IEnumerable<SyntaxTree> trees)
-        => CSharpCompilation.Create(
-            CompilationName,
-            _usesImplicitUsings ? trees.Append(ImplicitUsingsTree) : trees,
-            SharedReferences.Value);
+    private static CSharpCompilation CreateCompilation(IEnumerable<SyntaxTree> trees)
+        => CSharpCompilation.Create(CompilationName, trees, SharedReferences.Value);
 
     /// <summary>Applies an ordered change batch: deleted files drop their tree, all
     /// other change kinds re-read the file from disk.</summary>
@@ -289,6 +255,10 @@ public sealed class CSharpWorkspaceAnalyzer
         {
             var content = File.ReadAllText(path);
             var newTree = CSharpSyntaxTree.ParseText(content, path: path);
+            if (_implicitUsings.AppliesTo(path))
+            {
+                newTree = AddImplicitUsings(newTree);
+            }
             _syntaxTrees[path] = newTree;
             _compilation = oldTree is null
                 ? _compilation.AddSyntaxTrees(newTree)
@@ -306,6 +276,42 @@ public sealed class CSharpWorkspaceAnalyzer
             _pendingDiagnostics.Add(new ProtocolDiagnostic(
                 path, "warning", $"File could not be read and was skipped: {ex.Message}"));
         }
+    }
+
+    /// <summary>
+    /// Inserts <see cref="ImplicitUsings"/> where a using may legally start: past extern
+    /// aliases and global usings, and past leading trivia, so a directive that opens the
+    /// file keeps its line to itself.
+    /// </summary>
+    private SyntaxTree AddImplicitUsings(SyntaxTree tree)
+    {
+        var root = (CompilationUnitSyntax)tree.GetRoot();
+        var offset = root.ChildNodes()
+            .FirstOrDefault(child => child is not ExternAliasDirectiveSyntax
+                and not UsingDirectiveSyntax { GlobalKeyword.RawKind: (int)SyntaxKind.GlobalKeyword })
+            ?.SpanStart ?? root.EndOfFileToken.SpanStart;
+
+        var text = tree.GetText();
+        var withUsings = tree.WithChangedText(
+            text.WithChanges(new TextChange(new TextSpan(offset, 0), ImplicitUsings)));
+        _insertedUsings.Add(withUsings, new InsertedUsings(offset, text.Lines.GetLinePosition(offset)));
+        return withUsings;
+    }
+
+    /// <summary>
+    /// Text in a tree that the file does not have. It sits on one line, so the only
+    /// positions it moves are those after it on that line.
+    /// </summary>
+    private sealed record InsertedUsings(int Offset, LinePosition Position)
+    {
+        public LinePosition InFile(LinePosition position)
+            => position.Line == Position.Line && position.Character >= Position.Character + ImplicitUsings.Length
+                ? new LinePosition(position.Line, position.Character - ImplicitUsings.Length)
+                : position;
+
+        public SyntaxTree RemoveFrom(SyntaxTree tree)
+            => tree.WithChangedText(tree.GetText().WithChanges(
+                new TextChange(new TextSpan(Offset, ImplicitUsings.Length), string.Empty)));
     }
 
     /// <summary>
@@ -330,7 +336,6 @@ public sealed class CSharpWorkspaceAnalyzer
         // self-heal in release by rebuilding from the trees, recording a diagnostic so the
         // correction surfaces rather than hiding forever.
         var compiledTrees = new HashSet<SyntaxTree>(_compilation.SyntaxTrees);
-        compiledTrees.Remove(ImplicitUsingsTree);
         if (compiledTrees.Count != _syntaxTrees.Count
             || !_syntaxTrees.Values.All(compiledTrees.Contains))
         {
@@ -388,8 +393,9 @@ public sealed class CSharpWorkspaceAnalyzer
             var semanticModel = compilation.GetSemanticModel(tree);
             var bucketNodes = new List<ProtocolNode>();
             var bucketEdges = new List<ProtocolEdge>();
+            _insertedUsings.TryGetValue(tree, out var insertedUsings);
             var walker = new GraphWalker(
-                semanticModel, tree.FilePath, _workspaceIdPrefix, bucketNodes, bucketEdges);
+                semanticModel, tree.FilePath, _workspaceIdPrefix, bucketNodes, bucketEdges, insertedUsings);
             walker.Visit(tree.GetRoot(ct));
             return new FileFacts(tree.FilePath, bucketNodes, bucketEdges);
         }
@@ -731,6 +737,12 @@ public sealed class CSharpWorkspaceAnalyzer
             throw new ArgumentOutOfRangeException(nameof(maxDepth), "maxDepth must be between 0 and 32.");
         }
 
+        // Callers address the file as it is on disk.
+        if (_insertedUsings.TryGetValue(syntaxTree, out var insertedUsings))
+        {
+            syntaxTree = insertedUsings.RemoveFrom(syntaxTree);
+        }
+
         var root = syntaxTree.GetRoot(ct);
         SyntaxNode selected = root;
         if (start is { } offset && length is { } count)
@@ -833,15 +845,28 @@ public sealed class CSharpWorkspaceAnalyzer
         private readonly string _idPrefix;
         private readonly List<ProtocolNode> _nodes;
         private readonly List<ProtocolEdge> _edges;
+        private readonly InsertedUsings? _insertedUsings;
         private bool _hasTopLevelEntry;
 
-        public GraphWalker(SemanticModel semanticModel, string filePath, string idPrefix, List<ProtocolNode> nodes, List<ProtocolEdge> edges)
+        public GraphWalker(
+            SemanticModel semanticModel, string filePath, string idPrefix,
+            List<ProtocolNode> nodes, List<ProtocolEdge> edges, InsertedUsings? insertedUsings)
         {
             _semanticModel = semanticModel;
             _filePath = filePath;
             _idPrefix = idPrefix;
             _nodes = nodes;
             _edges = edges;
+            _insertedUsings = insertedUsings;
+        }
+
+        /// <summary>Where this syntax is in the file on disk.</summary>
+        private LinePositionSpan SpanInFile(SyntaxNode syntax)
+        {
+            var span = syntax.GetLocation().GetLineSpan().Span;
+            return _insertedUsings is null
+                ? span
+                : new LinePositionSpan(_insertedUsings.InFile(span.Start), _insertedUsings.InFile(span.End));
         }
 
         private string NodeId(ISymbol symbol) => _idPrefix + DisplayName(symbol);
@@ -875,7 +900,7 @@ public sealed class CSharpWorkspaceAnalyzer
             IReadOnlyDictionary<string, string>? metadata = null,
             string? name = null)
         {
-            var span = syntax.GetLocation().GetLineSpan();
+            var span = SpanInFile(syntax);
             return new ProtocolNode(
                 Id: NodeId(symbol),
                 Identifier: PublicIdentifier(symbol),
@@ -883,10 +908,10 @@ public sealed class CSharpWorkspaceAnalyzer
                 Kind: kind,
                 Language: "csharp",
                 FilePath: _filePath,
-                StartLine: span.StartLinePosition.Line,
-                EndLine: span.EndLinePosition.Line,
-                StartColumn: span.StartLinePosition.Character,
-                EndColumn: span.EndLinePosition.Character,
+                StartLine: span.Start.Line,
+                EndLine: span.End.Line,
+                StartColumn: span.Start.Character,
+                EndColumn: span.End.Character,
                 Namespace: symbol.ContainingNamespace.ToDisplayString(),
                 Visibility: symbol.DeclaredAccessibility.ToString().ToLowerInvariant(),
                 Signature: signature,
@@ -929,8 +954,8 @@ public sealed class CSharpWorkspaceAnalyzer
             _hasTopLevelEntry = statements.Any(statement => !statement.ContainsDiagnostics);
             if (_hasTopLevelEntry)
             {
-                var start = statements[0].GetLocation().GetLineSpan().StartLinePosition;
-                var end = statements[^1].GetLocation().GetLineSpan().EndLinePosition;
+                var start = SpanInFile(statements[0]).Start;
+                var end = SpanInFile(statements[^1]).End;
                 _nodes.Add(new ProtocolNode(
                     Id: TopLevelNodeId,
                     Identifier: "csharp:" + TopLevelIdentity,
@@ -1244,15 +1269,16 @@ public sealed class CSharpWorkspaceAnalyzer
         /// </summary>
         private void AddConstructorCall(SyntaxNode node)
         {
-            if (ResolveSymbol(node) is not IMethodSymbol constructor
-                || FindEnclosingNodeId(node) is not { } sourceId)
-            {
-                return;
-            }
+            if (FindEnclosingNodeId(node) is not { } sourceId) return;
 
-            var definition = constructor.OriginalDefinition;
-            var type = definition.ContainingType;
-            if (IsIndexedSourceMember(definition))
+            // A failed expression, as an ambiguous type name makes it, chooses no overload
+            // even when the name settles on one type. That type is still being constructed.
+            var definition = (ResolveSymbol(node) as IMethodSymbol)?.OriginalDefinition;
+            var type = definition?.ContainingType ?? NamedType(node);
+            if (type is null) return;
+            definition ??= OnlyConstructorTaking(type, node);
+
+            if (definition is not null && IsIndexedSourceMember(definition))
             {
                 AddLocatedEdge(sourceId, NodeId(definition), "CALLS", node);
                 // `new(...)` names no type, so no identifier will reference it.
@@ -1263,6 +1289,18 @@ public sealed class CSharpWorkspaceAnalyzer
             {
                 AddLocatedEdge(sourceId, NodeId(type), "CALLS", node);
             }
+        }
+
+        private INamedTypeSymbol? NamedType(SyntaxNode node)
+            => node is ObjectCreationExpressionSyntax { Type: var name } && ResolveSymbol(name) is INamedTypeSymbol type
+                ? type.OriginalDefinition
+                : null;
+
+        private static IMethodSymbol? OnlyConstructorTaking(INamedTypeSymbol type, SyntaxNode creation)
+        {
+            var arguments = (creation as BaseObjectCreationExpressionSyntax)?.ArgumentList?.Arguments.Count ?? 0;
+            var matching = type.InstanceConstructors.Where(constructor => constructor.Parameters.Length == arguments).ToList();
+            return matching.Count == 1 ? matching[0] : null;
         }
 
         private IMethodSymbol? ResolveMethodSymbol(InvocationExpressionSyntax invocation)
@@ -1376,7 +1414,27 @@ public sealed class CSharpWorkspaceAnalyzer
         private ISymbol? ResolveSymbol(SyntaxNode node)
         {
             var info = _semanticModel.GetSymbolInfo(node);
-            return info.Symbol ?? (info.CandidateSymbols.Length == 1 ? info.CandidateSymbols[0] : null);
+            return info.Symbol ?? (info.CandidateSymbols.Length == 1 ? info.CandidateSymbols[0] : OnlySourceCandidate(info));
+        }
+
+        /// <summary>
+        /// The repository symbol in an ambiguity with library symbols. Code that compiles
+        /// in its own project is not ambiguous, so the clash comes from analyzing it here:
+        /// against a newer framework than the project targets, which is how a project's own
+        /// <c>Range</c> meets one it has never seen, or beside another project's
+        /// <c>global using</c>. The rare wrong pick is a spurious user, which costs far less
+        /// than the empty answer of refusing. Between two repository symbols nothing says
+        /// which is meant, so that stays unresolved. This rescues the name only: the value's
+        /// type stays an error type, so its members still do not bind.
+        /// </summary>
+        private static ISymbol? OnlySourceCandidate(SymbolInfo info)
+        {
+            if (info.CandidateReason != CandidateReason.Ambiguous) return null;
+            var inSource = info.CandidateSymbols
+                .Where(candidate => candidate.Locations.Any(location => location.IsInSource))
+                .Take(2)
+                .ToList();
+            return inSource.Count == 1 ? inSource[0] : null;
         }
 
         /// <summary>
@@ -1429,7 +1487,7 @@ public sealed class CSharpWorkspaceAnalyzer
 
         private void AddLocatedEdge(string sourceId, string targetId, string kind, SyntaxNode location)
         {
-            var position = location.GetLocation().GetLineSpan().StartLinePosition;
+            var position = SpanInFile(location).Start;
             AddEdge(sourceId, targetId, kind, new Dictionary<string, string>
             {
                 ["line"] = position.Line.ToString(),

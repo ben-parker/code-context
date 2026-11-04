@@ -97,7 +97,7 @@ internal sealed class CSharpWorkerHost(JsonRpcConnection connection)
         {
             if (!_workspaces.TryGetValue(open.WorkspaceId, out var workspace))
             {
-                workspace = new CSharpWorkspaceAnalyzer(open.WorkspaceId);
+                workspace = new CSharpWorkspaceAnalyzer(open.WorkspaceId, open.RootPath);
                 _workspaces[open.WorkspaceId] = workspace;
             }
             // Non-destructive sync: the host re-opens before every mutation with the

@@ -19,7 +19,7 @@ public class CSharpWorkerSymbolCoverageTests : IDisposable
 
     private CSharpWorkspaceAnalyzer.AnalysisResult Analyze(params (string Name, string Content)[] files)
     {
-        var analyzer = new CSharpWorkspaceAnalyzer("test");
+        var analyzer = new CSharpWorkspaceAnalyzer("test", _tempDir);
         var paths = new List<string>();
         foreach (var (name, content) in files)
         {

@@ -104,6 +104,24 @@ namespace Fixture
     }
 
     [Fact]
+    public async Task InitialIndex_ReadsProjectSettingsUpToTheRootTheHostOpened()
+    {
+        await WriteFileAsync("Directory.Build.props",
+            "<Project><PropertyGroup><ImplicitUsings>enable</ImplicitUsings></PropertyGroup></Project>");
+        Directory.CreateDirectory(Path.Combine(_tempDir, "src"));
+        await WriteFileAsync(Path.Combine("src", "Code.cs"), """
+            namespace Fixture;
+            public class Item { public int Weigh() => 1; }
+            public class User { public int Calls(List<Item> items) => items.Select(i => i.Weigh()).Sum(); }
+            """);
+
+        await _pipeline.GraphUpdateService.PerformInitialScanAsync(_tempDir, null, CancellationToken.None);
+
+        var edges = await _pipeline.RepositoryFactory.CreateEdgeRepository().GetAllAsync();
+        Assert.Contains(edges, e => e.Type == "CALLS" && e.TargetId == CSharpWorkerPipeline.Id("Fixture.Item.Weigh()"));
+    }
+
+    [Fact]
     public async Task InitialIndex_UnreadableApprovedFile_ReportsProgressAndCommitsReadableFiles()
     {
         var readable = await WriteFileAsync(

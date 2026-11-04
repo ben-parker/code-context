@@ -12,6 +12,12 @@ Use `codecontext list --json` to inspect registrations. Only after that, use
 A human can pre-warm the index before agent work with `codecontext init --path .`
 (add `--wait`) so the first query skips the cold-start scan.
 
+Project files are not watched. A changed `ImplicitUsings` setting takes effect at the
+next source file change or `POST /api/index/refresh`. It is read from the nearest
+`.csproj` above each file and the nearest `Directory.Build.props`, never above the
+indexed root, so a file with no project above it gets only what `Directory.Build.props`
+sets, even if a `.csproj` elsewhere links it in.
+
 ## REST API
 
 For filters and operations not exposed by `query`, get the port from
