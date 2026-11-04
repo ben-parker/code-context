@@ -1,6 +1,7 @@
 # C# worker project awareness
 
-Status: proposed, awaiting agreement. No analyzer code has changed yet.
+Status: decisions 1-4 agreed on 2026-11-04. Decision 5 is under review, so delivery step 5
+is on hold.
 
 ## Problem
 
@@ -122,7 +123,7 @@ Host changes for stubs:
 
 - `query` prints `external <assembly>` instead of a location.
 - `uses` hides external targets by default and reports how many it hid, or every project
-  method would list `List<T>.Add`.
+  method would list `List<T>.Add`. `--external` shows them.
 - Method-family expansion stops at a stub. Otherwise every `Dispose` becomes one family.
 - File dependencies, related items and test evidence skip stubs.
 - Transitive traversal needs no change: a stub has no edges back into the project.
@@ -201,18 +202,25 @@ picked up with no `.cs` edit. Manifest additions: `project.assets.json`,
   re-walk only files that mention a changed name, but implicit uses such as conversions
   and `foreach` make that unsafe without more work, so it is left out.
 
-## Decisions needing agreement
+## Decisions
 
-1. Identifiers stay bare until a collision, then gain a `<project>#` qualifier. The
-   alternative, always qualifying, is simpler and never changes form, but it breaks every
+Decisions 1-4 were agreed on 2026-11-04.
+
+1. Agreed. Identifiers stay bare until a collision, then gain a `<project>#` qualifier. A
+   bare identifier with several owners returns all of them as an ambiguous match, never a
+   silent pick. The alternative, always qualifying, never changes form, but it breaks every
    existing identifier and adds tokens to all output.
-2. All libraries get stubs, including the BCL, with external targets hidden from `uses`.
-3. Multi-targeted projects analyze the first TFM only. Analyzing every TFM would see more
-   code but multiplies cost for those projects.
-4. Third-party SDK `.props` and `.targets` are read as data, which is what yields `TOOLS`
-   for Godot without a Godot list.
-5. The body-only fast path goes beyond the brief's "changed project and dependents". It
-   carries the per-edit win, since binding is the floor.
+2. Agreed. All libraries get stubs, including the BCL. `uses` hides external targets by
+   default and reports how many it hid. An opt-in `--external` flag reveals them, so the
+   count is not a dead end.
+3. Agreed. Multi-targeted projects analyze the first TFM only, and the others are
+   reported in status and coverage. Analyzing every TFM would see more code but multiplies
+   cost for those projects.
+4. Agreed. Third-party SDK `.props` and `.targets` are read as data by the same static
+   evaluator and are never executed. That yields `TOOLS` for Godot without a Godot list.
+5. Under review. The body-only fast path goes beyond the brief's "changed project and
+   dependents". It carries the per-edit win, since binding is the floor. Delivery step 5
+   waits for this answer.
 
 ## Delivery order
 
@@ -221,5 +229,5 @@ picked up with no `.cs` edit. Manifest additions: `project.assets.json`,
    usings text insertion on main.
 3. Stub nodes and host handling.
 4. Coverage reporting through protocol, status, query, OpenAPI and skill.
-5. Compact facts, classified incremental walks, parallel first scan.
+5. Compact facts, classified incremental walks, parallel first scan. On hold for decision 5.
 6. Shape tests, live check on a library type, Release R2R measurements.
