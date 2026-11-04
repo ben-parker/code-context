@@ -37,6 +37,61 @@ namespace CodeContext.Core.Tests.Services
         private static CodeNode Member(string identifier, string name, string type = "Method")
             => new() { Id = identifier, Identifier = identifier, Name = name, Type = type };
 
+        private static CodeNode External(string identifier, string name, string assembly = "Lib")
+            => new()
+            {
+                Id = identifier,
+                Identifier = identifier,
+                Name = name,
+                Type = "Method",
+                FilePath = "external:Lib",
+                Metadata = new Dictionary<string, string> { ["external"] = "true", ["assembly"] = assembly },
+            };
+
+        [Fact]
+        public async Task LibrarySymbolsOfAName_GiveWayToProjectCodeAndAreCounted()
+        {
+            Stub("Add",
+                Member("csharp:App.Cart.Add(int)", "Add"),
+                External("csharp:List<T>.Add(T)", "Add"),
+                External("csharp:HashSet<T>.Add(T)", "Add"));
+
+            var response = await _service.GetCompactContextAsync("Add");
+
+            Assert.Equal(1, response.TotalMatches);
+            Assert.False(response.Ambiguous);
+            Assert.Equal(2, response.ExternalMatchesHidden);
+            Assert.Equal("csharp:App.Cart.Add(int)", response.Matches.Single().Target.Identifier);
+        }
+
+        [Fact]
+        public async Task AskingForExternalSymbols_ListsThemAfterProjectCode()
+        {
+            Stub("Add",
+                External("csharp:List<T>.Add(T)", "Add"),
+                Member("csharp:App.Cart.Add(int)", "Add"));
+
+            var response = await _service.GetCompactContextAsync("Add", includeExternal: true);
+
+            Assert.Equal(2, response.TotalMatches);
+            Assert.Equal(0, response.ExternalMatchesHidden);
+            Assert.Equal("csharp:App.Cart.Add(int)", response.Matches[0].Target.Identifier);
+        }
+
+        [Fact]
+        public async Task ALibrarySymbolAloneIsAnAnswer()
+        {
+            Stub("Node3D", External("csharp:Godot.Node3D", "Node3D", "GodotSharp"));
+
+            var response = await _service.GetCompactContextAsync("Node3D");
+
+            var target = response.Matches.Single().Target;
+            Assert.Equal("GodotSharp", target.External);
+            Assert.Null(target.File);
+            Assert.Equal(0, target.Line);
+            Assert.Equal(0, response.ExternalMatchesHidden);
+        }
+
         [Fact]
         public async Task BareIdentifierWithSeveralOwners_ReturnsThemAllAsAmbiguous()
         {

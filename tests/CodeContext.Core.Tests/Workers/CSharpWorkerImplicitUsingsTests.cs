@@ -563,7 +563,9 @@ public class CSharpWorkerImplicitUsingsTests : IDisposable
         var result = Analyze(("App.csproj", Enabled), ("Code.cs", NeedsUsings));
         var code = Path.Combine(Root, "Code.cs");
 
-        Assert.All(result.Nodes, node => Assert.Equal(code, node.FilePath));
-        Assert.All(result.Edges, edge => Assert.StartsWith("App.", Display(edge.SourceId)));
+        Assert.All(
+            result.Nodes.Where(node => node.Metadata?.ContainsKey("external") != true),
+            node => Assert.Equal(code, node.FilePath));
+        Assert.DoesNotContain(result.Nodes, node => node.FilePath!.EndsWith(".g.cs", StringComparison.Ordinal));
     }
 }

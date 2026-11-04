@@ -349,6 +349,7 @@ public sealed class CSharpWorkspaceAnalyzer
         // Walk each tree into its own bucket, then concatenate the buckets to build the
         // flat whole-workspace lists, so each file's nodes/edges stay contiguous in walk order.
         var rawBuckets = new List<FileFacts>(_owners.Count);
+        var walked = new List<ExternalSymbols>(_owners.Count);
         var total = progressFiles?.Count ?? _owners.Count;
         var processed = 0;
         if (total == 0 && progress is not null)
@@ -390,11 +391,15 @@ public sealed class CSharpWorkspaceAnalyzer
             var semanticModel = unit.Compilation.GetSemanticModel(tree);
             var bucketNodes = new List<ProtocolNode>();
             var bucketEdges = new List<ProtocolEdge>();
+            var externals = new ExternalSymbols(_workspaceIdPrefix);
             var walker = new GraphWalker(
-                semanticModel, tree.FilePath, unit.IdPrefix, _workspaceIdPrefix, _owners, bucketNodes, bucketEdges);
+                semanticModel, tree.FilePath, unit.IdPrefix, _owners, externals, bucketNodes, bucketEdges);
             walker.Visit(tree.GetRoot(ct));
+            walked.Add(externals);
             return new FileFacts(tree.FilePath, bucketNodes, bucketEdges);
         }
+
+        rawBuckets.AddRange(ExternalSymbols.ToBuckets(walked));
 
         // Duplicate-id canonicalization. A node or edge id can be emitted by more than
         // one file (partial types split across files; base lists repeated on partial
@@ -475,9 +480,24 @@ public sealed class CSharpWorkspaceAnalyzer
         if (contested.Count == 0 || !nodes.Exists(node => contested.Contains(node.Identifier))) return nodes;
 
         return nodes.ConvertAll(node => contested.Contains(node.Identifier)
-            ? node with { Identifier = IdPrefix + _owners[node.FilePath!].Qualifier + "#" + node.Identifier[IdPrefix.Length..] }
+            ? node with { Identifier = IdPrefix + QualifierOf(node) + "#" + node.Identifier[IdPrefix.Length..] }
             : node);
     }
+
+    private string QualifierOf(ProtocolNode node)
+        => _owners.TryGetValue(node.FilePath!, out var owner)
+            ? owner.Qualifier
+            : node.Metadata![ExternalSymbols.AssemblyKey];
+
+    /// <summary>
+    /// The symbol's semantic identity. A static constructor displays exactly like a
+    /// parameterless instance constructor, so it carries a marker or the two would
+    /// collapse into a single node.
+    /// </summary>
+    internal static string DisplayNameOf(ISymbol symbol)
+        => symbol is IMethodSymbol { MethodKind: MethodKind.StaticConstructor }
+            ? symbol.ToDisplayString() + "[static]"
+            : symbol.ToDisplayString();
 
     private static bool ShouldReportProgress(int processed, int total)
     {
@@ -900,56 +920,49 @@ public sealed class CSharpWorkspaceAnalyzer
         private readonly SemanticModel _semanticModel;
         private readonly string _filePath;
         private readonly string _idPrefix;
-        private readonly string _workspacePrefix;
         private readonly IReadOnlyDictionary<string, ProjectCompilation> _owners;
+        private readonly ExternalSymbols _externals;
         private readonly List<ProtocolNode> _nodes;
         private readonly List<ProtocolEdge> _edges;
         private bool _hasTopLevelEntry;
 
         public GraphWalker(
-            SemanticModel semanticModel, string filePath, string idPrefix, string workspacePrefix,
+            SemanticModel semanticModel, string filePath, string idPrefix,
             IReadOnlyDictionary<string, ProjectCompilation> owners,
+            ExternalSymbols externals,
             List<ProtocolNode> nodes, List<ProtocolEdge> edges)
         {
             _semanticModel = semanticModel;
             _filePath = filePath;
             _idPrefix = idPrefix;
-            _workspacePrefix = workspacePrefix;
             _owners = owners;
+            _externals = externals;
             _nodes = nodes;
             _edges = edges;
         }
 
-        private string NodeId(ISymbol symbol) => PrefixOf(symbol) + DisplayName(symbol);
-
         /// <summary>
-        /// Whose id this symbol has: the project owning its declaring file, whichever
+        /// A symbol's id belongs to the project owning its declaring file, whichever
         /// compilation bound it, so a file compiled into two projects stays one node. A
-        /// symbol that failed to bind stays in this project: it names nothing elsewhere.
+        /// library symbol gets a stub, recorded because this file used it. One that failed
+        /// to bind stays in this project: it names nothing elsewhere.
         /// </summary>
-        private string PrefixOf(ISymbol symbol)
+        private string NodeId(ISymbol symbol)
         {
             foreach (var location in symbol.Locations)
             {
                 if (location.SourceTree is { } tree)
                 {
-                    return _owners.TryGetValue(tree.FilePath, out var owner) ? owner.IdPrefix : _idPrefix;
+                    return (_owners.TryGetValue(tree.FilePath, out var owner) ? owner.IdPrefix : _idPrefix) + DisplayName(symbol);
                 }
             }
-            return symbol is IErrorTypeSymbol ? _idPrefix : _workspacePrefix;
+            return ExternalSymbols.IsExternal(symbol) ? _externals.Add(symbol) : _idPrefix + DisplayName(symbol);
         }
+
         private static string PublicIdentifier(ISymbol symbol)
             => "csharp:" + DisplayName(symbol);
 
-        /// <summary>
-        /// The symbol's semantic identity. A static constructor displays exactly like a
-        /// parameterless instance constructor, so it carries a marker or the two would
-        /// collapse into a single node.
-        /// </summary>
-        private static string DisplayName(ISymbol symbol)
-            => symbol is IMethodSymbol { MethodKind: MethodKind.StaticConstructor }
-                ? symbol.ToDisplayString() + "[static]"
-                : symbol.ToDisplayString();
+        private static string DisplayName(ISymbol symbol) => DisplayNameOf(symbol);
 
         /// <summary>
         /// Identity of the file's synthetic top-level entry point. Each project's
@@ -1353,7 +1366,7 @@ public sealed class CSharpWorkspaceAnalyzer
                 if (node is ImplicitObjectCreationExpressionSyntax)
                     AddLocatedEdge(sourceId, NodeId(type), "REFERENCES", node);
             }
-            else if (IsIndexedSourceType(type) && sourceId != NodeId(type))
+            else if ((IsIndexedSourceType(type) || ExternalSymbols.IsExternal(type)) && sourceId != NodeId(type))
             {
                 AddLocatedEdge(sourceId, NodeId(type), "CALLS", node);
             }
@@ -1527,7 +1540,7 @@ public sealed class CSharpWorkspaceAnalyzer
             // A base type already has the more specific INHERITS or IMPLEMENTS edge;
             // emitting REFERENCES as well only duplicates it. Its type arguments do not.
             if (IsBaseTypeName(node) ||
-                !IsIndexedSourceType(referencedType) ||
+                !IsRecordedType(node, referencedType) ||
                 FindEnclosingNodeId(node) is not { } sourceId)
             {
                 return;
@@ -1538,6 +1551,14 @@ public sealed class CSharpWorkspaceAnalyzer
                 AddLocatedEdge(sourceId, targetId, "REFERENCES", node);
         }
 
+        /// <summary>
+        /// A library type is recorded where the code names it. <c>var</c> names nothing,
+        /// and would otherwise make every local a use of whatever it holds.
+        /// </summary>
+        private static bool IsRecordedType(SimpleNameSyntax node, INamedTypeSymbol type)
+            => IsIndexedSourceType(type)
+                || (ExternalSymbols.IsExternal(type) && node is not IdentifierNameSyntax { IsVar: true });
+
         private static bool IsBaseTypeName(SyntaxNode node)
         {
             while (node.Parent is QualifiedNameSyntax qualified && qualified.Right == node)
@@ -1547,8 +1568,11 @@ public sealed class CSharpWorkspaceAnalyzer
 
         private void AddMemberReference(ExpressionSyntax node, ISymbol member)
         {
-            if (!IsIndexedSourceMember(member) || FindEnclosingNodeId(node) is not { } sourceId)
+            if (!(IsIndexedSourceMember(member) || ExternalSymbols.IsExternal(member))
+                || FindEnclosingNodeId(node) is not { } sourceId)
+            {
                 return;
+            }
 
             var targetId = NodeId(member);
             if (sourceId != targetId)

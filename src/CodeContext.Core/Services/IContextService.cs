@@ -51,7 +51,8 @@ namespace CodeContext.Core.Services
             string? @namespace = null,
             string? signature = null,
             string? sourceFile = null,
-            string? relation = null);
+            string? relation = null,
+            bool includeExternal = false);
 
         /// <summary>
         /// Gets complete context for multiple identifiers
@@ -82,6 +83,11 @@ namespace CodeContext.Core.Services
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
         public bool Ambiguous { get; set; }
         public string? DisambiguationHint { get; set; }
+
+        /// <summary>Library symbols of this name left out because project code matched.</summary>
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+        public int ExternalMatchesHidden { get; set; }
+
         public CompactMatchFacets? Facets { get; set; }
         public List<CompactContextMatch> Matches { get; set; } = new();
     }
@@ -109,6 +115,10 @@ namespace CodeContext.Core.Services
         public string? File { get; set; }
         public int Line { get; set; }
         public string? Signature { get; set; }
+
+        /// <summary>The assembly of a library symbol, which has no file of its own.</summary>
+        public string? External { get; set; }
+
         public List<string>? Relations { get; set; }
         public int? Occurrences { get; set; }
         public List<int>? Lines { get; set; }
@@ -128,6 +138,11 @@ namespace CodeContext.Core.Services
         public int? UsesReturnedCount { get; set; }
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
         public bool UsesTruncated { get; set; }
+
+        /// <summary>Library symbols left out of <see cref="Uses"/>; asking for external ones lists them.</summary>
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+        public int UsesExternalHidden { get; set; }
+
         public List<CompactCodeNode>? UsedBy { get; set; }
         public int? UsedByCount { get; set; }
         public int? UsedByReturnedCount { get; set; }
@@ -240,6 +255,10 @@ namespace CodeContext.Core.Services
     /// </summary>
     public class ContextRelationships
     {
+        /// <summary>Library symbols left out of <see cref="Uses"/>.</summary>
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+        public int ExternalUsesHidden { get; set; }
+
         /// <summary>
         /// What this construct uses/depends on
         /// </summary>
@@ -391,6 +410,9 @@ namespace CodeContext.Core.Services
         public bool IncludeRelated { get; set; }
 
         public bool IncludeMetrics { get; set; }
+
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+        public bool IncludeExternal { get; set; }
 
         public int MaxMatches { get; set; } = 5;
 

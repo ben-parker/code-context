@@ -126,7 +126,10 @@ public sealed record NativeSyntaxTreeResult(
 /// the host converts from the worker's declared <see cref="SpanSemantics"/>. <c>id</c>
 /// must be stable and namespaced by language and
 /// parser/workspace ownership (e.g. <c>csharp:ws-1:MyNs.MyClass</c>) so facts from
-/// different workers can never collide.
+/// different workers can never collide. A symbol from outside the workspace that the code
+/// uses is a stub: <c>metadata.external</c> is <c>"true"</c>, <c>metadata.assembly</c> names
+/// where it came from, and <c>filePath</c> is a virtual <c>external:</c> path, which goes
+/// through file-scoped replacement like any other file.
 /// </summary>
 public sealed record ProtocolNode(
     [property: JsonPropertyName("id")] string Id,

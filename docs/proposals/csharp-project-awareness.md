@@ -125,8 +125,12 @@ Host changes for stubs:
 - `query` prints `external <assembly>` instead of a location.
 - `uses` hides external targets by default and reports how many it hid, or every project
   method would list `List<T>.Add`. `--external` shows them.
+- A name that matches project code leaves library symbols of that name out and reports how
+  many, or `query Add` would turn ambiguous in any project with a `List<T>`. `--external`
+  lists them, and a name only a library declares resolves to its stub as usual.
 - Method-family expansion stops at a stub. Otherwise every `Dispose` becomes one family.
-- File dependencies, related items and test evidence skip stubs.
+- File dependencies and related items skip stubs, and pruning files missing from disk
+  leaves their virtual files alone.
 - Transitive traversal needs no change: a stub has no edges back into the project.
 
 ### Saying what is not known

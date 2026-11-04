@@ -105,7 +105,8 @@ namespace CodeContext.Core.Services
             string? @namespace = null,
             string? signature = null,
             string? sourceFile = null,
-            string? relation = null)
+            string? relation = null,
+            bool includeExternal = false)
         {
             ValidateIdentifier(identifier);
             ValidateQueryBounds(depth, maxMatches, maxRelationships, maxCallSites, maxTestFiles, maxTestMethods);
@@ -147,9 +148,16 @@ namespace CodeContext.Core.Services
                 matchMode = isFilePath ? "filePath" : exact == true ? "exact" : "substring";
             }
 
+            var externalMatchesHidden = 0;
+            if (!includeExternal && !isFilePath && candidates.Exists(candidate => !IsExternal(candidate)))
+            {
+                externalMatchesHidden = candidates.RemoveAll(IsExternal);
+            }
+
             candidates = RankCandidates(candidates, identifier).ToList();
             var response = new CompactContextResponse
             {
+                ExternalMatchesHidden = externalMatchesHidden,
                 MatchMode = matchMode,
                 SubstringSearchSkipped = substringSearchSkipped,
                 TotalMatches = candidates.Count,
@@ -178,7 +186,7 @@ namespace CodeContext.Core.Services
                 foreach (var candidate in candidates.Take(maxMatches))
                 {
                     var match = await BuildContextMatchAsync(
-                        candidate, depth, includeTests, includeContent, includeRelated, includeMetrics);
+                        candidate, depth, includeTests, includeContent, includeRelated, includeMetrics, includeExternal);
                     response.Matches.Add(await ToCompactMatchAsync(
                         match, includeTests, includeRelated, includeMetrics, maxRelationships,
                         maxCallSites, maxTestFiles, maxTestMethods, relationKinds));
@@ -250,7 +258,8 @@ namespace CodeContext.Core.Services
                     sourceFile: request.SourceFile,
                     relation: request.RelationshipTypes is { Count: > 0 }
                         ? string.Join(",", request.RelationshipTypes)
-                        : null));
+                        : null,
+                    includeExternal: request.IncludeExternal));
             }
 
             return results;
@@ -477,6 +486,7 @@ namespace CodeContext.Core.Services
             => candidates
                 .OrderByDescending(candidate =>
                     string.Equals(candidate.Name, identifier, StringComparison.OrdinalIgnoreCase))
+                .ThenBy(IsExternal)
                 .ThenBy(candidate => IsTestPath(candidate.FilePath))
                 .ThenBy(candidate => TypeRank(candidate.Type))
                 .ThenBy(candidate => candidate.FilePath, StringComparer.OrdinalIgnoreCase)
@@ -485,7 +495,7 @@ namespace CodeContext.Core.Services
         private CompactMatchFacets BuildFacets(IReadOnlyCollection<CodeNode> candidates)
         {
             var files = candidates
-                .Where(candidate => !string.IsNullOrEmpty(candidate.FilePath))
+                .Where(candidate => !string.IsNullOrEmpty(candidate.FilePath) && !IsExternal(candidate))
                 .GroupBy(candidate => ToDisplayPath(candidate.FilePath!), StringComparer.OrdinalIgnoreCase)
                 .OrderByDescending(group => group.Count())
                 .ThenBy(group => group.Key, StringComparer.OrdinalIgnoreCase)
@@ -517,7 +527,7 @@ namespace CodeContext.Core.Services
         {
             var relationships = match.Relationships;
             var usedByNodes = await FilterCompactUsedByAsync(match.Target, relationships.UsedBy);
-            var compactRelationships = new CompactRelationships();
+            var compactRelationships = new CompactRelationships { UsesExternalHidden = relationships.ExternalUsesHidden };
             if (relationships.Uses.Count > 0)
             {
                 // Counts reflect the filtered total (pre-Take): a relation filter can drop
@@ -765,11 +775,16 @@ namespace CodeContext.Core.Services
             {
                 Name = node.Name,
                 Type = node.Type,
-                File = string.IsNullOrEmpty(node.FilePath) ? null : ToDisplayPath(node.FilePath),
-                Line = node.StartLine + 1,
+                File = string.IsNullOrEmpty(node.FilePath) || IsExternal(node) ? null : ToDisplayPath(node.FilePath),
+                Line = IsExternal(node) ? 0 : node.StartLine + 1,
+                External = IsExternal(node) ? node.Metadata?.GetValueOrDefault("assembly") ?? string.Empty : null,
                 Signature = Truncate(NormalizeCompactSignature(node.Signature), 160),
                 Identifier = PublicIdentifier(node)
             };
+
+        /// <summary>A library symbol the code uses, known only through that use.</summary>
+        private static bool IsExternal(CodeNode node)
+            => node.Metadata?.GetValueOrDefault("external") == "true";
 
         private string ToDisplayPath(string path)
         {
@@ -943,7 +958,8 @@ namespace CodeContext.Core.Services
             bool includeTests,
             bool includeContent,
             bool includeRelated,
-            bool includeMetrics)
+            bool includeMetrics,
+            bool includeExternal = false)
         {
             targetNode.Identifier = PublicIdentifier(targetNode);
             var match = new ContextMatch
@@ -952,7 +968,7 @@ namespace CodeContext.Core.Services
             };
 
             // Build relationships
-            match.Relationships = await BuildRelationshipsAsync(targetNode, depth, includeRelated);
+            match.Relationships = await BuildRelationshipsAsync(targetNode, depth, includeRelated, includeExternal);
 
             // Build testing information
             if (includeTests)
@@ -967,7 +983,7 @@ namespace CodeContext.Core.Services
             }
 
             // Include content if requested
-            if (includeContent && !string.IsNullOrEmpty(targetNode.FilePath))
+            if (includeContent && !string.IsNullOrEmpty(targetNode.FilePath) && !IsExternal(targetNode))
             {
                 match.Content = await GetFileContentSnippetAsync(targetNode);
             }
@@ -1021,7 +1037,8 @@ namespace CodeContext.Core.Services
         private async Task<ContextRelationships> BuildRelationshipsAsync(
             CodeNode targetNode,
             int depth,
-            bool includeRelated)
+            bool includeRelated,
+            bool includeExternal = false)
         {
             var relationships = new ContextRelationships();
 
@@ -1044,6 +1061,12 @@ namespace CodeContext.Core.Services
             {
                 usedBy = await TraverseRelationshipsAsync(targetNode.Id, depth, outgoing: false);
             }
+            if (!includeExternal)
+            {
+                // Every project method would otherwise list List<T>.Add; the count says so.
+                relationships.ExternalUsesHidden = uses.Count(item => item.Distance == 1 && IsExternal(item.Node));
+                uses = uses.Where(item => !IsExternal(item.Node)).ToList();
+            }
             relationships.Uses = uses.Where(item => item.Distance == 1).Select(item => item.Node).ToList();
             relationships.UsedBy = usedBy.Where(item => item.Distance == 1).Select(item => item.Node).ToList();
             relationships.TransitiveUses = uses.Where(item => item.Distance > 1)
@@ -1057,14 +1080,14 @@ namespace CodeContext.Core.Services
                     Node = item.Node, Distance = item.Distance, RelationPath = item.RelationPath.ToList()
                 }).ToList();
 
-            // Get file-level dependencies
-            if (!string.IsNullOrEmpty(targetNode.FilePath))
+            // Get file-level dependencies. A library symbol's file is only a grouping.
+            if (!string.IsNullOrEmpty(targetNode.FilePath) && !IsExternal(targetNode))
             {
                 relationships.FileDependencies = await GetFileDependenciesAsync(targetNode.FilePath);
                 relationships.FileDependents = await GetFileDependentsAsync(targetNode.FilePath);
             }
 
-            if (includeRelated)
+            if (includeRelated && !IsExternal(targetNode))
             {
                 relationships.RelatedItems = await GetRelatedItemsAsync(targetNode);
             }
@@ -1098,7 +1121,11 @@ namespace CodeContext.Core.Services
                     var relatedId = edge.SourceId == current ? edge.TargetId : edge.SourceId;
                     if (string.IsNullOrEmpty(relatedId) || family.ContainsKey(relatedId)) continue;
                     var node = await _nodeRepository.GetByIdAsync(relatedId);
-                    if (node is null) continue;
+
+                    // A library method links everything implementing it, so a family stops
+                    // there: every Dispose in a repository is not one method. Asked about the
+                    // library method itself, its family is what implements it.
+                    if (node is null || IsExternal(node)) continue;
                     family[relatedId] = node;
                     pending.Enqueue(relatedId);
                 }
@@ -1441,6 +1468,7 @@ namespace CodeContext.Core.Services
 
                     var relatedNode = await _nodeRepository.GetByIdAsync(relatedNodeId);
                     if (string.IsNullOrEmpty(relatedNode?.FilePath)
+                        || IsExternal(relatedNode)
                         || PathsReferToSameFile(relatedNode.FilePath, filePath))
                         continue;
 

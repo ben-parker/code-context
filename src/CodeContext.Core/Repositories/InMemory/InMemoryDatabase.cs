@@ -550,6 +550,10 @@ namespace CodeContext.Core.Repositories.InMemory
                     foreach (var node in shard.Nodes.Values)
                     {
                         if (node.Id is null) continue;
+
+                        // A library symbol's virtual file is never on disk. It leaves through
+                        // the worker's own delta, once nothing uses the symbol.
+                        if (node.Metadata?.GetValueOrDefault("external") == "true") continue;
                         if (!string.IsNullOrEmpty(node.FilePath) && !keep.Contains(node.FilePath))
                             removedNodeIds.Add(node.Id);
                     }
