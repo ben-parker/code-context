@@ -114,12 +114,16 @@ files' facts. The contract:
   nodes carry in `filePath` (the host matches them raw — case-insensitively on
   Windows, no normalization on either side). A listed file with no facts in the
   request has its facts deleted.
-- **Every fact belongs to the file whose analysis produced it.** Group edges under the
-  file whose walk emitted them (their source is always in that file), never under a
-  resolved target's file. If a language can emit the same node or edge id from more
-  than one file (e.g. C# partial types), pick one deterministic owner that depends
-  only on the current file set — the reference workers use the ordinally smallest
-  owning path — so incremental results never depend on edit order.
+- **A node belongs to its `filePath`; an edge belongs to its source node's file.** The
+  host removes the nodes of each listed file, and every edge sourced at those nodes,
+  so that is the unit to hash and emit. Never group an edge under a resolved target's
+  file. If a language can emit the same node or edge id from more than one file (e.g.
+  C# partial types), pick one deterministic owner that depends only on the current
+  file set — the reference workers use the ordinally smallest owning path — so
+  incremental results never depend on edit order. An edge found in one file can then
+  be sourced at a node owned by another: it belongs to the owner. Grouping it under
+  the file that found it loses it when the owner is replaced, and leaves it stale when
+  the other file stops emitting it.
 - **Chunks agree.** All chunks of one request carry the same `replacesWorkspace`
   value (the host ORs the flags) and should repeat the full `replacesFiles` list (the
   host unions them). Always emit at least one delta per mutation, ending with

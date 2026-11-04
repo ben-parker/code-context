@@ -408,13 +408,35 @@ public sealed class CSharpWorkspaceAnalyzer
         var nodeOwner = ComputeOwners(rawBuckets, static b => b.Nodes, static n => n.Id);
         var edgeOwner = ComputeOwners(rawBuckets, static b => b.Edges, static e => e.Id);
 
+        // A bucket must hold exactly what the host replaces as one unit, and the host
+        // removes an edge along with its source node. So an edge belongs to the file that
+        // owns its source node, not the file whose walk found it: `partial class C` in two
+        // files has one node in one file, yet both walks emit edges from it. Bucketing
+        // those under the file that found them would let an edit of the node's file lose
+        // the other file's edges, and an edit of the other file leave its old edges behind.
+        // With this rule any change to such an edge flips the owning file's hash, so both
+        // directions re-emit through the ordinary dirty diff.
+        var edgesByFile = new Dictionary<string, List<ProtocolEdge>>(StringComparer.Ordinal);
+        foreach (var raw in rawBuckets)
+        {
+            foreach (var edge in FilterOwned(raw.Edges, static e => e.Id, edgeOwner, raw.FilePath))
+            {
+                var file = nodeOwner.GetValueOrDefault(edge.SourceId, raw.FilePath);
+                if (!edgesByFile.TryGetValue(file, out var fileEdges))
+                {
+                    edgesByFile[file] = fileEdges = [];
+                }
+                fileEdges.Add(edge);
+            }
+        }
+
         var buckets = new List<FileFacts>(rawBuckets.Count);
         var nodes = new List<ProtocolNode>();
         var edges = new List<ProtocolEdge>();
         foreach (var raw in rawBuckets)
         {
             var keptNodes = FilterOwned(raw.Nodes, static n => n.Id, nodeOwner, raw.FilePath);
-            var keptEdges = FilterOwned(raw.Edges, static e => e.Id, edgeOwner, raw.FilePath);
+            var keptEdges = edgesByFile.GetValueOrDefault(raw.FilePath) ?? [];
             nodes.AddRange(keptNodes);
             edges.AddRange(keptEdges);
             buckets.Add(new FileFacts(raw.FilePath, keptNodes, keptEdges));
@@ -484,9 +506,10 @@ public sealed class CSharpWorkspaceAnalyzer
         return kept.Count == items.Count ? items : kept;
     }
 
-    /// <summary>The nodes and edges a single walked file contributed. <see cref="FilePath"/>
-    /// is the verbatim <c>tree.FilePath</c> string; the bucket's node <c>FilePath</c>s and
-    /// the <c>ReplacesFiles</c> entries derived from it are all this same string.</summary>
+    /// <summary>The facts the host holds under one file: the nodes it owns and the edges
+    /// sourced at those nodes, wherever they were found. <see cref="FilePath"/> is the
+    /// verbatim <c>tree.FilePath</c> string; the bucket's node <c>FilePath</c>s and the
+    /// <c>ReplacesFiles</c> entries derived from it are all this same string.</summary>
     public sealed record FileFacts(
         string FilePath,
         List<ProtocolNode> Nodes,
