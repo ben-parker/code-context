@@ -41,7 +41,8 @@ namespace CodeContext.Parser.Protocol;
 [JsonSerializable(typeof(IReadOnlyDictionary<string, string>))]
 [JsonSourceGenerationOptions(
     WriteIndented = false,
-    DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
+    DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+    MaxDepth = ParserProtocol.MaxJsonDepth)]
 public partial class ParserProtocolJsonContext : JsonSerializerContext
 {
 }

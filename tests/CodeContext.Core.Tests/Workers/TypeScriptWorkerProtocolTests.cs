@@ -1,6 +1,7 @@
 using CodeContext.Core.Services;
 using CodeContext.Core.Workers;
 using CodeContext.Parser.Protocol;
+using System.Text.Json;
 
 namespace CodeContext.Core.Tests.Workers;
 
@@ -663,6 +664,30 @@ namespace Mixed { public class Service { public string Run() => ""ok""; } }");
         Assert.Equal("typescript-compiler-syntax-v1", result.Format);
         Assert.Equal("SourceFile", result.Tree.GetProperty("kind").GetString());
     }
+
+    [Fact]
+    public async Task NativeSyntaxTree_AtTheMaximumDepth_CrossesTheWorkerBoundary()
+    {
+        // Same shape as the C# fixture: a 32-level tree is 64+ JSON levels plus the
+        // JSON-RPC envelope, past System.Text.Json's default reader limit.
+        var nested = string.Concat(Enumerable.Repeat("if (flag) { ", 20))
+            + "flag = false;" + string.Concat(Enumerable.Repeat(" }", 20));
+        var file = await WriteFileAsync(
+            "deep.ts", $"export function deep(flag: boolean): void {{ {nested} }}\n");
+        await _pipeline.GraphUpdateService.PerformInitialScanAsync(_tempDir, null, CancellationToken.None);
+
+        var result = await _pipeline.WorkerService.GetNativeSyntaxTreeAsync(file, maxDepth: 32);
+
+        Assert.True(result.Truncated, "a 32-level cut of a deeper tree reports truncation");
+        // 31 levels below the root is already 63 JSON levels before the envelope.
+        Assert.True(TreeDepth(result.Tree) >= 31, "the tree arrived at the requested depth");
+    }
+
+    private static int TreeDepth(JsonElement node) =>
+        node.TryGetProperty("children", out var children)
+        && children.ValueKind == JsonValueKind.Array && children.GetArrayLength() > 0
+            ? 1 + children.EnumerateArray().Max(TreeDepth)
+            : 0;
 
     // -----------------------------------------------------------------------
     // Incremental-delta emission (mirrors CSharpWorkerIncrementalDeltaTests):

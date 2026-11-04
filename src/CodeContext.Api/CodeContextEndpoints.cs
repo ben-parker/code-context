@@ -315,8 +315,11 @@ public static class CodeContextEndpoints
     {
         // Convert the JsonObject DOM to a JsonElement without the reflection-based
         // JsonSerializer.SerializeToElement(object) overload (IL2026/IL3050). JsonNode
-        // writing is AOT-safe, and JsonDocument.Parse is a pure reader.
-        using var document = JsonDocument.Parse(CompactNativeNode(tree).ToJsonString());
+        // writing is AOT-safe, and JsonDocument.Parse is a pure reader. A tree at the
+        // maximum depth of 32 nests past the reader's default limit of 64.
+        using var document = JsonDocument.Parse(
+            CompactNativeNode(tree).ToJsonString(),
+            new JsonDocumentOptions { MaxDepth = Parser.Protocol.ParserProtocol.MaxJsonDepth });
         return document.RootElement.Clone();
     }
 

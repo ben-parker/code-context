@@ -31,6 +31,9 @@ public static class ProgramHelpers
         {
             options.SerializerOptions.TypeInfoResolverChain.Insert(0, CodeContextJsonContext.Default);
             options.SerializerOptions.DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull;
+            // ASP.NET's options instance has its own depth limit; the context's attribute
+            // does not reach it. Syntax trees at maxDepth 32 need more than the default 64.
+            options.SerializerOptions.MaxDepth = Parser.Protocol.ParserProtocol.MaxJsonDepth;
         });
 
 #if ENABLE_OPENAPI

@@ -4,6 +4,7 @@ using CodeContext.Core.Services;
 using CodeContext.Core.Workers;
 using CodeContext.Parser.Protocol;
 using Microsoft.Extensions.Logging.Abstractions;
+using System.Text.Json;
 
 namespace CodeContext.Core.Tests.Workers;
 
@@ -202,6 +203,32 @@ namespace Fixture { public class DerivedThing : BaseThing { public void Extra() 
         Assert.Equal("roslyn-csharp-syntax-v1", result.Format);
         Assert.Equal("CompilationUnit", result.Tree.GetProperty("kind").GetString());
     }
+
+    [Fact]
+    public async Task NativeSyntaxTree_AtTheMaximumDepth_CrossesTheWorkerBoundary()
+    {
+        // Every tree level is two JSON levels (node object, children array), so a tree
+        // cut at the allowed maximum of 32 nests deeper than System.Text.Json's default
+        // reader limit of 64 once the JSON-RPC envelope is added. Twenty nested ifs give
+        // the walker more than 32 levels to fill.
+        var nested = string.Concat(Enumerable.Repeat("if (flag) { ", 20))
+            + "flag = false;" + string.Concat(Enumerable.Repeat(" }", 20));
+        var file = await WriteFileAsync(
+            "Deep.cs", $"namespace Fixture {{ public class Deep {{ void M(bool flag) {{ {nested} }} }} }}");
+        await _pipeline.GraphUpdateService.PerformInitialScanAsync(_tempDir, null, CancellationToken.None);
+
+        var result = await _pipeline.WorkerService.GetNativeSyntaxTreeAsync(file, maxDepth: 32);
+
+        Assert.True(result.Truncated, "a 32-level cut of a deeper tree reports truncation");
+        // 31 levels below the root is already 63 JSON levels before the envelope.
+        Assert.True(TreeDepth(result.Tree) >= 31, "the tree arrived at the requested depth");
+    }
+
+    private static int TreeDepth(JsonElement node) =>
+        node.TryGetProperty("children", out var children)
+        && children.ValueKind == JsonValueKind.Array && children.GetArrayLength() > 0
+            ? 1 + children.EnumerateArray().Max(TreeDepth)
+            : 0;
 
     [Fact]
     public async Task StaleGeneration_CannotOverwriteNewerCommit()

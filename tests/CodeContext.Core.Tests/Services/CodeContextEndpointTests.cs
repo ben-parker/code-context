@@ -103,6 +103,46 @@ public class CodeContextEndpointTests
     }
 
     [Fact]
+    public async Task SyntaxTree_AtTheMaximumDepth_IsServedInBothViews()
+    {
+        // Every tree level is two JSON levels (node object, children array), so a tree cut
+        // at the allowed maximum of 32 nests past System.Text.Json's default limit of 64
+        // before the response envelope adds its own levels. Built by the reader rather than
+        // the serializer so the fixture itself is not stopped by the same limit.
+        const string level = "{\"kind\":\"Block\",\"span\":{\"start\":0,\"length\":1,\"end\":1},\"children\":[";
+        var deep = string.Concat(Enumerable.Repeat(level, 32))
+            + "{\"kind\":\"Leaf\",\"span\":{\"start\":0,\"length\":1,\"end\":1}}"
+            + string.Concat(Enumerable.Repeat("]}", 32));
+        var readDeep = new JsonDocumentOptions { MaxDepth = 256 };
+        using var document = JsonDocument.Parse(deep, readDeep);
+        var tree = document.RootElement.Clone();
+        var service = Substitute.For<IContextService>();
+        var workers = Substitute.For<ILanguageWorkerService>();
+        workers.GetNativeSyntaxTreeAsync("Deep.cs", null, null, 32, Arg.Any<CancellationToken>())
+            .Returns(new NativeSyntaxTreeResult(
+                "csharp", "1.0", "default", "Deep.cs", "roslyn-csharp-syntax-v1", tree, true));
+        await using var app = await StartAppAsync(service, workers);
+        var client = app.GetTestClient();
+
+        foreach (var view in new[] { "full", "compact" })
+        {
+            var response = await client.PostAsJsonAsync(
+                "/api/syntax-tree", new { filePath = "Deep.cs", view, maxDepth = 32 });
+            var json = await response.Content.ReadAsStringAsync();
+            Assert.True(response.IsSuccessStatusCode, $"{view}: {response.StatusCode} {json}");
+            using var parsed = JsonDocument.Parse(json, readDeep);
+            var depth = 0;
+            var node = parsed.RootElement.GetProperty("tree");
+            while (node.TryGetProperty("children", out var children) && children.GetArrayLength() > 0)
+            {
+                node = children[0];
+                depth++;
+            }
+            Assert.Equal(32, depth);
+        }
+    }
+
+    [Fact]
     public async Task CompleteContext_ArgumentExceptionReturnsBadRequestContextError()
     {
         // Full-shape (byte-identity) live assertion — locks the CONTEXT_ERROR envelope emitted by

@@ -787,8 +787,13 @@ public sealed class CSharpWorkspaceAnalyzer
         var state = new NativeTreeBuildState(maxDepth, maxNodes: 10_000);
         var json = SerializeNode(selected, depth: 0, state, ct);
         return new NativeTreeResult(
-            JsonSerializer.SerializeToElement(json), state.Truncated);
+            JsonSerializer.SerializeToElement(json, DeepTreeJsonOptions), state.Truncated);
     }
+
+    // Every tree level is a node object plus its children array, so a tree cut at the
+    // allowed maximum of 32 is already past System.Text.Json's default depth limit of 64.
+    private static readonly JsonSerializerOptions DeepTreeJsonOptions =
+        new() { MaxDepth = ParserProtocol.MaxJsonDepth };
 
     private sealed class NativeTreeBuildState(int maxDepth, int maxNodes)
     {

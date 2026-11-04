@@ -12,6 +12,14 @@ public static class ParserProtocol
     public const int Version = 1;
 
     public const string JsonRpcVersion = "2.0";
+
+    /// <summary>
+    /// JSON nesting allowed on the wire and in the host's own responses. A native syntax
+    /// tree cut at its maximum depth of 32 is two JSON levels per tree level plus the
+    /// envelope, past System.Text.Json's default of 64, so every serializer that carries
+    /// one shares this bound.
+    /// </summary>
+    public const int MaxJsonDepth = 128;
 }
 
 public static class ParserProtocolMethods

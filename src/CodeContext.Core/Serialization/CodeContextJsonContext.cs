@@ -325,7 +325,8 @@ public record NativeSyntaxTreeRequestDto(
 [JsonSourceGenerationOptions(
     PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
     WriteIndented = false,
-    DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
+    DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+    MaxDepth = CodeContext.Parser.Protocol.ParserProtocol.MaxJsonDepth)]
 public partial class CodeContextJsonContext : JsonSerializerContext
 {
 }
