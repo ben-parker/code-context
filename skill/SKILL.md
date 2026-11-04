@@ -72,9 +72,11 @@ anything else, cross-check with `rg -w <Name>`.
   deconstruction, implicit base constructor calls, or the calls `using`, `foreach` and
   collection initializers imply. A read of a virtual or interface property is recorded
   on the member named at the read, not on its overrides or implementations. The
-  analysis sees repository source, the core .NET libraries and the SDK's default
-  implicit usings, not NuGet or engine assemblies or custom `<Using>` items, so a call
-  or member access inside a lambda passed to such an API can be missing.
+  analysis sees repository source, the .NET libraries and the SDK's default implicit
+  usings, not NuGet or engine assemblies or custom `<Using>` items. Usage reached
+  through a value of such a type is missing: `GetNode<Item>("x").Weigh()` records the
+  reference to `Item` but not the call to `Weigh`, and the same goes for a local holding
+  that value or a lambda parameter of that type.
 - **TypeScript/JavaScript** records calls, construction, imports and inheritance. It
   **does not record** property reads and writes or type references.
 

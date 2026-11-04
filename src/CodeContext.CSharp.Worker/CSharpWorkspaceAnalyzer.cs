@@ -50,33 +50,6 @@ public sealed class CSharpWorkspaceAnalyzer
         new(ResolveReferences);
 
     /// <summary>
-    /// Framework assemblies bound beside CoreLib. An unresolved call binds its lambda
-    /// arguments with error-typed parameters, so without System.Linq every call and member
-    /// access inside <c>items.Select(item =&gt; ...)</c> would be lost; these are the
-    /// libraries analyzed code most often hands lambdas to. The list is deliberately not
-    /// the whole framework, which cost three times as much on every workspace walk.
-    /// System.Runtime is here because the others reach CoreLib through its type forwards,
-    /// and System.Linq.Expressions because Queryable's overloads would otherwise take an
-    /// error type and leave chained Enumerable calls ambiguous.
-    /// </summary>
-    private static readonly string[] FrameworkAssemblies =
-    [
-        "System.Runtime",
-        "System.Console",
-        "System.Linq",
-        "System.Linq.Expressions",
-        "System.Linq.Queryable",
-        "System.Collections",
-        "System.Collections.Concurrent",
-        "System.Collections.Immutable",
-        "System.Memory",
-        "System.ObjectModel",
-        "System.Text.RegularExpressions",
-        "System.Threading",
-        "System.Threading.Tasks.Parallel",
-    ];
-
-    /// <summary>
     /// The SDK's default implicit usings, which live in a generated file under
     /// <c>obj/</c> that is never indexed. Without them a project that enables the setting
     /// has no System.Linq or System.Collections.Generic in scope at all. Kept outside
@@ -146,14 +119,9 @@ public sealed class CSharpWorkspaceAnalyzer
             if (!string.IsNullOrEmpty(objectAssembly) && File.Exists(objectAssembly))
             {
                 references.Add(MetadataReference.CreateFromFile(objectAssembly));
-                var directory = Path.GetDirectoryName(objectAssembly)!;
-                foreach (var name in FrameworkAssemblies)
+                foreach (var path in FrameworkAssemblies(objectAssembly))
                 {
-                    var path = Path.Combine(directory, name + ".dll");
-                    if (File.Exists(path))
-                    {
-                        references.Add(MetadataReference.CreateFromFile(path));
-                    }
+                    references.Add(MetadataReference.CreateFromFile(path));
                 }
             }
         }
@@ -163,6 +131,30 @@ public sealed class CSharpWorkspaceAnalyzer
         }
         return references.ToImmutable();
     }
+
+    /// <summary>
+    /// Every managed framework assembly beside CoreLib. A value whose type comes from a
+    /// missing assembly has an error type, so everything reached through it is silently
+    /// lost: the object <c>JsonSerializer.Deserialize&lt;Item&gt;(text)</c> returns, or the
+    /// parameter of a lambda passed to <c>Select</c>. Which libraries matter depends on the
+    /// analyzed code, so none is chosen in advance. Taking all of them also keeps each
+    /// assembly's own dependencies present: with System.Linq.Queryable but not
+    /// System.Linq.Expressions, chained LINQ goes ambiguous.
+    /// Names are matched because a self-contained layout also holds this worker's own
+    /// dependencies, which analyzed code must not bind against, and <c>*.Native.dll</c>
+    /// files share the directory without being assemblies.
+    /// </summary>
+    private static IEnumerable<string> FrameworkAssemblies(string coreLibrary)
+        => Directory.EnumerateFiles(Path.GetDirectoryName(coreLibrary)!, "*.dll")
+            .Where(path => !PathComparer.Equals(path, coreLibrary) && IsFrameworkAssembly(Path.GetFileName(path)))
+            .Order(StringComparer.Ordinal);
+
+    private static bool IsFrameworkAssembly(string fileName)
+        => !fileName.EndsWith(".Native.dll", StringComparison.OrdinalIgnoreCase)
+            && (fileName.StartsWith("System.", StringComparison.OrdinalIgnoreCase)
+                || fileName.StartsWith("Microsoft.Win32.", StringComparison.OrdinalIgnoreCase)
+                || fileName.Equals("mscorlib.dll", StringComparison.OrdinalIgnoreCase)
+                || fileName.Equals("netstandard.dll", StringComparison.OrdinalIgnoreCase));
 
     public int FileCount => _syntaxTrees.Count;
 

@@ -678,6 +678,38 @@ public class CSharpWorkerSymbolCoverageTests : IDisposable
         AssertEdgeSourcesExist(result);
     }
 
+    /// <summary>
+    /// A value typed by an unreferenced assembly has an error type, so usage reached through
+    /// it vanishes. Every receiver here is such a value on purpose: <c>new Item().Weigh()</c>
+    /// binds with or without the assembly and would prove nothing.
+    /// </summary>
+    [Fact]
+    public void ValuesFromAnyFrameworkLibrary_KeepTheUsageReachedThroughThem()
+    {
+        var result = Analyze(("Values.cs", """
+            using System.Linq;
+            using System.Text.Json;
+            using System.Text.Json.Nodes;
+            using System.Threading.Channels;
+            using System.Threading.Tasks;
+            namespace App;
+            public class Item { public int Size { get; set; } public int Weigh() => 1; }
+            public class User
+            {
+                public int Chained(string text) => JsonSerializer.Deserialize<Item>(text)!.Weigh();
+                public int Local(string text) { var item = JsonSerializer.Deserialize<Item>(text); return item!.Size; }
+                public object Lambda(JsonArray array) => array.Select(node => node!.GetValue<Item>().Weigh()).ToList();
+                public async Task<int> Awaited(ChannelReader<Item> reader) => (await reader.ReadAsync()).Weigh();
+            }
+            """));
+
+        var weigh = "App.Item.Weigh()";
+        AssertEdge(result, "App.User.Chained(string)", weigh, "CALLS");
+        AssertEdge(result, "App.User.Local(string)", "App.Item.Size", "REFERENCES");
+        AssertEdge(result, "App.User.Lambda(System.Text.Json.Nodes.JsonArray)", weigh, "CALLS");
+        AssertEdge(result, "App.User.Awaited(System.Threading.Channels.ChannelReader<App.Item>)", weigh, "CALLS");
+    }
+
     [Fact]
     public void LambdasPassedToCommonFrameworkLibraries_Bind()
     {
