@@ -228,6 +228,30 @@ public sealed class CSharpWorkerPartialTypeConvergenceTests : IAsyncLifetime
         }
     }
 
+    /// <summary>
+    /// In the global namespace an unresolved base keeps the display name, and so the id, of
+    /// the type it named. The edge therefore survives its target's deletion unchanged,
+    /// while the store drops it as dangling: nothing but the target's presence differs.
+    /// </summary>
+    [Theory]
+    [InlineData("class", "public class Root { }")]
+    [InlineData("record", "public record Root;")]
+    [InlineData("struct", "public interface Root { }")]
+    [InlineData("record struct", "public interface Root { }")]
+    public async Task DeletingAndRestoringABaseType_MatchesAFreshScan(string keyword, string root)
+    {
+        await WriteAsync("A.cs", $"public partial {keyword} G : Root {{ }}");
+        await WriteAsync("B.cs", $"public partial {keyword} G {{ public void M() {{ }} }}");
+        await WriteAsync("Root.cs", root);
+        await _pipeline.GraphUpdateService.PerformInitialScanAsync(_tempDir, null, CancellationToken.None);
+
+        await DeleteAsync("Root.cs");
+        await AssertMatchesFreshScanAsync("delete the base type");
+
+        await EditAsync("Root.cs", root);
+        await AssertMatchesFreshScanAsync("restore the base type");
+    }
+
     [Fact]
     public async Task EditingOnlyAMethodBody_StaysScopedToThatFile()
     {

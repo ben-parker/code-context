@@ -109,6 +109,9 @@ files' facts. The contract:
   file whose *emitted facts* differ from its previous emission. The reference workers
   do this by re-analyzing the workspace, hashing each file's fact set, and diffing
   against the previous emission's hashes — files whose hash changed join the delta.
+  The host drops an edge when its target node is removed, so if the same edge is still
+  emitted once its target has no node, its file has to join the delta too: the C#
+  worker hashes whether each edge's target has a node.
 - **`replacesFiles` = changed ∪ removed, verbatim.** List each changed file plus each
   file removed since the last emission, as byte-for-byte the same strings the emitted
   nodes carry in `filePath` (the host matches them raw — case-insensitively on

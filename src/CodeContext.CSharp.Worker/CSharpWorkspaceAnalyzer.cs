@@ -519,7 +519,10 @@ public sealed class CSharpWorkspaceAnalyzer
         List<ProtocolNode> Nodes,
         List<ProtocolEdge> Edges,
         List<ProtocolDiagnostic> Diagnostics,
-        IReadOnlyList<FileFacts> Buckets);
+        IReadOnlyList<FileFacts> Buckets)
+    {
+        public IReadOnlySet<string> NodeIds { get; } = Nodes.Select(n => n.Id).ToHashSet(StringComparer.Ordinal);
+    }
 
     /// <summary>
     /// The scoped emission for one incremental apply: the facts of the DIRTY buckets only
@@ -569,7 +572,7 @@ public sealed class CSharpWorkspaceAnalyzer
         _factHashes.Clear();
         foreach (var bucket in analysis.Buckets)
         {
-            _factHashes[bucket.FilePath] = ComputeBucketHash(bucket);
+            _factHashes[bucket.FilePath] = ComputeBucketHash(bucket, analysis.NodeIds);
         }
     }
 
@@ -595,7 +598,7 @@ public sealed class CSharpWorkspaceAnalyzer
         foreach (var bucket in analysis.Buckets)
         {
             currentPaths.Add(bucket.FilePath);
-            var hash = ComputeBucketHash(bucket);
+            var hash = ComputeBucketHash(bucket, analysis.NodeIds);
             pendingHashes[bucket.FilePath] = hash;
             if (!_factHashes.TryGetValue(bucket.FilePath, out var stored)
                 || !stored.AsSpan().SequenceEqual(hash))
@@ -634,9 +637,12 @@ public sealed class CSharpWorkspaceAnalyzer
     /// sorted by Id and edges by Id first (so the hash is independent of walk order), then
     /// every emission-affecting field is fed to SHA-256 in a fixed order with explicit
     /// length/null framing, so no two distinct fact sets can collide by field-boundary
-    /// ambiguity.
+    /// ambiguity. Whether each edge's target has a node counts as well: the host drops an
+    /// edge when its target node goes, yet the walk can keep emitting the same edge, as it
+    /// does for an unresolved base type in the global namespace. Re-emitting it is what
+    /// keeps it, and what brings it back if the host dropped it.
     /// </summary>
-    private static byte[] ComputeBucketHash(FileFacts bucket)
+    private static byte[] ComputeBucketHash(FileFacts bucket, IReadOnlySet<string> nodeIds)
     {
         using var hasher = new FactHasher();
         hasher.Int(bucket.Nodes.Count);
@@ -668,6 +674,7 @@ public sealed class CSharpWorkspaceAnalyzer
             hasher.Str(edge.TargetId);
             hasher.Str(edge.Kind);
             hasher.Metadata(edge.Metadata);
+            hasher.Int(nodeIds.Contains(edge.TargetId) ? 1 : 0);
         }
         return hasher.GetHashAndReset();
     }
