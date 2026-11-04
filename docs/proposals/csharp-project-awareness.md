@@ -1,7 +1,6 @@
 # C# worker project awareness
 
-Status: decisions 1-4 agreed on 2026-11-04. Decision 5 is under review, so delivery step 5
-is on hold.
+Status: all decisions agreed on 2026-11-04.
 
 ## Problem
 
@@ -52,7 +51,9 @@ data. Only projects owning at least one approved file are compiled.
 
 Each `.csproj` goes through a small static evaluator: properties, items, `Import`,
 `Directory.Build.props/targets`, `Directory.Packages.props`, and `Condition` expressions
-over those values. It runs no tasks and no targets, and it never loads an assembly. Only
+over those values. `Directory.Build.*` is searched up to the enclosing repository, or the
+workspace root when there is none, so a workspace opened on a subdirectory sees its
+repository's settings and nothing above the repository counts. It runs no tasks and no targets, and it never loads an assembly. Only
 pure string functions and `Exists` are understood. A condition it cannot read counts as
 true and is recorded. `Configuration` is `Debug`, or the first declared configuration
 when a project has no `Debug`.
@@ -66,7 +67,7 @@ third-party SDK such as `Godot.NET.Sdk/4.8.0` is resolved in the package folder 
 |---|---|
 | Package compile assets | `project.assets.json`, matched to the project by its `project.restore.projectPath`, so no location is assumed. Then a file at the evaluated intermediate path. |
 | Framework references | `frameworkReferences` and `downloadDependencies` resolved to `Microsoft.*.App.Ref` ref packs in the package folders, then `<dotnet root>/packs`, then `<dotnet root>/shared` |
-| `netstandard`, `net4x` | `NETStandard.Library`, `Microsoft.NETFramework.ReferenceAssemblies` or the system reference assemblies |
+| `netstandard`, `net4x` | `NETStandard.Library`, `Microsoft.NETFramework.ReferenceAssemblies` or the system reference assemblies, then a newer reference set or the installed runtime, reported as a stand-in |
 | Project references | Restored `projectReferences`, else `<ProjectReference>` |
 | `<Reference HintPath>` | Path as written, after property expansion. A file named like a workspace project's assembly becomes a project reference, which matters for Unity. |
 | Defines, `LangVersion` | Evaluated properties. `Nullable` is deliberately not applied: it would change no fact, would slow binding, and would rewrite parameter types in identifiers. |
@@ -204,7 +205,7 @@ picked up with no `.cs` edit. Manifest additions: `project.assets.json`,
 
 ## Decisions
 
-Decisions 1-4 were agreed on 2026-11-04.
+All were agreed on 2026-11-04.
 
 1. Agreed. Identifiers stay bare until a collision, then gain a `<project>#` qualifier. A
    bare identifier with several owners returns all of them as an ambiguous match, never a
@@ -218,9 +219,16 @@ Decisions 1-4 were agreed on 2026-11-04.
    cost for those projects.
 4. Agreed. Third-party SDK `.props` and `.targets` are read as data by the same static
    evaluator and are never executed. That yields `TOOLS` for Godot without a Godot list.
-5. Under review. The body-only fast path goes beyond the brief's "changed project and
-   dependents". It carries the per-edit win, since binding is the floor. Delivery step 5
-   waits for this answer.
+5. Agreed, on two conditions. A body-only edit re-walks that file alone, which goes beyond
+   the brief's "changed project and dependents" and carries the per-edit win, since binding
+   is the floor.
+   - Anything a dependent can bind differently against must classify as top-level: const
+     field initializers, attribute arguments, default parameter values, enum member values,
+     and expression bodies or `nameof`/`typeof` uses whose result flows into a signature or
+     constant. What `AreEquivalent(topLevel: true)` ignores is verified, with a test per case.
+   - Before step 5 ships, a committed deterministic edit walk (several seeds, 100+ steps,
+     body-only and top-level edits across files and projects) compares the incremental
+     graph to a fresh scan at every step.
 
 ## Delivery order
 
@@ -229,5 +237,6 @@ Decisions 1-4 were agreed on 2026-11-04.
    usings text insertion on main.
 3. Stub nodes and host handling.
 4. Coverage reporting through protocol, status, query, OpenAPI and skill.
-5. Compact facts, classified incremental walks, parallel first scan. On hold for decision 5.
+5. Compact facts, classified incremental walks, parallel first scan, behind the
+   convergence walk that decision 5 requires.
 6. Shape tests, live check on a library type, Release R2R measurements.
