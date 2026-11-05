@@ -927,7 +927,8 @@ the end-of-work message repeats the total.
 
 ### Phase 0: baseline numbers and harness
 
-Status: not started
+Status: delivered 2026-11-05, in review. Results in `docs/perf/persistent-fact-cache.md`:
+v0.10.0 and v0.10.7 on all three repositories, 1 discarded and 5 timed runs per column.
 
 Goal: before-numbers on 0.10.0, taken with the harness the last phase reuses.
 
@@ -1049,11 +1050,15 @@ query matrix including `--tests`, JSON equal);
 `NamingHeuristic_TakesTheFirstTenFilesByPath`.
 
 Acceptance: all existing store and context tests pass, with only the ordering assertions
-changed; the edit-walk convergence tests pass unchanged; warm edit latency on this
-repository within noise of phase 0 (three runs). Sorting must not move cost onto edits:
-the report gives the adjacency build time for a generated shard of 26k nodes and 296k
-edges before and after, and if it grows by more than 25 percent, buckets are sorted on
-first access instead of at build.
+changed; the edit-walk convergence tests pass unchanged. Sorting must not move cost onto
+edits: the report gives, for a generated shard of 26k nodes and 296k edges, before and
+after, the adjacency build time and the time of one single-file scoped commit followed
+by one query, and if either grows by more than 25 percent, buckets are sorted on first
+access instead of at build. End-to-end warm edit latency needs a release-recipe build
+(Native AOT host), which is too slow to produce per phase; it is checked by the
+coordinator with the phase 0 harness only if those two figures move by more than 10
+percent, and in any case in phase 11 against the v0.10.7 medians (jellyfin body 1.09 s,
+top-level 2.10 s; d2-roguelike 0.67 s, 0.93 s; this repository 0.84 s, 1.25 s).
 
 Gates: standard.
 
