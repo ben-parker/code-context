@@ -1,0 +1,112 @@
+# Fixed query list for scripts/bench/measure-cache.py, repository: code-context.
+# Exactly 100 queries, sent in order to GET /api/context/complete.
+# Line format: <kind><TAB><identifier>. Blank lines and lines starting with '#' are skipped.
+# Kinds and the request each one sends:
+#   symbol     identifier=<id>&depth=1                    (40 lines)
+#   tests      identifier=<id>&depth=1&includeTests=true  (20 lines)
+#   depth3     identifier=<id>&depth=3                    (20 lines)
+#   file       identifier=<repo-relative path>&depth=1    (10 lines, matchMode filePath)
+#   substring  identifier=<name fragment>&depth=1         (10 lines, no exact symbol of that
+#              name, so the service falls back to substring matching)
+# Every line was verified to return at least one match on 0.10.0. Chosen by usedBy count
+# among public types and Type.Method names with exactly one exact match.
+symbol	CodeNode
+symbol	CodeEdge
+symbol	AnalysisResult
+symbol	CSharpWorkspaceAnalyzer
+symbol	CompactContextResponse
+symbol	ProjectInfo
+symbol	FileChangeType
+symbol	FileMetadata
+symbol	InstanceRecord
+symbol	ProtocolNode
+symbol	ICodeNodeRepository
+symbol	CompleteContextResponse
+symbol	ContextService
+symbol	MsBuildExpander
+symbol	CodeContextOptions
+symbol	FileProcessingStatus
+symbol	ICodeEdgeRepository
+symbol	IFileMetadataRepository
+symbol	ScanPhase
+symbol	ParserSessionState
+symbol	ParserProcessSupervisor
+symbol	QuerySettings
+symbol	InMemoryNodeRepository.GetAllAsync
+symbol	ContextService.GetCompactContextAsync
+symbol	GraphUpdateService.PerformInitialScanAsync
+symbol	InMemoryNodeRepository.FindByNameAsync
+symbol	InMemoryEdgeRepository.GetBySourceIdAsync
+symbol	InMemoryRepositoryFactory.CreateNodeRepository
+symbol	InMemoryEdgeRepository.GetByTargetIdAsync
+symbol	ContextService.GetCompleteContextAsync
+symbol	InMemoryRepositoryFactory.CreateEdgeRepository
+symbol	CSharpWorkspaceAnalyzer.Analyze
+symbol	CSharpWorkspaceAnalyzer.ReplaceFiles
+symbol	GraphUpdateService.ProcessFileChangeAsync
+symbol	InMemoryFileMetadataRepository.UpsertAsync
+symbol	InMemoryNodeRepository.GetByIdAsync
+symbol	InMemoryDatabase.UpsertNode
+symbol	InMemoryDatabase.UpsertEdge
+symbol	InMemoryNodeRepository.GetByIdentifierAsync
+symbol	InMemoryCodeGraphRepository.TryCommitGenerationAsync
+tests	CompactRelationships
+tests	QueryCommandHandler
+tests	CompactCodeNode
+tests	ProjectCoverage
+tests	ParserProtocolJsonContext
+tests	FileChangeDto
+tests	InstanceRegistry
+tests	ParserWorkerOptions
+tests	TargetFrameworkName
+tests	FileChangeKinds
+tests	InstanceRegistry.GetAll
+tests	InstanceRegistry.Register
+tests	StatusService.GetStatusAsync
+tests	CSharpWorkspaceAnalyzer.EdgeFact
+tests	InMemoryFileMetadataRepository.GetByFilePathAsync
+tests	InMemoryDatabase.ContainsNode
+tests	InMemoryCodeGraphRepository.GetGraphAsync
+tests	InMemoryRepositoryFactory.CreateGraphRepository
+tests	CSharpWorkspaceAnalyzer.ApplyChanges
+tests	TargetFrameworkName.TryParse
+depth3	IContextService
+depth3	ContextTesting
+depth3	WorkerLaunchSpec
+depth3	FrameReader
+depth3	StatusResponseDto
+depth3	MultiContextRequest
+depth3	IScanProgressReporter
+depth3	InMemoryDatabase
+depth3	ProjectCoverageState
+depth3	ParserProtocolViolationException
+depth3	InMemoryDatabase.ContainsEdge
+depth3	RepositoryFileSelector.IsIncluded
+depth3	InstanceRegistry.FindForPath
+depth3	InMemoryDatabase.TryCommitGeneration
+depth3	ParserProcessSupervisor.EnsureInitializedAsync
+depth3	InMemoryRepositoryFactory.InitializeAsync
+depth3	CompositeScanProgressReporter.ReportComplete
+depth3	GraphUpdateService.PerformResumableScanAsync
+depth3	AnalysisDeltaApplier.ApplyAsync
+depth3	ParserProcessSupervisor.IndexWorkspaceAsync
+file	src/CodeContext.Core/CodeNode.cs
+file	src/CodeContext.Core/CodeEdge.cs
+file	src/CodeContext.CSharp.Worker/CSharpWorkspaceAnalyzer.cs
+file	src/CodeContext.Core/Services/IContextService.cs
+file	src/CodeContext.CSharp.Worker/Projects/ProjectModel.cs
+file	src/CodeContext.Core/Services/IGraphUpdateService.cs
+file	src/CodeContext.Core/Models/FileMetadata.cs
+file	src/CodeContext.Core/Instances/InstanceRecord.cs
+file	src/CodeContext.Parser.Protocol/Contracts.cs
+file	src/CodeContext.Core/Repositories/ICodeNodeRepository.cs
+substring	CodeN
+substring	CodeE
+substring	AnalysisRes
+substring	CSharpWorkspaceAnaly
+substring	CompactContextRespo
+substring	ProjectI
+substring	FileChangeT
+substring	FileMetad
+substring	InstanceRec
+substring	ProtocolN

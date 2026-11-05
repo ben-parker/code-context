@@ -1,0 +1,112 @@
+# Fixed query list for scripts/bench/measure-cache.py, repository: d2-roguelike.
+# Exactly 100 queries, sent in order to GET /api/context/complete.
+# Line format: <kind><TAB><identifier>. Blank lines and lines starting with '#' are skipped.
+# Kinds and the request each one sends:
+#   symbol     identifier=<id>&depth=1                    (40 lines)
+#   tests      identifier=<id>&depth=1&includeTests=true  (20 lines)
+#   depth3     identifier=<id>&depth=3                    (20 lines)
+#   file       identifier=<repo-relative path>&depth=1    (10 lines, matchMode filePath)
+#   substring  identifier=<name fragment>&depth=1         (10 lines, no exact symbol of that
+#              name, so the service falls back to substring matching)
+# Every line was verified to return at least one match on 0.10.0. Chosen by usedBy count
+# among public types and Type.Method names with exactly one exact match.
+symbol	Unit3D
+symbol	Edges
+symbol	RunState
+symbol	MonsterDef
+symbol	WalkGrid
+symbol	Behavior
+symbol	StatMod
+symbol	Targeting
+symbol	ActionTiming
+symbol	Player3D
+symbol	SkillDef
+symbol	ChunkDef
+symbol	AreaExits
+symbol	Amazon
+symbol	Combat
+symbol	MonsterAttack
+symbol	CastDef
+symbol	Monster3D
+symbol	StatusDef
+symbol	OfferRoller
+symbol	Statuses
+symbol	ItemOffer
+symbol	Node.AddChild
+symbol	Ground.Planar
+symbol	Seeds.Mix
+symbol	WalkGrid.CellCenter
+symbol	OfferRoller.Roll
+symbol	Player3D.Teleport
+symbol	Spatial.Meshes
+symbol	OfferRoller.EligibleModifiers
+symbol	Textures.Texture
+symbol	Ground.Num
+symbol	WalkGrid.ObjectInfo
+symbol	WalkGrid.IsBlocked
+symbol	WalkGrid.SubCellToWorld
+symbol	BitReader.GetBits
+symbol	Tscn.F
+symbol	OfferRoller.EligiblePassives
+symbol	Projectile3D.Has
+symbol	WalkGrid.MapData
+tests	Dt1File
+tests	ElementDef
+tests	ResolvedStats
+tests	PlayerControls
+tests	ModifierDef
+tests	Offer
+tests	ResolvedSkill
+tests	DashDef
+tests	MonsterShot
+tests	WaitingKind
+tests	MapBundle.TileInfo
+tests	Density.Describe
+tests	BiomeLight3D.Apply
+tests	Ground.Godot
+tests	DebugInput.SendKey
+tests	DebugInput.KeyFor
+tests	InputBindings.ButtonName
+tests	Labels.Floating
+tests	OfferPile3D.RarityColor
+tests	OfferPile3D.NearestIndex
+depth3	Palette
+depth3	PassiveDef
+depth3	Ds1File
+depth3	WeaponDef
+depth3	Threat
+depth3	SkillPointOffer
+depth3	ExitPassage
+depth3	ClassDef
+depth3	Champions
+depth3	Flight
+depth3	Player3D.IsMelee
+depth3	Spatial.Over
+depth3	WalkGrid.Load
+depth3	CofFile.Layer
+depth3	Gltf.Write
+depth3	Gltf.ApplyVertexScale
+depth3	Tscn.SubResource
+depth3	Tscn.Str
+depth3	Tscn.Transform
+depth3	Density.Parse
+file	game/scripts/Unit3D.cs
+file	game/rules/D2Roguelike.Rules/Chunks.cs
+file	game/rules/D2Roguelike.Rules/RunState.cs
+file	game/rules/D2Roguelike.Rules/Monsters.cs
+file	game/scripts/WalkGrid.cs
+file	game/rules/D2Roguelike.Rules/Behaviors.cs
+file	game/rules/D2Roguelike.Rules/Offers.cs
+file	game/rules/D2Roguelike.Rules/Targeting.cs
+file	game/rules/D2Roguelike.Rules/Kit.cs
+file	game/scripts/Player3D.cs
+substring	RunSt
+substring	WalkG
+substring	Behav
+substring	ActionTim
+substring	Playe
+substring	AreaEx
+substring	MonsterAtt
+substring	Monste
+substring	OfferRol
+substring	Statu

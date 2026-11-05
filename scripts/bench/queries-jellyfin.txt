@@ -1,0 +1,112 @@
+# Fixed query list for scripts/bench/measure-cache.py, repository: jellyfin.
+# Exactly 100 queries, sent in order to GET /api/context/complete.
+# Line format: <kind><TAB><identifier>. Blank lines and lines starting with '#' are skipped.
+# Kinds and the request each one sends:
+#   symbol     identifier=<id>&depth=1                    (40 lines)
+#   tests      identifier=<id>&depth=1&includeTests=true  (20 lines)
+#   depth3     identifier=<id>&depth=3                    (20 lines)
+#   file       identifier=<repo-relative path>&depth=1    (10 lines, matchMode filePath)
+#   substring  identifier=<name fragment>&depth=1         (10 lines, no exact symbol of that
+#              name, so the service falls back to substring matching)
+# Every line was verified to return at least one match on 0.10.0. Chosen by usedBy count
+# among public types and Type.Method names with exactly one exact match.
+symbol	BaseItem
+symbol	InternalItemsQuery
+symbol	ILibraryManager
+symbol	IFileSystem
+symbol	FileSystemMetadata
+symbol	IServerConfigurationManager
+symbol	BaseItemKind
+symbol	MediaStream
+symbol	MediaSourceInfo
+symbol	IDirectoryService
+symbol	BaseItemEntity
+symbol	QueryResult
+symbol	IUserManager
+symbol	BaseItemDto
+symbol	IProviderManager
+symbol	MetadataResult
+symbol	ItemUpdateType
+symbol	ILocalizationManager
+symbol	MetadataRefreshOptions
+symbol	MediaStreamType
+symbol	RequestHelpers
+symbol	IApplicationPaths
+symbol	UserManager.GetUserById
+symbol	GuidExtensions.IsEmpty
+symbol	EnumerableExtensions.Contains
+symbol	VideoResolver.Resolve
+symbol	ClaimsPrincipalExtensions.GetUserId
+symbol	GuidExtensions.IsNullOrEmpty
+symbol	ComicVineExternalUrlProvider.GetExternalUrls
+symbol	LibraryManager.GetUserRootFolder
+symbol	LibraryManager.GetLibraryOptions
+symbol	EncodingHelper.IsCopyCodec
+symbol	UserDataManager.GetUserData
+symbol	Group.SetState
+symbol	UserEntityExtensions.HasPermission
+symbol	BaseItemRepository.GetItemIdsList
+symbol	BaseExtensions.GetMD5
+symbol	DtoService.GetBaseItemDtos
+symbol	BaseItem.UpdateToRepositoryAsync
+symbol	LibraryManager.GetNewItemId
+tests	Policies
+tests	EncodingJobInfo
+tests	ItemSortBy
+tests	GroupStateType
+tests	IHasProviderIds
+tests	IMediaSourceManager
+tests	IGroupStateContext
+tests	MediaProtocol
+tests	IConfigurationManager
+tests	IUserDataManager
+tests	ManagedFileSystem.GetFileSystemInfo
+tests	RequestHelpers.GetSession
+tests	LocalizationManager.GetServerLocalizedString
+tests	BaseItem.GetImages
+tests	DtoService.GetBaseItemDto
+tests	BaseItem.GetParent
+tests	BaseItemRepository.GetItemList
+tests	ManagedFileSystem.DeleteFile
+tests	UserView.GetChildren
+tests	BaseItem.GetUserDataKeys
+depth3	VideoFileInfo
+depth3	ItemImageInfo
+depth3	IServerApplicationHost
+depth3	VideoResolver
+depth3	IServerApplicationPaths
+depth3	EncodingOptions
+depth3	SessionMessageType
+depth3	EncodingHelper
+depth3	IMediaEncoder
+depth3	ServerConfiguration
+depth3	MediaEncoder.SupportsFilter
+depth3	LocalizationManager.LoadAll
+depth3	LiveTvConfigurationExtensions.GetLiveTvConfiguration
+depth3	LocalizationManager.GetRatingScore
+depth3	BaseItemExtensions.HasImage
+depth3	ProviderManager.QueueRefresh
+depth3	ManagedFileSystem.GetFileInfo
+depth3	LibraryManager.GetLocalAlternateVersionIds
+depth3	Channel.IsVisible
+depth3	StackResolver.ResolveFiles
+file	MediaBrowser.Controller/Entities/BaseItem.cs
+file	MediaBrowser.Controller/Entities/InternalItemsQuery.cs
+file	MediaBrowser.Controller/Library/ILibraryManager.cs
+file	MediaBrowser.Model/IO/IFileSystem.cs
+file	MediaBrowser.Model/IO/FileSystemMetadata.cs
+file	MediaBrowser.Controller/Configuration/IServerConfigurationManager.cs
+file	Jellyfin.Data/Enums/BaseItemKind.cs
+file	MediaBrowser.Model/Entities/MediaStream.cs
+file	MediaBrowser.Model/Dto/MediaSourceInfo.cs
+file	MediaBrowser.Controller/Providers/IDirectoryService.cs
+substring	BaseI
+substring	InternalItemsQu
+substring	ILibraryMana
+substring	IFileSys
+substring	FileSystemMetad
+substring	IServerConfigurationMana
+substring	BaseItemK
+substring	MediaStr
+substring	MediaSourceI
+substring	IDirectoryServ

@@ -1,0 +1,30 @@
+{
+  "name": "jellyfin",
+  "queries": "queries-jellyfin.txt",
+  "coldSymbol": "BaseItem",
+  "edits": {
+    "body": {
+      "kind": "body",
+      "file": "MediaBrowser.Controller/Entities/BaseItem.cs",
+      "statement": "_ = CanDelete();",
+      "method": "BaseItem.GetDefaultPrimaryImageAspectRatio",
+      "project": "MediaBrowser.Controller",
+      "role": "root: 15 direct and 28 transitive dependent projects"
+    },
+    "top": {
+      "kind": "top",
+      "file": "Emby.Server.Implementations/ApplicationHost.cs",
+      "symbol": "ApplicationHost",
+      "project": "Emby.Server.Implementations",
+      "role": "near the top: 4 transitive dependents (Jellyfin.Server and tests)"
+    },
+    "leafBody": {
+      "kind": "body",
+      "file": "Jellyfin.Api/Helpers/HlsCodecStringHelpers.cs",
+      "statement": "_ = GetAC3String();",
+      "method": "HlsCodecStringHelpers.GetMP3String",
+      "project": "Jellyfin.Api",
+      "role": "leaf side: 6 transitive dependents (Emby.Server.Implementations, Jellyfin.Server, tests)"
+    }
+  }
+}
