@@ -13,6 +13,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Threading.Channels;
 
 namespace CodeContext.CSharp.Worker;
 
@@ -53,8 +54,6 @@ public sealed class CSharpWorkspaceAnalyzer
 
     /// <summary>Binding parallelizes well to here; past it, threads mostly wait on each other.</summary>
     private const int MaxWalkThreads = 8;
-
-    private const int MinWalkBatch = 32;
 
     /// <summary>
     /// Assemblies by path, shared across projects and workspaces. A shared instance is what
@@ -236,6 +235,12 @@ public sealed class CSharpWorkspaceAnalyzer
             LoadFile(path);
         }
     }
+
+    /// <summary>
+    /// Asks Roslyn about every invoked name, as the walker once did, so tests can hold the two
+    /// paths side by side. Only tests set this: no option or setting leads here.
+    /// </summary>
+    public bool AskEveryInvokedName { get; init; }
 
     /// <summary>How many times the projects were read and the files parsed.</summary>
     public int BuildCount { get; private set; }
@@ -537,32 +542,75 @@ public sealed class CSharpWorkspaceAnalyzer
 
         // Progress is defined over the approved request, including files that disappeared
         // or could not be read: those produce no facts, but still count as attempted.
-        var batchSize = Math.Max(MinWalkBatch, (total + 99) / 100);
-        var options = new ParallelOptions
+        var processed = 0;
+        async ValueTask Attempted()
         {
-            MaxDegreeOfParallelism = Math.Clamp(Environment.ProcessorCount, 1, MaxWalkThreads),
-            CancellationToken = ct,
-        };
-        var walkedNow = new HashSet<string>(PathComparer);
-        for (var start = 0; start < total; start += batchSize)
-        {
-            ct.ThrowIfCancellationRequested();
-            var batch = requested.Skip(start).Take(batchSize).Where(pending.Contains).ToList();
-            var walks = new WalkedFile[batch.Count];
-            Parallel.For(0, batch.Count, options, index => walks[index] = WalkFile(batch[index], ct));
-            for (var index = 0; index < batch.Count; index++)
+            processed++;
+            if (progress is not null && ShouldReportProgress(processed, total))
             {
-                _walked[batch[index]] = walks[index];
-                walkedNow.Add(batch[index]);
+                await progress(processed, total, requested[processed - 1]);
             }
+        }
 
-            for (var processed = start + 1; progress is not null && processed <= Math.Min(start + batchSize, total); processed++)
+        var indexes = new List<int>(total);
+        for (var index = 0; index < total; index++)
+        {
+            if (pending.Contains(requested[index])) indexes.Add(index);
+            else await Attempted();
+        }
+
+        // Largest first, handed out one at a time, so no thread is left finishing a big file
+        // after the rest run out. Characters stand in for binding cost: they are known from
+        // the parsed tree for free, where a node count would mean walking every tree first.
+        var walkOrder = indexes.OrderByDescending(index => _owners[requested[index]].Trees[requested[index]].Length).ToList();
+        var walks = new WalkedFile[total];
+        var finished = Channel.CreateUnbounded<int>(new UnboundedChannelOptions { SingleReader = true });
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var walking = Task.Run(() =>
+        {
+            try
             {
-                if (ShouldReportProgress(processed, total))
-                {
-                    await progress(processed, total, requested[processed - 1]);
-                }
+                Parallel.ForEach(
+                    Partitioner.Create(walkOrder, EnumerablePartitionerOptions.NoBuffering),
+                    new ParallelOptions
+                    {
+                        MaxDegreeOfParallelism = Math.Clamp(Environment.ProcessorCount, 1, MaxWalkThreads),
+                        CancellationToken = stop.Token,
+                    },
+                    index =>
+                    {
+                        walks[index] = WalkFile(requested[index], stop.Token);
+                        finished.Writer.TryWrite(index);
+                    });
             }
+            finally
+            {
+                finished.Writer.Complete();
+            }
+        }, CancellationToken.None);
+
+        try
+        {
+            await foreach (var _ in finished.Reader.ReadAllAsync(CancellationToken.None))
+            {
+                await Attempted();
+            }
+        }
+        catch
+        {
+            await stop.CancelAsync();
+            await walking.ContinueWith(_ => { }, TaskScheduler.Default);
+            throw;
+        }
+        await walking;
+        ct.ThrowIfCancellationRequested();
+
+        // Recorded in the order asked for, so nothing after this can tell how the walk went.
+        var walkedNow = new HashSet<string>(PathComparer);
+        foreach (var index in indexes)
+        {
+            _walked[requested[index]] = walks[index];
+            walkedNow.Add(requested[index]);
         }
 
         var removed = _walked.Keys.Where(path => !_owners.ContainsKey(path)).ToList();
@@ -613,7 +661,7 @@ public sealed class CSharpWorkspaceAnalyzer
         var edges = new List<EdgeFact>();
         var externals = new ExternalSymbols(_workspaceIdPrefix, _stubs, Share);
         var walker = new GraphWalker(
-            unit.Compilation.GetSemanticModel(tree), tree.FilePath, unit.IdPrefix, _owners, externals, Share, nodes, edges);
+            unit.Compilation.GetSemanticModel(tree), tree.FilePath, unit.IdPrefix, _owners, externals, Share, nodes, edges, AskEveryInvokedName);
         walker.Visit(tree.GetRoot(ct));
         nodes.TrimExcess();
         edges.TrimExcess();
@@ -1271,6 +1319,30 @@ public sealed class CSharpWorkspaceAnalyzer
         ["end"] = span.End,
     };
 
+    /// <summary>The invocation this name is the target of, if any.</summary>
+    public static InvocationExpressionSyntax? InvocationOf(SimpleNameSyntax node)
+    {
+        SyntaxNode invoked = node.Parent switch
+        {
+            MemberAccessExpressionSyntax access when access.Name == node => access,
+            MemberBindingExpressionSyntax binding when binding.Name == node => binding,
+            _ => node,
+        };
+        return invoked.Parent is InvocationExpressionSyntax invocation && invocation.Expression == invoked ? invocation : null;
+    }
+
+    /// <summary>
+    /// True when the name in an invocation needs no question of its own. Asking about it makes
+    /// Roslyn build the whole method group, extension methods included, which cost a quarter
+    /// of the walk, and a method the invocation resolved to adds nothing the invocation's own
+    /// edge has not recorded. Only these two kinds are skipped: a delegate or function pointer
+    /// call is a reference to the field or local holding it, and a failed call may still bind
+    /// the name or count it as unresolved, so those keep asking.
+    /// </summary>
+    public static bool InvocationSettlesName(SemanticModel model, SimpleNameSyntax node)
+        => InvocationOf(node) is { } invocation
+            && model.GetSymbolInfo(invocation).Symbol is IMethodSymbol { MethodKind: MethodKind.Ordinary or MethodKind.ReducedExtension };
+
     private sealed class GraphWalker : CSharpSyntaxWalker
     {
         private readonly SemanticModel _semanticModel;
@@ -1282,6 +1354,7 @@ public sealed class CSharpWorkspaceAnalyzer
         private Dictionary<string, int>? _unresolved;
         private readonly List<ProtocolNode> _nodes;
         private readonly List<EdgeFact> _edges;
+        private readonly bool _askEveryInvokedName;
         private bool _hasTopLevelEntry;
 
         public GraphWalker(
@@ -1289,8 +1362,10 @@ public sealed class CSharpWorkspaceAnalyzer
             IReadOnlyDictionary<string, ProjectCompilation> owners,
             ExternalSymbols externals,
             Func<string, string> share,
-            List<ProtocolNode> nodes, List<EdgeFact> edges)
+            List<ProtocolNode> nodes, List<EdgeFact> edges,
+            bool askEveryInvokedName)
         {
+            _askEveryInvokedName = askEveryInvokedName;
             _semanticModel = semanticModel;
             _filePath = filePath;
             _idPrefix = idPrefix;
@@ -1817,6 +1892,8 @@ public sealed class CSharpWorkspaceAnalyzer
 
         private void AddNameReference(SimpleNameSyntax node)
         {
+            if (!_askEveryInvokedName && InvocationSettlesName(_semanticModel, node)) return;
+
             var symbol = ResolveSymbol(node);
             if (symbol is null) NoteIfUnresolved(node);
             switch (symbol)
@@ -1896,16 +1973,7 @@ public sealed class CSharpWorkspaceAnalyzer
         /// True when this name is the method an invocation calls, which the CALLS edge
         /// already records. Any other use of a method name is a method group.
         /// </summary>
-        private static bool IsInvokedName(SimpleNameSyntax node)
-        {
-            SyntaxNode invoked = node.Parent switch
-            {
-                MemberAccessExpressionSyntax access when access.Name == node => access,
-                MemberBindingExpressionSyntax binding when binding.Name == node => binding,
-                _ => node,
-            };
-            return invoked.Parent is InvocationExpressionSyntax invocation && invocation.Expression == invoked;
-        }
+        private static bool IsInvokedName(SimpleNameSyntax node) => InvocationOf(node) is not null;
 
         private void AddTypeReference(SimpleNameSyntax node, INamedTypeSymbol referencedType)
         {
