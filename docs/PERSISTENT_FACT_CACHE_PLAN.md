@@ -186,6 +186,23 @@ reason and the alternative rejected.
   touched. Reason: PGO off made top-level edits about 17 percent slower in the profiling
   session's check, and once the cache exists a full first scan is rare while edits are
   constant. Both belong to the profiling session.
+- D27 [coord]. The comparison baseline for phase 11 is the last release before the cache,
+  v0.10.7 (`main` f4b16d8, merged here as 3f8b053), with v0.10.0 kept as a history column.
+  Reason: `main` gained two worker patches while this plan was being written. Measured by
+  the review session on jellyfin through the AOT host, same graph: cold start 33.5-35.8 s
+  to 18.9-20.8 s; top-level edit 8.2-9.6 s to 4.0-5.3 s (BaseItem) and 3.6-4.5 s to
+  2.0-2.3 s (ApplicationHost); body edit unchanged at 1.1-1.4 s; worker peak about 900 MB;
+  host 600-690 MB. Comparing 0.11 with 0.10.0 would credit the cache with their gains.
+  Consequences: every estimate in this document that was derived from a 27-29 s jellyfin
+  walk is too high by about a factor of 2.5 to 3 (the walk is now about 10 s). That
+  covers the first-edit rows of 3.7, the wake cost in 3.9 and R8. The rows are corrected
+  below; the 30-minute hibernation default was justified by the old figures and is
+  decided again in phase 9 from measured wake cost, with 15 minutes as the candidate.
+  Constraints carried into phases 6, 7 and 10: `AskEveryInvokedName` is a test-only
+  switch that must stay; nothing may depend on walk order (results are recorded in
+  requested order, pinned by `CSharpWorkerWalkOrderTests`); a cancelled walk throws and
+  records nothing; `CSharpWorkerFirstScanBuildTests` keeps its intent when phase 7
+  replaces `IsFreshBuildOf`.
 
 **Coordinator review of the plan's own decisions, 2026-11-05**
 
@@ -712,9 +729,9 @@ stay dormant.
 |---|---|---|
 | First query after a cold start | authenticate, map (materialize until phase 8) | 0.1-0.5 s |
 | `ready`, nothing changed | host start and enumeration 0.50-0.55 s measured with the 0.10.x patch (11.7 s without it), worker start 0.4-1.0 s, model 0.45-0.6 s, stats and reference mtimes 0.1-0.4 s, state tables 0.05 s | 1.5-2.6 s |
-| First edit, leaf project (Jellyfin.Api) | parse and create its closure, up to 2.4 s; cold walk of the project and its tests; load facts, settle and hash all buckets 0.5-1.0 s | 4-8 s |
-| First edit, root project | the same, with most of the repository as dependents | about 30 s |
-| Second and later edits there | unchanged | 1.3 s body, 3.9 s top-level |
+| First edit, leaf project (Jellyfin.Api) | parse and create its closure, up to 2.4 s; cold walk of the project and its tests; load facts, settle and hash all buckets 0.5-1.0 s | 3-5 s (was 4-8 s before D27) |
+| First edit, root project | the same, with most of the repository as dependents | 12-15 s (was about 30 s before D27) |
+| Second and later edits there | unchanged | 1.1-1.4 s body, 2.0-5.3 s top-level (v0.10.7) |
 
 Cold binding cost and the one-time hash of all buckets are unmeasured; phase 7 measures
 both. The root-project row is why phase 10 exists: with per-file declaration digests a
