@@ -68,6 +68,7 @@ public sealed class CSharpWorkspaceAnalyzer
 
     /// <summary>The projects as last read, or null when this workspace has no known root.</summary>
     private ProjectModel? _model;
+    private DateTime _builtAt;
 
     /// <summary>Every unit, dependencies before dependents, the fallback last.</summary>
     private List<ProjectCompilation> _units;
@@ -236,9 +237,26 @@ public sealed class CSharpWorkspaceAnalyzer
         }
     }
 
+    /// <summary>How many times the projects were read and the files parsed.</summary>
+    public int BuildCount { get; private set; }
+
     /// <summary>Replaces the workspace file set entirely and reparses everything.</summary>
     public void ReplaceFiles(IReadOnlyList<string> files, CancellationToken ct)
-        => Rebuild(files, reuse: false, ct);
+    {
+        if (IsFreshBuildOf(files)) return;
+        Rebuild(files, reuse: false, ct);
+    }
+
+    /// <summary>
+    /// The host opens a workspace and then indexes it, so on a first scan the build the open
+    /// just made is the one the index asked for, unless something moved in between.
+    /// </summary>
+    private bool IsFreshBuildOf(IReadOnlyList<string> files)
+        => _model is not null
+            && _walked.Count == 0
+            && _files.SetEquals(files)
+            && !_model.InputsChanged()
+            && files.All(file => File.GetLastWriteTimeUtc(file) < _builtAt);
 
     /// <summary>
     /// Reads the projects again. A project that reads as it did keeps its unit and so its
@@ -247,6 +265,8 @@ public sealed class CSharpWorkspaceAnalyzer
     /// </summary>
     private void Rebuild(IReadOnlyList<string> files, bool reuse, CancellationToken ct)
     {
+        BuildCount++;
+        _builtAt = DateTime.UtcNow;
         var previous = reuse ? _units : [];
         if (!reuse)
         {
