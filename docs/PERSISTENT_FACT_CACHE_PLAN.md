@@ -176,6 +176,12 @@ reason and the alternative rejected.
   1 s on jellyfin (their estimate 0.9 s). If the patch has not landed by phase 11,
   enumeration is reported as measured, the goal-2 figure is reported with and without it,
   and the coordinator decides then whether to reinstate the phase.
+  Landed 2026-11-05 as `main` a1f62fc (c45c02d selector, 464eda1 one build per first
+  scan), merged into this branch as 0cf756d. Measured by that session on jellyfin, AOT
+  host: enumeration 11.67-11.83 s to 0.50-0.55 s including host startup; cold start to
+  `ready` 48.5-49.4 s to 32.9-33.9 s; graph identical. Verification may assume about
+  0.5 s. The new selector agrees with the old one, not with Git, in at least one case
+  (`x[!a]b` matches `x/b`); that has its own follow-up and is not changed here.
 - D26 [coord]. TieredPGO stays on in the worker and the walk's batch barrier is not
   touched. Reason: PGO off made top-level edits about 17 percent slower in the profiling
   session's check, and once the cache exists a full first scan is rare while edits are
@@ -705,7 +711,7 @@ stay dormant.
 | Case on jellyfin | Work | Estimate |
 |---|---|---|
 | First query after a cold start | authenticate, map (materialize until phase 8) | 0.1-0.5 s |
-| `ready`, nothing changed | host enumeration about 0.9 s est. with the 0.10.x patch (11.6 s without it), worker start 0.4-1.0 s, model 0.45-0.6 s, stats and reference mtimes 0.1-0.4 s, state tables 0.05 s | 2.1-3.1 s |
+| `ready`, nothing changed | host start and enumeration 0.50-0.55 s measured with the 0.10.x patch (11.7 s without it), worker start 0.4-1.0 s, model 0.45-0.6 s, stats and reference mtimes 0.1-0.4 s, state tables 0.05 s | 1.5-2.6 s |
 | First edit, leaf project (Jellyfin.Api) | parse and create its closure, up to 2.4 s; cold walk of the project and its tests; load facts, settle and hash all buckets 0.5-1.0 s | 4-8 s |
 | First edit, root project | the same, with most of the repository as dependents | about 30 s |
 | Second and later edits there | unchanged | 1.3 s body, 3.9 s top-level |
