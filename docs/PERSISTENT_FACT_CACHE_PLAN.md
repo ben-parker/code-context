@@ -1242,7 +1242,11 @@ Tests:
   `StubLeavesWhenItsLastUserGoes_AfterRestore`,
   `PartialOwnershipMovesToTheNextFile_AfterRestore`,
   `CollidingIdentifiersQualifyAndUnqualifyTogether_AfterRestore`,
-  `CoverageListsProjectsThatBoundNothing`.
+  `CoverageListsProjectsThatBoundNothing`,
+  `CoverageAfterRestore_EqualsCoverageOfAFreshScan` (every field of every entry, including
+  a project that is `partial` only because the evaluator assumed an unreadable MSBuild
+  condition true, which `main` 2407cf1 introduced). Coverage state is derived from the
+  project model and the walk; it is never an input to a fingerprint.
 - `CSharpWorkerProtocolFixtureTests`: baseline index and `workspace/saveState` through the
   real process.
 - Convergence, tier 1, in process: `RestoreConvergenceTests.EveryStepMatchesAFreshScan(seed)`,
