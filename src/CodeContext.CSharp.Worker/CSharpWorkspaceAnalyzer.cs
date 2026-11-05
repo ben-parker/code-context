@@ -13,6 +13,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Threading.Channels;
 
 namespace CodeContext.CSharp.Worker;
 
@@ -53,8 +54,6 @@ public sealed class CSharpWorkspaceAnalyzer
 
     /// <summary>Binding parallelizes well to here; past it, threads mostly wait on each other.</summary>
     private const int MaxWalkThreads = 8;
-
-    private const int MinWalkBatch = 32;
 
     /// <summary>
     /// Assemblies by path, shared across projects and workspaces. A shared instance is what
@@ -543,32 +542,75 @@ public sealed class CSharpWorkspaceAnalyzer
 
         // Progress is defined over the approved request, including files that disappeared
         // or could not be read: those produce no facts, but still count as attempted.
-        var batchSize = Math.Max(MinWalkBatch, (total + 99) / 100);
-        var options = new ParallelOptions
+        var processed = 0;
+        async ValueTask Attempted()
         {
-            MaxDegreeOfParallelism = Math.Clamp(Environment.ProcessorCount, 1, MaxWalkThreads),
-            CancellationToken = ct,
-        };
-        var walkedNow = new HashSet<string>(PathComparer);
-        for (var start = 0; start < total; start += batchSize)
-        {
-            ct.ThrowIfCancellationRequested();
-            var batch = requested.Skip(start).Take(batchSize).Where(pending.Contains).ToList();
-            var walks = new WalkedFile[batch.Count];
-            Parallel.For(0, batch.Count, options, index => walks[index] = WalkFile(batch[index], ct));
-            for (var index = 0; index < batch.Count; index++)
+            processed++;
+            if (progress is not null && ShouldReportProgress(processed, total))
             {
-                _walked[batch[index]] = walks[index];
-                walkedNow.Add(batch[index]);
+                await progress(processed, total, requested[processed - 1]);
             }
+        }
 
-            for (var processed = start + 1; progress is not null && processed <= Math.Min(start + batchSize, total); processed++)
+        var indexes = new List<int>(total);
+        for (var index = 0; index < total; index++)
+        {
+            if (pending.Contains(requested[index])) indexes.Add(index);
+            else await Attempted();
+        }
+
+        // Largest first, handed out one at a time, so no thread is left finishing a big file
+        // after the rest run out. Characters stand in for binding cost: they are known from
+        // the parsed tree for free, where a node count would mean walking every tree first.
+        var walkOrder = indexes.OrderByDescending(index => _owners[requested[index]].Trees[requested[index]].Length).ToList();
+        var walks = new WalkedFile[total];
+        var finished = Channel.CreateUnbounded<int>(new UnboundedChannelOptions { SingleReader = true });
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var walking = Task.Run(() =>
+        {
+            try
             {
-                if (ShouldReportProgress(processed, total))
-                {
-                    await progress(processed, total, requested[processed - 1]);
-                }
+                Parallel.ForEach(
+                    Partitioner.Create(walkOrder, EnumerablePartitionerOptions.NoBuffering),
+                    new ParallelOptions
+                    {
+                        MaxDegreeOfParallelism = Math.Clamp(Environment.ProcessorCount, 1, MaxWalkThreads),
+                        CancellationToken = stop.Token,
+                    },
+                    index =>
+                    {
+                        walks[index] = WalkFile(requested[index], stop.Token);
+                        finished.Writer.TryWrite(index);
+                    });
             }
+            finally
+            {
+                finished.Writer.Complete();
+            }
+        }, CancellationToken.None);
+
+        try
+        {
+            await foreach (var _ in finished.Reader.ReadAllAsync(CancellationToken.None))
+            {
+                await Attempted();
+            }
+        }
+        catch
+        {
+            await stop.CancelAsync();
+            await walking.ContinueWith(_ => { }, TaskScheduler.Default);
+            throw;
+        }
+        await walking;
+        ct.ThrowIfCancellationRequested();
+
+        // Recorded in the order asked for, so nothing after this can tell how the walk went.
+        var walkedNow = new HashSet<string>(PathComparer);
+        foreach (var index in indexes)
+        {
+            _walked[requested[index]] = walks[index];
+            walkedNow.Add(requested[index]);
         }
 
         var removed = _walked.Keys.Where(path => !_owners.ContainsKey(path)).ToList();
