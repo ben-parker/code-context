@@ -29,6 +29,7 @@ public sealed class AnalysisDeltaApplier : IAnalysisDeltaSink
         public HashSet<string> ReplacesFiles { get; } = new(first.ReplacesFiles, PathComparer);
         public List<ProtocolNode> Nodes { get; } = [];
         public List<ProtocolEdge> Edges { get; } = [];
+        public IReadOnlyList<ProjectCoverage>? Coverage { get; private set; }
 
         public void Append(AnalysisDelta delta)
         {
@@ -40,6 +41,7 @@ public sealed class AnalysisDeltaApplier : IAnalysisDeltaSink
 
             ReplacesWorkspace |= delta.ReplacesWorkspace;
             ReplacesFiles.UnionWith(delta.ReplacesFiles);
+            Coverage = delta.Coverage ?? Coverage;
             Nodes.AddRange(delta.Nodes);
             Edges.AddRange(delta.Edges);
         }
@@ -47,15 +49,20 @@ public sealed class AnalysisDeltaApplier : IAnalysisDeltaSink
 
     private readonly IGenerationalGraphStore _store;
     private readonly ILogger<AnalysisDeltaApplier> _logger;
+    private readonly IAnalysisCoverageRegistry? _coverage;
     private readonly SemaphoreSlim _commitLock = new(1, 1);
     private readonly Dictionary<(string ParserId, string WorkspaceId), long> _lastCommittedGeneration = new();
     private readonly Dictionary<(string ParserId, string WorkspaceId), long> _highestSeenGeneration = new();
     private readonly Dictionary<(string ParserId, string WorkspaceId, long Generation, long RequestId), PendingDelta> _pending = new();
 
-    public AnalysisDeltaApplier(IGenerationalGraphStore store, ILogger<AnalysisDeltaApplier> logger)
+    public AnalysisDeltaApplier(
+        IGenerationalGraphStore store,
+        ILogger<AnalysisDeltaApplier> logger,
+        IAnalysisCoverageRegistry? coverage = null)
     {
         _store = store;
         _logger = logger;
+        _coverage = coverage;
     }
 
     /// <summary>
@@ -144,6 +151,10 @@ public sealed class AnalysisDeltaApplier : IAnalysisDeltaSink
             }
 
             _lastCommittedGeneration[sessionKey] = pending.Generation;
+            if (pending.Coverage is { } coverage)
+            {
+                _coverage?.Report(pending.ParserId, pending.WorkspaceId, coverage);
+            }
             RemovePending(sessionKey, generation => generation <= pending.Generation);
             _logger.LogDebug(
                 "[{ParserId}] atomically committed generation {Generation} for workspace {WorkspaceId}: {Nodes} nodes, {Edges} edges.",

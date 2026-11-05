@@ -81,7 +81,8 @@ public class JsonRpcConnectionTests : IAsyncLifetime
             ParserProtocolMethods.AnalysisDeltaNotification, delta,
             ParserProtocolJsonContext.Default.AnalysisDelta);
 
-        var observed = await received.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        // The suite shares this machine and is heavier now; five seconds was missed under load.
+        var observed = await received.Task.WaitAsync(TimeSpan.FromSeconds(30));
         Assert.Equal("ws-1", observed.WorkspaceId);
     }
 

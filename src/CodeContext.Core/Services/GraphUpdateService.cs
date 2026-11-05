@@ -63,9 +63,16 @@ public class GraphUpdateService : IGraphUpdateService
     public async Task ProcessFileChangesAsync(IReadOnlyList<FileChange> changes, CancellationToken ct)
     {
         var workerBatches = new Dictionary<string, List<FileChange>>(StringComparer.Ordinal);
+        var projectChanges = new HashSet<string>(StringComparer.Ordinal);
 
         foreach (var change in changes)
         {
+            if (_workerService?.TryGetParserForProjectInput(change.Path, _fileSelector.IsIncluded(change.Path), out var inputOwner) == true)
+            {
+                projectChanges.Add(inputOwner);
+                continue;
+            }
+
             // The same selector governs explicit refresh and watcher paths. An
             // excluded file is forwarded as a deletion so stale facts cannot remain
             // after a rule change or a direct refresh of an ignored path.
@@ -94,6 +101,22 @@ public class GraphUpdateService : IGraphUpdateService
             try
             {
                 await ProcessWorkerBatchAsync(parserId, batch, ct);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                failures.Add(ex);
+            }
+        }
+
+        foreach (var parserId in projectChanges)
+        {
+            try
+            {
+                await _workerService!.RefreshProjectsAsync(parserId, ct);
             }
             catch (OperationCanceledException)
             {

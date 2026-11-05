@@ -27,7 +27,8 @@ public class LanguageWorkerServiceTests : IAsyncLifetime
             new AnalysisDeltaApplier(_store, NullLogger<AnalysisDeltaApplier>.Instance),
             _registry,
             Options.Create(new CodeContextOptions { RootPath = _tempDir }),
-            NullLoggerFactory.Instance);
+            NullLoggerFactory.Instance,
+            TestWorkerOptions.Patient());
         return Task.CompletedTask;
     }
 

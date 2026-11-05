@@ -112,6 +112,11 @@
               "Full"
             ],
             "default": "Compact"
+          },
+          "includeExternal": {
+            "description": "Whether to include library symbols, which name matches and uses otherwise leave out",
+            "type": "boolean",
+            "default": false
           }
         },
         "required": [
@@ -251,6 +256,11 @@
               "Full"
             ],
             "default": "Compact"
+          },
+          "includeExternal": {
+            "description": "Whether to include library symbols, which name matches and uses otherwise leave out",
+            "type": "boolean",
+            "default": false
           }
         },
         "required": [

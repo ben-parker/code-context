@@ -394,6 +394,91 @@ public class QueryCommandHandlerTests
     }
 
     [Theory]
+    [InlineData(false, "external GodotSharp", "usesExternal\t4\t--external lists them", "externalMatches\t2\t--external lists them")]
+    [InlineData(true, "Location: external GodotSharp", "Library symbols used: 4 (--external lists them)", "Library symbols of this name: 2 (--external lists them)")]
+    public async Task LibrarySymbolsSayWhatTheyAreAndWhatWasLeftOut(
+        bool human, string location, string uses, string matches)
+    {
+        var response = JsonSerializer.Serialize(new
+        {
+            view = "compact",
+            matchMode = "exact",
+            totalMatches = 1,
+            returnedMatches = 1,
+            externalMatchesHidden = 2,
+            matches = new[]
+            {
+                new
+                {
+                    target = new { name = "Node3D", type = "Class", identifier = "csharp:Godot.Node3D", external = "GodotSharp" },
+                    relationships = new { usesExternalHidden = 4, usedByCount = 0 },
+                },
+            },
+        });
+        var handler = new RecordingHandler(request => request.RequestUri!.AbsolutePath == "/api/status"
+            ? Json(Status("ready")) : Json(response));
+        var (runtime, output, _) = Runtime(handler, new FakeRegistry(Instance()));
+
+        await QueryCommandHandler.ExecuteAsync(
+            new QuerySettings(["Node3D"], Root, 1, false, null, false, false, false, Human: human),
+            runtime, CancellationToken.None);
+
+        Assert.Contains(location, output.ToString());
+        Assert.Contains(uses, output.ToString());
+        Assert.Contains(matches, output.ToString());
+    }
+
+    [Theory]
+    [InlineData(false, "coverage\tpartial\t2 of 9 projects analyzed without all they declare: Game, Tools.")]
+    [InlineData(true, "Coverage (partial): 2 of 9 projects analyzed without all they declare: Game, Tools.")]
+    public async Task AMissingResultSaysWhatWasNotSeen(bool human, string expected)
+    {
+        var response = JsonSerializer.Serialize(new
+        {
+            totalMatches = 0,
+            matches = Array.Empty<object>(),
+            coverage = new { state = "partial", incompleteProjects = 2, totalProjects = 9, names = new[] { "Game", "Tools" } },
+        });
+        var handler = new RecordingHandler(request => request.RequestUri!.AbsolutePath == "/api/status"
+            ? Json(Status("ready")) : Json(response));
+        var (runtime, output, _) = Runtime(handler, new FakeRegistry(Instance()));
+
+        await QueryCommandHandler.ExecuteAsync(
+            new QuerySettings(["Node3D"], Root, 1, false, null, false, false, false, Human: human),
+            runtime, CancellationToken.None);
+
+        Assert.Contains(expected, output.ToString());
+    }
+
+    [Fact]
+    public async Task ExternalIsAskedForOnlyWhenRequested()
+    {
+        var handler = new RecordingHandler(request => request.RequestUri!.AbsolutePath == "/api/status"
+            ? Json(Status("ready")) : Json("{\"totalMatches\":0,\"matches\":[]}"));
+        var (runtime, _, _) = Runtime(handler, new FakeRegistry(Instance()));
+
+        await QueryCommandHandler.ExecuteAsync(
+            new QuerySettings(["A"], Root, 1, false, null, false, false, false), runtime, CancellationToken.None);
+        await QueryCommandHandler.ExecuteAsync(
+            new QuerySettings(["A"], Root, 1, false, null, false, false, false, External: true), runtime, CancellationToken.None);
+
+        var queries = handler.Requests
+            .Where(request => request.RequestUri!.AbsolutePath == "/api/context/complete")
+            .Select(request => request.RequestUri!.Query)
+            .ToList();
+        Assert.DoesNotContain("includeExternal", queries[0]);
+        Assert.Contains("includeExternal=true", queries[1]);
+    }
+
+    [Fact]
+    public void ExternalWorksBeforeOrAfterMulti()
+    {
+        var root = Program.CreateRootCommand();
+        Assert.Empty(root.Parse(["query", "A", "--external"]).Errors);
+        Assert.Empty(root.Parse(["query", "multi", "A", "--external"]).Errors);
+    }
+
+    [Theory]
     [InlineData(false, "relationships\tnot loaded\tdepth 0")]
     [InlineData(true, "Relationships: not loaded (depth 0)")]
     public async Task DepthZeroDoesNotClaimThereAreNoRelationships(bool human, string expected)

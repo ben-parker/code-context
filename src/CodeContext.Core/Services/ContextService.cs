@@ -1,5 +1,6 @@
 using CodeContext.Core.Repositories;
 using CodeContext.Core.Workers;
+using CodeContext.Parser.Protocol;
 using Microsoft.Extensions.Options;
 using System.Collections.Frozen;
 using System.Collections.Generic;
@@ -18,19 +19,54 @@ namespace CodeContext.Core.Services
         private readonly IFileMetadataRepository _fileMetadataRepository;
         private readonly string? _rootPath;
         private readonly ILanguageWorkerService? _workerService;
+        private readonly IAnalysisCoverageRegistry? _coverage;
+
+        private const int MaxCoverageNames = 5;
 
         public ContextService(
             ICodeNodeRepository nodeRepository,
             ICodeEdgeRepository edgeRepository,
             IFileMetadataRepository fileMetadataRepository,
             IOptions<CodeContextOptions>? options = null,
-            ILanguageWorkerService? workerService = null)
+            ILanguageWorkerService? workerService = null,
+            IAnalysisCoverageRegistry? coverage = null)
         {
             _nodeRepository = nodeRepository;
             _edgeRepository = edgeRepository;
             _fileMetadataRepository = fileMetadataRepository;
             _rootPath = options?.Value.RootPath;
             _workerService = workerService;
+            _coverage = coverage;
+        }
+
+        /// <summary>The worst state among projects.</summary>
+        internal static string OverallState(IReadOnlyList<ProjectCoverage> projects)
+            => projects.Any(project => project.State == ProjectCoverageStates.Fallback) ? ProjectCoverageStates.Fallback
+                : projects.Any(project => project.State == ProjectCoverageStates.Partial) ? ProjectCoverageStates.Partial
+                : ProjectCoverageStates.Complete;
+
+        /// <summary>
+        /// An answer of nothing means something only if the code was all seen. Where a project
+        /// was not, say which, so "no users" cannot be read as a fact it is not.
+        /// </summary>
+        private CoverageSummary? CoverageFor(CompactContextResponse response)
+        {
+            var nothingFound = response.TotalMatches == 0
+                || response.Matches.Exists(match => match.Relationships is { } relationships
+                    && (relationships.UsedByCount ?? 0) == 0);
+            if (!nothingFound || _coverage is null) return null;
+
+            var projects = _coverage.GetProjects();
+            var incomplete = projects.Where(project => project.State != ProjectCoverageStates.Complete).ToList();
+            return incomplete.Count == 0
+                ? null
+                : new CoverageSummary
+                {
+                    State = OverallState(projects),
+                    IncompleteProjects = incomplete.Count,
+                    TotalProjects = projects.Count,
+                    Names = incomplete.Take(MaxCoverageNames).Select(project => project.Name).ToList(),
+                };
         }
 
         public async Task<CompleteContextResponse> GetCompleteContextAsync(
@@ -47,7 +83,8 @@ namespace CodeContext.Core.Services
             string? containingType = null,
             string? @namespace = null,
             string? signature = null,
-            string? sourceFile = null)
+            string? sourceFile = null,
+            bool includeExternal = false)
         {
             ValidateIdentifier(identifier);
             if (depth is < 0 or > 10)
@@ -68,6 +105,11 @@ namespace CodeContext.Core.Services
                 return response;
             }
 
+            if (!includeExternal && !isFilePath && candidates.Exists(candidate => !IsExternal(candidate)))
+            {
+                candidates.RemoveAll(IsExternal);
+            }
+
             // Handle ambiguity
             if (candidates.Count > 1 && !isFilePath)
             {
@@ -78,7 +120,7 @@ namespace CodeContext.Core.Services
             foreach (var candidate in candidates)
             {
                 var contextMatch = await BuildContextMatchAsync(
-                    candidate, depth, includeTests, includeContent, includeRelated, includeMetrics);
+                    candidate, depth, includeTests, includeContent, includeRelated, includeMetrics, includeExternal);
                 if (includeTests) ApplyTestLimits(contextMatch.Testing, maxTestFiles, maxTestMethods);
                 response.Matches.Add(contextMatch);
             }
@@ -105,7 +147,8 @@ namespace CodeContext.Core.Services
             string? @namespace = null,
             string? signature = null,
             string? sourceFile = null,
-            string? relation = null)
+            string? relation = null,
+            bool includeExternal = false)
         {
             ValidateIdentifier(identifier);
             ValidateQueryBounds(depth, maxMatches, maxRelationships, maxCallSites, maxTestFiles, maxTestMethods);
@@ -147,9 +190,16 @@ namespace CodeContext.Core.Services
                 matchMode = isFilePath ? "filePath" : exact == true ? "exact" : "substring";
             }
 
+            var externalMatchesHidden = 0;
+            if (!includeExternal && !isFilePath && candidates.Exists(candidate => !IsExternal(candidate)))
+            {
+                externalMatchesHidden = candidates.RemoveAll(IsExternal);
+            }
+
             candidates = RankCandidates(candidates, identifier).ToList();
             var response = new CompactContextResponse
             {
+                ExternalMatchesHidden = externalMatchesHidden,
                 MatchMode = matchMode,
                 SubstringSearchSkipped = substringSearchSkipped,
                 TotalMatches = candidates.Count,
@@ -161,6 +211,7 @@ namespace CodeContext.Core.Services
             {
                 response.DisambiguationHint = await BuildNoMatchHintAsync(
                     identifier, matchMode == "exact", type, containingType, @namespace, signature, sourceFile);
+                response.Coverage = CoverageFor(response);
                 return response;
             }
 
@@ -178,7 +229,7 @@ namespace CodeContext.Core.Services
                 foreach (var candidate in candidates.Take(maxMatches))
                 {
                     var match = await BuildContextMatchAsync(
-                        candidate, depth, includeTests, includeContent, includeRelated, includeMetrics);
+                        candidate, depth, includeTests, includeContent, includeRelated, includeMetrics, includeExternal);
                     response.Matches.Add(await ToCompactMatchAsync(
                         match, includeTests, includeRelated, includeMetrics, maxRelationships,
                         maxCallSites, maxTestFiles, maxTestMethods, relationKinds));
@@ -187,6 +238,7 @@ namespace CodeContext.Core.Services
 
             response.ReturnedMatches = response.Matches.Count;
             response.Truncated = response.ReturnedMatches < response.TotalMatches;
+            response.Coverage = CoverageFor(response);
             return response;
         }
 
@@ -216,7 +268,8 @@ namespace CodeContext.Core.Services
                     containingType: request.ContainingType,
                     @namespace: request.Namespace,
                     signature: request.Signature,
-                    sourceFile: request.SourceFile);
+                    sourceFile: request.SourceFile,
+                    includeExternal: request.IncludeExternal);
 
                 results.Add(context);
             }
@@ -250,7 +303,8 @@ namespace CodeContext.Core.Services
                     sourceFile: request.SourceFile,
                     relation: request.RelationshipTypes is { Count: > 0 }
                         ? string.Join(",", request.RelationshipTypes)
-                        : null));
+                        : null,
+                    includeExternal: request.IncludeExternal));
             }
 
             return results;
@@ -282,7 +336,42 @@ namespace CodeContext.Core.Services
                     CandidateMatchesFilters(candidate, type, containingType, @namespace, signature, sourceFile))
                     .ToList();
             }
+            if (filtered.Count == 0 && !isFilePath)
+            {
+                filtered = (await FindOwnersOfBareIdentifierAsync(identifier, type)).Where(candidate =>
+                    CandidateMatchesFilters(candidate, type, containingType, @namespace, signature, sourceFile))
+                    .ToList();
+            }
             return (filtered, isFilePath);
+        }
+
+        /// <summary>
+        /// When a name is declared in several projects each owner's identifier carries its
+        /// project, as <c>csharp:Project#Name</c>. The bare form is then not one symbol, so it
+        /// answers with all of them rather than quietly choosing or claiming nothing is there.
+        /// </summary>
+        private async Task<List<CodeNode>> FindOwnersOfBareIdentifierAsync(string identifier, string? type)
+        {
+            var colon = identifier.IndexOf(':');
+            if (colon <= 0 || identifier.Contains('#')) return [];
+
+            var display = identifier[(colon + 1)..];
+            var scheme = identifier[..(colon + 1)];
+            var segments = WithoutTypeArgumentsOrParameters(display).Split('.');
+
+            // A constructor's node is named for what it is, so the type name would miss it.
+            var names = new List<string> { segments[^1] };
+            if (segments.Length > 1 && segments[^1] == segments[^2]) names.Add("constructor");
+
+            var owners = new List<CodeNode>();
+            foreach (var name in names)
+            {
+                owners.AddRange((await _nodeRepository.FindByNameAsync(name, type, exact: true)).Where(node =>
+                    PublicIdentifier(node) is var candidate
+                    && candidate.StartsWith(scheme, StringComparison.Ordinal)
+                    && candidate.EndsWith("#" + display, StringComparison.Ordinal)));
+            }
+            return owners;
         }
 
         /// <summary>
@@ -442,6 +531,7 @@ namespace CodeContext.Core.Services
             => candidates
                 .OrderByDescending(candidate =>
                     string.Equals(candidate.Name, identifier, StringComparison.OrdinalIgnoreCase))
+                .ThenBy(IsExternal)
                 .ThenBy(candidate => IsTestPath(candidate.FilePath))
                 .ThenBy(candidate => TypeRank(candidate.Type))
                 .ThenBy(candidate => candidate.FilePath, StringComparer.OrdinalIgnoreCase)
@@ -450,7 +540,7 @@ namespace CodeContext.Core.Services
         private CompactMatchFacets BuildFacets(IReadOnlyCollection<CodeNode> candidates)
         {
             var files = candidates
-                .Where(candidate => !string.IsNullOrEmpty(candidate.FilePath))
+                .Where(candidate => !string.IsNullOrEmpty(candidate.FilePath) && !IsExternal(candidate))
                 .GroupBy(candidate => ToDisplayPath(candidate.FilePath!), StringComparer.OrdinalIgnoreCase)
                 .OrderByDescending(group => group.Count())
                 .ThenBy(group => group.Key, StringComparer.OrdinalIgnoreCase)
@@ -482,7 +572,7 @@ namespace CodeContext.Core.Services
         {
             var relationships = match.Relationships;
             var usedByNodes = await FilterCompactUsedByAsync(match.Target, relationships.UsedBy);
-            var compactRelationships = new CompactRelationships();
+            var compactRelationships = new CompactRelationships { UsesExternalHidden = relationships.ExternalUsesHidden };
             if (relationships.Uses.Count > 0)
             {
                 // Counts reflect the filtered total (pre-Take): a relation filter can drop
@@ -649,7 +739,8 @@ namespace CodeContext.Core.Services
             }
             else directEdges = await _edgeRepository.GetByTargetIdAsync(target.Id);
             var edgesByNode = (directEdges ?? new List<CodeEdge>())
-                .Where(IsUsageEdge)
+                .Where(edge => IsUsageEdge(edge)
+                    || (!outgoing && IsExternal(target) && edge.Type is not null && MethodFamilyEdgeKinds.Contains(edge.Type)))
                 .Where(edge => !string.IsNullOrEmpty(outgoing ? edge.TargetId : edge.SourceId))
                 .GroupBy(edge => outgoing ? edge.TargetId! : edge.SourceId!, StringComparer.Ordinal)
                 .ToDictionary(group => group.Key, group => group.ToList(), StringComparer.Ordinal);
@@ -730,11 +821,16 @@ namespace CodeContext.Core.Services
             {
                 Name = node.Name,
                 Type = node.Type,
-                File = string.IsNullOrEmpty(node.FilePath) ? null : ToDisplayPath(node.FilePath),
-                Line = node.StartLine + 1,
+                File = string.IsNullOrEmpty(node.FilePath) || IsExternal(node) ? null : ToDisplayPath(node.FilePath),
+                Line = IsExternal(node) ? 0 : node.StartLine + 1,
+                External = IsExternal(node) ? node.Metadata?.GetValueOrDefault("assembly") ?? string.Empty : null,
                 Signature = Truncate(NormalizeCompactSignature(node.Signature), 160),
                 Identifier = PublicIdentifier(node)
             };
+
+        /// <summary>A library symbol the code uses, known only through that use.</summary>
+        private static bool IsExternal(CodeNode node)
+            => node.Metadata?.GetValueOrDefault("external") == "true";
 
         private string ToDisplayPath(string path)
         {
@@ -908,7 +1004,8 @@ namespace CodeContext.Core.Services
             bool includeTests,
             bool includeContent,
             bool includeRelated,
-            bool includeMetrics)
+            bool includeMetrics,
+            bool includeExternal = false)
         {
             targetNode.Identifier = PublicIdentifier(targetNode);
             var match = new ContextMatch
@@ -917,7 +1014,7 @@ namespace CodeContext.Core.Services
             };
 
             // Build relationships
-            match.Relationships = await BuildRelationshipsAsync(targetNode, depth, includeRelated);
+            match.Relationships = await BuildRelationshipsAsync(targetNode, depth, includeRelated, includeExternal);
 
             // Build testing information
             if (includeTests)
@@ -932,7 +1029,7 @@ namespace CodeContext.Core.Services
             }
 
             // Include content if requested
-            if (includeContent && !string.IsNullOrEmpty(targetNode.FilePath))
+            if (includeContent && !string.IsNullOrEmpty(targetNode.FilePath) && !IsExternal(targetNode))
             {
                 match.Content = await GetFileContentSnippetAsync(targetNode);
             }
@@ -986,7 +1083,8 @@ namespace CodeContext.Core.Services
         private async Task<ContextRelationships> BuildRelationshipsAsync(
             CodeNode targetNode,
             int depth,
-            bool includeRelated)
+            bool includeRelated,
+            bool includeExternal = false)
         {
             var relationships = new ContextRelationships();
 
@@ -1004,10 +1102,25 @@ namespace CodeContext.Core.Services
                     .ToList();
                 usedBy = await TraverseInboundFromFamilyAsync(family.Keys, depth);
                 relationships.StaticallyBoundTargets = await GetStaticallyBoundTargetsAsync(family);
+
+                // Overriding a library method is the project's use of it, and often the only one.
+                if (IsExternal(targetNode))
+                {
+                    var listed = usedBy.Select(item => item.Node.Id).ToHashSet(StringComparer.Ordinal);
+                    usedBy.AddRange(relationships.MethodFamilyMembers
+                        .Where(member => !listed.Contains(member.Id))
+                        .Select(member => new TraversedRelationship(member, 1, EmptyPath)));
+                }
             }
             else
             {
                 usedBy = await TraverseRelationshipsAsync(targetNode.Id, depth, outgoing: false);
+            }
+            if (!includeExternal)
+            {
+                // Every project method would otherwise list List<T>.Add; the count says so.
+                relationships.ExternalUsesHidden = uses.Count(item => item.Distance == 1 && IsExternal(item.Node));
+                uses = uses.Where(item => !IsExternal(item.Node)).ToList();
             }
             relationships.Uses = uses.Where(item => item.Distance == 1).Select(item => item.Node).ToList();
             relationships.UsedBy = usedBy.Where(item => item.Distance == 1).Select(item => item.Node).ToList();
@@ -1022,14 +1135,14 @@ namespace CodeContext.Core.Services
                     Node = item.Node, Distance = item.Distance, RelationPath = item.RelationPath.ToList()
                 }).ToList();
 
-            // Get file-level dependencies
-            if (!string.IsNullOrEmpty(targetNode.FilePath))
+            // Get file-level dependencies. A library symbol's file is only a grouping.
+            if (!string.IsNullOrEmpty(targetNode.FilePath) && !IsExternal(targetNode))
             {
                 relationships.FileDependencies = await GetFileDependenciesAsync(targetNode.FilePath);
                 relationships.FileDependents = await GetFileDependentsAsync(targetNode.FilePath);
             }
 
-            if (includeRelated)
+            if (includeRelated && !IsExternal(targetNode))
             {
                 relationships.RelatedItems = await GetRelatedItemsAsync(targetNode);
             }
@@ -1063,7 +1176,11 @@ namespace CodeContext.Core.Services
                     var relatedId = edge.SourceId == current ? edge.TargetId : edge.SourceId;
                     if (string.IsNullOrEmpty(relatedId) || family.ContainsKey(relatedId)) continue;
                     var node = await _nodeRepository.GetByIdAsync(relatedId);
-                    if (node is null) continue;
+
+                    // A library method links everything implementing it, so a family stops
+                    // there: every Dispose in a repository is not one method. Asked about the
+                    // library method itself, its family is what implements it.
+                    if (node is null || IsExternal(node)) continue;
                     family[relatedId] = node;
                     pending.Enqueue(relatedId);
                 }
@@ -1406,6 +1523,7 @@ namespace CodeContext.Core.Services
 
                     var relatedNode = await _nodeRepository.GetByIdAsync(relatedNodeId);
                     if (string.IsNullOrEmpty(relatedNode?.FilePath)
+                        || IsExternal(relatedNode)
                         || PathsReferToSameFile(relatedNode.FilePath, filePath))
                         continue;
 

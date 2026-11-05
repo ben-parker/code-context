@@ -50,7 +50,8 @@ public static class CodeContextEndpoints
             string? signature = null,
             string? sourceFile = null,
             string? relation = null,
-            string view = "compact") =>
+            string view = "compact",
+            bool includeExternal = false) =>
         {
             try
             {
@@ -63,7 +64,7 @@ public static class CodeContextEndpoints
                     var full = await contextService.GetCompleteContextAsync(
                         identifier, type, depth, includeTests, includeContent, exact ?? false,
                         includeRelated, includeMetrics, maxTestFiles, maxTestMethods, containingType,
-                        @namespace, signature, sourceFile);
+                        @namespace, signature, sourceFile, includeExternal);
                     return Results.Ok(full);
                 }
 
@@ -71,7 +72,7 @@ public static class CodeContextEndpoints
                     identifier, type, depth, includeTests, includeContent, exact,
                     includeRelated, includeMetrics, maxMatches, maxRelationships, expandAmbiguous,
                     maxCallSites, maxTestFiles, maxTestMethods, containingType, @namespace, signature,
-                    sourceFile, relation);
+                    sourceFile, relation, includeExternal);
                 return Results.Ok(compact);
             }
             catch (Exception ex)

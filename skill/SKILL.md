@@ -23,8 +23,8 @@ codecontext query multi Foo Bar             # several identifiers, one round tri
 `query` auto-discovers (or starts) the repo's instance, waits for indexing, and
 prints compact agent-oriented text; progress goes to stderr. Options: `--depth N`
 (`0` = cheap identity lookup), `--relation CALLS,REFERENCES`, `--exact`,
-`--limit N` (entries per relationship list, 1-100, default 10), `--path DIR`,
-`--human`, `--json`.
+`--limit N` (entries per relationship list, 1-100, default 10), `--external` (include
+library symbols), `--path DIR`, `--human`, `--json`.
 
 Reading results:
 
@@ -72,28 +72,34 @@ anything else, cross-check with `rg -w <Name>`.
   deconstruction, implicit base constructor calls, or the calls `using`, `foreach` and
   collection initializers imply. A read of a virtual or interface property is recorded
   on the member named at the read, not on its overrides or implementations. The
-  analysis sees repository source, the .NET libraries and, per project, the SDK's default
-  implicit usings, not NuGet or engine assemblies or `<Using>` items added or removed by
-  hand. Usage reached through a value of such a type is missing:
-  `GetNode<Item>("x").Weigh()` records the reference to `Item` but not the call to
-  `Weigh`, and the same goes for a local holding that value or a lambda parameter of
-  that type.
+  analysis compiles each project as a build would, reading its project file and restore
+  data: its own references, constants, target framework and usings. Files in no project
+  bind against the .NET libraries and the projects around them.
+- **Library symbols** are queryable by name or identifier, so `query Node3D` lists the
+  project's uses of a library type, marked `external <assembly>`. Only symbols the code
+  uses exist; nothing inside a library is indexed. `uses` leaves them out and prints
+  `usesExternal` with a count, and a name that matches project code leaves out library
+  symbols of that name and prints `externalMatches`. `--external` lists them.
+- **Same-named symbols in two projects** are separate, and their identifiers name the
+  project, as in `csharp:ToolA#Program.Main()`. A bare identifier then returns all of them
+  as ambiguous.
+- **A `coverage` line** on a `missing` or empty `usedBy` result means some project was
+  analyzed without all it declares, usually because it was never restored, so that answer
+  may be short. `codecontext status --path .` lists each project's state, its missing
+  references, and how many names failed to bind. Run `dotnet restore`, then `rg -w <Name>`
+  as the cross-check.
 - **C# is blind to these, so an empty `usedBy` proves nothing here; run `rg -w <Name>`:**
-  - **`#if` branches.** Files are parsed with no preprocessor symbols beyond the file's
-    own `#define`, so code under `#if DEBUG`, `#if TOOLS` or `#if UNITY_EDITOR` is unseen
-    and the `#else` branch is recorded instead.
+  - **Code the active build leaves out.** Each project is analyzed for `Debug`, or the
+    first configuration it declares, and its first target framework, with that project's
+    constants. The `#else` of `#if DEBUG` and code for another target are unseen, as they
+    are greyed out in an IDE.
   - **Usage from non-C# files**: `.razor` markup, XAML, Godot `.tscn` signal connections,
     Unity serialized references in scenes and prefabs.
-  - **Same-named types in different projects.** All projects share one analysis, so two
-    types with the same namespace and name become one node: `usedBy` is the union of
-    both, and a caller can be attributed to the wrong file. If their kinds differ, such as
-    a class and a record, uses of the type are kept but its members lose theirs.
-  - **Name clashes the build never sees.** When a repository type shares its name with a
-    .NET type its project cannot see, because the project targets an older framework or
-    the other type comes from another project's `global using`, uses of the name are
-    recorded but members reached through it are not. An extension method clashing the
-    same way is not recorded at all. Nor is a name that another project's `global using`
-    makes ambiguous between two repository types: which one is meant is not guessed.
+  - **Generated code.** Analyzers and source generators are never run, so members they
+    would add do not exist here and whatever is reached through them is lost. Status
+    counts names that failed to bind and lists the commonest.
+  - **Files in no project.** They bind against the workspace's projects together, so a
+    name two projects declare is ambiguous there and is not guessed.
 - **TypeScript/JavaScript** records calls, construction, imports and inheritance. It
   **does not record** property reads and writes or type references.
 

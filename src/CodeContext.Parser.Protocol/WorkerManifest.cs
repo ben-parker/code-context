@@ -19,7 +19,8 @@ public sealed record WorkerManifest(
     [property: JsonPropertyName("maxProtocolVersion")] int MaxProtocolVersion,
     [property: JsonPropertyName("languages")] IReadOnlyList<string>? Languages = null,
     [property: JsonPropertyName("extensions")] IReadOnlyList<string>? Extensions = null,
-    [property: JsonPropertyName("projectMarkers")] IReadOnlyList<string>? ProjectMarkers = null)
+    [property: JsonPropertyName("projectMarkers")] IReadOnlyList<string>? ProjectMarkers = null,
+    [property: JsonPropertyName("projectInputs")] IReadOnlyList<string>? ProjectInputs = null)
 {
     public const int CurrentManifestVersion = 1;
 

@@ -30,7 +30,8 @@ manifests are never auto-executed.
   "maxProtocolVersion": 1,
   "languages": ["python"],
   "extensions": [".py"],
-  "projectMarkers": ["pyproject.toml"]
+  "projectMarkers": ["pyproject.toml"],
+  "projectInputs": ["pyproject.toml", ".lock"]
 }
 ```
 
@@ -127,6 +128,18 @@ files' facts. The contract:
   be sourced at a node owned by another: it belongs to the owner. Grouping it under
   the file that found it loses it when the owner is replaced, and leaves it stale when
   the other file stops emitting it.
+- **Symbols from outside the workspace are stubs.** A worker may emit a node for a library
+  symbol the code uses, so a query on it can list its users. Set `metadata.external` to
+  `"true"` and `metadata.assembly` to where it came from, and give it a virtual `filePath`
+  starting `external:`, which `replacesFiles` lists like any other file. The host keeps such
+  a node out of file relationships and never prunes it as a missing file, so a worker must
+  remove it when nothing uses it.
+- **Project inputs are not source files.** `projectInputs` in the manifest lists file names,
+  or extensions starting with a dot, that change what the worker's files mean. The host
+  watches an exact name wherever it appears, including paths it would not index, and an
+  extension only in files it would. It answers a change with an empty
+  `workspace/applyChanges`, on which the worker rereads its projects. The usual
+  rule still holds: emit at least one delta.
 - **Chunks agree.** All chunks of one request carry the same `replacesWorkspace`
   value (the host ORs the flags) and should repeat the full `replacesFiles` list (the
   host unions them). Always emit at least one delta per mutation, ending with

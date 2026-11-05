@@ -32,7 +32,8 @@ public sealed class CodeContextTools
         [Description("Filter by exact signature")] string? signature = null,
         [Description("Filter by repository-relative or absolute source file")] string? sourceFile = null,
         [Description("Comma-separated relation kinds to filter uses/usedBy (CALLS, MOCK_CALLS, REFERENCES, IMPLEMENTS, INHERITS, EXTENDS, IMPORTS, USES); compact view only")] string? relation = null,
-        [Description("Response shape; compact is the default")] ContextResponseView view = ContextResponseView.Compact)
+        [Description("Response shape; compact is the default")] ContextResponseView view = ContextResponseView.Compact,
+        [Description("Whether to include library symbols, which name matches and uses otherwise leave out")] bool includeExternal = false)
     {
         try
         {
@@ -44,7 +45,7 @@ public sealed class CodeContextTools
                 var full = await contextService.GetCompleteContextAsync(
                     identifier, type, depth, includeTests, includeContent, exact ?? false,
                     includeRelated, includeMetrics, maxTestFiles, maxTestMethods, containingType,
-                    @namespace, signature, sourceFile);
+                    @namespace, signature, sourceFile, includeExternal);
                 return JsonSerializer.Serialize(full, CodeContextJsonContext.Default.CompleteContextResponse);
             }
 
@@ -52,7 +53,7 @@ public sealed class CodeContextTools
                 identifier, type, depth, includeTests, includeContent, exact,
                 includeRelated, includeMetrics, maxMatches, maxRelationships, expandAmbiguous,
                 maxCallSites, maxTestFiles, maxTestMethods, containingType, @namespace, signature,
-                sourceFile, relation);
+                sourceFile, relation, includeExternal);
             return JsonSerializer.Serialize(
                 compact, CodeContextJsonContext.Default.CompactContextResponse);
         }
@@ -88,7 +89,8 @@ public sealed class CodeContextTools
         [Description("Exact signature filter")] string? signature = null,
         [Description("Repository-relative or absolute source file filter")] string? sourceFile = null,
         [Description("Comma-separated relation kinds to filter uses/usedBy (CALLS, MOCK_CALLS, REFERENCES, IMPLEMENTS, INHERITS, EXTENDS, IMPORTS, USES); compact view only")] string? relation = null,
-        [Description("Response shape; compact is the default")] ContextResponseView view = ContextResponseView.Compact)
+        [Description("Response shape; compact is the default")] ContextResponseView view = ContextResponseView.Compact,
+        [Description("Whether to include library symbols, which name matches and uses otherwise leave out")] bool includeExternal = false)
     {
         var multiRequest = new MultiContextRequest
         {
@@ -107,6 +109,7 @@ public sealed class CodeContextTools
             Namespace = @namespace,
             Signature = signature,
             SourceFile = sourceFile,
+            IncludeExternal = includeExternal,
             RelationshipTypes = string.IsNullOrWhiteSpace(relation)
                 ? new List<string>()
                 : relation.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)

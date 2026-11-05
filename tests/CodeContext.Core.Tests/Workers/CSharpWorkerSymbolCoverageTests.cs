@@ -544,16 +544,23 @@ public class CSharpWorkerSymbolCoverageTests : IDisposable
         """;
 
     [Theory]
-    [InlineData("src/App.csproj", "<Project><PropertyGroup><ImplicitUsings>enable</ImplicitUsings></PropertyGroup></Project>")]
-    [InlineData("src/App.csproj", "<Project><PropertyGroup><ImplicitUsings>true</ImplicitUsings></PropertyGroup></Project>")]
-    [InlineData("Directory.Build.props", "<Project><PropertyGroup><ImplicitUsings>enable</ImplicitUsings></PropertyGroup></Project>")]
-    public void ProjectsWithImplicitUsings_BindWithoutUsingDirectives(string projectPath, string project)
+    [InlineData("enable")]
+    [InlineData("true")]
+    public void ProjectsWithImplicitUsings_BindWithoutUsingDirectives(string setting)
     {
-        var result = Analyze(("src/Code.cs", CodeWithoutUsings), (projectPath, project));
+        var result = Analyze(("src/Code.cs", CodeWithoutUsings), ("src/App.csproj", $"""
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup><TargetFramework>net10.0</TargetFramework><ImplicitUsings>{setting}</ImplicitUsings></PropertyGroup>
+            </Project>
+            """));
 
         const string list = "System.Collections.Generic.List<App.Item>";
-        AssertEdge(result, $"App.User.Calls({list})", "App.Item.Weigh()", "CALLS");
-        AssertEdge(result, $"App.User.Reads({list})", "App.Item.Size", "REFERENCES");
+        Assert.Contains(result.Edges, edge => edge.Kind == "CALLS"
+            && edge.SourceId.EndsWith($":App.User.Calls({list})", StringComparison.Ordinal)
+            && edge.TargetId.EndsWith(":App.Item.Weigh()", StringComparison.Ordinal));
+        Assert.Contains(result.Edges, edge => edge.Kind == "REFERENCES"
+            && edge.SourceId.EndsWith($":App.User.Reads({list})", StringComparison.Ordinal)
+            && edge.TargetId.EndsWith(":App.Item.Size", StringComparison.Ordinal));
     }
 
     [Fact]

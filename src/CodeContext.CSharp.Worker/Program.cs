@@ -209,9 +209,9 @@ internal sealed class CSharpWorkerHost(JsonRpcConnection connection)
             approvedFiles);
         var emitted = await PublishAsync(
             workspaceId, generation, requestId,
-            analysis.Nodes, analysis.Edges,
+            analysis.Nodes, analysis.Buckets.SelectMany(bucket => bucket.Edges).ToList(),
             replacesWorkspace: true, replacesFiles: [],
-            analysis.Diagnostics, ct);
+            analysis.Diagnostics, analysis.Coverage, ct);
         // Seed only after every chunk was sent, mirroring the incremental path's
         // commit-after-send rule: a cancelled mid-index emission must not leave the
         // hash baseline claiming facts the host never received.
@@ -220,9 +220,8 @@ internal sealed class CSharpWorkerHost(JsonRpcConnection connection)
     }
 
     /// <summary>
-    /// Incremental (applyChanges) path: re-walks the whole workspace for cross-file
-    /// binding correctness, then emits only the dirty buckets' facts scoped to the
-    /// dirty ∪ removed file set (every chunk flagged <c>replacesWorkspace:false</c> and
+    /// Incremental (applyChanges) path: walks what the changes could affect, then emits
+    /// only the dirty buckets' facts scoped to the dirty ∪ removed file set (every chunk flagged <c>replacesWorkspace:false</c> and
     /// carrying the full <c>replacesFiles</c> list). The per-file hash map is committed
     /// only after every chunk has been sent, so a failed emission cannot desync it.
     /// </summary>
@@ -230,12 +229,23 @@ internal sealed class CSharpWorkerHost(JsonRpcConnection connection)
         CSharpWorkspaceAnalyzer workspace, string workspaceId, long generation, long requestId, CancellationToken ct)
     {
         var analysis = workspace.Analyze(ct);
+        if (!workspace.HasFactBaseline)
+        {
+            var replaced = await PublishAsync(
+                workspaceId, generation, requestId,
+                analysis.Nodes, analysis.Buckets.SelectMany(bucket => bucket.Edges).ToList(),
+                replacesWorkspace: true, replacesFiles: [],
+                analysis.Diagnostics, analysis.Coverage, ct);
+            workspace.SeedFactHashes(analysis);
+            return replaced;
+        }
+
         var emission = workspace.BuildIncrementalEmission(analysis);
         var emitted = await PublishAsync(
             workspaceId, generation, requestId,
-            emission.Nodes, emission.Edges,
+            emission.Nodes, emission.EdgeFacts,
             replacesWorkspace: false, replacesFiles: emission.ReplacesFiles,
-            analysis.Diagnostics, ct);
+            analysis.Diagnostics, analysis.Coverage, ct);
         workspace.CommitIncremental(emission);
         return emitted;
     }
@@ -244,13 +254,13 @@ internal sealed class CSharpWorkerHost(JsonRpcConnection connection)
     /// Streams a node/edge set as one or more <c>analysis/delta</c> notifications, chunked
     /// at <see cref="MaxItemsPerDelta"/>. Always emits at least one delta (the supervisor
     /// requires ≥1 per mutation), so an empty incremental batch still sends a single
-    /// terminal delta with no facts. Diagnostics ride on the first chunk only.
+    /// terminal delta with no facts. Diagnostics and coverage ride on the first chunk only.
     /// </summary>
     private async Task<int> PublishAsync(
         string workspaceId, long generation, long requestId,
-        List<ProtocolNode> allNodes, List<ProtocolEdge> allEdges,
+        List<ProtocolNode> allNodes, List<CSharpWorkspaceAnalyzer.EdgeFact> allEdges,
         bool replacesWorkspace, IReadOnlyList<string> replacesFiles,
-        List<ProtocolDiagnostic> diagnostics, CancellationToken ct)
+        List<ProtocolDiagnostic> diagnostics, IReadOnlyList<ProjectCoverage> coverage, CancellationToken ct)
     {
         var nodeChunks = Chunk(allNodes, MaxItemsPerDelta);
         var edgeChunks = Chunk(allEdges, MaxItemsPerDelta);
@@ -262,8 +272,9 @@ internal sealed class CSharpWorkerHost(JsonRpcConnection connection)
             ct.ThrowIfCancellationRequested();
             IReadOnlyList<ProtocolNode> nodes = i < nodeChunks.Count ? nodeChunks[i] : [];
             var edgeIndex = i - nodeChunks.Count;
-            IReadOnlyList<ProtocolEdge> edges =
-                edgeIndex >= 0 && edgeIndex < edgeChunks.Count ? edgeChunks[edgeIndex] : [];
+            IReadOnlyList<ProtocolEdge> edges = edgeIndex >= 0 && edgeIndex < edgeChunks.Count
+                ? edgeChunks[edgeIndex].Select(edge => edge.ToProtocol()).ToList()
+                : [];
 
             var delta = new AnalysisDelta(
                 ParserId: ParserId,
@@ -276,7 +287,8 @@ internal sealed class CSharpWorkerHost(JsonRpcConnection connection)
                 Nodes: nodes,
                 Edges: edges,
                 IsLastForRequest: i == totalChunks - 1,
-                Diagnostics: i == 0 && diagnostics.Count > 0 ? diagnostics : null);
+                Diagnostics: i == 0 && diagnostics.Count > 0 ? diagnostics : null,
+                Coverage: i == 0 ? coverage : null);
 
             await connection.NotifyAsync(
                 ParserProtocolMethods.AnalysisDeltaNotification, delta,

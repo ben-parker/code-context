@@ -15,6 +15,15 @@ public sealed class StaticWorkerCatalog(params RegisteredWorker[] workers) : IWo
 }
 
 /// <summary>
+/// Worker options for tests that start a real process. Many start at once alongside the rest
+/// of the suite, and the production wait for <c>initialize</c> was missed under that load.
+/// </summary>
+public static class TestWorkerOptions
+{
+    public static ParserWorkerOptions Patient() => new() { InitializeTimeout = TimeSpan.FromSeconds(60) };
+}
+
+/// <summary>
 /// Builds the host-side pipeline (GraphUpdateService + LanguageWorkerService +
 /// AnalysisDeltaApplier) wired to the real C# worker executable from the test output
 /// directory — the protocol-fixture path the Phase 3 exit gate requires.
@@ -34,6 +43,11 @@ public sealed class CSharpWorkerPipeline : IAsyncDisposable
     {
     }
 
+    public CSharpWorkerPipeline(string rootPath, IAnalysisCoverageRegistry coverage)
+        : this(rootPath, null, [], coverage)
+    {
+    }
+
     /// <summary>
     /// <paramref name="decorateSink"/> wraps the real applier before it is handed to the
     /// worker service, letting delta-shape tests observe exactly what the worker emits.
@@ -41,7 +55,8 @@ public sealed class CSharpWorkerPipeline : IAsyncDisposable
     public CSharpWorkerPipeline(
         string rootPath,
         Func<IAnalysisDeltaSink, IAnalysisDeltaSink>? decorateSink,
-        RegisteredWorker[] additionalWorkers)
+        RegisteredWorker[] additionalWorkers,
+        IAnalysisCoverageRegistry? coverage = null)
     {
         RepositoryFactory = new InMemoryRepositoryFactory(NullLogger<InMemoryRepositoryFactory>.Instance);
         RepositoryFactory.InitializeAsync(rootPath).Wait();
@@ -52,7 +67,7 @@ public sealed class CSharpWorkerPipeline : IAsyncDisposable
         var store = (IGenerationalGraphStore)RepositoryFactory.CreateGraphRepository();
         // The applier is the real commit path; tests that assert delta shape wrap it with
         // a recording decorator so they observe exactly what the worker emitted.
-        IAnalysisDeltaSink sink = new AnalysisDeltaApplier(store, NullLogger<AnalysisDeltaApplier>.Instance);
+        IAnalysisDeltaSink sink = new AnalysisDeltaApplier(store, NullLogger<AnalysisDeltaApplier>.Instance, coverage);
         if (decorateSink is not null)
         {
             sink = decorateSink(sink);
@@ -63,7 +78,8 @@ public sealed class CSharpWorkerPipeline : IAsyncDisposable
             sink,
             SessionRegistry,
             options,
-            NullLoggerFactory.Instance);
+            NullLoggerFactory.Instance,
+            TestWorkerOptions.Patient());
 
         GraphUpdateService = new GraphUpdateService(
             RepositoryFactory,
@@ -110,7 +126,8 @@ public sealed class CSharpWorkerPipeline : IAsyncDisposable
             MaxProtocolVersion: ParserProtocol.Version,
             Languages: ["csharp"],
             Extensions: [".cs"],
-            ProjectMarkers: [".csproj", ".sln"]);
+            ProjectMarkers: [".csproj", ".sln"],
+            ProjectInputs: [".csproj", ".props", ".targets", ".projitems", "project.assets.json", "global.json"]);
         return new RegisteredWorker(manifest, CSharpWorkerLaunchSpec(), ManifestPath: "<in-test>");
     }
 

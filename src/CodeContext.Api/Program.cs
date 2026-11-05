@@ -168,6 +168,10 @@ public class Program
         Option<bool> queryJsonOption = CreateQueryJsonOption();
         Option<bool> queryHumanOption = CreateQueryHumanOption();
         Option<int?> queryLimitOption = CreateLimitOption();
+        Option<bool> queryExternalOption = new("--external")
+        {
+            Description = "Includes library symbols, which are left out of name matches and uses by default.",
+        };
         foreach (var option in new Option[]
                  {
                      queryPathOption,
@@ -178,6 +182,7 @@ public class Program
                      queryJsonOption,
                      queryHumanOption,
                      queryLimitOption,
+                     queryExternalOption,
                  })
         {
             option.Recursive = true;
@@ -194,6 +199,7 @@ public class Program
         queryCommand.Options.Add(queryJsonOption);
         queryCommand.Options.Add(queryHumanOption);
         queryCommand.Options.Add(queryLimitOption);
+        queryCommand.Options.Add(queryExternalOption);
         queryCommand.Options.Add(queryHelpOption);
         queryCommand.SetAction((ParseResult parseResult, CancellationToken ct) =>
             QueryCommandHandler.ExecuteAsync(
@@ -207,7 +213,8 @@ public class Program
                     parseResult.GetValue(queryJsonOption),
                     Multi: false,
                     parseResult.GetValue(queryHumanOption),
-                    parseResult.GetValue(queryLimitOption)),
+                    parseResult.GetValue(queryLimitOption),
+                    parseResult.GetValue(queryExternalOption)),
                 ct));
 
         var multiQueryCommand = new Command(
@@ -234,7 +241,8 @@ public class Program
                     parseResult.GetValue(queryJsonOption),
                     Multi: true,
                     parseResult.GetValue(queryHumanOption),
-                    parseResult.GetValue(queryLimitOption)),
+                    parseResult.GetValue(queryLimitOption),
+                    parseResult.GetValue(queryExternalOption)),
                 ct));
         queryCommand.Subcommands.Add(multiQueryCommand);
 

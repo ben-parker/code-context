@@ -67,6 +67,7 @@ public static class ProgramHelpers
 
         // Register services
         services.AddSingleton<IParserSessionRegistry, ParserSessionRegistry>();
+        services.AddSingleton<IAnalysisCoverageRegistry, AnalysisCoverageRegistry>();
         services.AddSingleton<IRepositoryFileSelector, RepositoryFileSelector>();
         services.AddSingleton<IGraphUpdateService, GraphUpdateService>();
         services.AddSingleton<IContextService, ContextService>();
@@ -83,7 +84,8 @@ public static class ProgramHelpers
         services.AddSingleton<IWorkerCatalog, WorkerCatalog>();
         services.AddSingleton<IAnalysisDeltaSink>(sp => new AnalysisDeltaApplier(
             (IGenerationalGraphStore)sp.GetRequiredService<IRepositoryFactory>().CreateGraphRepository(),
-            sp.GetRequiredService<ILogger<AnalysisDeltaApplier>>()));
+            sp.GetRequiredService<ILogger<AnalysisDeltaApplier>>(),
+            sp.GetRequiredService<IAnalysisCoverageRegistry>()));
         // Per-worker env overlays (e.g. GC A/B knobs) come from the CodeContext:WorkerEnvironment
         // configuration section; this instance flows into LanguageWorkerService's optional
         // workerOptions parameter via constructor injection. Absent section => defaults, no overlay.

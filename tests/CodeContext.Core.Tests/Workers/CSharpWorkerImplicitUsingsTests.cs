@@ -4,10 +4,9 @@ using CodeContext.Parser.Protocol;
 namespace CodeContext.Core.Tests.Workers;
 
 /// <summary>
-/// One compilation serves every project in a workspace, but implicit usings belong to one
-/// project each. These pin the failure that follows from confusing the two: a repository
-/// type named like a framework type going ambiguous, which leaves a query printing a
-/// confident <c>usedBy 0/0</c> for something plainly used.
+/// Implicit usings belong to one project each. These pin the failure that follows from
+/// confusing projects: a repository type named like a framework type going ambiguous, which
+/// leaves a query printing a confident <c>usedBy 0/0</c> for something plainly used.
 /// </summary>
 public class CSharpWorkerImplicitUsingsTests : IDisposable
 {
@@ -65,11 +64,26 @@ public class CSharpWorkerImplicitUsingsTests : IDisposable
 
     private static string Id(string display) => CSharpWorkspaceAnalyzer.IdPrefix + "test:" + display;
 
+    /// <summary>The id with any project key taken out, so a test can name a symbol alone.</summary>
+    private static string Display(string id) => id[id.LastIndexOf(':', id.IndexOf('(') is >= 0 and var open ? open : id.Length - 1)..][1..];
+
+    /// <summary>Makes a bare project file a real one, leaving what the test declares in place.</summary>
+    private static string AsSdkProject(string content)
+    {
+        var close = content.IndexOf('>');
+        if (!content.StartsWith("<Project", StringComparison.Ordinal) || close < 0 || content.Contains("Sdk=", StringComparison.Ordinal))
+        {
+            return content;
+        }
+        return content[..8] + " Sdk=\"Microsoft.NET.Sdk\"" + content[8..(close + 1)]
+            + "<PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup>" + content[(close + 1)..];
+    }
+
     private string Write(string name, string content)
     {
         var path = Path.GetFullPath(Path.Combine(Root, name));
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        File.WriteAllText(path, content);
+        File.WriteAllText(path, name.EndsWith(".csproj", StringComparison.Ordinal) ? AsSdkProject(content) : content);
         return path;
     }
 
@@ -86,7 +100,7 @@ public class CSharpWorkerImplicitUsingsTests : IDisposable
 
     private static bool HasEdge(
         CSharpWorkspaceAnalyzer.AnalysisResult result, string source, string target, string kind)
-        => result.Edges.Any(edge => edge.SourceId == Id(source) && edge.TargetId == Id(target) && edge.Kind == kind);
+        => result.Edges.Any(edge => Display(edge.SourceId) == source && Display(edge.TargetId) == target && edge.Kind == kind);
 
     private static void AssertEdge(
         CSharpWorkspaceAnalyzer.AnalysisResult result, string source, string target, string kind)
@@ -130,8 +144,14 @@ public class CSharpWorkerImplicitUsingsTests : IDisposable
     public void AnotherProjectsImplicitUsings_DoNotHideMembersOfRepositoryTypes(string source, string target, string kind)
         => AssertEdge(AnalyzeMixedWorkspace(), source, target, kind);
 
+    private const string ReferencesProjA =
+        "<Project><ItemGroup><ProjectReference Include=\"..\\ProjA\\ProjA.csproj\" /></ItemGroup></Project>";
+
+    private const string ReferencesProjB =
+        "<Project><PropertyGroup><ImplicitUsings>enable</ImplicitUsings></PropertyGroup><ItemGroup><ProjectReference Include=\"..\\ProjB\\ProjB.csproj\" /></ItemGroup></Project>";
+
     [Fact]
-    public void EachProjectKeepsItsOwnUsings_AcrossAReferenceInEitherDirection()
+    public void AProjectWithoutUsings_ReadsOneThatHasThem()
     {
         var result = Analyze(
             ("ProjA/ProjA.csproj", Enabled),
@@ -142,10 +162,9 @@ public class CSharpWorkerImplicitUsingsTests : IDisposable
                 {
                     public List<Item> Items { get; } = new();
                     public int Count(List<Item> items) => items.Count;
-                    public void Fire(Game.Client.Uses uses) => uses.Param(uses.Field).Start();
                 }
                 """),
-            ("ProjB/ProjB.csproj", Silent),
+            ("ProjB/ProjB.csproj", ReferencesProjA),
             ("ProjB/Model.cs", ProjB),
             ("ProjB/Uses.cs", ProjBUses),
             ("ProjB/Reader.cs", """
@@ -163,6 +182,23 @@ public class CSharpWorkerImplicitUsingsTests : IDisposable
         AssertEdge(result, "Game.Client.Reader.Through(App.Store)", "App.Item.Weigh()", "CALLS");
         AssertEdge(result, "Game.Client.Reader.Count(App.Store)",
             "App.Store.Count(System.Collections.Generic.List<App.Item>)", "CALLS");
+    }
+
+    [Fact]
+    public void AProjectWithUsings_ReadsOneThatLacksThem()
+    {
+        var result = Analyze(
+            ("ProjA/ProjA.csproj", ReferencesProjB),
+            ("ProjA/Code.cs", NeedsUsings),
+            ("ProjA/Store.cs", """
+                namespace App;
+                public class Store { public void Fire(Game.Client.Uses uses) => uses.Param(uses.Field).Start(); }
+                """),
+            ("ProjB/ProjB.csproj", Silent),
+            ("ProjB/Model.cs", ProjB),
+            ("ProjB/Uses.cs", ProjBUses));
+
+        Assert.True(SawUsings(result));
         AssertEdge(result, "App.Store.Fire(Game.Client.Uses)", "Game.Client.Uses.Param(Game.Model.Timer)", "CALLS");
         AssertEdge(result, "App.Store.Fire(Game.Client.Uses)", "Game.Model.Timer.Start()", "CALLS");
     }
@@ -252,9 +288,9 @@ public class CSharpWorkerImplicitUsingsTests : IDisposable
     [InlineData(true, "<Project><PropertyGroup Condition=\"'$(TargetFramework)' == 'net10.0'\"><ImplicitUsings>enable</ImplicitUsings></PropertyGroup></Project>")]
     [InlineData(true, "<Project><PropertyGroup><ImplicitUsings>ENABLE</ImplicitUsings></PropertyGroup></Project>")]
     [InlineData(true, "<Project><Choose><When Condition=\"'$(X)' == ''\"><PropertyGroup><ImplicitUsings>enable</ImplicitUsings></PropertyGroup></When></Choose></Project>")]
-    // A value that cannot be evaluated counts as on: wrongly off loses a whole project's
-    // LINQ and collections, wrongly on costs only a name clash.
-    [InlineData(true, "<Project><PropertyGroup><ImplicitUsings>$(UseImplicitUsings)</ImplicitUsings></PropertyGroup></Project>")]
+    // A value is evaluated: an unset property is empty, as it is in a build.
+    [InlineData(false, "<Project><PropertyGroup><ImplicitUsings>$(UseImplicitUsings)</ImplicitUsings></PropertyGroup></Project>")]
+    [InlineData(true, "<Project><PropertyGroup><UseImplicitUsings>enable</UseImplicitUsings><ImplicitUsings>$(UseImplicitUsings)</ImplicitUsings></PropertyGroup></Project>")]
     [InlineData(true, "<Project xmlns=\"http://schemas.microsoft.com/developer/msbuild/2003\"><PropertyGroup><ImplicitUsings>true</ImplicitUsings></PropertyGroup></Project>")]
     [InlineData(true, "<Project><PropertyGroup><ImplicitUsings>disable</ImplicitUsings></PropertyGroup><PropertyGroup><ImplicitUsings>enable</ImplicitUsings></PropertyGroup></Project>")]
     // A target that turns them off leaves the code other targets compile relying on them.
@@ -308,12 +344,12 @@ public class CSharpWorkerImplicitUsingsTests : IDisposable
             ("build/Common.props", Enabled), ("src/App/App.csproj", project), ("src/App/Code.cs", NeedsUsings))));
 
     [Fact]
-    public void ImportsOutsideTheWorkspaceRoot_AreIgnored()
+    public void AnImportAProjectNames_IsFollowedOutOfTheWorkspace()
     {
         Directory.CreateDirectory(Root);
         File.WriteAllText(Path.Combine(_tempDir, "Outer.props"), Enabled);
 
-        Assert.False(SawUsings(Analyze(
+        Assert.True(SawUsings(Analyze(
             ("App.csproj", "<Project><Import Project=\"..\\Outer.props\" /></Project>"), ("Code.cs", NeedsUsings))));
     }
 
@@ -354,7 +390,7 @@ public class CSharpWorkerImplicitUsingsTests : IDisposable
     [Fact]
     public void AFileUnderNoProject_FollowsAProjectThatEnablesThem()
     {
-        // Typically linked in by a .csproj elsewhere, which cannot be seen from here.
+        // Excluded from a project or compiled some other way, yet written alongside them.
         var result = Analyze(
             ("ProjA/ProjA.csproj", Enabled),
             ("ProjA/Other.cs", "namespace Other; public class Thing { }"),
@@ -371,6 +407,17 @@ public class CSharpWorkerImplicitUsingsTests : IDisposable
             ("Shared/Code.cs", NeedsUsings))));
 
     [Fact]
+    public void AFileUnderNoProject_BindsAgainstTheProjectsAroundIt()
+    {
+        var result = Analyze(
+            ("Lib/Lib.csproj", Silent),
+            ("Lib/Thing.cs", "namespace Lib; public class Thing { public int Value() => 1; }"),
+            ("scripts/Tool.cs", "public class Tool { public int Run(Lib.Thing thing) => thing.Value(); }"));
+
+        AssertEdge(result, "Tool.Run(Lib.Thing)", "Lib.Thing.Value()", "CALLS");
+    }
+
+    [Fact]
     public void EveryDefaultNamespaceOfTheSdk_IsInScope()
     {
         var result = Analyze(("App.csproj", Enabled), ("Code.cs", """
@@ -384,7 +431,7 @@ public class CSharpWorkerImplicitUsingsTests : IDisposable
     }
 
     [Fact]
-    public void TypesOfOneNameAndDifferentKinds_KeepTheUsersOfTheirOneNode()
+    public void TypesOfOneNameAndDifferentKinds_KeepTheirOwnNodesAndUsers()
     {
         var result = Analyze(
             ("A/A.csproj", Silent),
@@ -396,6 +443,10 @@ public class CSharpWorkerImplicitUsingsTests : IDisposable
 
         AssertEdge(result, "Use.UseA.Get(App.Options)", "App.Options", "REFERENCES");
         AssertEdge(result, "Use.UseB.Get(App.Options)", "App.Options", "REFERENCES");
+
+        var options = result.Nodes.Where(node => node.Name == "Options").ToList();
+        Assert.Equal(["Class", "Record"], options.Select(node => node.Kind).Order());
+        Assert.Equal(2, options.Select(node => node.Id).Distinct().Count());
     }
 
     [Fact]
@@ -409,17 +460,17 @@ public class CSharpWorkerImplicitUsingsTests : IDisposable
     public void AProjectEdit_IsReadByTheNextFullRefresh()
     {
         var analyzer = new CSharpWorkspaceAnalyzer("test", Root);
-        var project = Write("src/App.csproj", Disabled);
+        Write("src/App.csproj", Disabled);
         var code = Write("src/Code.cs", NeedsUsings);
 
         analyzer.ReplaceFiles([code], CancellationToken.None);
         Assert.False(SawUsings(analyzer.Analyze(CancellationToken.None)));
 
-        File.WriteAllText(project, Enabled);
+        Write("src/App.csproj", Enabled);
         analyzer.ReplaceFiles([code], CancellationToken.None);
         Assert.True(SawUsings(analyzer.Analyze(CancellationToken.None)));
 
-        File.WriteAllText(project, Disabled);
+        Write("src/App.csproj", Disabled);
         analyzer.ReplaceFiles([code], CancellationToken.None);
         Assert.False(SawUsings(analyzer.Analyze(CancellationToken.None)));
     }
@@ -430,13 +481,13 @@ public class CSharpWorkerImplicitUsingsTests : IDisposable
     public void AProjectEdit_IsReadByTheNextIncrementalChange(bool startEnabled)
     {
         var analyzer = new CSharpWorkspaceAnalyzer("test", Root);
-        var project = Write("src/App.csproj", startEnabled ? Enabled : Disabled);
+        Write("src/App.csproj", startEnabled ? Enabled : Disabled);
         var code = Write("src/Code.cs", NeedsUsings);
         var other = Write("src/Other.cs", "namespace App; public class Other { }");
         analyzer.ReplaceFiles([code, other], CancellationToken.None);
         analyzer.SeedFactHashes(analyzer.Analyze(CancellationToken.None));
 
-        File.WriteAllText(project, startEnabled ? Disabled : Enabled);
+        Write("src/App.csproj", startEnabled ? Disabled : Enabled);
         File.WriteAllText(other, "namespace App; public class Other { public int Value; }");
         analyzer.SyncApprovedFiles([code, other], CancellationToken.None);
         analyzer.ApplyChanges([new FileChangeDto(other, FileChangeKinds.Changed, null)], CancellationToken.None);
@@ -444,6 +495,21 @@ public class CSharpWorkerImplicitUsingsTests : IDisposable
 
         Assert.Equal(!startEnabled, SawUsings(analysis));
         Assert.Contains(code, analyzer.BuildIncrementalEmission(analysis).ReplacesFiles);
+    }
+
+    [Fact]
+    public void ADirectoryBuildPropsThatAppears_IsReadByTheNextIncrementalChange()
+    {
+        var analyzer = new CSharpWorkspaceAnalyzer("test", Root);
+        Write("src/App.csproj", Silent);
+        var code = Write("src/Code.cs", NeedsUsings);
+        analyzer.ReplaceFiles([code], CancellationToken.None);
+        Assert.False(SawUsings(analyzer.Analyze(CancellationToken.None)));
+
+        Write("src/Directory.Build.props", Enabled);
+        analyzer.SyncApprovedFiles([code], CancellationToken.None);
+
+        Assert.True(SawUsings(analyzer.Analyze(CancellationToken.None)));
     }
 
     [Theory]
@@ -497,7 +563,9 @@ public class CSharpWorkerImplicitUsingsTests : IDisposable
         var result = Analyze(("App.csproj", Enabled), ("Code.cs", NeedsUsings));
         var code = Path.Combine(Root, "Code.cs");
 
-        Assert.All(result.Nodes, node => Assert.Equal(code, node.FilePath));
-        Assert.All(result.Edges, edge => Assert.StartsWith(Id("App."), edge.SourceId));
+        Assert.All(
+            result.Nodes.Where(node => node.Metadata?.ContainsKey("external") != true),
+            node => Assert.Equal(code, node.FilePath));
+        Assert.DoesNotContain(result.Nodes, node => node.FilePath!.EndsWith(".g.cs", StringComparison.Ordinal));
     }
 }

@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
@@ -17,7 +18,8 @@ public sealed record QuerySettings(
     bool Json,
     bool Multi,
     bool Human = false,
-    int? Limit = null);
+    int? Limit = null,
+    bool External = false);
 
 internal sealed record QueryRuntime(
     IInstanceRegistry Registry,
@@ -214,6 +216,7 @@ public static class QueryCommandHandler
             query.Append("&relation=").Append(Uri.EscapeDataString(settings.Relation));
         if (settings.Exact) query.Append("&exact=true");
         if (settings.Limit is { } limit) query.Append("&maxRelationships=").Append(limit);
+        if (settings.External) query.Append("&includeExternal=true");
 
         using var request = new HttpRequestMessage(
             HttpMethod.Get,
@@ -234,6 +237,7 @@ public static class QueryCommandHandler
             IncludeTests = settings.IncludeTests,
             Exact = settings.Exact ? true : null,
             MaxRelationships = settings.Limit ?? DefaultRelationshipLimit,
+            IncludeExternal = settings.External,
             RelationshipTypes = ParseRelations(settings.Relation),
         };
         var body = JsonSerializer.Serialize(
@@ -324,6 +328,7 @@ public static class QueryCommandHandler
         if (response.TotalMatches == 0 || response.Matches.Count == 0)
         {
             output.WriteLine($"missing\t{Clean(requestedIdentifier)}");
+            WriteCoverage(response.Coverage, "coverage\t{0}\t", output);
             return;
         }
 
@@ -338,6 +343,9 @@ public static class QueryCommandHandler
             if (!string.IsNullOrWhiteSpace(response.DisambiguationHint))
                 output.WriteLine($"hint\t{Clean(response.DisambiguationHint)}");
         }
+        if (response.ExternalMatchesHidden > 0)
+            output.WriteLine($"externalMatches\t{response.ExternalMatchesHidden}\t--external lists them");
+        WriteCoverage(response.Coverage, "coverage\t{0}\t", output);
 
         foreach (var match in response.Matches)
         {
@@ -379,6 +387,8 @@ public static class QueryCommandHandler
 
         WriteAgentNodeCategory("uses", relationships.Uses, relationships.UsesReturnedCount,
             relationships.UsesCount, relationships.UsesTruncated, output);
+        if (relationships.UsesExternalHidden > 0)
+            output.WriteLine($"usesExternal\t{relationships.UsesExternalHidden}\t--external lists them");
         WriteAgentNodeCategory("usedBy", relationships.UsedBy, relationships.UsedByReturnedCount,
             relationships.UsedByCount, relationships.UsedByTruncated, output, showEmpty: true);
         WriteAgentNodeCategory("transitiveUses", relationships.TransitiveUses,
@@ -471,9 +481,20 @@ public static class QueryCommandHandler
         }
     }
 
+    /// <summary>Why an empty answer may not mean nothing is there.</summary>
+    private static void WriteCoverage(CoverageSummary? coverage, string prefix, TextWriter output)
+    {
+        if (coverage is null) return;
+        var more = coverage.IncompleteProjects - coverage.Names.Count;
+        var names = string.Join(", ", coverage.Names.Select(Clean)) + (more > 0 ? $" and {more} more" : string.Empty);
+        output.WriteLine(string.Format(CultureInfo.InvariantCulture, prefix, coverage.State)
+            + $"{coverage.IncompleteProjects} of {coverage.TotalProjects} projects analyzed without all they declare: {names}. "
+            + "This answer may be incomplete; codecontext status has details.");
+    }
+
     private static string? Location(CompactCodeNode node)
-        => string.IsNullOrEmpty(node.File)
-            ? null
+        => node.External is { } assembly ? $"external {assembly}"
+            : string.IsNullOrEmpty(node.File) ? null
             : $"{node.File}{(node.Line > 0 ? $":{node.Line}" : string.Empty)}";
 
     private static string? AgentSignature(CompactCodeNode node)
@@ -501,6 +522,7 @@ public static class QueryCommandHandler
         if (response.TotalMatches == 0 || response.Matches.Count == 0)
         {
             output.WriteLine($"No match: {requestedIdentifier}");
+            WriteCoverage(response.Coverage, "Coverage ({0}): ", output);
             return;
         }
 
@@ -512,6 +534,9 @@ public static class QueryCommandHandler
             if (!string.IsNullOrWhiteSpace(response.DisambiguationHint))
                 output.WriteLine($"Hint: {response.DisambiguationHint}");
         }
+        if (response.ExternalMatchesHidden > 0)
+            output.WriteLine($"Library symbols of this name: {response.ExternalMatchesHidden} (--external lists them)");
+        WriteCoverage(response.Coverage, "Coverage ({0}): ", output);
 
         for (var index = 0; index < response.Matches.Count; index++)
         {
@@ -520,8 +545,8 @@ public static class QueryCommandHandler
             var target = match.Target;
             output.WriteLine($"{target.Name ?? "<unnamed>"} [{target.Type ?? "Unknown"}]");
             output.WriteLine($"  Identifier: {target.Identifier}");
-            if (!string.IsNullOrEmpty(target.File))
-                output.WriteLine($"  Location: {target.File}{(target.Line > 0 ? $":{target.Line}" : string.Empty)}");
+            if (Location(target) is { } location)
+                output.WriteLine($"  Location: {location}");
             if (!string.IsNullOrEmpty(target.Signature))
                 output.WriteLine($"  Signature: {target.Signature}");
 
@@ -544,6 +569,8 @@ public static class QueryCommandHandler
 
         WriteNodeCategory("Uses", relationships.Uses, relationships.UsesReturnedCount,
             relationships.UsesCount, relationships.UsesTruncated, output);
+        if (relationships.UsesExternalHidden > 0)
+            output.WriteLine($"  Library symbols used: {relationships.UsesExternalHidden} (--external lists them)");
         WriteNodeCategory("Used by", relationships.UsedBy, relationships.UsedByReturnedCount,
             relationships.UsedByCount ?? 0, relationships.UsedByTruncated, output);
         WriteNodeCategory("Transitive uses", relationships.TransitiveUses,
