@@ -12,8 +12,8 @@ Use `codecontext list --json` to inspect registrations. Only after that, use
 A human can pre-warm the index before agent work with `codecontext init --path .`
 (add `--wait`) so the first query skips the cold-start scan.
 
-A changed project file or restore takes effect at the next source file change or
-`POST /api/index/refresh`. Projects are read from their files alone: nothing a repository
+Project files and restores are watched, so a changed `.csproj` or a `dotnet restore` takes
+effect without a source edit. Projects are read from their files alone: nothing a repository
 supplies is ever run, including MSBuild, analyzers and source generators. `Directory.Build.*`
 is searched up to the enclosing repository, or the indexed root when there is none. Each
 project is analyzed for one configuration and target: `Debug`, or the first it declares, and

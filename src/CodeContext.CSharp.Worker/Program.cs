@@ -209,7 +209,7 @@ internal sealed class CSharpWorkerHost(JsonRpcConnection connection)
             approvedFiles);
         var emitted = await PublishAsync(
             workspaceId, generation, requestId,
-            analysis.Nodes, analysis.Edges,
+            analysis.Nodes, analysis.Buckets.SelectMany(bucket => bucket.Edges).ToList(),
             replacesWorkspace: true, replacesFiles: [],
             analysis.Diagnostics, analysis.Coverage, ct);
         // Seed only after every chunk was sent, mirroring the incremental path's
@@ -220,9 +220,8 @@ internal sealed class CSharpWorkerHost(JsonRpcConnection connection)
     }
 
     /// <summary>
-    /// Incremental (applyChanges) path: re-walks the whole workspace for cross-file
-    /// binding correctness, then emits only the dirty buckets' facts scoped to the
-    /// dirty ∪ removed file set (every chunk flagged <c>replacesWorkspace:false</c> and
+    /// Incremental (applyChanges) path: walks what the changes could affect, then emits
+    /// only the dirty buckets' facts scoped to the dirty ∪ removed file set (every chunk flagged <c>replacesWorkspace:false</c> and
     /// carrying the full <c>replacesFiles</c> list). The per-file hash map is committed
     /// only after every chunk has been sent, so a failed emission cannot desync it.
     /// </summary>
@@ -233,7 +232,7 @@ internal sealed class CSharpWorkerHost(JsonRpcConnection connection)
         var emission = workspace.BuildIncrementalEmission(analysis);
         var emitted = await PublishAsync(
             workspaceId, generation, requestId,
-            emission.Nodes, emission.Edges,
+            emission.Nodes, emission.EdgeFacts,
             replacesWorkspace: false, replacesFiles: emission.ReplacesFiles,
             analysis.Diagnostics, analysis.Coverage, ct);
         workspace.CommitIncremental(emission);
@@ -248,7 +247,7 @@ internal sealed class CSharpWorkerHost(JsonRpcConnection connection)
     /// </summary>
     private async Task<int> PublishAsync(
         string workspaceId, long generation, long requestId,
-        List<ProtocolNode> allNodes, List<ProtocolEdge> allEdges,
+        List<ProtocolNode> allNodes, List<CSharpWorkspaceAnalyzer.EdgeFact> allEdges,
         bool replacesWorkspace, IReadOnlyList<string> replacesFiles,
         List<ProtocolDiagnostic> diagnostics, IReadOnlyList<ProjectCoverage> coverage, CancellationToken ct)
     {
@@ -262,8 +261,9 @@ internal sealed class CSharpWorkerHost(JsonRpcConnection connection)
             ct.ThrowIfCancellationRequested();
             IReadOnlyList<ProtocolNode> nodes = i < nodeChunks.Count ? nodeChunks[i] : [];
             var edgeIndex = i - nodeChunks.Count;
-            IReadOnlyList<ProtocolEdge> edges =
-                edgeIndex >= 0 && edgeIndex < edgeChunks.Count ? edgeChunks[edgeIndex] : [];
+            IReadOnlyList<ProtocolEdge> edges = edgeIndex >= 0 && edgeIndex < edgeChunks.Count
+                ? edgeChunks[edgeIndex].Select(edge => edge.ToProtocol()).ToList()
+                : [];
 
             var delta = new AnalysisDelta(
                 ParserId: ParserId,

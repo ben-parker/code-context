@@ -116,7 +116,8 @@ public sealed class CSharpWorkerPipeline : IAsyncDisposable
             MaxProtocolVersion: ParserProtocol.Version,
             Languages: ["csharp"],
             Extensions: [".cs"],
-            ProjectMarkers: [".csproj", ".sln"]);
+            ProjectMarkers: [".csproj", ".sln"],
+            ProjectInputs: [".csproj", ".props", ".targets", "project.assets.json", "global.json"]);
         return new RegisteredWorker(manifest, CSharpWorkerLaunchSpec(), ManifestPath: "<in-test>");
     }
 

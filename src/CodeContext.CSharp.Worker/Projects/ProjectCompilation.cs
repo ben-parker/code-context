@@ -54,7 +54,10 @@ internal sealed class ProjectCompilation
             Options);
     }
 
-    public ProjectInfo? Project { get; }
+    public ProjectInfo? Project { get; set; }
+
+    /// <summary>What the project read as when this unit was made, for telling if it still does.</summary>
+    public string? Signature { get; init; }
 
     /// <summary>The prefix of every id this unit's files own.</summary>
     public string IdPrefix { get; }
@@ -100,14 +103,27 @@ internal sealed class ProjectCompilation
         return text.ToString();
     }
 
-    public void SetText(string path, SourceText text)
+    /// <summary>
+    /// Takes in a file's text and says whether the change can reach other files. If it
+    /// cannot, units referencing this one keep their reference: the declarations they bind
+    /// against are the same, so a new one would only cost them everything they have bound.
+    /// </summary>
+    public bool SetText(string path, SourceText text)
     {
         var tree = CSharpSyntaxTree.ParseText(text, ParseOptions, path);
-        Compilation = _trees.TryGetValue(path, out var old)
-            ? Compilation.ReplaceSyntaxTree(old, tree)
-            : Compilation.AddSyntaxTrees(tree);
+        if (!_trees.TryGetValue(path, out var old))
+        {
+            Compilation = Compilation.AddSyntaxTrees(tree);
+            _trees[path] = tree;
+            Changed = true;
+            return true;
+        }
+
+        Compilation = Compilation.ReplaceSyntaxTree(old, tree);
         _trees[path] = tree;
-        Changed = true;
+        var visible = EditClassifier.CanAffectOtherFiles(old, tree);
+        Changed |= visible;
+        return visible;
     }
 
     /// <summary>Takes over a tree parsed with these options, sparing a reparse.</summary>
@@ -118,11 +134,12 @@ internal sealed class ProjectCompilation
         Changed = true;
     }
 
-    public void Remove(string path)
+    public bool Remove(string path)
     {
-        if (!_trees.Remove(path, out var tree)) return;
+        if (!_trees.Remove(path, out var tree)) return false;
         Compilation = Compilation.RemoveSyntaxTrees(tree);
         Changed = true;
+        return true;
     }
 
     /// <summary>

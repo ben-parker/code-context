@@ -575,6 +575,39 @@ public class CSharpWorkerProjectCompilationTests : IDisposable
     }
 
     [Fact]
+    public async Task ARestoreIsPickedUpWithNoSourceEdit()
+    {
+        Write("game/Game.csproj", Project());
+        Write("game/Player.cs", UsesEngine);
+        await using var pipeline = new CSharpWorkerPipeline(_root);
+        await pipeline.GraphUpdateService.PerformInitialScanAsync(_root, null, CancellationToken.None);
+        var edges = pipeline.RepositoryFactory.CreateEdgeRepository();
+        Assert.DoesNotContain(await edges.GetAllAsync(), edge => edge.Type == "CALLS" && edge.TargetId!.EndsWith(":Game.Item.Weigh()", StringComparison.Ordinal));
+
+        RestoredPackage("game/Game.csproj", "game/obj/project.assets.json");
+        await pipeline.GraphUpdateService.ProcessFileChangeAsync(
+            Path.Combine(_root, "game", "obj", "project.assets.json"), CodeContext.Core.Services.FileChangeType.Changed, CancellationToken.None);
+
+        Assert.Contains(await edges.GetAllAsync(), edge => edge.Type == "CALLS" && edge.TargetId!.EndsWith(":Game.Item.Weigh()", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task AProjectThatAppearsClaimsItsFilesWithNoSourceEdit()
+    {
+        Write("App/Code.cs", "public class Code {\n#if DEBUG\npublic void InDebug() { }\n#endif\n}");
+        await using var pipeline = new CSharpWorkerPipeline(_root);
+        await pipeline.GraphUpdateService.PerformInitialScanAsync(_root, null, CancellationToken.None);
+        var nodes = pipeline.RepositoryFactory.CreateNodeRepository();
+        Assert.DoesNotContain(await nodes.GetAllAsync(), node => node.Name == "InDebug");
+
+        var project = Write("App/App.csproj", Project());
+        await pipeline.GraphUpdateService.ProcessFileChangeAsync(
+            project, CodeContext.Core.Services.FileChangeType.Created, CancellationToken.None);
+
+        Assert.Contains(await nodes.GetAllAsync(), node => node.Name == "InDebug");
+    }
+
+    [Fact]
     public async Task CoverageReachesTheHostWhenAGenerationCommits()
     {
         Write("App/App.csproj", Project());

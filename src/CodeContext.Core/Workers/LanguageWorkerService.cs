@@ -19,6 +19,15 @@ public interface ILanguageWorkerService
 
     bool TryGetParserForExtension(string extension, out string parserId);
 
+    /// <summary>Finds the worker that declared this file a project input.</summary>
+    bool TryGetParserForProjectInput(string path, out string parserId);
+
+    /// <summary>
+    /// Tells a worker its project inputs changed, with no source file changing. It rereads
+    /// its projects and publishes whatever now binds differently.
+    /// </summary>
+    Task RefreshProjectsAsync(string parserId, CancellationToken ct = default);
+
     /// <summary>Builds (or replaces) the complete workspace generation from
     /// <paramref name="files"/>.</summary>
     Task IndexWorkspaceAsync(
@@ -111,6 +120,49 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
 
     public bool TryGetParserForExtension(string extension, out string parserId)
         => _extensionToParser.TryGetValue(extension, out parserId!);
+
+    public bool TryGetParserForProjectInput(string path, out string parserId)
+    {
+        var name = Path.GetFileName(path);
+        foreach (var state in _workers.Values)
+        {
+            foreach (var input in state.Registration.Manifest.ProjectInputs ?? [])
+            {
+                if (input.StartsWith('.')
+                    ? name.EndsWith(input, StringComparison.OrdinalIgnoreCase)
+                    : name.Equals(input, StringComparison.OrdinalIgnoreCase))
+                {
+                    parserId = state.Registration.Manifest.ParserId;
+                    return true;
+                }
+            }
+        }
+        parserId = string.Empty;
+        return false;
+    }
+
+    public async Task RefreshProjectsAsync(string parserId, CancellationToken ct = default)
+    {
+        var state = GetWorker(parserId);
+        await state.Lock.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            // Before a first index there is nothing to bring up to date.
+            if (!state.EverIndexed) return;
+
+            var supervisor = EnsureSupervisor(state);
+            var generation = ++state.Generation;
+            await supervisor.OpenWorkspaceAsync(new OpenWorkspaceParams(
+                DefaultWorkspaceId, _options.RootPath,
+                state.Registration.Manifest.ProjectMarkers ?? [], state.ApprovedFiles.ToList()), ct).ConfigureAwait(false);
+            await supervisor.ApplyChangesAsync(new ApplyChangesParams(
+                DefaultWorkspaceId, generation, []), ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            state.Lock.Release();
+        }
+    }
 
     public async Task IndexWorkspaceAsync(
         string parserId,

@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using CodeContext.Parser.Protocol;
 using Microsoft.CodeAnalysis;
 using static CodeContext.CSharp.Worker.CSharpWorkspaceAnalyzer;
@@ -14,7 +15,10 @@ namespace CodeContext.CSharp.Worker.Projects;
 /// forwarded between assemblies stays one node. It lives in a virtual file named for its
 /// namespace, so the ordinary file-scoped delta adds and removes it.
 /// </summary>
-internal sealed class ExternalSymbols(string workspacePrefix)
+internal sealed class ExternalSymbols(
+    string workspacePrefix,
+    ConcurrentDictionary<(string Id, string Assembly), ProtocolNode> stubs,
+    Func<string, string> share)
 {
     public const string AssemblyKey = "assembly";
 
@@ -24,7 +28,7 @@ internal sealed class ExternalSymbols(string workspacePrefix)
     private const string GlobalNamespace = "<global>";
 
     private readonly Dictionary<string, ProtocolNode> _nodes = new(StringComparer.Ordinal);
-    private readonly List<ProtocolEdge> _edges = [];
+    private readonly List<EdgeFact> _edges = [];
 
     /// <summary>True for a symbol that comes from a referenced assembly rather than source.</summary>
     public static bool IsExternal(ISymbol symbol)
@@ -35,15 +39,13 @@ internal sealed class ExternalSymbols(string workspacePrefix)
     /// <summary>Records the symbol and returns its id.</summary>
     public string Add(ISymbol symbol)
     {
-        var id = workspacePrefix + IdInfix + DisplayNameOf(symbol);
+        var id = share(workspacePrefix + IdInfix + DisplayNameOf(symbol));
         if (_nodes.ContainsKey(id)) return id;
 
-        _nodes[id] = ToNode(id, symbol);
+        _nodes[id] = stubs.GetOrAdd((id, symbol.ContainingAssembly.Name), key => ToNode(key.Id, symbol));
         if (symbol.ContainingType is { } type)
         {
-            var typeId = Add(type.OriginalDefinition);
-            var kind = ContainmentKind(symbol);
-            _edges.Add(new ProtocolEdge($"{typeId}=[{kind}]=>{id}", typeId, id, kind));
+            _edges.Add(new EdgeFact(Add(type.OriginalDefinition), id, ContainmentKind(symbol)));
         }
         return id;
     }
@@ -100,7 +102,7 @@ internal sealed class ExternalSymbols(string workspacePrefix)
     public static IEnumerable<FileFacts> ToBuckets(IEnumerable<ExternalSymbols> walked)
     {
         var nodes = new Dictionary<string, ProtocolNode>(StringComparer.Ordinal);
-        var edges = new Dictionary<string, ProtocolEdge>(StringComparer.Ordinal);
+        var edges = new HashSet<EdgeFact>();
         foreach (var symbols in walked)
         {
             foreach (var (id, node) in symbols._nodes)
@@ -111,16 +113,16 @@ internal sealed class ExternalSymbols(string workspacePrefix)
                     nodes[id] = node;
                 }
             }
-            foreach (var edge in symbols._edges) edges[edge.Id] = edge;
+            edges.UnionWith(symbols._edges);
         }
 
-        var edgesBySource = edges.Values.ToLookup(edge => edge.SourceId, StringComparer.Ordinal);
+        var edgesBySource = edges.ToLookup(edge => edge.SourceId, StringComparer.Ordinal);
         return nodes.Values
             .GroupBy(node => node.FilePath!, StringComparer.Ordinal)
             .OrderBy(group => group.Key, StringComparer.Ordinal)
             .Select(group => new FileFacts(
                 group.Key,
                 group.OrderBy(node => node.Id, StringComparer.Ordinal).ToList(),
-                group.SelectMany(node => edgesBySource[node.Id]).OrderBy(edge => edge.Id, StringComparer.Ordinal).ToList()));
+                group.SelectMany(node => edgesBySource[node.Id]).ToList()));
     }
 }

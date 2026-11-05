@@ -8,6 +8,7 @@ using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Collections.Immutable;
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -20,14 +21,15 @@ namespace CodeContext.CSharp.Worker;
 /// the references, constants and usings the project declares, plus one fallback compilation
 /// for files no project compiles. A workspace with no projects has only the fallback.
 ///
-/// The whole workspace is always re-walked (cross-file binding correctness requires it),
-/// but the emission is delta-native: facts are bucketed per walked file and each bucket
-/// carries a deterministic content hash. A full index seeds the hash map and replaces the
-/// whole workspace; an incremental apply diffs the freshly walked buckets against the
-/// stored hashes and emits only the DIRTY buckets (hash changed) plus the paths REMOVED
-/// since the last emission, scoping the host's replacement to exactly those files.
-/// Cross-file correctness falls out for free: editing base.cs so a dependent's edge
-/// resolves differently changes the dependent's bucket hash, so the dependent re-emits.
+/// Binding is nearly all the cost of analysis, so an edit binds as little as it can. The
+/// facts of every file are kept. An edit no other file can see re-walks that file alone; any
+/// other edit re-walks its project and what depends on it (see <see cref="EditClassifier"/>).
+///
+/// Emission is delta-native: facts are bucketed per file and each bucket carries a
+/// deterministic content hash. A full index seeds the hash map and replaces the whole
+/// workspace; an incremental apply diffs the buckets against the stored hashes and emits only
+/// the DIRTY buckets plus the paths REMOVED since the last emission, scoping the host's
+/// replacement to exactly those files.
 /// </summary>
 public sealed class CSharpWorkspaceAnalyzer
 {
@@ -48,6 +50,11 @@ public sealed class CSharpWorkspaceAnalyzer
     private static readonly Lazy<ToolchainLocations> Toolchain = new(ToolchainLocations.Detect);
 
     private const int MaxCommonUnresolvedNames = 5;
+
+    /// <summary>Binding parallelizes well to here; past it, threads mostly wait on each other.</summary>
+    private const int MaxWalkThreads = 8;
+
+    private const int MinWalkBatch = 32;
 
     /// <summary>
     /// Assemblies by path, shared across projects and workspaces. A shared instance is what
@@ -73,6 +80,29 @@ public sealed class CSharpWorkspaceAnalyzer
 
     /// <summary>The unit each file's facts come from, and so the prefix of the ids it owns.</summary>
     private readonly Dictionary<string, ProjectCompilation> _owners = new(PathComparer);
+
+    /// <summary>What each file's last walk found, before ownership between files is settled.</summary>
+    private readonly Dictionary<string, WalkedFile> _walked = new(PathComparer);
+
+    /// <summary>The facts held under each file, ownership settled. Rebuilt only when they can differ.</summary>
+    private readonly Dictionary<string, FileFacts> _buckets = new(PathComparer);
+
+    /// <summary>Files changed since the last walk in a way only they can see.</summary>
+    private readonly HashSet<string> _changedFiles = new(PathComparer);
+
+    /// <summary>Units whose files, and whose dependents' files, must be walked again.</summary>
+    private readonly HashSet<ProjectCompilation> _changedUnits = [];
+
+    /// <summary>Ids emitted by more than one file, with those files, as of the last analysis.</summary>
+    private Dictionary<string, List<string>> _sharedIds = new(StringComparer.Ordinal);
+
+    /// <summary>Identifiers more than one symbol would carry, as of the last analysis.</summary>
+    private HashSet<string> _contestedIdentifiers = new(StringComparer.Ordinal);
+
+    /// <summary>Id strings by value, so the many edges naming a symbol share one string.</summary>
+    private readonly ConcurrentDictionary<string, string> _idStrings = new(StringComparer.Ordinal);
+
+    private readonly ConcurrentDictionary<(string Id, string Assembly), ProtocolNode> _stubs = new();
 
     /// <summary>
     /// Per-file content hash of the facts last emitted for that file, keyed by the exact
@@ -173,49 +203,120 @@ public sealed class CSharpWorkspaceAnalyzer
     /// dropped, newly approved files are loaded from disk. Cached trees for still-approved
     /// files are kept as-is (changes arrive via <see cref="ApplyChanges"/>). This runs on
     /// every workspace/open, which the host sends before each mutation, so a restarted
-    /// worker self-heals its state here. A changed project input rebuilds the units, and the
-    /// fact diff then re-emits whatever now binds differently.
+    /// worker self-heals its state here. A changed project input rebuilds what it affects,
+    /// and the fact diff then re-emits whatever now binds differently.
     /// </summary>
     public void SyncApprovedFiles(IReadOnlyList<string> approvedFiles, CancellationToken ct)
     {
-        if (_model is not null && !_model.InputsChanged() && _files.SetEquals(approvedFiles)) return;
-        if (_model is null && _rootPath is null && _files.SetEquals(approvedFiles)) return;
-        Rebuild(approvedFiles, reuseTrees: true, ct);
+        if (_rootPath is not null && (_model is null || _model.InputsChanged()))
+        {
+            Rebuild(approvedFiles, reuse: true, ct);
+            return;
+        }
+        if (_files.SetEquals(approvedFiles)) return;
+
+        var approved = new HashSet<string>(approvedFiles, PathComparer);
+        var added = approvedFiles.Where(path => !_files.Contains(path)).ToList();
+
+        // A file no known project compiles may belong to a project that had none until now.
+        if (_model is not null && added.Exists(path => _model.ProjectsCompiling(path).Count == 0))
+        {
+            Rebuild(approvedFiles, reuse: true, ct);
+            return;
+        }
+
+        foreach (var stale in _files.Where(path => !approved.Contains(path)).ToList())
+        {
+            DropFile(stale);
+        }
+        foreach (var path in added)
+        {
+            ct.ThrowIfCancellationRequested();
+            LoadFile(path);
+        }
+        _files = approved;
     }
 
     /// <summary>Replaces the workspace file set entirely and reparses everything.</summary>
     public void ReplaceFiles(IReadOnlyList<string> files, CancellationToken ct)
-        => Rebuild(files, reuseTrees: false, ct);
+        => Rebuild(files, reuse: false, ct);
 
     /// <summary>
-    /// Reads the projects again and rebuilds every unit, keeping a tree when its file is
-    /// still compiled the same way so only what changed is parsed.
+    /// Reads the projects again. A project that reads as it did keeps its unit and so its
+    /// facts, unless something it references changed; any other gets a new unit, keeping
+    /// each tree whose file is still parsed the same way.
     /// </summary>
-    private void Rebuild(IReadOnlyList<string> files, bool reuseTrees, CancellationToken ct)
+    private void Rebuild(IReadOnlyList<string> files, bool reuse, CancellationToken ct)
     {
-        var previous = reuseTrees ? _units : [];
+        var previous = reuse ? _units : [];
+        if (!reuse)
+        {
+            _walked.Clear();
+            _buckets.Clear();
+            _idStrings.Clear();
+        }
+
         _model = _rootPath is null ? null : ProjectModel.Load(_rootPath, files, Toolchain.Value, ct);
         _files = new HashSet<string>(files, PathComparer);
         _owners.Clear();
         _unitByProject.Clear();
 
+        var filesByProject = new Dictionary<ProjectInfo, List<string>>();
+        foreach (var path in files)
+        {
+            foreach (var project in _model?.ProjectsCompiling(path) ?? [])
+            {
+                if (!filesByProject.TryGetValue(project, out var list)) filesByProject[project] = list = [];
+                list.Add(path);
+            }
+        }
+
         var units = new List<ProjectCompilation>();
+        var kept = new HashSet<ProjectCompilation>();
         foreach (var project in _model?.Projects ?? [])
         {
-            var unit = new ProjectCompilation(
-                project,
-                _workspaceIdPrefix + project.Key + ":",
-                ProjectCompilation.ParseOptionsFor(project),
-                ReferencesFor(project));
-            unit.References.AddRange(project.ProjectReferences.Select(reference => _unitByProject[reference]));
+            var signature = Signature(project, filesByProject.GetValueOrDefault(project) ?? []);
+            var references = project.ProjectReferences.Select(reference => _unitByProject[reference]).ToList();
+            var existing = previous.Find(unit => unit.Project?.Key == project.Key);
+            ProjectCompilation unit;
+            if (existing?.Signature == signature && references.TrueForAll(kept.Contains))
+            {
+                unit = existing;
+                unit.Project = project;
+                kept.Add(unit);
+            }
+            else
+            {
+                unit = new ProjectCompilation(
+                    project,
+                    _workspaceIdPrefix + project.Key + ":",
+                    ProjectCompilation.ParseOptionsFor(project),
+                    ReferencesFor(project)) { Signature = signature };
+                _changedUnits.Add(unit);
+            }
+            unit.References.Clear();
+            unit.References.AddRange(references);
             _unitByProject[project] = unit;
             units.Add(unit);
         }
 
-        _fallback = CreateFallback(_model?.Projects ?? []);
-        _fallback.References.AddRange(units);
-        units.Add(_fallback);
+        var fallback = CreateFallback(_model?.Projects ?? []);
+        fallback.References.AddRange(units);
+        var previousFallback = previous.Find(unit => unit.Project is null);
+        if (previousFallback is not null && units.TrueForAll(kept.Contains) && units.Count == previous.Count - 1
+            && previousFallback.Trees.Keys.All(path => _model?.ProjectsCompiling(path).Count is null or 0)
+            && files.All(path => _model?.ProjectsCompiling(path).Count > 0 || previousFallback.Trees.ContainsKey(path)))
+        {
+            fallback = previousFallback;
+        }
+        else
+        {
+            _changedUnits.Add(fallback);
+        }
+        _fallback = fallback;
+        units.Add(fallback);
         _units = units;
+        _changedUnits.RemoveWhere(unit => !units.Contains(unit));
 
         foreach (var path in files)
         {
@@ -224,7 +325,8 @@ public sealed class CSharpWorkspaceAnalyzer
             SourceText? text = null;
             foreach (var unit in compiling)
             {
-                var reusable = previous.FirstOrDefault(old => old.Trees.ContainsKey(path)
+                if (unit.Trees.ContainsKey(path)) continue;
+                var reusable = previous.Find(old => old.Trees.ContainsKey(path)
                     && old.ParseOptions.Equals(unit.ParseOptions));
                 if (reusable is not null)
                 {
@@ -237,6 +339,24 @@ public sealed class CSharpWorkspaceAnalyzer
             }
             if (compiling[0].Trees.ContainsKey(path)) _owners[path] = compiling[0];
         }
+    }
+
+    /// <summary>Everything about a project that decides how its files bind.</summary>
+    private static string Signature(ProjectInfo project, List<string> files)
+    {
+        var text = new StringBuilder()
+            .AppendJoin('\n', project.PreprocessorSymbols).Append('\0')
+            .Append(project.LanguageVersion).Append('\0')
+            .Append(project.AssemblyName).Append('\0')
+            .Append(project.GlobalUsings).Append('\0')
+            .AppendJoin('\n', project.InternalsVisibleTo).Append('\0')
+            .AppendJoin('\n', project.ProjectReferences.Select(reference => reference.Key)).Append('\0');
+        foreach (var path in project.MetadataReferences)
+        {
+            text.Append(path).Append('|').Append(File.GetLastWriteTimeUtc(path).Ticks).Append('\n');
+        }
+        text.Append('\0').AppendJoin('\n', files.Order(StringComparer.Ordinal));
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text.ToString())));
     }
 
     private List<ProjectCompilation> UnitsCompiling(string path)
@@ -273,9 +393,16 @@ public sealed class CSharpWorkspaceAnalyzer
     }
 
     /// <summary>Applies an ordered change batch: deleted files drop their tree, all
-    /// other change kinds re-read the file from disk.</summary>
+    /// other change kinds re-read the file from disk. An empty batch means a project input
+    /// changed, which may be a project nothing has read yet, so projects are read again.</summary>
     public void ApplyChanges(IReadOnlyList<FileChangeDto> changes, CancellationToken ct)
     {
+        if (changes.Count == 0 && _rootPath is not null)
+        {
+            Rebuild(_files.ToList(), reuse: true, ct);
+            return;
+        }
+
         foreach (var change in changes)
         {
             ct.ThrowIfCancellationRequested();
@@ -300,7 +427,10 @@ public sealed class CSharpWorkspaceAnalyzer
     {
         _owners.Remove(path);
         _files.Remove(path);
-        foreach (var unit in _units) unit.Remove(path);
+        foreach (var unit in _units)
+        {
+            if (unit.Remove(path)) _changedUnits.Add(unit);
+        }
     }
 
     private void LoadFile(string path)
@@ -313,9 +443,16 @@ public sealed class CSharpWorkspaceAnalyzer
         }
 
         var compiling = UnitsCompiling(path);
-        foreach (var unit in compiling) unit.SetText(path, text);
+        var visibleElsewhere = false;
+        foreach (var unit in compiling)
+        {
+            visibleElsewhere |= unit.SetText(path, text);
+        }
         _owners[path] = compiling[0];
         _files.Add(path);
+
+        if (visibleElsewhere) _changedUnits.UnionWith(compiling);
+        else _changedFiles.Add(path);
     }
 
     /// <summary>The file's text, or null with a diagnostic telling the host why not.</summary>
@@ -348,121 +485,234 @@ public sealed class CSharpWorkspaceAnalyzer
         foreach (var unit in _units) unit.RefreshReferences();
         foreach (var unit in _units) unit.ClearChanged();
 
-        // Walk each tree into its own bucket, then concatenate the buckets to build the
-        // flat whole-workspace lists, so each file's nodes/edges stay contiguous in walk order.
-        var rawBuckets = new List<FileFacts>(_owners.Count);
-        var walked = new List<ExternalSymbols>(_owners.Count);
-        var unresolved = new Dictionary<ProjectCompilation, Dictionary<string, int>>();
-        var total = progressFiles?.Count ?? _owners.Count;
-        var processed = 0;
+        var pending = FilesToWalk();
+        var requested = progressFiles ?? pending.ToList();
+        var total = requested.Count;
         if (total == 0 && progress is not null)
         {
             await progress(0, 0, null);
         }
-        if (progressFiles is null)
-        {
-            foreach (var path in _owners.Keys)
-            {
-                rawBuckets.Add(AnalyzeFile(path));
-            }
-        }
-        else
-        {
-            // Progress is defined over the approved request, including files that
-            // disappeared or could not be read. Those paths produce diagnostics and
-            // no facts, but still count as completed analysis attempts.
-            foreach (var path in progressFiles)
-            {
-                ct.ThrowIfCancellationRequested();
-                if (_owners.ContainsKey(path))
-                {
-                    rawBuckets.Add(AnalyzeFile(path));
-                }
-                processed++;
-                if (progress is not null && ShouldReportProgress(processed, total))
-                {
-                    await progress(processed, total, path);
-                }
-            }
-        }
 
-        FileFacts AnalyzeFile(string path)
+        // Progress is defined over the approved request, including files that disappeared
+        // or could not be read: those produce no facts, but still count as attempted.
+        var batchSize = Math.Max(MinWalkBatch, (total + 99) / 100);
+        var options = new ParallelOptions
+        {
+            MaxDegreeOfParallelism = Math.Clamp(Environment.ProcessorCount, 1, MaxWalkThreads),
+            CancellationToken = ct,
+        };
+        var walkedNow = new HashSet<string>(PathComparer);
+        for (var start = 0; start < total; start += batchSize)
         {
             ct.ThrowIfCancellationRequested();
-            var unit = _owners[path];
-            var tree = unit.Trees[path];
-            var semanticModel = unit.Compilation.GetSemanticModel(tree);
-            var bucketNodes = new List<ProtocolNode>();
-            var bucketEdges = new List<ProtocolEdge>();
-            var externals = new ExternalSymbols(_workspaceIdPrefix);
-            var walker = new GraphWalker(
-                semanticModel, tree.FilePath, unit.IdPrefix, _owners, externals, bucketNodes, bucketEdges);
-            walker.Visit(tree.GetRoot(ct));
-            walked.Add(externals);
-            walker.AddUnresolvedNamesTo(unresolved, unit);
-            return new FileFacts(tree.FilePath, bucketNodes, bucketEdges);
-        }
-
-        rawBuckets.AddRange(ExternalSymbols.ToBuckets(walked));
-
-        // Duplicate-id canonicalization. A node or edge id can be emitted by more than
-        // one file (partial types split across files; base lists repeated on partial
-        // declarations). The winner must be a pure function of the file SET, never of
-        // edit order: incremental emission re-sends only dirty buckets, so a winner that
-        // depended on which file was analyzed or edited last would make the incremental
-        // graph diverge from a fresh scan of the identical tree. Rule: the bucket with
-        // the ordinally smallest FilePath owns the id; within one bucket the last
-        // occurrence wins (matching the old per-file flat-walk behavior). Buckets are
-        // recomputed from the full walk on every analysis, so deleting the canonical
-        // file moves the id into the ordinal-next survivor's bucket, flipping that
-        // bucket's hash and re-emitting it — convergence needs no extra bookkeeping.
-        var nodeOwner = ComputeOwners(rawBuckets, static b => b.Nodes, static n => n.Id);
-        var edgeOwner = ComputeOwners(rawBuckets, static b => b.Edges, static e => e.Id);
-
-        // A bucket must hold exactly what the host replaces as one unit, and the host
-        // removes an edge along with its source node. So an edge belongs to the file that
-        // owns its source node, not the file whose walk found it: `partial class C` in two
-        // files has one node in one file, yet both walks emit edges from it. Bucketing
-        // those under the file that found them would let an edit of the node's file lose
-        // the other file's edges, and an edit of the other file leave its old edges behind.
-        // With this rule any change to such an edge flips the owning file's hash, so both
-        // directions re-emit through the ordinary dirty diff.
-        var edgesByFile = new Dictionary<string, List<ProtocolEdge>>(StringComparer.Ordinal);
-        foreach (var raw in rawBuckets)
-        {
-            foreach (var edge in FilterOwned(raw.Edges, static e => e.Id, edgeOwner, raw.FilePath))
+            var batch = requested.Skip(start).Take(batchSize).Where(pending.Contains).ToList();
+            var walks = new WalkedFile[batch.Count];
+            Parallel.For(0, batch.Count, options, index => walks[index] = WalkFile(batch[index], ct));
+            for (var index = 0; index < batch.Count; index++)
             {
-                var file = nodeOwner.GetValueOrDefault(edge.SourceId, raw.FilePath);
-                if (!edgesByFile.TryGetValue(file, out var fileEdges))
+                _walked[batch[index]] = walks[index];
+                walkedNow.Add(batch[index]);
+            }
+
+            for (var processed = start + 1; progress is not null && processed <= Math.Min(start + batchSize, total); processed++)
+            {
+                if (ShouldReportProgress(processed, total))
                 {
-                    edgesByFile[file] = fileEdges = [];
+                    await progress(processed, total, requested[processed - 1]);
                 }
-                fileEdges.Add(edge);
             }
         }
 
-        var buckets = new List<FileFacts>(rawBuckets.Count);
-        var nodes = new List<ProtocolNode>();
-        var edges = new List<ProtocolEdge>();
-        var contested = ContestedIdentifiers(rawBuckets);
-        foreach (var raw in rawBuckets)
-        {
-            var keptNodes = Qualify(
-                FilterOwned(raw.Nodes, static n => n.Id, nodeOwner, raw.FilePath), contested);
-            var keptEdges = edgesByFile.GetValueOrDefault(raw.FilePath) ?? [];
-            nodes.AddRange(keptNodes);
-            edges.AddRange(keptEdges);
-            buckets.Add(new FileFacts(raw.FilePath, keptNodes, keptEdges));
-        }
+        var removed = _walked.Keys.Where(path => !_owners.ContainsKey(path)).ToList();
+        foreach (var path in removed) _walked.Remove(path);
+        _changedFiles.Clear();
+        _changedUnits.Clear();
 
+        var buckets = SettleOwnership(walkedNow, removed);
         var diagnostics = _pendingDiagnostics.ToList();
         _pendingDiagnostics.Clear();
-        return new AnalysisResult(nodes, edges, diagnostics, buckets) { Coverage = BuildCoverage(unresolved) };
+        return new AnalysisResult(diagnostics, buckets) { Coverage = BuildCoverage() };
     }
 
-    private List<ProjectCoverage> BuildCoverage(Dictionary<ProjectCompilation, Dictionary<string, int>> unresolved)
+    private static bool ShouldReportProgress(int processed, int total)
+    {
+        if (processed == total) return true;
+        var interval = Math.Max(1, (total + 99) / 100);
+        return processed % interval == 0;
+    }
+
+    /// <summary>
+    /// What must be walked: files edited on their own, every file of a changed unit and of
+    /// what depends on it, and anything not walked yet. A unit lists its references
+    /// transitively, so one pass finds every dependent.
+    /// </summary>
+    private HashSet<string> FilesToWalk()
+    {
+        var affected = _units
+            .Where(unit => _changedUnits.Contains(unit) || unit.References.Exists(_changedUnits.Contains))
+            .ToHashSet();
+        var files = new HashSet<string>(_changedFiles.Where(_owners.ContainsKey), PathComparer);
+        foreach (var (path, unit) in _owners)
+        {
+            if (affected.Contains(unit) || !_walked.ContainsKey(path)) files.Add(path);
+        }
+        return files;
+    }
+
+    private WalkedFile WalkFile(string path, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        var unit = _owners[path];
+        var tree = unit.Trees[path];
+        var nodes = new List<ProtocolNode>();
+        var edges = new List<EdgeFact>();
+        var externals = new ExternalSymbols(_workspaceIdPrefix, _stubs, Share);
+        var walker = new GraphWalker(
+            unit.Compilation.GetSemanticModel(tree), tree.FilePath, unit.IdPrefix, _owners, externals, Share, nodes, edges);
+        walker.Visit(tree.GetRoot(ct));
+        nodes.TrimExcess();
+        edges.TrimExcess();
+        return new WalkedFile(unit, nodes, edges, externals, walker.UnresolvedNames);
+    }
+
+    private string Share(string id) => _idStrings.GetOrAdd(id, id);
+
+    /// <summary>
+    /// Settles which file holds each fact, a pure function of the file SET and never of edit
+    /// order, or an incremental graph would diverge from a fresh scan. A node or edge id can
+    /// be emitted by more than one file (partial types; base lists repeated on partial
+    /// declarations). The ordinally smallest emitting path owns a node, and an edge belongs
+    /// to the file owning its source node, because the host removes an edge along with that
+    /// node: a bucket must hold exactly what the host replaces as one unit.
+    ///
+    /// Only files that could have changed are rebuilt: those just walked, those sharing an
+    /// id with them, and those whose identifier gained or lost a rival.
+    /// </summary>
+    private List<FileFacts> SettleOwnership(HashSet<string> walkedNow, List<string> removed)
+    {
+        var owners = new Dictionary<string, string>(StringComparer.Ordinal);
+        var shared = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        foreach (var (path, walked) in _walked)
+        {
+            foreach (var node in walked.Nodes)
+            {
+                if (!owners.TryGetValue(node.Id, out var current))
+                {
+                    owners[node.Id] = path;
+                }
+                else if (current != path)
+                {
+                    if (!shared.TryGetValue(node.Id, out var files)) shared[node.Id] = files = [current];
+                    if (!files.Contains(path)) files.Add(path);
+                    if (string.CompareOrdinal(path, current) < 0) owners[node.Id] = path;
+                }
+            }
+        }
+
+        var stubBuckets = ExternalSymbols.ToBuckets(_walked.Values.Select(walked => walked.Externals)).ToList();
+
+        var holders = new Dictionary<string, string>(StringComparer.Ordinal);
+        var contested = new HashSet<string>(StringComparer.Ordinal);
+        var filesByIdentifier = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        void Hold(ProtocolNode node, string? file)
+        {
+            if (!holders.TryAdd(node.Identifier, node.Id) && holders[node.Identifier] != node.Id)
+            {
+                contested.Add(node.Identifier);
+            }
+            if (file is null) return;
+            if (!filesByIdentifier.TryGetValue(node.Identifier, out var files)) filesByIdentifier[node.Identifier] = files = [];
+            if (!files.Contains(file)) files.Add(file);
+        }
+        foreach (var (path, walked) in _walked)
+        {
+            foreach (var node in walked.Nodes) Hold(node, path);
+        }
+        foreach (var bucket in stubBuckets)
+        {
+            foreach (var node in bucket.Nodes) Hold(node, null);
+        }
+
+        var rebuild = new HashSet<string>(walkedNow, PathComparer);
+        var touched = new HashSet<string>(walkedNow, PathComparer);
+        touched.UnionWith(removed);
+        foreach (var files in _sharedIds.Values.Concat(shared.Values))
+        {
+            if (files.Exists(touched.Contains)) rebuild.UnionWith(files);
+        }
+        foreach (var identifier in contested.Where(item => !_contestedIdentifiers.Contains(item))
+                     .Concat(_contestedIdentifiers.Where(item => !contested.Contains(item))))
+        {
+            if (filesByIdentifier.TryGetValue(identifier, out var files)) rebuild.UnionWith(files);
+        }
+
+        foreach (var path in removed) _buckets.Remove(path);
+        foreach (var path in rebuild)
+        {
+            if (_walked.ContainsKey(path)) _buckets[path] = BuildBucket(path, owners, shared, contested);
+        }
+        _sharedIds = shared;
+        _contestedIdentifiers = contested;
+
+        var result = new List<FileFacts>(_buckets.Count + stubBuckets.Count);
+        result.AddRange(_buckets.Values);
+        result.AddRange(stubBuckets.Select(bucket => contested.Count == 0 ? bucket : bucket with { Nodes = Qualify(bucket.Nodes, contested) }));
+        return result;
+    }
+
+    private FileFacts BuildBucket(
+        string path,
+        Dictionary<string, string> owners,
+        Dictionary<string, List<string>> shared,
+        HashSet<string> contested)
+    {
+        var walked = _walked[path];
+
+        // Among within-file duplicates of an id, the last occurrence wins.
+        var last = new Dictionary<string, int>(walked.Nodes.Count, StringComparer.Ordinal);
+        for (var index = 0; index < walked.Nodes.Count; index++) last[walked.Nodes[index].Id] = index;
+        var nodes = new List<ProtocolNode>(last.Count);
+        for (var index = 0; index < walked.Nodes.Count; index++)
+        {
+            var node = walked.Nodes[index];
+            if (last[node.Id] == index && owners[node.Id] == path) nodes.Add(node);
+        }
+
+        var edges = new HashSet<EdgeFact>();
+        foreach (var edge in walked.Edges)
+        {
+            if (!owners.TryGetValue(edge.SourceId, out var owner) || owner == path) edges.Add(edge);
+        }
+        foreach (var node in nodes)
+        {
+            if (!shared.TryGetValue(node.Id, out var files)) continue;
+            foreach (var file in files)
+            {
+                if (file == path) continue;
+                foreach (var edge in _walked[file].Edges)
+                {
+                    if (edge.SourceId == node.Id) edges.Add(edge);
+                }
+            }
+        }
+
+        return new FileFacts(path, Qualify(nodes, contested), edges.ToList());
+    }
+
+    private List<ProjectCoverage> BuildCoverage()
     {
         var files = _owners.Values.GroupBy(unit => unit).ToDictionary(group => group.Key, group => group.Count());
+        var unresolved = new Dictionary<ProjectCompilation, Dictionary<string, int>>();
+        foreach (var walked in _walked.Values)
+        {
+            if (walked.UnresolvedNames is not { } own) continue;
+            if (!unresolved.TryGetValue(walked.Unit, out var names))
+            {
+                unresolved[walked.Unit] = names = new Dictionary<string, int>(StringComparer.Ordinal);
+            }
+            foreach (var (name, count) in own) names[name] = names.GetValueOrDefault(name) + count;
+        }
+
         var coverage = new List<ProjectCoverage>();
         foreach (var unit in _units)
         {
@@ -514,21 +764,6 @@ public sealed class CSharpWorkspaceAnalyzer
 
     private static IReadOnlyList<string>? NullIfEmpty(IReadOnlyList<string> items) => items.Count == 0 ? null : items;
 
-    /// <summary>The public identifiers more than one symbol would carry.</summary>
-    private static HashSet<string> ContestedIdentifiers(List<FileFacts> buckets)
-    {
-        var holders = new Dictionary<string, string>(StringComparer.Ordinal);
-        var contested = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var node in buckets.SelectMany(bucket => bucket.Nodes))
-        {
-            if (!holders.TryAdd(node.Identifier, node.Id) && holders[node.Identifier] != node.Id)
-            {
-                contested.Add(node.Identifier);
-            }
-        }
-        return contested;
-    }
-
     /// <summary>
     /// Gives each symbol sharing an identifier its project's name. All of them change
     /// together, so a bare identifier never quietly means one of several.
@@ -557,64 +792,33 @@ public sealed class CSharpWorkspaceAnalyzer
             ? symbol.ToDisplayString() + "[static]"
             : symbol.ToDisplayString();
 
-    private static bool ShouldReportProgress(int processed, int total)
-    {
-        if (processed == total) return true;
-        var interval = Math.Max(1, (total + 99) / 100);
-        return processed % interval == 0;
-    }
-
-    /// <summary>Maps each fact id to the ordinally smallest FilePath that emits it.</summary>
-    private static Dictionary<string, string> ComputeOwners<T>(
-        List<FileFacts> buckets,
-        Func<FileFacts, List<T>> facts,
-        Func<T, string> id)
-    {
-        var owner = new Dictionary<string, string>(StringComparer.Ordinal);
-        foreach (var bucket in buckets)
-        {
-            foreach (var fact in facts(bucket))
-            {
-                var key = id(fact);
-                if (!owner.TryGetValue(key, out var current)
-                    || string.CompareOrdinal(bucket.FilePath, current) < 0)
-                {
-                    owner[key] = bucket.FilePath;
-                }
-            }
-        }
-        return owner;
-    }
-
     /// <summary>
-    /// Keeps only the facts this bucket canonically owns; among within-bucket duplicates
-    /// of an id, keeps the last occurrence. Returns the original list when nothing was
-    /// dropped (the overwhelmingly common no-duplicates case).
+    /// One edge as a value. The wire form carries a long id and a metadata dictionary, which
+    /// across a large workspace cost more than everything else this process holds; both
+    /// derive from these fields, so they exist only while being sent.
     /// </summary>
-    private static List<T> FilterOwned<T>(
-        List<T> items,
-        Func<T, string> id,
-        Dictionary<string, string> owner,
-        string filePath)
+    public readonly record struct EdgeFact(string SourceId, string TargetId, string Kind, int Line = -1, int Column = -1)
     {
-        var lastIndex = new Dictionary<string, int>(StringComparer.Ordinal);
-        for (var i = 0; i < items.Count; i++)
-        {
-            lastIndex[id(items[i])] = i;
-        }
+        public string Id => $"{SourceId}=[{Kind}]=>{TargetId}" + (Line >= 0 ? $"@{Line}:{Column}" : string.Empty);
 
-        var kept = new List<T>(items.Count);
-        for (var i = 0; i < items.Count; i++)
-        {
-            var key = id(items[i]);
-            if (lastIndex[key] == i && owner[key] == filePath)
-            {
-                kept.Add(items[i]);
-            }
-        }
-
-        return kept.Count == items.Count ? items : kept;
+        public ProtocolEdge ToProtocol() => new(
+            Id, SourceId, TargetId, Kind,
+            Line >= 0
+                ? new Dictionary<string, string>
+                {
+                    ["line"] = Line.ToString(CultureInfo.InvariantCulture),
+                    ["column"] = Column.ToString(CultureInfo.InvariantCulture),
+                }
+                : null);
     }
+
+    /// <summary>What one walk of one file found, kept so an untouched file is not walked again.</summary>
+    private sealed record WalkedFile(
+        ProjectCompilation Unit,
+        List<ProtocolNode> Nodes,
+        List<EdgeFact> Edges,
+        ExternalSymbols Externals,
+        Dictionary<string, int>? UnresolvedNames);
 
     /// <summary>The facts the host holds under one file: the nodes it owns and the edges
     /// sourced at those nodes, wherever they were found. <see cref="FilePath"/> is the
@@ -623,18 +827,32 @@ public sealed class CSharpWorkspaceAnalyzer
     public sealed record FileFacts(
         string FilePath,
         List<ProtocolNode> Nodes,
-        List<ProtocolEdge> Edges);
-
-    public sealed record AnalysisResult(
-        List<ProtocolNode> Nodes,
-        List<ProtocolEdge> Edges,
-        List<ProtocolDiagnostic> Diagnostics,
-        IReadOnlyList<FileFacts> Buckets)
+        List<EdgeFact> Edges)
     {
-        public IReadOnlySet<string> NodeIds { get; } = Nodes.Select(n => n.Id).ToHashSet(StringComparer.Ordinal);
+        /// <summary>Set once computed: a bucket is rebuilt, never changed.</summary>
+        internal byte[]? Hash { get; set; }
+    }
+
+    public sealed class AnalysisResult(List<ProtocolDiagnostic> diagnostics, IReadOnlyList<FileFacts> buckets)
+    {
+        private List<ProtocolNode>? _nodes;
+        private List<ProtocolEdge>? _edges;
+        private HashSet<string>? _nodeIds;
+
+        public List<ProtocolDiagnostic> Diagnostics { get; } = diagnostics;
+        public IReadOnlyList<FileFacts> Buckets { get; } = buckets;
 
         /// <summary>What each project could and could not see.</summary>
         public IReadOnlyList<ProjectCoverage> Coverage { get; init; } = [];
+
+        public List<ProtocolNode> Nodes => _nodes ??= Buckets.SelectMany(bucket => bucket.Nodes).ToList();
+
+        /// <summary>The wire form of every edge. Sending walks <see cref="Buckets"/> instead.</summary>
+        public List<ProtocolEdge> Edges
+            => _edges ??= Buckets.SelectMany(bucket => bucket.Edges).Select(edge => edge.ToProtocol()).ToList();
+
+        public IReadOnlySet<string> NodeIds
+            => _nodeIds ??= Buckets.SelectMany(bucket => bucket.Nodes).Select(node => node.Id).ToHashSet(StringComparer.Ordinal);
     }
 
     /// <summary>
@@ -649,20 +867,21 @@ public sealed class CSharpWorkspaceAnalyzer
     {
         internal IncrementalEmission(
             List<ProtocolNode> nodes,
-            List<ProtocolEdge> edges,
+            List<EdgeFact> edgeFacts,
             List<string> replacesFiles,
             Dictionary<string, byte[]> pendingHashes,
             List<string> removedPaths)
         {
             Nodes = nodes;
-            Edges = edges;
+            EdgeFacts = edgeFacts;
             ReplacesFiles = replacesFiles;
             _pendingHashes = pendingHashes;
             _removedPaths = removedPaths;
         }
 
         public List<ProtocolNode> Nodes { get; }
-        public List<ProtocolEdge> Edges { get; }
+        public List<EdgeFact> EdgeFacts { get; }
+        public List<ProtocolEdge> Edges => EdgeFacts.ConvertAll(edge => edge.ToProtocol());
 
         /// <summary>Dirty ∪ removed, verbatim paths; repeated on every emitted chunk.</summary>
         public List<string> ReplacesFiles { get; }
@@ -703,7 +922,7 @@ public sealed class CSharpWorkspaceAnalyzer
     public IncrementalEmission BuildIncrementalEmission(AnalysisResult analysis)
     {
         var nodes = new List<ProtocolNode>();
-        var edges = new List<ProtocolEdge>();
+        var edges = new List<EdgeFact>();
         var replacesFiles = new List<string>();
         var pendingHashes = new Dictionary<string, byte[]>(PathComparer);
         var currentPaths = new HashSet<string>(PathComparer);
@@ -757,6 +976,8 @@ public sealed class CSharpWorkspaceAnalyzer
     /// </summary>
     private static byte[] ComputeBucketHash(FileFacts bucket, IReadOnlySet<string> nodeIds)
     {
+        if (bucket.Hash is { } known) return known;
+
         using var hasher = new FactHasher();
         hasher.Int(bucket.Nodes.Count);
         foreach (var node in bucket.Nodes.OrderBy(n => n.Id, StringComparer.Ordinal))
@@ -780,16 +1001,21 @@ public sealed class CSharpWorkspaceAnalyzer
             hasher.Metadata(node.Metadata);
         }
         hasher.Int(bucket.Edges.Count);
-        foreach (var edge in bucket.Edges.OrderBy(e => e.Id, StringComparer.Ordinal))
+        foreach (var edge in bucket.Edges
+                     .OrderBy(e => e.SourceId, StringComparer.Ordinal)
+                     .ThenBy(e => e.TargetId, StringComparer.Ordinal)
+                     .ThenBy(e => e.Kind, StringComparer.Ordinal)
+                     .ThenBy(e => e.Line)
+                     .ThenBy(e => e.Column))
         {
-            hasher.Str(edge.Id);
             hasher.Str(edge.SourceId);
             hasher.Str(edge.TargetId);
             hasher.Str(edge.Kind);
-            hasher.Metadata(edge.Metadata);
+            hasher.Int(edge.Line);
+            hasher.Int(edge.Column);
             hasher.Int(nodeIds.Contains(edge.TargetId) ? 1 : 0);
         }
-        return hasher.GetHashAndReset();
+        return bucket.Hash = hasher.GetHashAndReset();
     }
 
     /// <summary>
@@ -983,22 +1209,25 @@ public sealed class CSharpWorkspaceAnalyzer
         private readonly string _idPrefix;
         private readonly IReadOnlyDictionary<string, ProjectCompilation> _owners;
         private readonly ExternalSymbols _externals;
-        private readonly Dictionary<string, int> _unresolved = new(StringComparer.Ordinal);
+        private readonly Func<string, string> _share;
+        private Dictionary<string, int>? _unresolved;
         private readonly List<ProtocolNode> _nodes;
-        private readonly List<ProtocolEdge> _edges;
+        private readonly List<EdgeFact> _edges;
         private bool _hasTopLevelEntry;
 
         public GraphWalker(
             SemanticModel semanticModel, string filePath, string idPrefix,
             IReadOnlyDictionary<string, ProjectCompilation> owners,
             ExternalSymbols externals,
-            List<ProtocolNode> nodes, List<ProtocolEdge> edges)
+            Func<string, string> share,
+            List<ProtocolNode> nodes, List<EdgeFact> edges)
         {
             _semanticModel = semanticModel;
             _filePath = filePath;
             _idPrefix = idPrefix;
             _owners = owners;
             _externals = externals;
+            _share = share;
             _nodes = nodes;
             _edges = edges;
         }
@@ -1015,10 +1244,10 @@ public sealed class CSharpWorkspaceAnalyzer
             {
                 if (location.SourceTree is { } tree)
                 {
-                    return (_owners.TryGetValue(tree.FilePath, out var owner) ? owner.IdPrefix : _idPrefix) + DisplayName(symbol);
+                    return _share((_owners.TryGetValue(tree.FilePath, out var owner) ? owner.IdPrefix : _idPrefix) + DisplayName(symbol));
                 }
             }
-            return ExternalSymbols.IsExternal(symbol) ? _externals.Add(symbol) : _idPrefix + DisplayName(symbol);
+            return ExternalSymbols.IsExternal(symbol) ? _externals.Add(symbol) : _share(_idPrefix + DisplayName(symbol));
         }
 
         private static string PublicIdentifier(ISymbol symbol)
@@ -1061,17 +1290,8 @@ public sealed class CSharpWorkspaceAnalyzer
                 Metadata: metadata);
         }
 
-        private void AddEdge(string sourceId, string targetId, string kind, IReadOnlyDictionary<string, string>? metadata = null)
-        {
-            _edges.Add(new ProtocolEdge(
-                Id: $"{sourceId}=[{kind}]=>{targetId}" + (metadata is not null && metadata.TryGetValue("line", out var line)
-                    ? $"@{line}:{metadata.GetValueOrDefault("column", "0")}"
-                    : string.Empty),
-                SourceId: sourceId,
-                TargetId: targetId,
-                Kind: kind,
-                Metadata: metadata));
-        }
+        private void AddEdge(string sourceId, string targetId, string kind)
+            => _edges.Add(new EdgeFact(sourceId, targetId, kind));
 
         /// <summary>
         /// Emits a containment edge (HAS_METHOD / HAS_PROPERTY / HAS_FIELD) from the
@@ -1564,18 +1784,11 @@ public sealed class CSharpWorkspaceAnalyzer
             if (_semanticModel.GetConstantValue(node).HasValue) return;
 
             var name = node.Identifier.ValueText;
+            _unresolved ??= new Dictionary<string, int>(StringComparer.Ordinal);
             _unresolved[name] = _unresolved.GetValueOrDefault(name) + 1;
         }
 
-        public void AddUnresolvedNamesTo(Dictionary<ProjectCompilation, Dictionary<string, int>> byUnit, ProjectCompilation unit)
-        {
-            if (_unresolved.Count == 0) return;
-            if (!byUnit.TryGetValue(unit, out var names)) byUnit[unit] = names = new Dictionary<string, int>(StringComparer.Ordinal);
-            foreach (var (name, count) in _unresolved)
-            {
-                names[name] = names.GetValueOrDefault(name) + count;
-            }
-        }
+        public Dictionary<string, int>? UnresolvedNames => _unresolved;
 
         /// <summary>
         /// The bound symbol, or the only candidate when binding failed. Engine and package
@@ -1672,11 +1885,7 @@ public sealed class CSharpWorkspaceAnalyzer
         private void AddLocatedEdge(string sourceId, string targetId, string kind, SyntaxNode location)
         {
             var position = location.GetLocation().GetLineSpan().StartLinePosition;
-            AddEdge(sourceId, targetId, kind, new Dictionary<string, string>
-            {
-                ["line"] = position.Line.ToString(),
-                ["column"] = position.Character.ToString(),
-            });
+            _edges.Add(new EdgeFact(sourceId, targetId, kind, position.Line, position.Character));
         }
 
         /// <summary>

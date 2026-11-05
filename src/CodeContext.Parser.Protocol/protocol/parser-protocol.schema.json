@@ -291,7 +291,8 @@
         "maxProtocolVersion": { "type": "integer" },
         "languages": { "type": "array", "items": { "type": "string" } },
         "extensions": { "type": "array", "items": { "type": "string" } },
-        "projectMarkers": { "type": "array", "items": { "type": "string" } }
+        "projectMarkers": { "type": "array", "items": { "type": "string" } },
+        "projectInputs": { "type": "array", "items": { "type": "string" }, "description": "Optional. File names, or extensions starting with a dot, that change what the worker's files mean without being files it analyzes. The host watches them wherever they appear and answers a change with an empty workspace/applyChanges, on which the worker must reread its projects." }
       }
     }
   },
