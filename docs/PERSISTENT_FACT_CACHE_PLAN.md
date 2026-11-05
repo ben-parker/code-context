@@ -1521,4 +1521,5 @@ into the release.
 | MimeTypes source-only package gap | Out of scope |
 | `JsonRpcConnectionTests.Notification_DispatchesToHandler` 30 s wait | Left as is; the cause of slow tests under suite load is unknown and out of scope. Phase 5 must not shorten it. |
 | Test worker starts needing `TestWorkerOptions.Patient()` | Rule for all phases; new real-worker tests use it |
+| `ParserProcessSupervisorTests` `CrashingRepeatedly...` and `MalformedOutput...` failed in 1 of 8 full-suite runs on `main` ("The pipe is being closed", state `Failed` where `Unavailable` is expected) | Predates this work: a race in how the supervisor classifies a dying worker. Phase 9 changes that code. If the hibernation work explains it, fix it with a test; if not, record what was seen. The assertion is not loosened. A failure of these two tests in a gate run before phase 9 is re-run once and recorded, not treated as a regression of the phase |
 | Dedicated skill pass | Closing step 2 |
