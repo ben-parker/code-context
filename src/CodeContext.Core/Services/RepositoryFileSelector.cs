@@ -1,8 +1,6 @@
 using System.Collections.Concurrent;
 using System.Collections.Frozen;
 using System.IO.Enumeration;
-using System.Text;
-using System.Text.RegularExpressions;
 using Microsoft.Extensions.Options;
 
 namespace CodeContext.Core.Services;
@@ -11,6 +9,8 @@ namespace CodeContext.Core.Services;
 /// Package-free implementation of the project-local portions of gitignore semantics.
 /// Rules are compiled once per directory and applied root-to-leaf, so matching cost is
 /// proportional to path depth rather than ignore-files times repository files.
+/// This is close to Git but not identical: a negated class can match a slash, so
+/// <c>x[!a]b</c> matches <c>x/b</c>.
 /// </summary>
 public sealed class RepositoryFileSelector : IRepositoryFileSelector
 {
@@ -21,14 +21,14 @@ public sealed class RepositoryFileSelector : IRepositoryFileSelector
 
     private readonly string _rootPath;
     private readonly object _gate = new();
-    private readonly Dictionary<string, IReadOnlyList<IgnoreRule>> _rulesByDirectory = new(PathComparer);
+    private readonly Dictionary<string, IReadOnlyList<IgnorePattern>> _rulesByDirectory = new(PathComparer);
     private readonly HashSet<string> _loadedIgnoreFiles = new(PathComparer);
     private readonly HashSet<string> _mandatoryNames;
     private int _ignoredPathCount;
 
     // Per-(path, kind) include/exclude verdict memoization. IsIncluded runs multiple times per
     // surviving FS event and once per entry during scans; each call would otherwise re-walk every
-    // ancestor directory and re-run every compiled regex (O(depth^2) evaluations per leaf). Keyed by
+    // ancestor directory and re-run every rule (O(depth^2) evaluations per leaf). Keyed by
     // "relativePath\0d|f" so directory and file verdicts for the same path never collide (directory-
     // only rules make them genuinely different). Swapped wholesale by Invalidate(), the single point
     // where rule state changes, so verdict staleness is exactly the rules-cache staleness contract.
@@ -104,7 +104,7 @@ public sealed class RepositoryFileSelector : IRepositoryFileSelector
 
         while (directories.TryPop(out var directory))
         {
-            EnsureRulesLoaded(directory);
+            RulesFor(directory);
             var entries = new FileSystemEnumerable<ScannedEntry>(
                 directory,
                 static (ref FileSystemEntry entry) =>
@@ -213,14 +213,15 @@ public sealed class RepositoryFileSelector : IRepositoryFileSelector
 
         foreach (var directory in AncestorDirectories(parent))
         {
-            EnsureRulesLoaded(directory);
+            var rules = RulesFor(directory);
+            if (rules.Count == 0) continue;
+
             var relativeToRules = Normalize(Path.GetRelativePath(directory,
                 Path.Combine(_rootPath, rootRelativePath.Replace('/', Path.DirectorySeparatorChar))));
-            IReadOnlyList<IgnoreRule> rules;
-            lock (_gate) rules = _rulesByDirectory.GetValueOrDefault(directory) ?? [];
+            var path = IgnorePath.Create(relativeToRules, OperatingSystem.IsWindows());
             foreach (var rule in rules)
             {
-                if (rule.Matches(relativeToRules, isDirectory))
+                if (rule.Matches(path, isDirectory))
                     included = rule.Negated;
             }
         }
@@ -244,21 +245,26 @@ public sealed class RepositoryFileSelector : IRepositoryFileSelector
         return chain;
     }
 
-    private void EnsureRulesLoaded(string directory)
+    /// <summary>
+    /// A directory's rules, read if need be. Loading and returning are one step: with a gap
+    /// between them, an <see cref="Invalidate"/> landing there leaves no rules to apply, and
+    /// the path being tested reads as included.
+    /// </summary>
+    private IReadOnlyList<IgnorePattern> RulesFor(string directory)
     {
         directory = Path.GetFullPath(directory);
         lock (_gate)
         {
-            if (_rulesByDirectory.ContainsKey(directory)) return;
+            if (_rulesByDirectory.TryGetValue(directory, out var loaded)) return loaded;
             var ignoreFile = Path.Combine(directory, ".gitignore");
-            var rules = new List<IgnoreRule>();
+            var rules = new List<IgnorePattern>();
             if (File.Exists(ignoreFile))
             {
                 try
                 {
                     foreach (var line in File.ReadLines(ignoreFile))
                     {
-                        if (IgnoreRule.TryParse(line, out var rule)) rules.Add(rule);
+                        if (IgnorePattern.TryParse(line, OperatingSystem.IsWindows(), out var rule)) rules.Add(rule);
                     }
                     _loadedIgnoreFiles.Add(ignoreFile);
                 }
@@ -266,106 +272,11 @@ public sealed class RepositoryFileSelector : IRepositoryFileSelector
                 catch (IOException) { }
             }
             _rulesByDirectory[directory] = rules;
+            return rules;
         }
     }
 
     private static string Normalize(string path) => path.Replace('\\', '/').TrimEnd('/');
-
-    private sealed record IgnoreRule(bool Negated, bool DirectoryOnly, Regex Pattern)
-    {
-        public bool Matches(string relativePath, bool isDirectory)
-            => (!DirectoryOnly || isDirectory) && Pattern.IsMatch(Normalize(relativePath));
-
-        public static bool TryParse(string rawLine, out IgnoreRule rule)
-        {
-            rule = null!;
-            var line = TrimUnescapedTrailingSpaces(rawLine.TrimEnd('\r'));
-            if (line.Length == 0 || line[0] == '#') return false;
-
-            var negated = line[0] == '!';
-            if (negated) line = line[1..];
-            else if (line.StartsWith("\\!", StringComparison.Ordinal) || line.StartsWith("\\#", StringComparison.Ordinal))
-                line = line[1..];
-            if (line.Length == 0) return false;
-
-            var directoryOnly = EndsWithUnescapedSlash(line);
-            if (directoryOnly) line = line[..^1];
-            var anchored = line.StartsWith("/", StringComparison.Ordinal);
-            if (anchored) line = line[1..];
-            var hasSlash = line.Contains('/');
-
-            var prefix = anchored || hasSlash ? "^" : "(?:^|.*/)";
-            var regex = prefix + GlobToRegex(line) + "$";
-            var options = RegexOptions.Compiled | RegexOptions.CultureInvariant;
-            if (OperatingSystem.IsWindows()) options |= RegexOptions.IgnoreCase;
-            rule = new IgnoreRule(negated, directoryOnly, new Regex(regex, options));
-            return true;
-        }
-
-        private static string TrimUnescapedTrailingSpaces(string value)
-        {
-            var end = value.Length;
-            while (end > 0 && value[end - 1] == ' ')
-            {
-                var slashes = 0;
-                for (var index = end - 2; index >= 0 && value[index] == '\\'; index--) slashes++;
-                if ((slashes & 1) == 1) break;
-                end--;
-            }
-            return value[..end];
-        }
-
-        private static bool EndsWithUnescapedSlash(string value)
-        {
-            if (!value.EndsWith("/", StringComparison.Ordinal)) return false;
-            var slashes = 0;
-            for (var index = value.Length - 2; index >= 0 && value[index] == '\\'; index--) slashes++;
-            return (slashes & 1) == 0;
-        }
-
-        private static string GlobToRegex(string glob)
-        {
-            var result = new StringBuilder();
-            for (var index = 0; index < glob.Length; index++)
-            {
-                var character = glob[index];
-                if (character == '\\' && index + 1 < glob.Length)
-                {
-                    result.Append(Regex.Escape(glob[++index].ToString()));
-                }
-                else if (character == '*')
-                {
-                    var isDouble = index + 1 < glob.Length && glob[index + 1] == '*';
-                    if (!isDouble) result.Append("[^/]*");
-                    else
-                    {
-                        index++;
-                        if (index + 1 < glob.Length && glob[index + 1] == '/')
-                        {
-                            index++;
-                            result.Append("(?:.*/)?");
-                        }
-                        else result.Append(".*");
-                    }
-                }
-                else if (character == '?') result.Append("[^/]");
-                else if (character == '[')
-                {
-                    var close = glob.IndexOf(']', index + 1);
-                    if (close < 0) result.Append("\\[");
-                    else
-                    {
-                        var content = glob[(index + 1)..close];
-                        if (content.StartsWith('!')) content = "^" + content[1..];
-                        result.Append('[').Append(content).Append(']');
-                        index = close;
-                    }
-                }
-                else result.Append(Regex.Escape(character.ToString()));
-            }
-            return result.ToString();
-        }
-    }
 }
 
 internal static class CharacterSearchExtensions

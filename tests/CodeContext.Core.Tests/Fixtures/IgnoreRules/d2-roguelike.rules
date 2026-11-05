@@ -1,0 +1,25 @@
+# Extracted game data and generated assets are Blizzard's; rebuild them with tools/build-assets.ps1.
+.cache/
+game/assets/
+
+bin/
+obj/
+.vs/
+game/.godot/
+game/screenshots/
+game/*.sln
+*.uid
+game/hd/
+
+# Knit checkout (fetched by tools/build-hd.ps1; tools/ext/knit.patch is kept)
+tools/ext/Knit/
+
+# Godot offline docs (RST sources, fetched by tools/godot-docs.py)
+tools/ext/godot-docs/
+
+# Wiki checker (node tools/wiki/check.js)
+tools/wiki/node_modules/
+tools/wiki/package-lock.json
+
+# Screenshots the wiki checker writes (node tools/wiki/check.js)
+docs/wiki/shots/
