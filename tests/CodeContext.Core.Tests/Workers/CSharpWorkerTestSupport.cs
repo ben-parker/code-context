@@ -15,6 +15,15 @@ public sealed class StaticWorkerCatalog(params RegisteredWorker[] workers) : IWo
 }
 
 /// <summary>
+/// Worker options for tests that start a real process. Many start at once alongside the rest
+/// of the suite, and the production wait for <c>initialize</c> was missed under that load.
+/// </summary>
+public static class TestWorkerOptions
+{
+    public static ParserWorkerOptions Patient() => new() { InitializeTimeout = TimeSpan.FromSeconds(60) };
+}
+
+/// <summary>
 /// Builds the host-side pipeline (GraphUpdateService + LanguageWorkerService +
 /// AnalysisDeltaApplier) wired to the real C# worker executable from the test output
 /// directory — the protocol-fixture path the Phase 3 exit gate requires.
@@ -69,7 +78,8 @@ public sealed class CSharpWorkerPipeline : IAsyncDisposable
             sink,
             SessionRegistry,
             options,
-            NullLoggerFactory.Instance);
+            NullLoggerFactory.Instance,
+            TestWorkerOptions.Patient());
 
         GraphUpdateService = new GraphUpdateService(
             RepositoryFactory,

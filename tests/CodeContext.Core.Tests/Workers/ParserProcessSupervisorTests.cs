@@ -36,7 +36,7 @@ public class ParserProcessSupervisorTests
         ParserWorkerOptions? options = null,
         IParserSessionRegistry? registry = null)
         => new(spec,
-            options ?? new ParserWorkerOptions(),
+            options ?? TestWorkerOptions.Patient(),
             NullLogger<ParserProcessSupervisor>.Instance,
             registry,
             new CodeContextOptions { RootPath = Path.GetTempPath() });
