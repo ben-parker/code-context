@@ -1,5 +1,4 @@
 using System.Collections.Concurrent;
-using System.Collections.Frozen;
 using System.Collections.Immutable;
 using System.Collections.ObjectModel;
 using CodeContext.Core.Models;
@@ -17,6 +16,12 @@ namespace CodeContext.Core.Repositories.InMemory
     /// untouched shards keep their cached adjacency across other shards' commits. Incremental
     /// per-node mutations (the single-file parser / repository path) still write to the live
     /// dictionaries of the fact's shard; those are serialized by the index coordinator.
+    ///
+    /// Shards are reached only through <see cref="IGraphShard"/>: reads through its read members,
+    /// commits through its commit members, so a shard kind other than the heap shard can be
+    /// published without changing what any read or commit means. Every multi-valued read is in
+    /// canonical order: ordinal by id inside a shard, shards concatenated in <see cref="ShardKey"/>
+    /// order.
     /// </summary>
     public class InMemoryDatabase
     {
@@ -68,12 +73,12 @@ namespace CodeContext.Core.Repositories.InMemory
         }
 
         /// <summary>
-        /// One shard's node/edge/identifier tables. A committed shard is immutable and is
-        /// replaced wholesale (new reference) by a commit; in-place mutations bump
-        /// <see cref="Version"/> so the per-shard adjacency and cross-shard candidate caches
-        /// invalidate without a reference change.
+        /// The heap shard: one shard's node/edge/identifier tables. A committed shard is immutable
+        /// and is replaced wholesale (new reference) by a commit; in-place mutations bump
+        /// <see cref="Version"/> so the per-shard adjacency, statistics and cross-shard candidate
+        /// caches invalidate without a reference change.
         /// </summary>
-        internal sealed class GraphState
+        internal sealed class GraphState : IGraphShard
         {
             public ConcurrentDictionary<string, CodeNode> Nodes { get; }
             public ConcurrentDictionary<string, string> Identifiers { get; }
@@ -82,8 +87,12 @@ namespace CodeContext.Core.Repositories.InMemory
             private long _version;
             private volatile CachedAdjacency? _adjacency;
             private volatile HashSet<string>? _crossShardEdgeIds;
+            private volatile CachedHistogram? _histogram;
 
             private sealed record CachedAdjacency(long Version, GraphAdjacency Value);
+
+            private sealed record CachedHistogram(
+                long Version, Dictionary<string, int> NodesByType, Dictionary<string, int> EdgesByType);
 
             public GraphState()
             {
@@ -104,13 +113,97 @@ namespace CodeContext.Core.Repositories.InMemory
                     concurrencyLevel: 1, capacity: Math.Max(0, edgeCapacity));
             }
 
+            /// <summary>A heap copy of any shard, for the legacy in-place mutation paths.</summary>
+            public static GraphState CopyOf(IGraphShard shard)
+            {
+                var nodes = shard.GetAllNodes();
+                var edges = shard.GetAllEdges();
+                var copy = new GraphState(nodes.Count, edges.Count);
+                foreach (var node in nodes)
+                {
+                    copy.Nodes[node.Id!] = node;
+                    if (!string.IsNullOrWhiteSpace(node.Identifier)) copy.Identifiers[node.Identifier] = node.Id!;
+                }
+                foreach (var edge in edges) copy.Edges[edge.Id!] = edge;
+                return copy;
+            }
+
             public long Version => Interlocked.Read(ref _version);
 
-            /// <summary>Invalidates the per-shard adjacency and cross-shard caches after an in-place write.</summary>
+            /// <summary>Invalidates the per-shard caches after an in-place write.</summary>
             public void BumpVersion()
             {
                 Interlocked.Increment(ref _version);
                 _crossShardEdgeIds = null;
+            }
+
+            // ---- Read members ----
+
+            public int NodeCount => Nodes.Count;
+
+            public int EdgeCount => Edges.Count;
+
+            public bool TryGetNode(string id, out CodeNode? node)
+            {
+                var found = Nodes.TryGetValue(id, out var value);
+                node = value;
+                return found;
+            }
+
+            public bool TryGetNodeIdByIdentifier(string identifier, out string? id)
+            {
+                var found = Identifiers.TryGetValue(identifier, out var value);
+                id = value;
+                return found;
+            }
+
+            public bool TryGetEdge(string id, out CodeEdge? edge)
+            {
+                var found = Edges.TryGetValue(id, out var value);
+                edge = value;
+                return found;
+            }
+
+            public IReadOnlyList<CodeNode> FindNodesByName(string name, bool exact)
+                => GetOrBuildAdjacency().FindNodesByName(name, exact);
+
+            public IReadOnlyList<CodeNode> FindNodesByPath(string requestedPath)
+                => GetOrBuildAdjacency().FindNodesByPath(requestedPath);
+
+            public IReadOnlyList<CodeEdge> GetEdgesBySource(string id)
+                => GetOrBuildAdjacency().GetEdgesBySource(id);
+
+            public IReadOnlyList<CodeEdge> GetEdgesByTarget(string id)
+                => GetOrBuildAdjacency().GetEdgesByTarget(id);
+
+            public IReadOnlyList<CodeNode> GetAllNodes() => GetOrBuildAdjacency().Nodes;
+
+            public IReadOnlyList<CodeEdge> GetAllEdges() => GetOrBuildAdjacency().Edges;
+
+            public IReadOnlyList<string> GetFilePaths() => GetOrBuildAdjacency().FilePaths;
+
+            // A pass over the dictionaries, not the adjacency: status polling must not force an
+            // adjacency build (and its sort) after every commit of a scan.
+            public void AddStatistics(Dictionary<string, int> nodesByType, Dictionary<string, int> edgesByType)
+            {
+                var version = Version;
+                var cached = _histogram;
+                if (cached is null || cached.Version != version)
+                {
+                    var nodeTypes = new Dictionary<string, int>(StringComparer.Ordinal);
+                    var edgeTypes = new Dictionary<string, int>(StringComparer.Ordinal);
+                    foreach (var node in Nodes.Values)
+                        if (!string.IsNullOrEmpty(node.Type))
+                            nodeTypes[node.Type] = nodeTypes.GetValueOrDefault(node.Type) + 1;
+                    foreach (var edge in Edges.Values)
+                        if (!string.IsNullOrEmpty(edge.Type))
+                            edgeTypes[edge.Type] = edgeTypes.GetValueOrDefault(edge.Type) + 1;
+                    _histogram = cached = new CachedHistogram(version, nodeTypes, edgeTypes);
+                }
+                foreach (var (type, count) in cached.NodesByType)
+                    nodesByType[type] = nodesByType.GetValueOrDefault(type) + count;
+                foreach (var (type, count) in cached.EdgesByType)
+                    edgesByType[type] = edgesByType.GetValueOrDefault(type) + count;
             }
 
             /// <summary>
@@ -118,7 +211,7 @@ namespace CodeContext.Core.Repositories.InMemory
             /// edges a removal in ANOTHER shard could dangle. A cheap, id-convention-independent
             /// superset of the cross-shard sweep candidates (built once per shard version).
             /// </summary>
-            public HashSet<string> GetCrossShardEdgeIds()
+            public IReadOnlyCollection<string> GetCrossShardEdgeIds()
             {
                 var cached = _crossShardEdgeIds;
                 if (cached is not null) return cached;
@@ -141,68 +234,235 @@ namespace CodeContext.Core.Repositories.InMemory
                 var cached = _adjacency;
                 if (cached is { } c && c.Version == version) return c.Value;
 
-                var nodes = new List<CodeNode>(Nodes.Count);
-                var edges = new List<CodeEdge>(Edges.Count);
-                var bySource = new Dictionary<string, List<CodeEdge>>(StringComparer.Ordinal);
-                var byTarget = new Dictionary<string, List<CodeEdge>>(StringComparer.Ordinal);
-                var byFilePath = new Dictionary<string, List<CodeNode>>(StringComparer.OrdinalIgnoreCase);
-
-                foreach (var node in Nodes.Values)
-                {
-                    nodes.Add(node);
-                    if (!string.IsNullOrWhiteSpace(node.FilePath))
-                    {
-                        var key = FilePathMatcher.Normalize(node.FilePath);
-                        if (!byFilePath.TryGetValue(key, out var bucket))
-                            byFilePath[key] = bucket = new List<CodeNode>();
-                        bucket.Add(node);
-                    }
-                }
-
-                foreach (var edge in Edges.Values)
-                {
-                    edges.Add(edge);
-                    if (edge.SourceId is not null)
-                    {
-                        if (!bySource.TryGetValue(edge.SourceId, out var bucket))
-                            bySource[edge.SourceId] = bucket = new List<CodeEdge>();
-                        bucket.Add(edge);
-                    }
-                    if (edge.TargetId is not null)
-                    {
-                        if (!byTarget.TryGetValue(edge.TargetId, out var bucket))
-                            byTarget[edge.TargetId] = bucket = new List<CodeEdge>();
-                        bucket.Add(edge);
-                    }
-                }
-
-                var adjacency = new GraphAdjacency
-                {
-                    Nodes = nodes,
-                    Edges = edges,
-                    EdgesBySource = bySource.ToFrozenDictionary(
-                        entry => entry.Key, entry => entry.Value.ToArray(), StringComparer.Ordinal),
-                    EdgesByTarget = byTarget.ToFrozenDictionary(
-                        entry => entry.Key, entry => entry.Value.ToArray(), StringComparer.Ordinal),
-                    NodesByFilePath = byFilePath.ToFrozenDictionary(
-                        entry => entry.Key, entry => entry.Value.ToArray(), StringComparer.OrdinalIgnoreCase),
-                };
+                var adjacency = GraphAdjacency.Build(Nodes.Values, Edges.Values);
                 _adjacency = new CachedAdjacency(version, adjacency);
                 return adjacency;
+            }
+
+            // ---- Commit members ----
+
+            public IGraphShard? ApplyScoped(
+                IReadOnlyList<CodeNode> nodes,
+                IReadOnlyList<CodeEdge> edges,
+                IReadOnlySet<string>? replaceFiles,
+                IReadOnlyList<IGraphShard> foreignShards,
+                out HashSet<string> removedIds,
+                out HashSet<string> removedNotReestablished)
+            {
+                removedIds = new HashSet<string>(StringComparer.Ordinal);
+                removedNotReestablished = new HashSet<string>(StringComparer.Ordinal);
+                // One snapshot of the values for both passes (each Values read copies the table).
+                var carried = Nodes.Values;
+                foreach (var node in carried)
+                {
+                    if (node.Id is null) continue;
+                    if (replaceFiles is null
+                        || (!string.IsNullOrEmpty(node.FilePath) && replaceFiles.Contains(node.FilePath)))
+                    {
+                        removedIds.Add(node.Id);
+                    }
+                }
+
+                // Nothing removed and nothing supplied: the shard is unchanged, so the caller keeps
+                // this reference (and its caches) and only the generation advances.
+                if (removedIds.Count == 0 && !HasId(nodes, static node => node.Id) && !HasId(edges, static edge => edge.Id))
+                    return null;
+
+                var next = new GraphState(Nodes.Count + nodes.Count, Edges.Count + edges.Count);
+
+                foreach (var node in carried)
+                {
+                    if (node.Id is null || removedIds.Contains(node.Id)) continue;
+                    // Carried facts were already globally unique — no foreign probe needed.
+                    next.Nodes.TryAdd(node.Id, node);
+                    RegisterIdentifier(next, node, foreignProbe: null);
+                }
+
+                foreach (var node in nodes)
+                {
+                    if (node.Id is null) continue;
+                    // A delta node replacing a carried node (or an earlier copy in this delta) takes
+                    // over its id; the replaced copy's identifier no longer names anything, so the
+                    // map stays exactly { node.Identifier -> node.Id } over the final nodes.
+                    if (next.Nodes.TryGetValue(node.Id, out var replaced)) ReleaseIdentifier(next, replaced);
+                    RegisterIdentifier(next, node, foreignShards);
+                    next.Nodes[node.Id] = node;
+                }
+
+                // Carry edges within the shard, mirroring the pre-shard rule exactly: an edge from a
+                // surviving node into a replaced node is kept only when the delta re-established that
+                // target — otherwise it would dangle.
+                foreach (var edge in Edges.Values)
+                {
+                    if (edge.Id is null) continue;
+                    if (edge.SourceId is not null && removedIds.Contains(edge.SourceId)) continue;
+                    if (edge.TargetId is not null
+                        && removedIds.Contains(edge.TargetId)
+                        && !next.Nodes.ContainsKey(edge.TargetId)) continue;
+                    next.Edges.TryAdd(edge.Id, edge);
+                }
+
+                foreach (var edge in edges)
+                {
+                    if (edge.Id is null) continue;
+                    next.Edges[edge.Id] = edge;
+                }
+
+                foreach (var id in removedIds)
+                    if (!next.Nodes.ContainsKey(id)) removedNotReestablished.Add(id);
+
+                return next;
+            }
+
+            /// <summary>
+            /// Returns a rebuilt copy of this foreign shard with dangling edges and delta-id collisions
+            /// removed, or null when nothing changed (so the caller keeps the original reference and its
+            /// cached adjacency). Dangling-edge drop mirrors the pre-shard global semantics (drop iff
+            /// source was removed, or target was removed and not re-established anywhere); a co-resident
+            /// delta id is dropped so the delta's copy is the single global survivor.
+            /// </summary>
+            public IGraphShard? WithoutForeignConflicts(
+                IReadOnlySet<string> removedIds,
+                IReadOnlySet<string> removedNotReestablished,
+                IReadOnlySet<string> deltaNodeIds,
+                IReadOnlySet<string> deltaEdgeIds)
+            {
+                HashSet<string>? dropEdges = null;
+
+                if (removedIds.Count > 0)
+                {
+                    foreach (var edgeId in GetCrossShardEdgeIds())
+                    {
+                        if (!Edges.TryGetValue(edgeId, out var edge) || edge.Id is null) continue;
+                        var dangles = (edge.SourceId is not null && removedIds.Contains(edge.SourceId))
+                            || (edge.TargetId is not null && removedNotReestablished.Contains(edge.TargetId));
+                        if (dangles) (dropEdges ??= new HashSet<string>(StringComparer.Ordinal)).Add(edge.Id);
+                    }
+                }
+
+                if (deltaEdgeIds.Count > 0)
+                {
+                    foreach (var id in deltaEdgeIds)
+                        if (Edges.ContainsKey(id)) (dropEdges ??= new HashSet<string>(StringComparer.Ordinal)).Add(id);
+                }
+
+                HashSet<string>? dropNodes = null;
+                if (deltaNodeIds.Count > 0)
+                {
+                    foreach (var id in deltaNodeIds)
+                        if (Nodes.ContainsKey(id)) (dropNodes ??= new HashSet<string>(StringComparer.Ordinal)).Add(id);
+                }
+
+                // When a delta reclaims an id, the evicted foreign node's OWN edges die with it — including
+                // fully-local ones (both endpoints in-shard) that never appear in the cross-shard candidate
+                // set. This deliberately DIVERGES from the old single-map behaviour (which left the edge in
+                // place, silently re-pointing it at the unrelated new node with the reclaimed id — a wrong
+                // association); dropping matches the store's own removed-node edge rule.
+                if (dropNodes is not null)
+                {
+                    foreach (var edge in Edges.Values)
+                    {
+                        if (edge.Id is null) continue;
+                        if ((edge.SourceId is not null && dropNodes.Contains(edge.SourceId))
+                            || (edge.TargetId is not null && dropNodes.Contains(edge.TargetId)))
+                        {
+                            (dropEdges ??= new HashSet<string>(StringComparer.Ordinal)).Add(edge.Id);
+                        }
+                    }
+                }
+
+                if (dropEdges is null && dropNodes is null) return null;
+
+                var next = new GraphState(
+                    Nodes.Count - (dropNodes?.Count ?? 0),
+                    Math.Max(0, Edges.Count - (dropEdges?.Count ?? 0)));
+                foreach (var pair in Nodes)
+                    if (dropNodes is null || !dropNodes.Contains(pair.Key)) next.Nodes.TryAdd(pair.Key, pair.Value);
+                foreach (var pair in Identifiers)
+                    if (dropNodes is null || !dropNodes.Contains(pair.Value)) next.Identifiers.TryAdd(pair.Key, pair.Value);
+                foreach (var pair in Edges)
+                    if (dropEdges is null || !dropEdges.Contains(pair.Key)) next.Edges.TryAdd(pair.Key, pair.Value);
+                return next;
+            }
+
+            public void CollectNodesOutside(IReadOnlySet<string> keepPaths, HashSet<string> into)
+            {
+                foreach (var node in Nodes.Values)
+                {
+                    if (node.Id is null) continue;
+
+                    // A library symbol's virtual file is never on disk. It leaves through
+                    // the worker's own delta, once nothing uses the symbol.
+                    if (node.Metadata?.GetValueOrDefault("external") == "true") continue;
+                    if (!string.IsNullOrEmpty(node.FilePath) && !keepPaths.Contains(node.FilePath))
+                        into.Add(node.Id);
+                }
+            }
+
+            /// <summary>
+            /// Returns a rebuilt copy of this shard with removed nodes and edges touching any globally-removed
+            /// node dropped, or null when the shard is unaffected (keep the original reference).
+            /// </summary>
+            public IGraphShard? WithoutNodes(IReadOnlySet<string> removedIds)
+            {
+                var hasNodeRemoval = false;
+                foreach (var node in Nodes.Values)
+                    if (node.Id is not null && removedIds.Contains(node.Id)) { hasNodeRemoval = true; break; }
+
+                var hasEdgeRemoval = false;
+                if (!hasNodeRemoval)
+                {
+                    // No local node removals: only cross-shard edges can be affected.
+                    foreach (var edgeId in GetCrossShardEdgeIds())
+                    {
+                        if (!Edges.TryGetValue(edgeId, out var edge)) continue;
+                        if ((edge.SourceId is not null && removedIds.Contains(edge.SourceId))
+                            || (edge.TargetId is not null && removedIds.Contains(edge.TargetId)))
+                        {
+                            hasEdgeRemoval = true;
+                            break;
+                        }
+                    }
+                    if (!hasEdgeRemoval) return null;
+                }
+
+                var next = new GraphState(Nodes.Count, Edges.Count);
+                foreach (var node in Nodes.Values)
+                {
+                    if (node.Id is null) continue;
+                    if (removedIds.Contains(node.Id)) continue;
+                    next.Nodes.TryAdd(node.Id, node);
+                    AddIdentifier(next, node, globalIdentifiers: null);
+                }
+                foreach (var edge in Edges.Values)
+                {
+                    if (edge.Id is null) continue;
+                    if (edge.SourceId is not null && removedIds.Contains(edge.SourceId)) continue;
+                    if (edge.TargetId is not null && removedIds.Contains(edge.TargetId)) continue;
+                    next.Edges.TryAdd(edge.Id, edge);
+                }
+                return next;
+            }
+
+            private static bool HasId<T>(IReadOnlyList<T> items, Func<T, string?> idOf)
+            {
+                foreach (var item in items)
+                    if (idOf(item) is not null) return true;
+                return false;
             }
         }
 
         private static readonly StringComparer PathComparer =
             OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
 
-        private static ImmutableSortedDictionary<ShardKey, GraphState> EmptyShards { get; } =
-            ImmutableSortedDictionary.Create<ShardKey, GraphState>(ShardKey.Comparer);
+        private static ImmutableSortedDictionary<ShardKey, IGraphShard> EmptyShards { get; } =
+            ImmutableSortedDictionary.Create<ShardKey, IGraphShard>(ShardKey.Comparer);
 
-        private volatile ImmutableSortedDictionary<ShardKey, GraphState> _shards = EmptyShards;
+        private volatile ImmutableSortedDictionary<ShardKey, IGraphShard> _shards = EmptyShards;
         private readonly object _commitLock = new();
         private long _version;
         private long _lastCommittedGeneration;
-        private ImmutableSortedDictionary<ShardKey, GraphState>? _reconciliationState;
+        private ImmutableSortedDictionary<ShardKey, IGraphShard>? _reconciliationState;
         private long _reconciliationGeneration;
 
         // Each cache publishes {version, payload} as ONE immutable holder swapped through a single
@@ -226,7 +486,7 @@ namespace CodeContext.Core.Repositories.InMemory
             {
                 var shards = _shards;
                 var count = 0;
-                foreach (var shard in shards.Values) count += shard.Nodes.Count;
+                foreach (var shard in shards.Values) count += shard.NodeCount;
                 return count;
             }
         }
@@ -238,7 +498,7 @@ namespace CodeContext.Core.Repositories.InMemory
             {
                 var shards = _shards;
                 var count = 0;
-                foreach (var shard in shards.Values) count += shard.Edges.Count;
+                foreach (var shard in shards.Values) count += shard.EdgeCount;
                 return count;
             }
         }
@@ -249,7 +509,7 @@ namespace CodeContext.Core.Repositories.InMemory
             var shards = _shards;
             foreach (var shard in shards.Values)
             {
-                if (shard.Nodes.TryGetValue(id, out node)) return true;
+                if (shard.TryGetNode(id, out node)) return true;
             }
             node = null;
             return false;
@@ -264,7 +524,7 @@ namespace CodeContext.Core.Repositories.InMemory
             var shards = _shards;
             foreach (var shard in shards.Values)
             {
-                if (shard.Identifiers.TryGetValue(identifier, out id)) return true;
+                if (shard.TryGetNodeIdByIdentifier(identifier, out id)) return true;
             }
             id = null;
             return false;
@@ -275,7 +535,7 @@ namespace CodeContext.Core.Repositories.InMemory
             var shards = _shards;
             foreach (var shard in shards.Values)
             {
-                if (shard.Edges.TryGetValue(id, out edge)) return true;
+                if (shard.TryGetEdge(id, out edge)) return true;
             }
             edge = null;
             return false;
@@ -285,20 +545,21 @@ namespace CodeContext.Core.Repositories.InMemory
 
         public CodeEdge? GetEdge(string id) => TryGetEdge(id, out var edge) ? edge : null;
 
-        /// <summary>Concatenates shard nodes in ordinal <see cref="ShardKey"/> order (latched once).</summary>
+        /// <summary>Every node in canonical order: shards in <see cref="ShardKey"/> order, id order inside (latched once).</summary>
         public IEnumerable<CodeNode> EnumerateNodes()
         {
             var shards = _shards;
             foreach (var shard in shards.Values)
-                foreach (var node in shard.Nodes.Values)
+                foreach (var node in shard.GetAllNodes())
                     yield return node;
         }
 
+        /// <summary>Every edge in canonical order: shards in <see cref="ShardKey"/> order, id order inside (latched once).</summary>
         public IEnumerable<CodeEdge> EnumerateEdges()
         {
             var shards = _shards;
             foreach (var shard in shards.Values)
-                foreach (var edge in shard.Edges.Values)
+                foreach (var edge in shard.GetAllEdges())
                     yield return edge;
         }
 
@@ -315,7 +576,7 @@ namespace CodeContext.Core.Repositories.InMemory
                 if (string.IsNullOrEmpty(node.Identifier))
                     node.Identifier = DeriveLegacyIdentifier(node) ?? string.Empty;
 
-                var shard = EnsureShard(ShardKey.ForNode(node), _shards, out _);
+                var shard = EnsureHeapShard(ShardKey.ForNode(node));
                 shard.Nodes.TryGetValue(node.Id, out var existing);
                 RegisterIdentifierAcrossShards(_shards, shard, node);
                 shard.Nodes[node.Id] = node;
@@ -343,8 +604,10 @@ namespace CodeContext.Core.Repositories.InMemory
             lock (_commitLock)
             {
                 var removedAny = false;
-                foreach (var shard in _shards.Values)
+                foreach (var (key, candidate) in _shards)
                 {
+                    if (!candidate.TryGetNode(id, out _)) continue;
+                    var shard = AsHeapShard(key, candidate);
                     if (shard.Nodes.TryRemove(id, out _))
                     {
                         foreach (var entry in shard.Identifiers.Where(entry => entry.Value == id).ToList())
@@ -364,7 +627,7 @@ namespace CodeContext.Core.Repositories.InMemory
             if (edge.Id is null) throw new ArgumentException("Edge must have an Id", nameof(edge));
             lock (_commitLock)
             {
-                var shard = EnsureShard(ShardKey.ForEdge(edge), _shards, out _);
+                var shard = EnsureHeapShard(ShardKey.ForEdge(edge));
                 shard.Edges[edge.Id] = edge;
                 // Global last-write-wins for the edge id across shards.
                 PurgeEdgeFromOtherShards(shard, edge.Id);
@@ -375,9 +638,10 @@ namespace CodeContext.Core.Repositories.InMemory
 
         private void PurgeNodeFromOtherShards(GraphState keep, string id)
         {
-            foreach (var shard in _shards.Values)
+            foreach (var (key, candidate) in _shards)
             {
-                if (ReferenceEquals(shard, keep)) continue;
+                if (ReferenceEquals(candidate, keep) || !candidate.TryGetNode(id, out _)) continue;
+                var shard = AsHeapShard(key, candidate);
                 if (shard.Nodes.TryRemove(id, out _))
                 {
                     foreach (var entry in shard.Identifiers.Where(entry => entry.Value == id).ToList())
@@ -389,9 +653,10 @@ namespace CodeContext.Core.Repositories.InMemory
 
         private void PurgeEdgeFromOtherShards(GraphState keep, string id)
         {
-            foreach (var shard in _shards.Values)
+            foreach (var (key, candidate) in _shards)
             {
-                if (ReferenceEquals(shard, keep)) continue;
+                if (ReferenceEquals(candidate, keep) || !candidate.TryGetEdge(id, out _)) continue;
+                var shard = AsHeapShard(key, candidate);
                 if (shard.Edges.TryRemove(id, out _)) shard.BumpVersion();
             }
         }
@@ -402,8 +667,18 @@ namespace CodeContext.Core.Repositories.InMemory
             lock (_commitLock)
             {
                 var removed = 0;
-                foreach (var shard in _shards.Values)
+                foreach (var (key, candidate) in _shards)
                 {
+                    // The adjacency lookups cannot answer for a null id (a heap shard matches the
+                    // edges with a null endpoint), so a null id always materializes the shard.
+                    if (candidate is not GraphState
+                        && nodeId is not null
+                        && candidate.GetEdgesBySource(nodeId).Count == 0
+                        && candidate.GetEdgesByTarget(nodeId).Count == 0)
+                    {
+                        continue;
+                    }
+                    var shard = AsHeapShard(key, candidate);
                     var toRemove = shard.Edges.Values
                         .Where(e => e.SourceId == nodeId || e.TargetId == nodeId)
                         .Select(e => e.Id)
@@ -419,9 +694,9 @@ namespace CodeContext.Core.Repositories.InMemory
         }
 
         /// <summary>
-        /// Captures nodes and edges from one committed shard map. Reading counts or enumerations
-        /// separately can straddle an atomic generation swap and produce a graph whose nodes and
-        /// edges came from different versions; latching the map once avoids that.
+        /// Captures nodes and edges from one committed shard map, in canonical order. Reading counts
+        /// or enumerations separately can straddle an atomic generation swap and produce a graph whose
+        /// nodes and edges came from different versions; latching the map once avoids that.
         /// </summary>
         public CodeGraph CaptureGraph()
         {
@@ -430,8 +705,8 @@ namespace CodeContext.Core.Repositories.InMemory
             var edges = new List<CodeEdge>();
             foreach (var shard in shards.Values)
             {
-                nodes.AddRange(shard.Nodes.Values);
-                edges.AddRange(shard.Edges.Values);
+                nodes.AddRange(shard.GetAllNodes());
+                edges.AddRange(shard.GetAllEdges());
             }
             return new CodeGraph { Nodes = nodes, Edges = edges };
         }
@@ -499,7 +774,11 @@ namespace CodeContext.Core.Repositories.InMemory
                 var current = _reconciliationState ?? _shards;
                 var next = scope is null
                     ? PartitionIntoState(nodes, edges)
-                    : BuildScopedState(current, nodes, edges, scope);
+                    : BuildScopedState(
+                        current,
+                        nodes as IReadOnlyList<CodeNode> ?? nodes.ToList(),
+                        edges as IReadOnlyList<CodeEdge> ?? edges.ToList(),
+                        scope);
 
                 if (_reconciliationState is not null)
                 {
@@ -508,9 +787,14 @@ namespace CodeContext.Core.Repositories.InMemory
                 }
                 else
                 {
-                    _shards = next;
+                    // An unchanged commit returns the same map: the generation advances, every
+                    // shard and cache stays as it is.
+                    if (!ReferenceEquals(next, _shards))
+                    {
+                        _shards = next;
+                        NotifyMutation();
+                    }
                     Interlocked.Exchange(ref _lastCommittedGeneration, generation);
-                    NotifyMutation();
                 }
                 return true;
             }
@@ -536,6 +820,56 @@ namespace CodeContext.Core.Repositories.InMemory
             }
         }
 
+        /// <summary>
+        /// Publishes shards loaded from elsewhere (a snapshot) as one map, in one swap. Allowed only
+        /// into a store with no node and no edge and no staged reconciliation; the generation is not
+        /// changed. The caller is responsible for the shards' own consistency (global id and
+        /// identifier uniqueness), which a loader checks before it calls this.
+        /// </summary>
+        internal void PublishLoadedShards(IEnumerable<KeyValuePair<ShardKey, IGraphShard>> shards)
+        {
+            ArgumentNullException.ThrowIfNull(shards);
+            lock (_commitLock)
+            {
+                if (_reconciliationState is not null)
+                    throw new InvalidOperationException("Cannot publish loaded shards while a graph reconciliation is active.");
+                foreach (var existing in _shards.Values)
+                {
+                    if (existing.NodeCount > 0 || existing.EdgeCount > 0)
+                        throw new InvalidOperationException("Loaded shards can only be published into an empty store.");
+                }
+
+                var builder = ImmutableSortedDictionary.CreateBuilder<ShardKey, IGraphShard>(ShardKey.Comparer);
+                foreach (var (key, shard) in shards)
+                {
+                    ArgumentNullException.ThrowIfNull(shard);
+                    builder.Add(key, shard);
+                }
+                _shards = builder.ToImmutable();
+                NotifyMutation();
+            }
+        }
+
+        /// <summary>
+        /// Swaps one shard for an equivalent one (a compacted or mapped copy) if it is still the
+        /// <paramref name="expected"/> reference and no reconciliation is staged. Returns whether the
+        /// swap happened. The published map changes by the same single volatile write as a commit;
+        /// the generation is not changed.
+        /// </summary>
+        internal bool TryReplaceShard(ShardKey key, IGraphShard expected, IGraphShard replacement)
+        {
+            ArgumentNullException.ThrowIfNull(expected);
+            ArgumentNullException.ThrowIfNull(replacement);
+            lock (_commitLock)
+            {
+                if (_reconciliationState is not null) return false;
+                if (!_shards.TryGetValue(key, out var current) || !ReferenceEquals(current, expected)) return false;
+                _shards = _shards.SetItem(key, replacement);
+                NotifyMutation();
+                return true;
+            }
+        }
+
         public int PruneFilesNotPresent(IReadOnlyCollection<string> presentFilePaths)
         {
             var keep = new HashSet<string>(presentFilePaths, PathComparer);
@@ -546,18 +880,7 @@ namespace CodeContext.Core.Repositories.InMemory
                 // Phase 1: the globally-removed node ids (nodes whose file is no longer present).
                 var removedNodeIds = new HashSet<string>(StringComparer.Ordinal);
                 foreach (var shard in current.Values)
-                {
-                    foreach (var node in shard.Nodes.Values)
-                    {
-                        if (node.Id is null) continue;
-
-                        // A library symbol's virtual file is never on disk. It leaves through
-                        // the worker's own delta, once nothing uses the symbol.
-                        if (node.Metadata?.GetValueOrDefault("external") == "true") continue;
-                        if (!string.IsNullOrEmpty(node.FilePath) && !keep.Contains(node.FilePath))
-                            removedNodeIds.Add(node.Id);
-                    }
-                }
+                    shard.CollectNodesOutside(keep, removedNodeIds);
 
                 if (removedNodeIds.Count == 0) return 0;
 
@@ -566,7 +889,7 @@ namespace CodeContext.Core.Repositories.InMemory
                 var builder = current.ToBuilder();
                 foreach (var (key, shard) in current)
                 {
-                    var rebuilt = PruneShard(shard, removedNodeIds);
+                    var rebuilt = shard.WithoutNodes(removedNodeIds);
                     if (rebuilt is not null) builder[key] = rebuilt;
                 }
 
@@ -584,7 +907,7 @@ namespace CodeContext.Core.Repositories.InMemory
         /// <summary>
         /// Returns a version-stamped composite adjacency snapshot of the current committed state,
         /// rebuilt only when the mutation version changes. Untouched shards contribute their reused
-        /// per-shard <see cref="GraphAdjacency"/>; a single-shard graph delegates straight to it.
+        /// per-shard read state; a single-shard graph delegates straight to it.
         /// </summary>
         internal CompositeAdjacency GetAdjacency()
         {
@@ -604,24 +927,28 @@ namespace CodeContext.Core.Repositories.InMemory
             => _shards.TryGetValue(key, out var shard) ? shard : null;
 
         internal GraphAdjacency? GetShardAdjacency(ShardKey key)
-            => _shards.TryGetValue(key, out var shard) ? shard.GetOrBuildAdjacency() : null;
+            => _shards.TryGetValue(key, out var shard) && shard is GraphState heap ? heap.GetOrBuildAdjacency() : null;
 
         internal IReadOnlyCollection<ShardKey> ShardKeys => _shards.Keys.ToList();
 
         internal ShardKey? FindShardOfNode(string id)
         {
             foreach (var (key, shard) in _shards)
-                if (shard.Nodes.ContainsKey(id)) return key;
+                if (shard.TryGetNode(id, out _)) return key;
             return null;
         }
 
         internal ShardKey? FindShardOfEdge(string id)
         {
             foreach (var (key, shard) in _shards)
-                if (shard.Edges.ContainsKey(id)) return key;
+                if (shard.TryGetEdge(id, out _)) return key;
             return null;
         }
 
+        /// <summary>
+        /// Counts over the committed graph. The per-type maps enumerate in ordinal key order, so a
+        /// status response does not depend on the order facts were committed in.
+        /// </summary>
         public GraphStatistics GetStatistics()
         {
             var version = Interlocked.Read(ref _version);
@@ -632,31 +959,29 @@ namespace CodeContext.Core.Repositories.InMemory
             }
 
             var shards = _shards;
-            var nodesByType = new Dictionary<string, int>();
-            var edgesByType = new Dictionary<string, int>();
+            var nodesByType = new Dictionary<string, int>(StringComparer.Ordinal);
+            var edgesByType = new Dictionary<string, int>(StringComparer.Ordinal);
             var nodeCount = 0;
             var edgeCount = 0;
 
             foreach (var shard in shards.Values)
             {
-                foreach (var node in shard.Nodes.Values)
-                {
-                    nodeCount++;
-                    if (!string.IsNullOrEmpty(node.Type))
-                        nodesByType[node.Type] = nodesByType.GetValueOrDefault(node.Type) + 1;
-                }
-
-                foreach (var edge in shard.Edges.Values)
-                {
-                    edgeCount++;
-                    if (!string.IsNullOrEmpty(edge.Type))
-                        edgesByType[edge.Type] = edgesByType.GetValueOrDefault(edge.Type) + 1;
-                }
+                nodeCount += shard.NodeCount;
+                edgeCount += shard.EdgeCount;
+                shard.AddStatistics(nodesByType, edgesByType);
             }
 
-            var statistics = new GraphStatistics(nodeCount, edgeCount, nodesByType, edgesByType);
+            var statistics = new GraphStatistics(nodeCount, edgeCount, OrdinalKeyOrder(nodesByType), OrdinalKeyOrder(edgesByType));
             _cachedStatistics = new CachedStatistics(version, statistics);
             return statistics;
+        }
+
+        private static Dictionary<string, int> OrdinalKeyOrder(Dictionary<string, int> counts)
+        {
+            // A Dictionary filled without removals enumerates in insertion order.
+            var ordered = new Dictionary<string, int>(counts.Count);
+            foreach (var key in counts.Keys.Order(StringComparer.Ordinal)) ordered[key] = counts[key];
+            return ordered;
         }
 
         // ---- Shard construction ----
@@ -677,7 +1002,7 @@ namespace CodeContext.Core.Repositories.InMemory
         }
 
         /// <summary>Full replacement: partition incoming facts by their metadata-derived shard.</summary>
-        private static ImmutableSortedDictionary<ShardKey, GraphState> PartitionIntoState(
+        private static ImmutableSortedDictionary<ShardKey, IGraphShard> PartitionIntoState(
             IEnumerable<CodeNode> nodes, IEnumerable<CodeEdge> edges)
         {
             // Collapse duplicate ids to a single surviving copy, last in input order winning — mirroring
@@ -704,7 +1029,7 @@ namespace CodeContext.Core.Repositories.InMemory
             // Global identifier map preserves the pre-shard behaviour: a duplicate public identifier
             // pointing at a different id is rejected regardless of which shard each fact lands in.
             var globalIdentifiers = new Dictionary<string, string>(StringComparer.Ordinal);
-            var builder = ImmutableSortedDictionary.CreateBuilder<ShardKey, GraphState>(ShardKey.Comparer);
+            var builder = ImmutableSortedDictionary.CreateBuilder<ShardKey, IGraphShard>(ShardKey.Comparer);
             foreach (var key in nodesByShard.Keys.Union(edgesByShard.Keys))
             {
                 var shardNodes = nodesByShard.GetValueOrDefault(key);
@@ -727,12 +1052,13 @@ namespace CodeContext.Core.Repositories.InMemory
         /// <summary>
         /// Scoped commit: replace facts owned by (scope.ParserId, scope.WorkspaceId) — or its listed
         /// files — carrying over the rest of that shard, then sweep foreign shards for edges that
-        /// dangle onto removed-and-not-reestablished nodes. Untouched shards keep their reference.
+        /// dangle onto removed-and-not-reestablished nodes. Untouched shards keep their reference;
+        /// an unchanged scoped commit returns <paramref name="current"/> itself.
         /// </summary>
-        private static ImmutableSortedDictionary<ShardKey, GraphState> BuildScopedState(
-            ImmutableSortedDictionary<ShardKey, GraphState> current,
-            IEnumerable<CodeNode> nodes,
-            IEnumerable<CodeEdge> edges,
+        private static ImmutableSortedDictionary<ShardKey, IGraphShard> BuildScopedState(
+            ImmutableSortedDictionary<ShardKey, IGraphShard> current,
+            IReadOnlyList<CodeNode> nodes,
+            IReadOnlyList<CodeEdge> edges,
             CommitScope scope)
         {
             var key = ShardKey.From(scope.ParserId, scope.WorkspaceId);
@@ -743,90 +1069,35 @@ namespace CodeContext.Core.Repositories.InMemory
 
             // The foreign shards, probed per-identifier (not eagerly enumerated) so the commit stays
             // O(touched shard + delta × shards) rather than O(total foreign nodes).
-            var foreignShards = new List<GraphState>();
+            var foreignShards = new List<IGraphShard>();
             foreach (var (otherKey, otherShard) in current)
                 if (otherKey != key) foreignShards.Add(otherShard);
 
-            var deltaNodeCount = nodes is ICollection<CodeNode> nc ? nc.Count : 0;
-            var deltaEdgeCount = edges is ICollection<CodeEdge> ec ? ec.Count : 0;
-            var nextShard = new GraphState(
-                (currentShard?.Nodes.Count ?? 0) + deltaNodeCount,
-                (currentShard?.Edges.Count ?? 0) + deltaEdgeCount);
-            var removedNodeIds = new HashSet<string>(StringComparer.Ordinal);
-            // Identifiers of the shard being built, for within-shard uniqueness across carried + delta.
-            var buildIdentifiers = new Dictionary<string, string>(StringComparer.Ordinal);
-            // Delta ids let us fold cross-shard id collisions (delta wins) into the same one-swap publish.
-            var deltaNodeIds = new HashSet<string>(StringComparer.Ordinal);
-            var deltaEdgeIds = new HashSet<string>(StringComparer.Ordinal);
-
-            if (currentShard is not null)
-            {
-                foreach (var node in currentShard.Nodes.Values)
-                {
-                    if (node.Id is null) continue;
-                    var removed = replaceFiles is null
-                        || (!string.IsNullOrEmpty(node.FilePath) && replaceFiles.Contains(node.FilePath));
-                    if (removed)
-                    {
-                        removedNodeIds.Add(node.Id);
-                    }
-                    else
-                    {
-                        // Carried facts were already globally unique — no foreign probe needed.
-                        nextShard.Nodes.TryAdd(node.Id, node);
-                        RegisterBuildIdentifier(nextShard, buildIdentifiers, node, foreignProbe: null);
-                    }
-                }
-            }
-
-            foreach (var node in nodes)
-            {
-                if (node.Id is null) continue;
-                deltaNodeIds.Add(node.Id);
-                nextShard.Nodes[node.Id] = node;
-                RegisterBuildIdentifier(nextShard, buildIdentifiers, node, foreignProbe: foreignShards);
-            }
-
-            if (currentShard is not null)
-            {
-                // Carry edges within the shard, mirroring the pre-shard rule exactly: an edge from a
-                // surviving node into a replaced node is kept only when the delta re-established that
-                // target — otherwise it would dangle.
-                foreach (var edge in currentShard.Edges.Values)
-                {
-                    if (edge.Id is null) continue;
-                    if (edge.SourceId is not null && removedNodeIds.Contains(edge.SourceId)) continue;
-                    if (edge.TargetId is not null
-                        && removedNodeIds.Contains(edge.TargetId)
-                        && !nextShard.Nodes.ContainsKey(edge.TargetId)) continue;
-                    nextShard.Edges.TryAdd(edge.Id, edge);
-                }
-            }
-
-            foreach (var edge in edges)
-            {
-                if (edge.Id is null) continue;
-                deltaEdgeIds.Add(edge.Id);
-                nextShard.Edges[edge.Id] = edge;
-            }
+            var nextShard = (currentShard ?? new GraphState()).ApplyScoped(
+                nodes, edges, replaceFiles, foreignShards, out var removedNodeIds, out var removedNotReestablished);
+            if (nextShard is null) return current;
 
             var builder = current.ToBuilder();
             builder[key] = nextShard;
 
+            // Delta ids let us fold cross-shard id collisions (delta wins) into the same one-swap publish.
+            var deltaNodeIds = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var node in nodes)
+                if (node.Id is not null) deltaNodeIds.Add(node.Id);
+            var deltaEdgeIds = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var edge in edges)
+                if (edge.Id is not null) deltaEdgeIds.Add(edge.Id);
+
             // Rebuild any foreign shard that (a) holds an edge now dangling onto a removed-and-not-
             // reestablished node, or (b) co-resides a delta id — the delta wins globally, so the stale
             // foreign copy is dropped. Both fold into this single swap; untouched shards keep their ref.
-            var removedNotReestablished = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var id in removedNodeIds)
-                if (!nextShard.Nodes.ContainsKey(id)) removedNotReestablished.Add(id);
-
             if (removedNodeIds.Count > 0 || deltaNodeIds.Count > 0 || deltaEdgeIds.Count > 0)
             {
                 foreach (var (otherKey, otherShard) in current)
                 {
                     if (otherKey == key) continue;
-                    var rebuilt = RebuildForeignShard(
-                        otherShard, removedNodeIds, removedNotReestablished, deltaNodeIds, deltaEdgeIds);
+                    var rebuilt = otherShard.WithoutForeignConflicts(
+                        removedNodeIds, removedNotReestablished, deltaNodeIds, deltaEdgeIds);
                     if (rebuilt is not null) builder[otherKey] = rebuilt;
                 }
             }
@@ -834,181 +1105,81 @@ namespace CodeContext.Core.Repositories.InMemory
             return builder.ToImmutable();
         }
 
-        /// <summary>
-        /// Returns a rebuilt copy of a foreign shard with dangling edges and delta-id collisions removed,
-        /// or null when nothing changed (so the caller keeps the original reference and its cached
-        /// adjacency). Dangling-edge drop mirrors the pre-shard global semantics (drop iff source was
-        /// removed, or target was removed and not re-established anywhere); a co-resident delta id is
-        /// dropped so the delta's copy is the single global survivor.
-        /// </summary>
-        private static GraphState? RebuildForeignShard(
-            GraphState shard,
-            HashSet<string> removedNodeIds,
-            HashSet<string> removedNotReestablished,
-            HashSet<string> deltaNodeIds,
-            HashSet<string> deltaEdgeIds)
-        {
-            HashSet<string>? dropEdges = null;
-
-            if (removedNodeIds.Count > 0)
-            {
-                foreach (var edgeId in shard.GetCrossShardEdgeIds())
-                {
-                    if (!shard.Edges.TryGetValue(edgeId, out var edge) || edge.Id is null) continue;
-                    var dangles = (edge.SourceId is not null && removedNodeIds.Contains(edge.SourceId))
-                        || (edge.TargetId is not null && removedNotReestablished.Contains(edge.TargetId));
-                    if (dangles) (dropEdges ??= new HashSet<string>(StringComparer.Ordinal)).Add(edge.Id);
-                }
-            }
-
-            if (deltaEdgeIds.Count > 0)
-            {
-                foreach (var id in deltaEdgeIds)
-                    if (shard.Edges.ContainsKey(id)) (dropEdges ??= new HashSet<string>(StringComparer.Ordinal)).Add(id);
-            }
-
-            HashSet<string>? dropNodes = null;
-            if (deltaNodeIds.Count > 0)
-            {
-                foreach (var id in deltaNodeIds)
-                    if (shard.Nodes.ContainsKey(id)) (dropNodes ??= new HashSet<string>(StringComparer.Ordinal)).Add(id);
-            }
-
-            // When a delta reclaims an id, the evicted foreign node's OWN edges die with it — including
-            // fully-local ones (both endpoints in-shard) that never appear in the cross-shard candidate
-            // set. This deliberately DIVERGES from the old single-map behaviour (which left the edge in
-            // place, silently re-pointing it at the unrelated new node with the reclaimed id — a wrong
-            // association); dropping matches the store's own removed-node edge rule.
-            if (dropNodes is not null)
-            {
-                foreach (var edge in shard.Edges.Values)
-                {
-                    if (edge.Id is null) continue;
-                    if ((edge.SourceId is not null && dropNodes.Contains(edge.SourceId))
-                        || (edge.TargetId is not null && dropNodes.Contains(edge.TargetId)))
-                    {
-                        (dropEdges ??= new HashSet<string>(StringComparer.Ordinal)).Add(edge.Id);
-                    }
-                }
-            }
-
-            if (dropEdges is null && dropNodes is null) return null;
-
-            var next = new GraphState(
-                shard.Nodes.Count - (dropNodes?.Count ?? 0),
-                Math.Max(0, shard.Edges.Count - (dropEdges?.Count ?? 0)));
-            foreach (var pair in shard.Nodes)
-                if (dropNodes is null || !dropNodes.Contains(pair.Key)) next.Nodes.TryAdd(pair.Key, pair.Value);
-            foreach (var pair in shard.Identifiers)
-                if (dropNodes is null || !dropNodes.Contains(pair.Value)) next.Identifiers.TryAdd(pair.Key, pair.Value);
-            foreach (var pair in shard.Edges)
-                if (dropEdges is null || !dropEdges.Contains(pair.Key)) next.Edges.TryAdd(pair.Key, pair.Value);
-            return next;
-        }
-
-        /// <summary>
-        /// Returns a rebuilt copy of a shard with removed nodes and edges touching any globally-removed
-        /// node dropped, or null when the shard is unaffected (keep the original reference).
-        /// </summary>
-        private static GraphState? PruneShard(GraphState shard, HashSet<string> removedNodeIds)
-        {
-            var hasNodeRemoval = false;
-            foreach (var node in shard.Nodes.Values)
-                if (node.Id is not null && removedNodeIds.Contains(node.Id)) { hasNodeRemoval = true; break; }
-
-            var hasEdgeRemoval = false;
-            if (!hasNodeRemoval)
-            {
-                // No local node removals: only cross-shard edges can be affected.
-                foreach (var edgeId in shard.GetCrossShardEdgeIds())
-                {
-                    if (!shard.Edges.TryGetValue(edgeId, out var edge)) continue;
-                    if ((edge.SourceId is not null && removedNodeIds.Contains(edge.SourceId))
-                        || (edge.TargetId is not null && removedNodeIds.Contains(edge.TargetId)))
-                    {
-                        hasEdgeRemoval = true;
-                        break;
-                    }
-                }
-                if (!hasEdgeRemoval) return null;
-            }
-
-            var next = new GraphState(shard.Nodes.Count, shard.Edges.Count);
-            foreach (var node in shard.Nodes.Values)
-            {
-                if (node.Id is null) continue;
-                if (removedNodeIds.Contains(node.Id)) continue;
-                next.Nodes.TryAdd(node.Id, node);
-                AddIdentifier(next, node, globalIdentifiers: null);
-            }
-            foreach (var edge in shard.Edges.Values)
-            {
-                if (edge.Id is null) continue;
-                if (edge.SourceId is not null && removedNodeIds.Contains(edge.SourceId)) continue;
-                if (edge.TargetId is not null && removedNodeIds.Contains(edge.TargetId)) continue;
-                next.Edges.TryAdd(edge.Id, edge);
-            }
-            return next;
-        }
-
         // ---- In-place shard/identifier helpers ----
 
-        private GraphState EnsureShard(
-            ShardKey key, ImmutableSortedDictionary<ShardKey, GraphState> shards, out bool created)
+        /// <summary>The heap shard for <paramref name="key"/>, created (and published) if absent.</summary>
+        private GraphState EnsureHeapShard(ShardKey key)
         {
-            if (shards.TryGetValue(key, out var shard))
+            if (_shards.TryGetValue(key, out var shard)) return AsHeapShard(key, shard);
+            var created = new GraphState();
+            _shards = _shards.Add(key, created);
+            return created;
+        }
+
+        /// <summary>
+        /// The legacy in-place mutations write heap dictionaries. A shard of another kind is first
+        /// replaced by a heap copy of itself, published in place of it. A staged reconciliation that
+        /// holds the same shard reference gets the same copy, so the write reaches both maps exactly
+        /// as it does when a heap shard is shared between them.
+        /// </summary>
+        private GraphState AsHeapShard(ShardKey key, IGraphShard shard)
+        {
+            if (shard is GraphState heap) return heap;
+            heap = GraphState.CopyOf(shard);
+            _shards = _shards.SetItem(key, heap);
+            if (_reconciliationState is not null
+                && _reconciliationState.TryGetValue(key, out var staged)
+                && ReferenceEquals(staged, shard))
             {
-                created = false;
-                return shard;
+                _reconciliationState = _reconciliationState.SetItem(key, heap);
             }
-            shard = new GraphState();
-            _shards = shards.Add(key, shard);
-            created = true;
-            return shard;
+            return heap;
         }
 
         private static void RegisterIdentifierAcrossShards(
-            ImmutableSortedDictionary<ShardKey, GraphState> shards, GraphState target, CodeNode node)
+            ImmutableSortedDictionary<ShardKey, IGraphShard> shards, GraphState target, CodeNode node)
         {
             if (string.IsNullOrWhiteSpace(node.Identifier) || string.IsNullOrEmpty(node.Id)) return;
             foreach (var shard in shards.Values)
             {
-                if (shard.Identifiers.TryGetValue(node.Identifier, out var existingId) && existingId != node.Id)
+                if (shard.TryGetNodeIdByIdentifier(node.Identifier, out var existingId) && existingId != node.Id)
                     throw new InvalidDataException($"Duplicate public symbol identifier '{node.Identifier}'.");
             }
             target.Identifiers[node.Identifier] = node.Id;
         }
 
         /// <summary>
-        /// Registers a delta/carried node's identifier during a scoped shard build: enforces uniqueness
-        /// within the shard being built and, for delta nodes, probes each foreign shard's identifier map
-        /// directly (O(1) per probe) instead of eagerly copying every foreign identifier. Throwing leaves
-        /// no published state (the whole build is pre-swap).
+        /// Registers a carried or delta node's identifier during a scoped shard build: enforces
+        /// uniqueness within the shard being built and, for delta nodes, probes each foreign shard's
+        /// identifier map directly (O(1) per probe) instead of eagerly copying every foreign
+        /// identifier. Throwing leaves no published state (the whole build is pre-swap).
         /// </summary>
-        private static void RegisterBuildIdentifier(
-            GraphState nextShard,
-            Dictionary<string, string> buildIdentifiers,
-            CodeNode node,
-            IReadOnlyList<GraphState>? foreignProbe)
+        private static void RegisterIdentifier(
+            GraphState nextShard, CodeNode node, IReadOnlyList<IGraphShard>? foreignProbe)
         {
             if (string.IsNullOrEmpty(node.Identifier))
                 node.Identifier = DeriveLegacyIdentifier(node) ?? string.Empty;
             if (string.IsNullOrWhiteSpace(node.Identifier) || string.IsNullOrEmpty(node.Id)) return;
 
-            if (!buildIdentifiers.TryAdd(node.Identifier, node.Id)
-                && buildIdentifiers[node.Identifier] != node.Id)
-            {
+            if (nextShard.Identifiers.TryGetValue(node.Identifier, out var heldBy) && heldBy != node.Id)
                 throw new InvalidDataException($"Duplicate public symbol identifier '{node.Identifier}'.");
-            }
 
             if (foreignProbe is not null)
             {
                 foreach (var foreign in foreignProbe)
-                    if (foreign.Identifiers.TryGetValue(node.Identifier, out var foreignId) && foreignId != node.Id)
+                    if (foreign.TryGetNodeIdByIdentifier(node.Identifier, out var foreignId) && foreignId != node.Id)
                         throw new InvalidDataException($"Duplicate public symbol identifier '{node.Identifier}'.");
             }
 
             nextShard.Identifiers[node.Identifier] = node.Id;
+        }
+
+        /// <summary>Drops the identifier of a node copy that is being replaced, if it still names that id.</summary>
+        private static void ReleaseIdentifier(GraphState nextShard, CodeNode replaced)
+        {
+            if (string.IsNullOrWhiteSpace(replaced.Identifier) || string.IsNullOrEmpty(replaced.Id)) return;
+            if (nextShard.Identifiers.TryGetValue(replaced.Identifier, out var heldBy) && heldBy == replaced.Id)
+                nextShard.Identifiers.TryRemove(replaced.Identifier, out _);
         }
 
         /// <summary>
@@ -1050,39 +1221,36 @@ namespace CodeContext.Core.Repositories.InMemory
         }
 
         /// <summary>
-        /// Read facade over one or more per-shard <see cref="GraphAdjacency"/> snapshots. A single-shard
-        /// graph delegates every member straight to that shard's adjacency (zero overhead — the common
-        /// case). Multi-shard probes each shard in ordinal <see cref="ShardKey"/> order and concatenates.
+        /// Read facade over the shards of one published map. A single-shard graph delegates every
+        /// member straight to that shard (zero overhead — the common case). Multi-shard probes each
+        /// shard in ordinal <see cref="ShardKey"/> order and concatenates, so every list is in
+        /// canonical order.
         /// </summary>
         internal sealed class CompositeAdjacency
         {
             private static readonly CodeEdge[] EmptyEdges = Array.Empty<CodeEdge>();
             private static readonly CodeNode[] EmptyNodes = Array.Empty<CodeNode>();
+            private static readonly string[] EmptyPaths = Array.Empty<string>();
 
-            private readonly GraphAdjacency[] _shards;
+            private readonly IGraphShard[] _shards;
             private IReadOnlyList<CodeNode>? _nodes;
             private IReadOnlyList<CodeEdge>? _edges;
             private IReadOnlyList<CodeNode>? _nodesView;
             private IReadOnlyList<CodeEdge>? _edgesView;
+            private IReadOnlyList<string>? _filePaths;
 
-            private CompositeAdjacency(GraphAdjacency[] shards) => _shards = shards;
+            private CompositeAdjacency(IGraphShard[] shards) => _shards = shards;
 
-            internal static CompositeAdjacency Build(ImmutableSortedDictionary<ShardKey, GraphState> shards)
-            {
-                var adjacencies = new GraphAdjacency[shards.Count];
-                var i = 0;
-                foreach (var shard in shards.Values)
-                    adjacencies[i++] = shard.GetOrBuildAdjacency();
-                return new CompositeAdjacency(adjacencies);
-            }
+            internal static CompositeAdjacency Build(ImmutableSortedDictionary<ShardKey, IGraphShard> shards)
+                => new(shards.Values.ToArray());
 
             public IReadOnlyList<CodeNode> Nodes
             {
                 get
                 {
-                    if (_shards.Length == 1) return _shards[0].Nodes;
+                    if (_shards.Length == 1) return _shards[0].GetAllNodes();
                     if (_shards.Length == 0) return EmptyNodes;
-                    return _nodes ??= _shards.SelectMany(s => s.Nodes).ToList();
+                    return _nodes ??= _shards.SelectMany(s => s.GetAllNodes()).ToList();
                 }
             }
 
@@ -1090,17 +1258,16 @@ namespace CodeContext.Core.Repositories.InMemory
             {
                 get
                 {
-                    if (_shards.Length == 1) return _shards[0].Edges;
+                    if (_shards.Length == 1) return _shards[0].GetAllEdges();
                     if (_shards.Length == 0) return EmptyEdges;
-                    return _edges ??= _shards.SelectMany(s => s.Edges).ToList();
+                    return _edges ??= _shards.SelectMany(s => s.GetAllEdges()).ToList();
                 }
             }
 
             // Cached, downcast-proof read-only facades over the whole-graph node/edge lists, built ONCE
             // per composite instance (i.e. once per mutation version). GetAll repository reads return
             // these directly — zero per-call copy — yet the returned object cannot be cast back to the
-            // shared List/array backing store (single-shard delegates straight to a GraphAdjacency's List;
-            // the multi-shard concat caches its own List), so no reader can mutate another reader's view.
+            // shared List/array backing store, so no reader can mutate another reader's view.
             public IReadOnlyList<CodeNode> NodesView => _nodesView ??= AsReadOnlyView(Nodes);
 
             public IReadOnlyList<CodeEdge> EdgesView => _edgesView ??= AsReadOnlyView(Edges);
@@ -1109,6 +1276,21 @@ namespace CodeContext.Core.Repositories.InMemory
                 => source is IList<T> list
                     ? new ReadOnlyCollection<T>(list)
                     : new ReadOnlyCollection<T>(source.ToList());
+
+            /// <summary>
+            /// Distinct (ordinal) non-empty node file paths over every shard, ordered OrdinalIgnoreCase
+            /// then Ordinal.
+            /// </summary>
+            public IReadOnlyList<string> FilePaths
+            {
+                get
+                {
+                    if (_shards.Length == 1) return _shards[0].GetFilePaths();
+                    if (_shards.Length == 0) return EmptyPaths;
+                    return _filePaths ??= new ReadOnlyCollection<string>(GraphAdjacency.SortPaths(
+                        _shards.SelectMany(s => s.GetFilePaths()).Distinct(StringComparer.Ordinal)));
+                }
+            }
 
             public IReadOnlyList<CodeEdge> GetEdgesBySource(string sourceId)
             {
@@ -1144,6 +1326,14 @@ namespace CodeContext.Core.Repositories.InMemory
                     if (hit.Count > 0) (acc ??= new List<CodeNode>()).AddRange(hit);
                 }
                 return acc ?? (IReadOnlyList<CodeNode>)EmptyNodes;
+            }
+
+            public IReadOnlyList<CodeNode> FindNodesByName(string name, bool exact)
+            {
+                if (_shards.Length == 1) return _shards[0].FindNodesByName(name, exact);
+                var acc = new List<CodeNode>();
+                foreach (var shard in _shards) acc.AddRange(shard.FindNodesByName(name, exact));
+                return acc;
             }
         }
     }

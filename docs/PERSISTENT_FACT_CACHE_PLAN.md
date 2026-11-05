@@ -1044,7 +1044,50 @@ Gates: standard.
 
 ### Phase 1: shard interface and canonical read order
 
-Status: not started
+Status: accepted 2026-11-05. Reviewed by one Opus and one Sonnet reviewer; no blocker;
+the confirmed findings fixed by a fixer; gates re-run by the coordinator.
+
+Review outcome.
+- Commit rules: unchanged apart from the two named fixes. The Sonnet reviewer ran the
+  pre-change store against the reference model over 400 seeds x 200 operations and found
+  divergence only in the identifier-shadowing corner the fix addresses; the new store
+  matched over 300 further seeds with a harsher generator. The Opus reviewer's mutation
+  checks (alias bug restored, sorting disabled) fail the new tests.
+- Fixed: (1) a legacy in-place mutation on a non-heap shard was lost when a
+  reconciliation was staged, because only the live map received the heap copy (latent
+  until phase 8; now the staged map receives it too when it holds the same shard);
+  (2) `RemoveEdgesTouchingNode(null)` threw on a non-heap shard where a heap shard removes
+  edges with a null endpoint; (3) the read matrix now compares the raw identifier map,
+  probes every identifier ever issued and asks by-source and by-target for every edge
+  endpoint; (4) the generator now also produces blank and `external:` paths, null ids,
+  ownership metadata that differs from the scope, null and empty `ReplacesFiles`
+  entries, case-variant prune keep-sets, `ReplaceAll`, `Reset`, the four legacy mutations
+  and a mid-scenario `TryReplaceShard` swap; (5) both release workflows passed an
+  explicit test filter that replaced the project default, so they would have run the
+  benchmark; both now exclude it.
+- Phase 8 reuses `StoreScenarioRunner.RunAsync(seed, operations, equivalentShard)`: the
+  same scenarios run with every live shard swapped for a non-heap equivalent
+  (`NonHeapShardStore_MatchesReferenceModel`, today over a delegating test shard).
+- Not generated, covered by named tests instead: legacy mutations while a reconciliation
+  is staged (whether the write survives depends on whether the staged map still shares
+  the shard object, which is today's behaviour and is kept; see section 9).
+- Dismissed: line endings of `GraphAdjacency.cs` (the index copy is LF); the order of
+  status `languageBreakdown` (file-metadata repository, not the graph store; section 9).
+
+Edit-path cost, measured by the coordinator on the generated shard (26,000 nodes, 298,792
+edges), Release, alternating runs, base against this phase. As first delivered: commit
+plus one keyed query 507 / 498 / 574 / 538 ms base against 553 / 573 / 581 / 572 ms,
+about 8 percent slower and slower in every round. Cause: one wrapper object per bucket
+(about 53,000), a garbage-collection cost rather than sorting. Decision: fix it now
+rather than carry an 8 percent store regression to phase 11, since the cause was
+contained. The buckets became slots of one array with one array of sorted flags. After
+the fix, five alternating rounds by the fixer: 578.5 / 553.9, 570.6 / 554.9,
+548.4 / 568.8, 538.7 / 509.7, 527.5 / 510.1 ms (base / phase 1): four of five rounds
+faster, the other 3.7 percent slower. Commit plus one compact context query (depth 2, tests):
+phase 1 faster in all five rounds (599 to 668 ms base, 582 to 606 ms phase 1), because
+the naming heuristic reads the cached file-path list instead of every node. Neither
+figure moved by more than 10 percent, so the phase 0 harness was not run; phase 11
+checks end to end.
 
 Goal: `InMemoryDatabase` works against `IGraphShard`; reads are canonical; no feature yet.
 
@@ -1628,3 +1671,7 @@ into the release.
 | Test worker starts needing `TestWorkerOptions.Patient()` | Rule for all phases; new real-worker tests use it |
 | `ParserProcessSupervisorTests` `CrashingRepeatedly...` and `MalformedOutput...` failed in 1 of 8 full-suite runs on `main` ("The pipe is being closed", state `Failed` where `Unavailable` is expected) | Predates this work: a race in how the supervisor classifies a dying worker. Phase 9 changes that code. If the hibernation work explains it, fix it with a test; if not, record what was seen. The assertion is not loosened. A failure of these two tests in a gate run before phase 9 is re-run once and recorded, not treated as a regression of the phase |
 | Dedicated skill pass | Closing step 2 |
+| Legacy in-place store writes (`UpsertNode`, `RemoveNode`, `UpsertEdge`, `RemoveEdgesTouchingNode`) during a staged reconciliation reach the live map at once and survive the reconciliation's commit only where the staged map still shares the shard object; a write to a shard the reconciliation already rebuilt, or to a new shard key, is dropped by that commit | Predates this work and is kept; pinned by `LegacyUpsertIntoANewShard_DuringAReconciliation_IsLiveUntilItsCommit` and the phase 1 legacy-mutation tests. No production path writes this way during a reconciliation. Phase 8 must keep a mapped shard behaving as a heap shard here, which those tests check |
+| A shard key whose facts were all removed stays in the shard map; `RemoveNode(null)` throws when any shard exists and returns false on an empty store | Found in phase 1; not changed. Phase 2's writer must skip a shard with no facts; phase 3's capture must not treat an empty key as a change |
+| Status `languageBreakdown` order follows scan history (file-metadata repository) | Out of scope unless a later phase needs byte-identical status |
+| `ParserProcessSupervisorTests.SlowProgressObserver_DoesNotBlockProtocolResponses` failed once in a full-suite run during the phase 1 fix and passed alone and on the re-run | Timing-based, unrelated to the store. Same rule as the two supervisor tests above: re-run once and record |

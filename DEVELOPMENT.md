@@ -32,9 +32,10 @@ dotnet build
 dotnet test
 ```
 
-The test project defaults to `Category!=ExternalTooling`, so `dotnet test` is the
-ordinary deterministic gate. Run a focused class or method with xUnit's fully
-qualified name filter:
+The test project defaults to `Category!=ExternalTooling&Category!=Benchmark`, so
+`dotnet test` is the ordinary deterministic gate. An explicit `--filter` replaces that
+default, so add both exclusions to any filter of your own that should leave those
+categories out. Run a focused class or method with xUnit's fully qualified name filter:
 
 ```bash
 dotnet test tests/CodeContext.Core.Tests/CodeContext.Core.Tests.csproj --filter "FullyQualifiedName~ContextServiceTests"
@@ -47,6 +48,14 @@ requires Node.js plus the installed worker dependencies:
 ```bash
 npm ci --prefix src/CodeContext.TypeScript.Worker
 dotnet test tests/CodeContext.Core.Tests/CodeContext.Core.Tests.csproj --filter "Category=ExternalTooling"
+```
+
+The benchmark category times the graph store's edit path on a generated
+jellyfin-sized shard. It asserts nothing about time and prints its medians; run it in
+Release on an otherwise idle machine:
+
+```bash
+dotnet test tests/CodeContext.Core.Tests/CodeContext.Core.Tests.csproj -c Release --filter "Category=Benchmark" --logger "console;verbosity=detailed"
 ```
 
 Test the standalone worker SDKs as well:

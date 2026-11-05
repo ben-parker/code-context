@@ -13,7 +13,9 @@ namespace CodeContext.Core.Tests.Repositories;
 /// <summary>
 /// Covers the version-stamped adjacency index (<see cref="InMemoryDatabase.GetAdjacency"/> +
 /// <see cref="GraphAdjacency"/>): invalidation on every mutation path, generational/reconciliation
-/// consistency, and set-equivalence with a brute-force scan (the pre-index behaviour). The path
+/// consistency, and equivalence with a brute-force scan (the pre-index behaviour) in canonical
+/// order: every list the index returns is in ordinal id order, whatever order the facts were
+/// committed in. The path
 /// index deliberately mirrors <see cref="FilePathMatcher"/> — the same matcher <c>ContextService</c>
 /// uses — so its case/suffix semantics are validated against the real matcher, not a copy.
 /// </summary>
@@ -223,7 +225,7 @@ public class GraphAdjacencyTests
     // ---- Scan-vs-index equivalence on a random (seeded) graph ---------------
 
     [Fact]
-    public void Adjacency_IsSetEqualToBruteForceScan_OnRandomGraph()
+    public void Adjacency_EqualsBruteForceScanInIdOrder_OnRandomGraph()
     {
         var rng = new Random(20260717);
         var filePaths = new[]
@@ -244,17 +246,19 @@ public class GraphAdjacencyTests
         _database.TryCommitGeneration(1, nodes, edges, scope: null);
         var adj = _database.GetAdjacency();
 
-        // Edge adjacency set-equal to brute-force scan for every node id.
+        // Edge adjacency equal to a brute-force scan for every node id, in edge id order.
         foreach (var id in nodeIds)
         {
-            var expectSrc = edges.Where(e => e.SourceId == id).Select(e => e.Id!).ToHashSet();
-            var expectTgt = edges.Where(e => e.TargetId == id).Select(e => e.Id!).ToHashSet();
-            Assert.Equal(expectSrc, adj.GetEdgesBySource(id).Select(e => e.Id!).ToHashSet());
-            Assert.Equal(expectTgt, adj.GetEdgesByTarget(id).Select(e => e.Id!).ToHashSet());
+            var expectSrc = edges.Where(e => e.SourceId == id).Select(e => e.Id!).Order(StringComparer.Ordinal);
+            var expectTgt = edges.Where(e => e.TargetId == id).Select(e => e.Id!).Order(StringComparer.Ordinal);
+            Assert.Equal(expectSrc, adj.GetEdgesBySource(id).Select(e => e.Id!));
+            Assert.Equal(expectTgt, adj.GetEdgesByTarget(id).Select(e => e.Id!));
         }
+        Assert.Equal(nodes.Select(n => n.Id!).Order(StringComparer.Ordinal), adj.Nodes.Select(n => n.Id!));
+        Assert.Equal(edges.Select(e => e.Id!).Order(StringComparer.Ordinal), adj.Edges.Select(e => e.Id!));
 
-        // File-path index set-equal to a brute-force FilePathMatcher filter for a mix of
-        // rooted, relative, and case-variant query paths.
+        // File-path index equal to a brute-force FilePathMatcher filter, in id order, for a mix
+        // of rooted, relative, and case-variant query paths.
         var queries = new[]
         {
             "/repo/src/Alpha.cs", "/REPO/SRC/ALPHA.CS", @"\repo\src\Beta.cs",
@@ -263,8 +267,8 @@ public class GraphAdjacencyTests
         };
         foreach (var q in queries)
         {
-            var expected = nodes.Where(n => FilePathMatcher.Matches(n.FilePath, q)).Select(n => n.Id!).ToHashSet();
-            var actual = adj.FindNodesByPath(q).Select(n => n.Id!).ToHashSet();
+            var expected = nodes.Where(n => FilePathMatcher.Matches(n.FilePath, q)).Select(n => n.Id!).Order(StringComparer.Ordinal);
+            var actual = adj.FindNodesByPath(q).Select(n => n.Id!);
             Assert.Equal(expected, actual);
         }
     }
@@ -312,6 +316,37 @@ public class GraphAdjacencyTests
         })).ToArray();
 
         await Task.WhenAll(readers.Append(writer));
+    }
+
+    [Fact]
+    public async Task SortedOnFirstRead_ConcurrentFirstReaders_AllSeeIdOrder()
+    {
+        // Buckets and whole-snapshot lists are sorted on first read. Readers racing on a fresh
+        // snapshot must each get a complete list in id order, never a list mid-sort.
+        var rng = new Random(11);
+        var nodes = Enumerable.Range(0, 400).Select(i => Node($"n{rng.Next():x8}{i}", "/a/A.cs")).ToList();
+        var edges = Enumerable.Range(0, 4000)
+            .Select(i => Edge($"e{rng.Next():x8}{i}", nodes[rng.Next(20)].Id!, "hub"))
+            .ToList();
+        var expectedHub = edges.Select(e => e.Id!).Order(StringComparer.Ordinal).ToList();
+        var expectedNodes = nodes.Select(n => n.Id!).Order(StringComparer.Ordinal).ToList();
+
+        for (var round = 0; round < 20; round++)
+        {
+            var database = new InMemoryDatabase();
+            database.TryCommitGeneration(1, nodes, edges, scope: null);
+            using var start = new ManualResetEventSlim();
+            var readers = Enumerable.Range(0, 8).Select(i => Task.Run(() =>
+            {
+                start.Wait();
+                var adjacency = database.GetAdjacency();
+                Assert.Equal(expectedHub, adjacency.GetEdgesByTarget("hub").Select(e => e.Id!));
+                Assert.Equal(expectedNodes, (i % 2 == 0 ? adjacency.Nodes : adjacency.FindNodesByPath("A.cs")).Select(n => n.Id!));
+                Assert.Equal(expectedHub, adjacency.Edges.Select(e => e.Id!));
+            })).ToArray();
+            start.Set();
+            await Task.WhenAll(readers);
+        }
     }
 
     private static void AssertSameNodeSet(IEnumerable<string> expectedIds, IReadOnlyList<CodeNode> actual)

@@ -3,6 +3,10 @@ using System.Threading.Tasks;
 
 namespace CodeContext.Core.Repositories
 {
+    /// <summary>
+    /// Edge reads. Every list is in canonical order: ordinal by edge id within a shard, shards in
+    /// (parserId, workspaceId) ordinal order.
+    /// </summary>
     public interface ICodeEdgeRepository
     {
         Task<IReadOnlyList<CodeEdge>> GetAllAsync();

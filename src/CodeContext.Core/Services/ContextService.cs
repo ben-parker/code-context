@@ -1356,8 +1356,8 @@ namespace CodeContext.Core.Services
             }
 
             var heuristicFiles = await FindTestFilesAsync(targetNode);
-            foreach (var testFile in heuristicFiles.Where(file => file.FilePath is not null))
-                AddEvidence(evidenceByFile, testFile.FilePath!, "namingHeuristic");
+            foreach (var testFile in heuristicFiles)
+                AddEvidence(evidenceByFile, testFile, "namingHeuristic");
 
             foreach (var (filePath, evidence) in evidenceByFile)
             {
@@ -1486,7 +1486,7 @@ namespace CodeContext.Core.Services
             => _nodeRepository.FindByFilePathAsync(filePath, type);
 
         // File-path matching lives in the shared FilePathMatcher so the in-memory adjacency
-        // index (GraphAdjacency.NodesByFilePath) resolves paths with byte-identical semantics.
+        // index (the file-path buckets of GraphAdjacency) resolves paths with byte-identical semantics.
         private static bool FilePathMatches(string? indexedPath, string requestedPath)
             => FilePathMatcher.Matches(indexedPath, requestedPath);
 
@@ -1580,29 +1580,29 @@ namespace CodeContext.Core.Services
                 ? node.Id
                 : $"{node.Type}\0{node.FilePath}\0{node.StartLine}\0{node.StartCol}\0{node.Name}";
 
-        private async Task<List<CodeNode>> FindTestFilesAsync(CodeNode targetNode)
+        private const int MaxNamingHeuristicFiles = 10;
+
+        /// <summary>
+        /// Files that may test <paramref name="targetNode"/> by name alone: the distinct node file
+        /// paths containing "Test" or "Spec", ordered OrdinalIgnoreCase then Ordinal, and of those
+        /// the first ten for which <see cref="MightContainTestsForTargetAsync"/> holds.
+        /// </summary>
+        private async Task<List<string>> FindTestFilesAsync(CodeNode targetNode)
         {
-            var allNodes = await _nodeRepository.GetAllAsync();
-            var testFiles = new List<CodeNode>();
+            var testFiles = new List<string>();
+            // The repository returns the paths distinct and already in this order.
+            var paths = ((await _nodeRepository.GetFilePathsAsync()) ?? [])
+                .Where(path => path.Contains("Test", StringComparison.OrdinalIgnoreCase)
+                    || path.Contains("Spec", StringComparison.OrdinalIgnoreCase));
 
-            // Look for test files that might test this construct
-            // Common patterns: *Test.cs, *Tests.cs, Test*.cs
-            var testFileNodes = allNodes.Where(n => 
-                !string.IsNullOrEmpty(n.FilePath) && 
-                (n.FilePath.Contains("Test", StringComparison.OrdinalIgnoreCase) ||
-                 n.FilePath.Contains("Spec", StringComparison.OrdinalIgnoreCase)))
-                .ToList();
-
-            // Filter to files that might contain tests for the target
-            foreach (var node in testFileNodes)
+            foreach (var path in paths)
             {
-                if (await MightContainTestsForTargetAsync(node.FilePath, targetNode))
-                {
-                    testFiles.Add(node);
-                }
+                if (testFiles.Count == MaxNamingHeuristicFiles) break;
+                if (await MightContainTestsForTargetAsync(path, targetNode))
+                    testFiles.Add(path);
             }
 
-            return testFiles.Take(10).ToList();
+            return testFiles;
         }
 
         private async Task<List<CodeNode>> GetTestMethodsForTargetAsync(string? testFilePath, CodeNode targetNode)
