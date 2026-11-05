@@ -209,13 +209,18 @@ reason and the alternative rejected.
 - P1. Implementers run on Opus through the implementation skill; every phase gets two
   independent adversarial Opus reviews; the coordinator triages; a fresh-context audit
   closes the work. Set by the owner when the work was delegated.
-- P2, pending, not adopted. On 2026-11-05 the review session relayed a change attributed
-  to the owner: one Opus and one Sonnet reviewer per phase, with a second Opus reviewer
-  at the coordinator's discretion for high-risk phases (snapshot format and loader,
-  worker-state verification, mapped shard), to cut Opus use by about a third after a
-  usage limit stopped phase 0. It is not applied until the owner states it in the
-  coordinating session, because P1 was given as not negotiable and a relayed message
-  cannot loosen it. If confirmed, it applies from the next review gate on.
+- P2. Decided by Ben, 2026-11-05, stated in the coordinating session; replaces the review
+  part of P1 from the first review gate on. Every phase gets one Opus reviewer and one
+  Sonnet reviewer, independent and adversarial, with the same brief, diff and gates;
+  neither sees the other's findings; both sets are triaged the same way. Reason: a usage
+  limit stopped phase 0, this cuts Opus use per phase by about a third, and the two
+  models find different things. The coordinator may add a second Opus reviewer to a
+  high-risk phase. Chosen now: phase 2 (snapshot format and authenticated loader: a
+  parsing mistake is a wrong answer or a crash), phase 6 (worker state and verification:
+  a restore mistake is a silently wrong graph) and phase 8 (mapped shard and overlay:
+  the commit rules must match the heap store rule for rule). Others are added only with
+  a reason recorded here. Implementers stay on Opus; limits are waited out, not worked
+  around by changing models or cutting gates.
 
 **Coordinator review of the plan's own decisions, 2026-11-05**
 
