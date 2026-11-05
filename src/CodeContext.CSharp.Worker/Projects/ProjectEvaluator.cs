@@ -27,8 +27,14 @@ public sealed class EvaluatedProject
     public required IReadOnlyList<string> MissingSdks { get; init; }
     public required IReadOnlyList<string> MissingImports { get; init; }
 
-    /// <summary>Conditions and expressions that could not be read, in document order.</summary>
+    /// <summary>Expressions that could not be read but change nothing the compiler is given.</summary>
     public required IReadOnlyList<string> Uncertainties { get; init; }
+
+    /// <summary>
+    /// Conditions, and expressions deciding what the compiler is given, that could not be read.
+    /// The project's context is a guess wherever one of these applies.
+    /// </summary>
+    public required IReadOnlyList<string> CompilerUncertainties { get; init; }
 
     public string Property(string name) => Properties.GetValueOrDefault(name, string.Empty);
 
@@ -99,7 +105,19 @@ public sealed class ProjectEvaluator
     private readonly List<string> _sdkNames = [];
     private readonly List<string> _missingSdks = [];
     private readonly List<string> _missingImports = [];
+    private static readonly HashSet<string> CompilerProperties = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "AssemblyName", "DefineConstants", "EnableDefaultCompileItems", "ImplicitUsings",
+        "LangVersion", "TargetFramework", "TargetFrameworks",
+    };
+
+    private static readonly HashSet<string> CompilerItems = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Compile", "FrameworkReference", "PackageReference", "PackageVersion", "ProjectReference", "Reference", "Using",
+    };
+
     private readonly List<string> _uncertainties = [];
+    private readonly List<string> _compilerUncertainties = [];
 
     private bool _dotNetSdkPropsDone;
     private bool _dotNetSdkTargetsDone;
@@ -173,6 +191,7 @@ public sealed class ProjectEvaluator
             MissingSdks = _missingSdks,
             MissingImports = _missingImports,
             Uncertainties = _uncertainties,
+            CompilerUncertainties = _compilerUncertainties,
         };
     }
 
@@ -252,7 +271,7 @@ public sealed class ProjectEvaluator
             if (!Passes(property, file)) continue;
             var expander = Expander(file);
             var value = expander.Expand(property.Value);
-            if (expander.Uncertain) NoteUncertain(property.Value);
+            if (expander.Uncertain) NoteUncertain(property.Value, CompilerProperties.Contains(property.Name.LocalName));
             SetProperty(property.Name.LocalName, value);
         }
     }
@@ -309,11 +328,12 @@ public sealed class ProjectEvaluator
         var condition = element.Attribute("Condition")?.Value;
         if (condition is null) return true;
         if (MsBuildCondition.Evaluate(condition, Expander(file)) is { } result) return result;
-        NoteUncertain(condition);
+        NoteUncertain(condition, reachesCompiler: true);
         return true;
     }
 
-    private void NoteUncertain(string text) => _uncertainties.Add(text.Trim());
+    private void NoteUncertain(string text, bool reachesCompiler)
+        => (reachesCompiler ? _compilerUncertainties : _uncertainties).Add(text.Trim());
 
     private void ProcessImport(XElement import, string file)
     {
@@ -650,7 +670,7 @@ public sealed class ProjectEvaluator
         var type = item.Name.LocalName;
         var include = ExpandList(item.Attribute("Include")?.Value, expander);
         var remove = ExpandList(item.Attribute("Remove")?.Value, expander);
-        if (expander.Uncertain) NoteUncertain(item.ToString());
+        if (expander.Uncertain) NoteUncertain(item.ToString(), CompilerItems.Contains(type));
 
         if (type == "Compile")
         {
@@ -661,7 +681,7 @@ public sealed class ProjectEvaluator
                 _compileItems.Clear();
                 remove.RemoveAll(path => path.Equals("@(Compile)", StringComparison.OrdinalIgnoreCase));
             }
-            if (include.Concat(remove).Any(path => !IsUsablePath(path))) NoteUncertain(item.ToString());
+            if (include.Concat(remove).Any(path => !IsUsablePath(path))) NoteUncertain(item.ToString(), reachesCompiler: true);
             if (include.Count > 0)
             {
                 var exclude = ExpandList(item.Attribute("Exclude")?.Value, expander);

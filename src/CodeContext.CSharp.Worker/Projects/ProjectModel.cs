@@ -517,6 +517,10 @@ public sealed class ProjectModel
 
             gaps.AddRange(evaluated.MissingSdks.Select(sdk => $"SDK {sdk} was not found, so its defaults are unknown."));
             gaps.AddRange(evaluated.MissingImports.Select(import => $"Import {import} could not be read."));
+            if (evaluated.CompilerUncertainties.Count > 0)
+            {
+                gaps.Add($"{evaluated.CompilerUncertainties.Count} expression(s) deciding what this project compiles could not be read; first: {evaluated.CompilerUncertainties[0]}");
+            }
             if (evaluated.Uncertainties.Count > 0)
             {
                 remarks.Add($"{evaluated.Uncertainties.Count} project expression(s) could not be read; first: {evaluated.Uncertainties[0]}");
