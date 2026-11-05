@@ -927,8 +927,36 @@ the end-of-work message repeats the total.
 
 ### Phase 0: baseline numbers and harness
 
-Status: delivered 2026-11-05, in review. Results in `docs/perf/persistent-fact-cache.md`:
-v0.10.0 and v0.10.7 on all three repositories, 1 discarded and 5 timed runs per column.
+Status: delivered 2026-11-05; reviewed by one Opus and one Sonnet reviewer; fixes in
+progress. Results in `docs/perf/persistent-fact-cache.md`: v0.10.0 and v0.10.7 on all
+three repositories, 1 discarded and 5 timed runs per column.
+
+Review outcome. Both reviewers recomputed the recorded cells from the raw results and
+every one matched, so the tables stand as a first reading. Neither found the harness safe
+to reuse as it was. Confirmed against the script by the coordinator and sent to a fixer:
+- Safety: `stop --path` also matches an ancestor instance, and the harness called it
+  without checking that its own instance was still the one registered, so it could stop
+  another session's instance (for this repository's bench worktree the ancestor is the
+  main checkout); a hard kill could leave an edit that the next run would take for the
+  original and keep; file writes were not atomic; an unparseable `list --json` read as
+  "no instances".
+- Numbers: the "warm edit" medians include the first edit in that project (round 0 was
+  0.99 s against 0.81 s for later rounds on this repository); edit detection polled every
+  52 ms, so figures move in 52 ms steps; memory after queries and after edits was sampled
+  with no settle; the root first-edit ran with no settle while the leaf one had 5 s; query
+  latency included client-side JSON parsing; two of the three enumeration columns are the
+  polling floor on v0.10.7, and only the OS process-creation row measures enumeration.
+- Paths that cannot run before the feature exists (snapshot, hibernation, wake, cached
+  cold starts) could record "not applicable" or drop a figure silently, and stopped the
+  instance without waiting for a snapshot of the unchanged graph.
+
+Decision (coordinator, 2026-11-05): the comparison in phase 11 is taken by running v0.10.7
+and the branch build back to back, interleaved, with the fixed harness, on the same day
+and the same commits of the three repositories. Reasons: the fixes change how warm edits,
+memory and latency are taken, so the phase 0 figures and later figures would differ for
+harness reasons; d2-roguelike is edited by other sessions and will have moved by then;
+and re-taking v0.10.7 costs under an hour. The phase 0 tables are kept, with their
+limitations stated in the document, as the reading that sized this work.
 
 Goal: before-numbers on 0.10.0, taken with the harness the last phase reuses.
 
@@ -1057,8 +1085,9 @@ by one query, and if either grows by more than 25 percent, buckets are sorted on
 access instead of at build. End-to-end warm edit latency needs a release-recipe build
 (Native AOT host), which is too slow to produce per phase; it is checked by the
 coordinator with the phase 0 harness only if those two figures move by more than 10
-percent, and in any case in phase 11 against the v0.10.7 medians (jellyfin body 1.09 s,
-top-level 2.10 s; d2-roguelike 0.67 s, 0.93 s; this repository 0.84 s, 1.25 s).
+percent, and in any case in phase 11 against v0.10.7 re-taken back to back (phase 0
+read: jellyfin body 1.09 s, top-level 2.10 s; d2-roguelike 0.67 s, 0.93 s; this
+repository 0.84 s, 1.25 s, each a little high because round 0 was included).
 
 Gates: standard.
 
@@ -1429,8 +1458,9 @@ Status: not started
 
 Goal: the after-numbers, and the decision whether the release meets its goals.
 
-Scope: run `scripts/bench/measure-cache.py` on release-recipe builds of the branch for the
-three repositories; fill `docs/perf/persistent-fact-cache.md`; add a results section to
+Scope: run `scripts/bench/measure-cache.py` with `--require-cache` and
+`--require-hibernation` on a release-recipe build of the branch AND on the v0.10.7 release
+asset, interleaved, same day, same commits of the three repositories (recorded per run); fill `docs/perf/persistent-fact-cache.md`; add a results section to
 this document and to the brief; extend `scripts/verify-publish.ps1` with one step: stop,
 start again on the same directory, and require `indexing.cache.state` to reach `verified`.
 
