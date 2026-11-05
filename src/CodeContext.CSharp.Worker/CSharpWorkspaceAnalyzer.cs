@@ -237,6 +237,12 @@ public sealed class CSharpWorkspaceAnalyzer
         }
     }
 
+    /// <summary>
+    /// Asks Roslyn about every invoked name, as the walker once did, so tests can hold the two
+    /// paths side by side. Only tests set this: no option or setting leads here.
+    /// </summary>
+    public bool AskEveryInvokedName { get; init; }
+
     /// <summary>How many times the projects were read and the files parsed.</summary>
     public int BuildCount { get; private set; }
 
@@ -613,7 +619,7 @@ public sealed class CSharpWorkspaceAnalyzer
         var edges = new List<EdgeFact>();
         var externals = new ExternalSymbols(_workspaceIdPrefix, _stubs, Share);
         var walker = new GraphWalker(
-            unit.Compilation.GetSemanticModel(tree), tree.FilePath, unit.IdPrefix, _owners, externals, Share, nodes, edges);
+            unit.Compilation.GetSemanticModel(tree), tree.FilePath, unit.IdPrefix, _owners, externals, Share, nodes, edges, AskEveryInvokedName);
         walker.Visit(tree.GetRoot(ct));
         nodes.TrimExcess();
         edges.TrimExcess();
@@ -1271,6 +1277,30 @@ public sealed class CSharpWorkspaceAnalyzer
         ["end"] = span.End,
     };
 
+    /// <summary>The invocation this name is the target of, if any.</summary>
+    public static InvocationExpressionSyntax? InvocationOf(SimpleNameSyntax node)
+    {
+        SyntaxNode invoked = node.Parent switch
+        {
+            MemberAccessExpressionSyntax access when access.Name == node => access,
+            MemberBindingExpressionSyntax binding when binding.Name == node => binding,
+            _ => node,
+        };
+        return invoked.Parent is InvocationExpressionSyntax invocation && invocation.Expression == invoked ? invocation : null;
+    }
+
+    /// <summary>
+    /// True when the name in an invocation needs no question of its own. Asking about it makes
+    /// Roslyn build the whole method group, extension methods included, which cost a quarter
+    /// of the walk, and a method the invocation resolved to adds nothing the invocation's own
+    /// edge has not recorded. Only these two kinds are skipped: a delegate or function pointer
+    /// call is a reference to the field or local holding it, and a failed call may still bind
+    /// the name or count it as unresolved, so those keep asking.
+    /// </summary>
+    public static bool InvocationSettlesName(SemanticModel model, SimpleNameSyntax node)
+        => InvocationOf(node) is { } invocation
+            && model.GetSymbolInfo(invocation).Symbol is IMethodSymbol { MethodKind: MethodKind.Ordinary or MethodKind.ReducedExtension };
+
     private sealed class GraphWalker : CSharpSyntaxWalker
     {
         private readonly SemanticModel _semanticModel;
@@ -1282,6 +1312,7 @@ public sealed class CSharpWorkspaceAnalyzer
         private Dictionary<string, int>? _unresolved;
         private readonly List<ProtocolNode> _nodes;
         private readonly List<EdgeFact> _edges;
+        private readonly bool _askEveryInvokedName;
         private bool _hasTopLevelEntry;
 
         public GraphWalker(
@@ -1289,8 +1320,10 @@ public sealed class CSharpWorkspaceAnalyzer
             IReadOnlyDictionary<string, ProjectCompilation> owners,
             ExternalSymbols externals,
             Func<string, string> share,
-            List<ProtocolNode> nodes, List<EdgeFact> edges)
+            List<ProtocolNode> nodes, List<EdgeFact> edges,
+            bool askEveryInvokedName)
         {
+            _askEveryInvokedName = askEveryInvokedName;
             _semanticModel = semanticModel;
             _filePath = filePath;
             _idPrefix = idPrefix;
@@ -1817,6 +1850,8 @@ public sealed class CSharpWorkspaceAnalyzer
 
         private void AddNameReference(SimpleNameSyntax node)
         {
+            if (!_askEveryInvokedName && InvocationSettlesName(_semanticModel, node)) return;
+
             var symbol = ResolveSymbol(node);
             if (symbol is null) NoteIfUnresolved(node);
             switch (symbol)
@@ -1896,16 +1931,7 @@ public sealed class CSharpWorkspaceAnalyzer
         /// True when this name is the method an invocation calls, which the CALLS edge
         /// already records. Any other use of a method name is a method group.
         /// </summary>
-        private static bool IsInvokedName(SimpleNameSyntax node)
-        {
-            SyntaxNode invoked = node.Parent switch
-            {
-                MemberAccessExpressionSyntax access when access.Name == node => access,
-                MemberBindingExpressionSyntax binding when binding.Name == node => binding,
-                _ => node,
-            };
-            return invoked.Parent is InvocationExpressionSyntax invocation && invocation.Expression == invoked;
-        }
+        private static bool IsInvokedName(SimpleNameSyntax node) => InvocationOf(node) is not null;
 
         private void AddTypeReference(SimpleNameSyntax node, INamedTypeSymbol referencedType)
         {
