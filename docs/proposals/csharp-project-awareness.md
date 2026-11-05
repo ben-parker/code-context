@@ -187,16 +187,20 @@ they make visible, which adds 24% edges on the generated corpora.
 | Repo | | First scan | Body edit | Top-level edit | Peak memory |
 |---|---|---|---|---|---|
 | Flat, 316k lines, no csproj | before | 46.1 s | 35-37 s | 37 s | 1,206 MB |
-| | after | 25.4 s | 0.07-0.44 s | 13-14 s | 762 MB |
+| | after | 25.2 s | 0.07-0.44 s | 13-14 s | 755 MB |
 | 20 projects, 312k lines | before | 47.2 s | 35-41 s | 38 s | 1,286 MB |
-| | after | 24.1 s | 0.08-0.17 s | 6.8-7.0 s | 754 MB |
+| | after | 24.7 s | 0.08-0.56 s | 6.6-7.0 s | 772 MB |
 | d2-roguelike, 44k lines | before | 13.8 s | 3.4 s | 3.4 s | 397 MB |
-| | after | 5.2 s | 0.05-0.07 s | 0.2-0.5 s | 508 MB |
-| This repo, 39k lines | after | 5.5 s | 0.1 s | 1.9-2.1 s | 395 MB |
+| | after | 5.4 s | 0.05-0.07 s | 0.2-0.6 s | 453-508 MB |
+| This repo, 41k lines | after | 6.3 s | 0.07-0.11 s | 1.9-4.1 s | 410 MB |
 
-d2-roguelike uses more memory than before: it now holds 25 compilations and 26% more nodes.
+d2-roguelike uses more memory than before: it now holds 25 compilations and 27% more nodes.
 That held at about 460 MB across 180 edits rather than growing. This repo's before figures
 are left out because it grew between the two measurements.
+
+The body-only path is guarded by a committed walk: four seeds through 120 mixed edits across
+projects, compared with a fresh scan at every step. Injecting a bug into each path it guards
+fails it, and two rounds of independent review drove the shape-change cases into it.
 
 ## Invariants
 
@@ -217,6 +221,8 @@ are left out because it grew between the two measurements.
 - Files a project compiles but the file selector refuses, such as gitignored generated
   code, do not bind.
 - `extern alias` on references is not applied.
+- Code only a non-owner project compiles, because it defines a constant the owner does not,
+  has no nodes. Status notes how many such files a project has.
 - A top-level edit in one huge project still re-walks that project. A later step could
   re-walk only files that mention a changed name, but implicit uses such as conversions
   and `foreach` make that unsafe without more work, so it is left out.
