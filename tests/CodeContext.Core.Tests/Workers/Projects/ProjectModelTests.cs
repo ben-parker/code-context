@@ -1506,7 +1506,34 @@ public class ProjectModelTests : IDisposable
 
         Assert.Contains("GUESSED", info.PreprocessorSymbols);
         Assert.Contains(info.Notes, note => note.Contains("could not be read", StringComparison.Ordinal));
-        Assert.Equal(ProjectCoverageState.Complete, info.State);
+        Assert.Equal(ProjectCoverageState.Partial, info.State);
+    }
+
+    /// <summary>A guess about what the compiler is given is a gap. One about anything else is a remark.</summary>
+    [Theory]
+    [InlineData("""<PropertyGroup><DefineConstants>$([System.Net.Dns]::GetHostName())</DefineConstants></PropertyGroup>""", ProjectCoverageState.Partial)]
+    [InlineData("""<PropertyGroup><LangVersion>$([System.Net.Dns]::GetHostName())</LangVersion></PropertyGroup>""", ProjectCoverageState.Partial)]
+    [InlineData("""<PropertyGroup><AssemblyName>$([System.Net.Dns]::GetHostName())</AssemblyName></PropertyGroup>""", ProjectCoverageState.Partial)]
+    [InlineData("""<ItemGroup><Compile Include="$([System.Net.Dns]::GetHostName()).cs" /></ItemGroup>""", ProjectCoverageState.Partial)]
+    [InlineData("""<ItemGroup><Compile Remove="@(Generated)" /></ItemGroup>""", ProjectCoverageState.Partial)]
+    [InlineData("""<ItemGroup><PackageReference Include="$([System.Net.Dns]::GetHostName())" /></ItemGroup>""", ProjectCoverageState.Partial)]
+    [InlineData("""<ItemGroup><Using Include="$([System.Net.Dns]::GetHostName())" /></ItemGroup>""", ProjectCoverageState.Partial)]
+    [InlineData("""<PropertyGroup><Copyright>$([System.Net.Dns]::GetHostName())</Copyright></PropertyGroup>""", ProjectCoverageState.Complete)]
+    [InlineData("""<ItemGroup><None Include="$([System.Net.Dns]::GetHostName()).txt" /></ItemGroup>""", ProjectCoverageState.Complete)]
+    public void OnlyWhatReachesTheCompilerMakesAProjectPartial(string body, ProjectCoverageState expected)
+    {
+        InstallCoreFramework();
+        Write("App/App.csproj", $"""
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup>
+              {body}
+            </Project>
+            """);
+
+        var info = Assert.Single(Load(Source("App/A.cs")).Projects);
+
+        Assert.Contains(info.Notes, note => note.Contains("could not be read", StringComparison.Ordinal));
+        Assert.Equal(expected, info.State);
     }
 
     [Fact]
