@@ -351,6 +351,11 @@ public sealed class ProjectEvaluator
         }
 
         var path = expander.FullPath(expanded);
+        if (expander.IsForeign(path))
+        {
+            NoteMissingImport(project);
+            return;
+        }
         if (path.Contains('*') || path.Contains('?'))
         {
             foreach (var match in ExpandImportWildcard(path)) ImportFile(match);
@@ -651,6 +656,12 @@ public sealed class ProjectEvaluator
         {
             // Item paths are relative to the project, wherever the import that wrote them lives.
             var projectExpander = Expander(_projectPath);
+            if (remove.Exists(path => path.Equals("@(Compile)", StringComparison.OrdinalIgnoreCase)))
+            {
+                _compileItems.Clear();
+                remove.RemoveAll(path => path.Equals("@(Compile)", StringComparison.OrdinalIgnoreCase));
+            }
+            if (include.Concat(remove).Any(path => !IsUsablePath(path))) NoteUncertain(item.ToString());
             if (include.Count > 0)
             {
                 var exclude = ExpandList(item.Attribute("Exclude")?.Value, expander);

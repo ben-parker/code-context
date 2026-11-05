@@ -216,8 +216,8 @@ public sealed class MsBuildExpander(Func<string, string?> property, string direc
             "msbuild" => CallMsBuild(name, a),
             "system.io.path" => CallPath(name, a),
             "system.string" or "string" => CallString(name, a),
-            "system.io.file" when name == "exists" && a.Count == 1 => Bool(File.Exists(FullPath(a[0]))),
-            "system.io.directory" when name == "exists" && a.Count == 1 => Bool(System.IO.Directory.Exists(FullPath(a[0]))),
+            "system.io.file" when name == "exists" && a.Count == 1 => Bool(!IsForeign(FullPath(a[0])) && File.Exists(FullPath(a[0]))),
+            "system.io.directory" when name == "exists" && a.Count == 1 => Bool(!IsForeign(FullPath(a[0])) && System.IO.Directory.Exists(FullPath(a[0]))),
             "system.environment" => CallEnvironment(name, a),
             "system.operatingsystem" => name switch
             {
@@ -365,7 +365,7 @@ public sealed class MsBuildExpander(Func<string, string?> property, string direc
     private string? FileAbove(string file, string? from)
     {
         var start = string.IsNullOrEmpty(from) ? Directory : FullPath(from);
-        if (boundary is not null && !IsWithin(start, boundary)) return null;
+        if (IsForeign(start) || (boundary is not null && !IsWithin(start, boundary))) return null;
         for (var current = start; current is not null; current = Path.GetDirectoryName(current))
         {
             var candidate = Path.Combine(current, file);
@@ -373,6 +373,29 @@ public sealed class MsBuildExpander(Func<string, string?> property, string direc
             if (boundary is not null && SamePath(current, boundary)) break;
         }
         return null;
+    }
+
+    internal bool IsForeign(string path) => IsForeignPath(path, boundary);
+
+    /// <summary>
+    /// True for a network path outside the repository's own share. Reading a project must
+    /// not reach out: opening <c>\\host\share</c> makes Windows authenticate to that host,
+    /// so a repository could learn who indexed it, and a property in the path could carry an
+    /// environment variable with it. A repository on a share may read the rest of that share.
+    /// </summary>
+    public static bool IsForeignPath(string path, string? root)
+    {
+        if (!OperatingSystem.IsWindows() || !IsNetworkPath(path)) return false;
+        return root is null || !IsNetworkPath(root) || !ShareOf(path).Equals(ShareOf(root), StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsNetworkPath(string path)
+        => path.StartsWith(@"\\", StringComparison.Ordinal) || path.StartsWith("//", StringComparison.Ordinal);
+
+    private static string ShareOf(string path)
+    {
+        var parts = path.Replace('/', '\\').Split('\\', StringSplitOptions.RemoveEmptyEntries);
+        return parts.Length >= 2 ? parts[0] + '\\' + parts[1] : path;
     }
 
     private static bool IsWithin(string path, string directory)

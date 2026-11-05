@@ -117,7 +117,7 @@ public sealed class CSharpWorkerPipeline : IAsyncDisposable
             Languages: ["csharp"],
             Extensions: [".cs"],
             ProjectMarkers: [".csproj", ".sln"],
-            ProjectInputs: [".csproj", ".props", ".targets", "project.assets.json", "global.json"]);
+            ProjectInputs: [".csproj", ".props", ".targets", ".projitems", "project.assets.json", "global.json"]);
         return new RegisteredWorker(manifest, CSharpWorkerLaunchSpec(), ManifestPath: "<in-test>");
     }
 

@@ -126,6 +126,7 @@ public sealed class CSharpWorkerEditWalkConvergenceTests : IAsyncLifetime
             _files.Add(new SourceFile("Lib", "Shared", "SharedTool") { Methods = { Method() } });
             _files.Add(new SourceFile("scripts", "Loose", "LooseTool") { Methods = { Method() } });
             _files.Add(new SourceFile("App", "Collides", _files[1].TypeName) { Methods = { Method() } });
+            _files.Add(new SourceFile(Path.Combine("Lib", "Sub"), "Nested", "NestedTool") { Methods = { Method() } });
             _files.Add(new SourceFile("App", "Program", "AppEntry") { Statements = "Walk.AppEntry.Start();", Methods = { new MethodModel("Start", "") } });
 
             File.WriteAllText(Path.Combine(root, "Directory.Build.props"), """
@@ -142,6 +143,7 @@ public sealed class CSharpWorkerEditWalkConvergenceTests : IAsyncLifetime
             var references = string.Concat(project.References.Select(reference =>
                 $"<ProjectReference Include=\"..\\{reference}\\{reference}.csproj\" />"));
             var linked = project.Name == "App" ? "<Compile Include=\"..\\Lib\\Shared.cs\" />" : string.Empty;
+            if (project.LinkedFile is { } link) linked += $"<Compile Include=\"{link}\" />";
             var constants = project.Feature ? "<DefineConstants>$(DefineConstants);FEATURE</DefineConstants>" : string.Empty;
             File.WriteAllText(Path.Combine(directory, project.Name + ".csproj"), $"""
                 <Project Sdk="Microsoft.NET.Sdk">
@@ -229,8 +231,10 @@ public sealed class CSharpWorkerEditWalkConvergenceTests : IAsyncLifetime
             else if (roll < 84) ToggleBase();
             else if (roll < 88) AddFile();
             else if (roll < 92) DeleteFile(deleted);
-            else if (roll < 96) CollideNames();
-            else ToggleFeature();
+            else if (roll < 91) CollideNames();
+            else if (roll < 93) ToggleFeature();
+            else if (roll < 97) ToggleLink();
+            else ToggleNestedProject(deleted);
         }
 
         /// <summary>
@@ -360,6 +364,48 @@ public sealed class CSharpWorkerEditWalkConvergenceTests : IAsyncLifetime
             Note($"type in {file.FileName} is now {file.TypeName}", isBody: false);
         }
 
+        /// <summary>A project borrows or returns another's file, which can change who owns it.</summary>
+        private void ToggleLink()
+        {
+            var project = _projects[_random.Next(_projects.Count)];
+            if (project.LinkedFile is null)
+            {
+                var file = _files.Where(candidate => candidate.Directory != project.Name && candidate.Directory != "scripts")
+                    .OrderBy(_ => _random.Next())
+                    .First();
+                project.LinkedFile = $"..\\{file.Directory}\\{file.FileName}.cs";
+            }
+            else
+            {
+                project.LinkedFile = null;
+            }
+            WriteProject(project);
+            _touched.Add(Path.Combine(root, project.Name, project.Name + ".csproj"));
+            Note($"{project.Name} now links {project.LinkedFile ?? "nothing"}", isBody: false);
+        }
+
+        /// <summary>A project appears over part of another's tree and takes the files under it.</summary>
+        private void ToggleNestedProject(List<string> deleted)
+        {
+            var path = Path.Combine(root, "Lib", "Sub", "Sub.csproj");
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+                deleted.Add(path);
+                Note("nested project removed", isBody: false);
+                return;
+            }
+
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.WriteAllText(path, $"""
+                <Project Sdk="Microsoft.NET.Sdk">
+                  <PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup>
+                </Project>
+                """);
+            _touched.Add(path);
+            Note("nested project added", isBody: false);
+        }
+
         /// <summary>A project file changes with no source file changing beside it.</summary>
         private void ToggleFeature()
         {
@@ -374,6 +420,7 @@ public sealed class CSharpWorkerEditWalkConvergenceTests : IAsyncLifetime
     private sealed record ProjectModel(string Name, string[] References)
     {
         public bool Feature { get; set; }
+        public string? LinkedFile { get; set; }
     }
 
     private sealed class MethodModel(string name, string body)

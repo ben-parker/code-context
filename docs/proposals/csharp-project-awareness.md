@@ -70,14 +70,14 @@ third-party SDK such as `Godot.NET.Sdk/4.8.0` is resolved in the package folder 
 | `netstandard`, `net4x` | `NETStandard.Library`, `Microsoft.NETFramework.ReferenceAssemblies` or the system reference assemblies, then a newer reference set or the installed runtime, reported as a stand-in |
 | Project references | Restored `projectReferences`, else `<ProjectReference>` |
 | `<Reference HintPath>` | Path as written, after property expansion. A file named like a workspace project's assembly becomes a project reference, which matters for Unity. |
-| Defines, `LangVersion` | Evaluated properties. `Nullable` is deliberately not applied: it would change no fact, would slow binding, and would rewrite parameter types in identifiers. |
+| Defines, `LangVersion` | Evaluated properties, and the SDK's default language version for the TFM when a project names none, since newer versions change what code binds to. `Nullable` is deliberately not applied: it would change no fact, would slow binding, and would rewrite parameter types in identifiers. |
 | Implicit usings | `*.GlobalUsings.g.cs` in the intermediate directory when present, else the SDK base set, plus `<Using>` items |
 | Multi-targeting | First TFM only, as Visual Studio's active target. The others are reported. |
 
 Which project compiles a file is decided by running its `Compile` item operations in
 order over the approved files. A file in two projects is parsed and compiled in both,
-but facts come from one owner: the project with the deepest directory, then the ordinal
-smallest path.
+but facts come from one owner: the deepest project whose directory holds the file, then the
+ordinal smallest path. Code only a non-owner compiles has no nodes, which status reports.
 
 ### Compilations
 
@@ -205,7 +205,8 @@ are left out because it grew between the two measurements.
 - Every node and edge id still starts with `<parserId>:<workspaceId>:`, and generation
   commits stay atomic.
 - Nothing from a repository is executed: no MSBuild, tasks, analyzers or generators.
-  Assemblies are read through Roslyn's metadata reader only.
+  Assemblies are read through Roslyn's metadata reader only. Paths a repository supplies are
+  not opened if they name another host, because that alone makes Windows authenticate to it.
 
 ## Known gaps, reported rather than fixed
 

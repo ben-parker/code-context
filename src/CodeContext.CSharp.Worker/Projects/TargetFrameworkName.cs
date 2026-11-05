@@ -18,6 +18,13 @@ public sealed record TargetFrameworkName(string Moniker, string Identifier, Vers
     private static readonly Version[] NetStandardVersions =
         [new(1, 0), new(1, 1), new(1, 2), new(1, 3), new(1, 4), new(1, 5), new(1, 6), new(2, 0), new(2, 1)];
 
+    /// <summary>The versions the SDK defines an _OR_GREATER symbol for, as it lists them.</summary>
+    private static readonly Version[] WindowsPlatformVersions =
+    [
+        new(7, 0), new(8, 0), new(10, 0, 17763, 0), new(10, 0, 18362, 0), new(10, 0, 19041, 0),
+        new(10, 0, 20348, 0), new(10, 0, 22000, 0), new(10, 0, 22621, 0), new(10, 0, 26100, 0),
+    ];
+
     private static readonly Version[] NetCoreAppVersions =
         [new(1, 0), new(1, 1), new(2, 0), new(2, 1), new(2, 2), new(3, 0), new(3, 1)];
 
@@ -30,6 +37,26 @@ public sealed record TargetFrameworkName(string Moniker, string Identifier, Vers
     /// <summary>The version as a build writes it: <c>4.7.2</c>, or <c>8.0</c> with no third part.</summary>
     public string VersionText(int minimumParts = 2)
         => Version.ToString(Math.Clamp(Version.Build > 0 ? Math.Max(minimumParts, 3) : minimumParts, 2, Version.Build >= 0 ? 3 : 2));
+
+    /// <summary>
+    /// The C# version the SDK picks when a project names none, or null for a framework newer
+    /// than this table, which then gets the newest the compiler knows. Later language
+    /// versions are not only additions: C# 14 changes which overload <c>array.Reverse()</c>
+    /// binds to, and makes <c>field</c> a keyword inside accessors.
+    /// </summary>
+    public string? DefaultLanguageVersion => (Identifier, Version.Major, Version.Minor) switch
+    {
+        (NetCoreApp, 10, _) => "14.0",
+        (NetCoreApp, 9, _) => "13.0",
+        (NetCoreApp, 8, _) => "12.0",
+        (NetCoreApp, 7, _) => "11.0",
+        (NetCoreApp, 6, _) => "10.0",
+        (NetCoreApp, 5, _) => "9.0",
+        (NetCoreApp, 3, _) => "8.0",
+        (NetCoreApp, > 10, _) => null,
+        (NetStandard, 2, 1) => "8.0",
+        _ => "7.3",
+    };
 
     public bool IsNetCoreApp => Identifier == NetCoreApp;
     public bool IsNetStandard => Identifier == NetStandard;
@@ -149,12 +176,18 @@ public sealed record TargetFrameworkName(string Moniker, string Identifier, Vers
             // net8.0-windows10.0.19041 is WINDOWS10_0_19041_0, in the SDK's four parts.
             var dash = Moniker.IndexOf('-');
             var version = Moniker[(dash + 1 + platform.Length)..];
-            if (version.Length > 0)
+            var isWindows = name == "WINDOWS";
+            if (version.Length == 0 && isWindows) version = "7.0";
+            if (version.Length == 0) yield break;
+
+            if (version.Count(character => character == '.') == 2) version += ".0";
+            yield return name + version.Replace('.', '_');
+            yield return name + version.Replace('.', '_') + "_OR_GREATER";
+
+            if (!isWindows || !System.Version.TryParse(version.Contains('.') ? version : version + ".0", out var parsed)) yield break;
+            foreach (var known in WindowsPlatformVersions.Where(known => known < parsed))
             {
-                if (version.Count(character => character == '.') == 2) version += ".0";
-                var symbol = name + version.Replace('.', '_');
-                yield return symbol;
-                yield return symbol + "_OR_GREATER";
+                yield return $"WINDOWS{known.ToString().Replace('.', '_')}_OR_GREATER";
             }
         }
     }

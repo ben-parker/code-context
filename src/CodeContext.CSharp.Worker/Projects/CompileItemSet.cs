@@ -36,6 +36,9 @@ public sealed class CompileItemSet
         _operations.Add(new Operation(true, includes, excludes));
     }
 
+    /// <summary><c>Remove="@(Compile)"</c>: everything so far is gone, and later items still count.</summary>
+    public void Clear() => _operations.Clear();
+
     public void Remove(IEnumerable<string> fullPatterns)
         => _operations.Add(new Operation(false, new PathSet(fullPatterns), new PathSet([])));
 

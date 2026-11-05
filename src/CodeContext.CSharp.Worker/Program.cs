@@ -229,6 +229,17 @@ internal sealed class CSharpWorkerHost(JsonRpcConnection connection)
         CSharpWorkspaceAnalyzer workspace, string workspaceId, long generation, long requestId, CancellationToken ct)
     {
         var analysis = workspace.Analyze(ct);
+        if (!workspace.HasFactBaseline)
+        {
+            var replaced = await PublishAsync(
+                workspaceId, generation, requestId,
+                analysis.Nodes, analysis.Buckets.SelectMany(bucket => bucket.Edges).ToList(),
+                replacesWorkspace: true, replacesFiles: [],
+                analysis.Diagnostics, analysis.Coverage, ct);
+            workspace.SeedFactHashes(analysis);
+            return replaced;
+        }
+
         var emission = workspace.BuildIncrementalEmission(analysis);
         var emitted = await PublishAsync(
             workspaceId, generation, requestId,

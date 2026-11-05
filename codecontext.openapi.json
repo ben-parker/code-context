@@ -21,8 +21,8 @@
         "tags": [
           "codecontext"
         ],
-        "summary": "Get OpenAPI 3.0 specification",
-        "description": "Returns the OpenAPI 3.0 specification for the CodeContext API",
+        "summary": "Get OpenAPI specification",
+        "description": "Returns the OpenAPI specification for the CodeContext API",
         "operationId": "GetOpenApiSchema",
         "responses": {
           "200": {
@@ -267,6 +267,7 @@
           {
             "name": "includeExternal",
             "in": "query",
+            "description": "Whether to include library symbols, which name matches and uses otherwise leave out",
             "schema": {
               "type": "boolean",
               "default": false

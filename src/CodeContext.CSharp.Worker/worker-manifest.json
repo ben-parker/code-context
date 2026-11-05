@@ -10,5 +10,5 @@
   "languages": ["csharp"],
   "extensions": [".cs"],
   "projectMarkers": [".csproj", ".sln"],
-  "projectInputs": [".csproj", ".props", ".targets", "project.assets.json", "global.json"]
+  "projectInputs": [".csproj", ".props", ".targets", ".projitems", "project.assets.json", "global.json"]
 }

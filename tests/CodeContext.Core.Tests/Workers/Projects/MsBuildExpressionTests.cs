@@ -101,12 +101,22 @@ public class MsBuildExpressionTests
     [InlineData("netstandard2.0", "NETSTANDARD", "NETSTANDARD2_0", "NETSTANDARD1_6_OR_GREATER")]
     [InlineData("net48", "NETFRAMEWORK", "NET48", "NET472_OR_GREATER", "NET48_OR_GREATER")]
     [InlineData("netcoreapp3.1", "NETCOREAPP", "NETCOREAPP3_1", "NETCOREAPP2_0_OR_GREATER")]
-    [InlineData("net6.0-windows", "NET6_0", "WINDOWS")]
+    [InlineData("net6.0-windows", "NET6_0", "WINDOWS", "WINDOWS7_0", "WINDOWS7_0_OR_GREATER")]
+    [InlineData("net8.0-windows10.0.19041.0", "WINDOWS", "WINDOWS10_0_19041_0", "WINDOWS10_0_19041_0_OR_GREATER", "WINDOWS10_0_17763_0_OR_GREATER", "WINDOWS7_0_OR_GREATER")]
+    [InlineData("net8.0-windows10.0.19041", "WINDOWS10_0_19041_0")]
+    [InlineData("net8.0-android34.0", "ANDROID", "ANDROID34_0", "ANDROID34_0_OR_GREATER")]
     public void DefinesTheSdkFrameworkSymbols(string moniker, params string[] expected)
     {
         Assert.True(TargetFrameworkName.TryParse(moniker, out var framework));
         var symbols = framework.PreprocessorSymbols().ToList();
         foreach (var symbol in expected) Assert.Contains(symbol, symbols);
+    }
+
+    [Fact]
+    public void AnOlderPlatformVersionDoesNotClaimANewerOne()
+    {
+        Assert.True(TargetFrameworkName.TryParse("net8.0-windows10.0.17763.0", out var framework));
+        Assert.DoesNotContain("WINDOWS10_0_19041_0_OR_GREATER", framework.PreprocessorSymbols());
     }
 
     [Theory]

@@ -2,6 +2,7 @@ using System.Collections.Immutable;
 using System.Text;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Text;
 
 namespace CodeContext.CSharp.Worker.Projects;
@@ -30,7 +31,8 @@ internal sealed class ProjectCompilation
         new CSharpCompilationOptions(OutputKind.ConsoleApplication).WithAllowUnsafe(true);
 
     private readonly Dictionary<string, SyntaxTree> _trees = new(PathComparer);
-    private readonly SyntaxTree? _generatedTree;
+    private SyntaxTree? _generatedTree;
+    private HashSet<string> _signedFriends = new(StringComparer.Ordinal);
     private readonly ImmutableArray<MetadataReference> _metadataReferences;
 
     public ProjectCompilation(
@@ -44,7 +46,7 @@ internal sealed class ProjectCompilation
         IdPrefix = idPrefix;
         ParseOptions = parseOptions;
         _metadataReferences = metadataReferences;
-        _generatedTree = (project is null ? fallbackUsings : GeneratedSource(project)) is { Length: > 0 } text
+        _generatedTree = (project is null ? fallbackUsings : GeneratedSource(project, _signedFriends)) is { Length: > 0 } text
             ? CSharpSyntaxTree.ParseText(text, parseOptions, path: $"{Qualifier}.Project.g.cs")
             : null;
         Compilation = CSharpCompilation.Create(
@@ -91,10 +93,10 @@ internal sealed class ProjectCompilation
     /// What a build generates into the project without it being on disk here: its global
     /// usings, and the <c>InternalsVisibleTo</c> items the SDK turns into attributes.
     /// </summary>
-    private static string GeneratedSource(ProjectInfo project)
+    private static string GeneratedSource(ProjectInfo project, IEnumerable<string> signedFriends)
     {
         var text = new StringBuilder(project.GlobalUsings);
-        foreach (var friend in project.InternalsVisibleTo)
+        foreach (var friend in project.InternalsVisibleTo.Concat(signedFriends).Distinct(StringComparer.Ordinal))
         {
             text.Append("[assembly: global::System.Runtime.CompilerServices.InternalsVisibleTo(")
                 .Append(SymbolDisplay.FormatLiteral(friend, quote: true))
@@ -140,6 +142,40 @@ internal sealed class ProjectCompilation
         Compilation = Compilation.RemoveSyntaxTrees(tree);
         Changed = true;
         return true;
+    }
+
+    /// <summary>
+    /// A friend named with a public key only matches a signed assembly, and nothing here is
+    /// signed, so a test project reaching internals that way would lose everything it does
+    /// with them. The same friend is granted by name. Only attribute changes can alter this,
+    /// and those reach other files, so body edits never get here.
+    /// </summary>
+    public void RefreshFriends()
+    {
+        if (!Changed || Project is null) return;
+
+        var friends = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var tree in _trees.Values)
+        {
+            foreach (var attribute in ((CompilationUnitSyntax)tree.GetRoot()).AttributeLists.SelectMany(list => list.Attributes))
+            {
+                if (attribute.Name.ToString().Split('.')[^1] is "InternalsVisibleTo" or "InternalsVisibleToAttribute"
+                    && attribute.ArgumentList?.Arguments.FirstOrDefault()?.Expression is LiteralExpressionSyntax literal
+                    && literal.Token.ValueText.Split(',') is { Length: > 1 } parts)
+                {
+                    friends.Add(parts[0].Trim());
+                }
+            }
+        }
+        if (friends.SetEquals(_signedFriends)) return;
+
+        _signedFriends = friends;
+        var replacement = CSharpSyntaxTree.ParseText(
+            GeneratedSource(Project, friends), ParseOptions, path: $"{Qualifier}.Project.g.cs");
+        Compilation = _generatedTree is null
+            ? Compilation.AddSyntaxTrees(replacement)
+            : Compilation.ReplaceSyntaxTree(_generatedTree, replacement);
+        _generatedTree = replacement;
     }
 
     /// <summary>

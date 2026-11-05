@@ -219,7 +219,7 @@ public sealed class CSharpWorkspaceAnalyzer
         var added = approvedFiles.Where(path => !_files.Contains(path)).ToList();
 
         // A file no known project compiles may belong to a project that had none until now.
-        if (_model is not null && added.Exists(path => _model.ProjectsCompiling(path).Count == 0))
+        if (_model is not null && added.Exists(path => _model.ProjectsCompiling(path).Count == 0 || _model.ReachesIdleProject(path)))
         {
             Rebuild(approvedFiles, reuse: true, ct);
             return;
@@ -234,7 +234,6 @@ public sealed class CSharpWorkspaceAnalyzer
             ct.ThrowIfCancellationRequested();
             LoadFile(path);
         }
-        _files = approved;
     }
 
     /// <summary>Replaces the workspace file set entirely and reparses everything.</summary>
@@ -256,8 +255,9 @@ public sealed class CSharpWorkspaceAnalyzer
             _idStrings.Clear();
         }
 
+        var previousOwners = new Dictionary<string, ProjectCompilation>(_owners, PathComparer);
         _model = _rootPath is null ? null : ProjectModel.Load(_rootPath, files, Toolchain.Value, ct);
-        _files = new HashSet<string>(files, PathComparer);
+        _files = new HashSet<string>(PathComparer);
         _owners.Clear();
         _unitByProject.Clear();
 
@@ -335,9 +335,26 @@ public sealed class CSharpWorkspaceAnalyzer
                 else if ((text ??= TryRead(path)) is not null)
                 {
                     unit.SetText(path, text);
+
+                    // New to this unit, so what binds to it there has changed.
+                    _changedUnits.Add(unit);
                 }
             }
-            if (compiling[0].Trees.ContainsKey(path)) _owners[path] = compiling[0];
+            if (!compiling[0].Trees.ContainsKey(path)) continue;
+
+            _owners[path] = compiling[0];
+            _files.Add(path);
+
+            // A file's ids belong to its owner, so a new owner moves every symbol in it, and
+            // everything binding to them has to be walked again to reach the new ids.
+            if (previousOwners.TryGetValue(path, out var previousOwner) && previousOwner != compiling[0])
+            {
+                _changedUnits.UnionWith(compiling);
+                if (units.Find(unit => unit.IdPrefix == previousOwner.IdPrefix) is { } formerOwner)
+                {
+                    _changedUnits.Add(formerOwner);
+                }
+            }
         }
     }
 
@@ -348,6 +365,7 @@ public sealed class CSharpWorkspaceAnalyzer
             .AppendJoin('\n', project.PreprocessorSymbols).Append('\0')
             .Append(project.LanguageVersion).Append('\0')
             .Append(project.AssemblyName).Append('\0')
+            .Append(project.Name).Append('\0')
             .Append(project.GlobalUsings).Append('\0')
             .AppendJoin('\n', project.InternalsVisibleTo).Append('\0')
             .AppendJoin('\n', project.ProjectReferences.Select(reference => reference.Key)).Append('\0');
@@ -482,7 +500,11 @@ public sealed class CSharpWorkspaceAnalyzer
         CancellationToken ct,
         IReadOnlyList<string>? progressFiles = null)
     {
-        foreach (var unit in _units) unit.RefreshReferences();
+        foreach (var unit in _units)
+        {
+            unit.RefreshFriends();
+            unit.RefreshReferences();
+        }
         foreach (var unit in _units) unit.ClearChanged();
 
         var pending = FilesToWalk();
@@ -554,7 +576,10 @@ public sealed class CSharpWorkspaceAnalyzer
         var files = new HashSet<string>(_changedFiles.Where(_owners.ContainsKey), PathComparer);
         foreach (var (path, unit) in _owners)
         {
-            if (affected.Contains(unit) || !_walked.ContainsKey(path)) files.Add(path);
+            if (affected.Contains(unit) || !_walked.TryGetValue(path, out var walked) || walked.Unit != unit)
+            {
+                files.Add(path);
+            }
         }
         return files;
     }
@@ -741,6 +766,14 @@ public sealed class CSharpWorkspaceAnalyzer
                 continue;
             }
 
+            var projectNotes = project.Notes.ToList();
+            var viewedOnly = FilesSeenDifferentlyByOwner(unit);
+            if (viewedOnly > 0)
+            {
+                projectNotes.Add($"{viewedOnly} file(s) this project shares with another use different constants here, "
+                    + "and only the owning project's view of them is indexed.");
+            }
+
             coverage.Add(new ProjectCoverage(
                 project.Name,
                 project.RelativePath,
@@ -757,10 +790,20 @@ public sealed class CSharpWorkspaceAnalyzer
                 NullIfEmpty(project.AnalyzerPackages),
                 total,
                 common,
-                NullIfEmpty(project.Notes.ToList())));
+                NullIfEmpty(projectNotes)));
         }
         return coverage;
     }
+
+    /// <summary>
+    /// A file two projects compile is walked once. Where they differ on constants, code only
+    /// the other project compiles has no nodes, which a reader of status should be told.
+    /// </summary>
+    private int FilesSeenDifferentlyByOwner(ProjectCompilation unit)
+        => unit.Trees.Count(entry => _owners.TryGetValue(entry.Key, out var owner)
+            && owner != unit
+            && !owner.ParseOptions.Equals(unit.ParseOptions)
+            && entry.Value.GetRoot().ContainsDirectives);
 
     private static IReadOnlyList<string>? NullIfEmpty(IReadOnlyList<string> items) => items.Count == 0 ? null : items;
 
@@ -892,6 +935,12 @@ public sealed class CSharpWorkspaceAnalyzer
         private readonly Dictionary<string, byte[]> _pendingHashes;
         private readonly List<string> _removedPaths;
     }
+
+    /// <summary>
+    /// False for a worker that has told the host nothing, as after a restart. It then cannot
+    /// know what the host holds, so it must replace all of it rather than send a difference.
+    /// </summary>
+    public bool HasFactBaseline => _factHashes.Count > 0;
 
     /// <summary>
     /// Seeds the fact-hash map from a full analysis: every walked file's bucket hash

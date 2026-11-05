@@ -45,7 +45,7 @@ public sealed class CodeContextTools
                 var full = await contextService.GetCompleteContextAsync(
                     identifier, type, depth, includeTests, includeContent, exact ?? false,
                     includeRelated, includeMetrics, maxTestFiles, maxTestMethods, containingType,
-                    @namespace, signature, sourceFile);
+                    @namespace, signature, sourceFile, includeExternal);
                 return JsonSerializer.Serialize(full, CodeContextJsonContext.Default.CompleteContextResponse);
             }
 

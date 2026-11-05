@@ -56,13 +56,15 @@ public sealed class RestoreData
     }
 
     /// <summary>Reads an assets file, or returns null when it is not readable as one.</summary>
-    public static RestoreData? TryRead(string assetsPath, string? projectPathForMovedRepository = null)
+    /// <param name="boundary">Paths recorded here are repository content, so one naming a
+    /// host outside this repository's own share is ignored rather than opened.</param>
+    public static RestoreData? TryRead(string assetsPath, string? projectPathForMovedRepository = null, string? boundary = null)
     {
         try
         {
             using var stream = File.OpenRead(assetsPath);
             using var document = JsonDocument.Parse(stream);
-            return Read(assetsPath, document.RootElement, projectPathForMovedRepository);
+            return Read(assetsPath, document.RootElement, projectPathForMovedRepository, boundary);
         }
         catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException or InvalidOperationException)
         {
@@ -70,12 +72,14 @@ public sealed class RestoreData
         }
     }
 
-    private static RestoreData Read(string assetsPath, JsonElement root, string? projectPathOverride)
+    private static RestoreData Read(string assetsPath, JsonElement root, string? projectPathOverride, string? boundary)
     {
         var packageFolders = new List<string>();
         if (root.TryGetProperty("packageFolders", out var folders) && folders.ValueKind == JsonValueKind.Object)
         {
-            packageFolders.AddRange(folders.EnumerateObject().Select(folder => folder.Name));
+            packageFolders.AddRange(folders.EnumerateObject()
+                .Select(folder => folder.Name)
+                .Where(folder => !MsBuildExpander.IsForeignPath(folder, boundary)));
         }
 
         string? projectPath = null;
@@ -95,7 +99,7 @@ public sealed class RestoreData
             foreach (var framework in frameworks.EnumerateObject())
             {
                 var libraryList = FindTarget(targetsElement, framework.Name);
-                targets[framework.Name] = ReadTarget(framework, libraryList, libraries, packageFolders, projectDirectory);
+                targets[framework.Name] = ReadTarget(framework, libraryList, libraries, packageFolders, projectDirectory, boundary);
             }
         }
         return new RestoreData(assetsPath, projectPath, packageFolders, targets);
@@ -123,7 +127,8 @@ public sealed class RestoreData
         JsonElement? libraryList,
         JsonElement libraries,
         List<string> packageFolders,
-        string projectDirectory)
+        string projectDirectory,
+        string? boundary)
     {
         var frameworkReferences = new List<string>();
         if (framework.Value.TryGetProperty("frameworkReferences", out var references) && references.ValueKind == JsonValueKind.Object)
@@ -148,7 +153,9 @@ public sealed class RestoreData
         if (framework.Value.TryGetProperty("runtimeIdentifierGraphPath", out var graph) && graph.GetString() is { Length: > 0 } graphPath)
         {
             // <root>/sdk/<version>/PortableRuntimeIdentifierGraph.json
-            dotnetRoot = Path.GetDirectoryName(Path.GetDirectoryName(Path.GetDirectoryName(graphPath)));
+            dotnetRoot = MsBuildExpander.IsForeignPath(graphPath, boundary)
+                ? null
+                : Path.GetDirectoryName(Path.GetDirectoryName(Path.GetDirectoryName(graphPath)));
         }
 
         var compile = new List<string>();

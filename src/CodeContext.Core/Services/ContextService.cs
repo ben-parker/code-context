@@ -83,7 +83,8 @@ namespace CodeContext.Core.Services
             string? containingType = null,
             string? @namespace = null,
             string? signature = null,
-            string? sourceFile = null)
+            string? sourceFile = null,
+            bool includeExternal = false)
         {
             ValidateIdentifier(identifier);
             if (depth is < 0 or > 10)
@@ -104,6 +105,11 @@ namespace CodeContext.Core.Services
                 return response;
             }
 
+            if (!includeExternal && !isFilePath && candidates.Exists(candidate => !IsExternal(candidate)))
+            {
+                candidates.RemoveAll(IsExternal);
+            }
+
             // Handle ambiguity
             if (candidates.Count > 1 && !isFilePath)
             {
@@ -114,7 +120,7 @@ namespace CodeContext.Core.Services
             foreach (var candidate in candidates)
             {
                 var contextMatch = await BuildContextMatchAsync(
-                    candidate, depth, includeTests, includeContent, includeRelated, includeMetrics);
+                    candidate, depth, includeTests, includeContent, includeRelated, includeMetrics, includeExternal);
                 if (includeTests) ApplyTestLimits(contextMatch.Testing, maxTestFiles, maxTestMethods);
                 response.Matches.Add(contextMatch);
             }
@@ -262,7 +268,8 @@ namespace CodeContext.Core.Services
                     containingType: request.ContainingType,
                     @namespace: request.Namespace,
                     signature: request.Signature,
-                    sourceFile: request.SourceFile);
+                    sourceFile: request.SourceFile,
+                    includeExternal: request.IncludeExternal);
 
                 results.Add(context);
             }

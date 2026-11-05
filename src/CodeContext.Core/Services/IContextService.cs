@@ -30,7 +30,8 @@ namespace CodeContext.Core.Services
             string? containingType = null,
             string? @namespace = null,
             string? signature = null,
-            string? sourceFile = null);
+            string? sourceFile = null,
+            bool includeExternal = false);
 
         Task<CompactContextResponse> GetCompactContextAsync(
             string identifier,

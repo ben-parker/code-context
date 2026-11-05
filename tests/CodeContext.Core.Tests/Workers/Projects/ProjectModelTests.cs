@@ -652,6 +652,145 @@ public class ProjectModelTests : IDisposable
     }
 
     [Fact]
+    public void RemovingEverySoFarLeavesOnlyLaterItems()
+    {
+        InstallCoreFramework();
+        Write("App/App.csproj", """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup>
+              <ItemGroup><Compile Remove="@(Compile)" /><Compile Include="Only.cs" /></ItemGroup>
+            </Project>
+            """);
+        var only = Source("App/Only.cs");
+        var other = Source("App/Other.cs");
+
+        var model = Load(only, other);
+
+        Assert.Single(model.ProjectsCompiling(only));
+        Assert.Equal([other], model.UnassignedFiles);
+    }
+
+    [Fact]
+    public void AnItemListItCannotExpandIsRecorded()
+    {
+        InstallCoreFramework();
+        Write("App/App.csproj", """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup>
+              <ItemGroup><Compile Remove="@(Generated)" /></ItemGroup>
+            </Project>
+            """);
+
+        var info = Assert.Single(Load(Source("App/A.cs")).Projects);
+
+        Assert.Contains(info.Notes, note => note.Contains("could not be read", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("net10.0", "14.0")]
+    [InlineData("net8.0", "12.0")]
+    [InlineData("net6.0", "10.0")]
+    [InlineData("netcoreapp3.1", "8.0")]
+    [InlineData("netstandard2.1", "8.0")]
+    [InlineData("netstandard2.0", "7.3")]
+    [InlineData("net48", "7.3")]
+    public void TheLanguageVersionDefaultsToTheFrameworks(string framework, string expected)
+    {
+        InstallCoreFramework();
+        Write("App/App.csproj", $"""
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup><TargetFramework>{framework}</TargetFramework></PropertyGroup>
+            </Project>
+            """);
+
+        Assert.Equal(expected, Assert.Single(Load(Source("App/A.cs")).Projects).LanguageVersion);
+    }
+
+    [Fact]
+    public void AFrameworkNewerThanTheTableGetsTheNewestLanguage()
+    {
+        Assert.True(TargetFrameworkName.TryParse("net20.0", out var framework));
+        Assert.Null(framework.DefaultLanguageVersion);
+    }
+
+    [Fact]
+    public void ADeclaredLanguageVersionWinsOverTheDefault()
+    {
+        InstallCoreFramework();
+        Write("App/App.csproj", """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup><TargetFramework>net8.0</TargetFramework><LangVersion>preview</LangVersion></PropertyGroup>
+            </Project>
+            """);
+
+        Assert.Equal("preview", Assert.Single(Load(Source("App/A.cs")).Projects).LanguageVersion);
+    }
+
+    [SkippableOnNonWindowsTheory]
+    [InlineData("""<Import Project="\\\\evil\\share\\x.props" />""")]
+    [InlineData("""<Import Project="//evil/share/x.props" />""")]
+    [InlineData("""<PropertyGroup Condition="Exists('\\\\evil\\share')"><DefineConstants>REACHED</DefineConstants></PropertyGroup>""")]
+    [InlineData("""<ItemGroup><Reference Include="X"><HintPath>\\\\evil\\share\\X.dll</HintPath></Reference></ItemGroup>""")]
+    public void ANetworkPathIsNeverOpened(string body)
+    {
+        InstallCoreFramework();
+        Write("App/App.csproj", $"""
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup>
+              {body}
+            </Project>
+            """);
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+
+        var info = Assert.Single(Load(Source("App/A.cs")).Projects);
+
+        // Resolving a host that does not exist takes seconds; refusing it takes none.
+        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(2), watch.Elapsed.ToString());
+        Assert.DoesNotContain("REACHED", info.PreprocessorSymbols);
+        Assert.DoesNotContain(info.MetadataReferences, reference => reference.Contains("evil", StringComparison.Ordinal));
+    }
+
+    [SkippableOnNonWindowsTheory]
+    [InlineData(@"\\host\share\x.dll", @"C:\repo", true)]
+    [InlineData("//host/share/x.dll", @"C:\repo", true)]
+    [InlineData(@"\\host\share\x.dll", null, true)]
+    [InlineData(@"\\other\share\x.dll", @"\\host\share\repo", true)]
+    [InlineData(@"\\HOST\Share\lib\x.dll", @"\\host\share\repo", false)]
+    [InlineData(@"C:\lib\x.dll", @"C:\repo", false)]
+    public void ARepositoryOnAShareMayReadThatShareAlone(string path, string? root, bool foreign)
+        => Assert.Equal(foreign, MsBuildExpander.IsForeignPath(path, root));
+
+    [Fact]
+    public void RestoreDataNamingAnotherHostIsNotFollowed()
+    {
+        InstallCoreFramework();
+        var project = Write("App/App.csproj", Net8);
+        Write("App/obj/project.assets.json", JsonSerializer.Serialize(new Dictionary<string, object>
+        {
+            ["targets"] = new Dictionary<string, object> { ["net8.0"] = new { } },
+            ["libraries"] = new { },
+            ["packageFolders"] = new Dictionary<string, object> { [@"\\evil\share\"] = new { }, [PackageFolder + Path.DirectorySeparatorChar] = new { } },
+            ["project"] = new Dictionary<string, object>
+            {
+                ["restore"] = new { projectPath = project },
+                ["frameworks"] = new Dictionary<string, object> { ["net8.0"] = new { } },
+            },
+        }));
+
+        var restore = RestoreData.TryRead(Path.Combine(_root, "App", "obj", "project.assets.json"), boundary: _root)!;
+
+        Assert.Equal([PackageFolder + Path.DirectorySeparatorChar], restore.PackageFolders);
+    }
+
+    private sealed class SkippableOnNonWindowsTheoryAttribute : TheoryAttribute
+    {
+        public SkippableOnNonWindowsTheoryAttribute()
+        {
+            if (!OperatingSystem.IsWindows()) Skip = "Network paths in this form are a Windows concern.";
+        }
+    }
+
+    [Fact]
     public void AnImportCannotReachAboveTheRepository()
     {
         InstallCoreFramework();
