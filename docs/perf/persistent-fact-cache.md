@@ -2,8 +2,13 @@
 
 Before and after numbers for the persistent fact cache and worker hibernation
 (`docs/PERSISTENT_FACT_CACHE_PLAN.md`, section 6 defines each number). Every figure was
-taken with `scripts/bench/measure-cache.py`; phase 11 reruns the same script, configs
-and query lists against the branch build and adds its column here.
+taken with `scripts/bench/measure-cache.py` as it stood on 2026-11-05, before its review.
+
+These tables are a first reading. The review found limitations in how several of them
+were taken (see "Limitations of these baseline numbers") and the harness has been fixed
+since. Phase 11 therefore re-takes v0.10.7 and the branch build back to back, interleaved,
+on the same day and the same commits, with the fixed harness, and compares those two
+columns; the figures below are not the phase 11 baseline.
 
 The comparison baseline for phase 11 is **v0.10.7**: it contains `main`'s enumeration
 patch (a1f62fc) and largest-files-first walk (f4b16d8), so a 0.11 figure against it
@@ -18,7 +23,7 @@ v0.10.4 (enumeration patch only) is recorded for jellyfin cold start.
 - Disk: one NVMe SSD (WD WDS100T3X0C, 1 TB) holding the system, the repositories and
   `%TEMP%`.
 - Python 3.13.3 runs the harness.
-- Runs taken on 2026-11-05: v0.10.0 08:41-11:28, v0.10.7 and v0.10.4 14:38-15:00.
+- Runs taken on 2026-11-05: v0.10.0 08:41-11:28, v0.10.7 and v0.10.4 14:36-15:00.
 - Other agents ran builds and `dotnet test` during the v0.10.0 session. The harness
   waits until no `dotnet`, `testhost`, `vstest`, `MSBuild`, `VBCSCompiler`,
   `CodeContext.Core.Tests` or `CodeContext.FakeWorker` process exists before each run,
@@ -139,8 +144,8 @@ range. Edit rows pool the 3 rounds of every run (15 values).
 | Cold start: spawn `query` to exit 0 (s) | 50.1 (47.8-50.5) | 20.1 (19.8-20.9) | 34.9 (34.6-36.4) |
 | Cold start: first `query` process exit (s) | 30.7 (30.6-30.7) † | 20.1 (19.8-20.9) | 30.6 (30.6-30.7) † |
 | Cold start: spawn to `status == ready` (s) | 49.5 (47.3-49.9) | 19.5 (19.1-20.3) | 34.2 (34.0-35.7) |
-| Host enumeration: spawn to csharp `starting` (s) | 12.1 (11.9-12.2) | 0.26 (0.25-0.35) | 0.31 (0.26-0.40) |
-| Host enumeration: spawn to csharp pid in status (s) | 12.2 (12.0-12.4) | 0.43 (0.39-0.51) | 0.47 (0.39-0.50) |
+| Host enumeration: spawn to csharp `starting` (s) | 12.1 (11.9-12.2) | 0.26 (0.25-0.35) ‡ | 0.31 (0.26-0.40) ‡ |
+| Host enumeration: spawn to csharp pid in status (s) | 12.2 (12.0-12.4) | 0.43 (0.39-0.51) ‡ | 0.47 (0.39-0.50) ‡ |
 | Host enumeration: host to worker process, OS (s) | 11.9 (11.8-12.1) | 0.21 (0.20-0.22) | 0.23 (0.20-0.25) |
 | Host WS 5 s after ready (MB) | 763 (757-777) | 775 (741-781) | - |
 | Host private 5 s after ready (MB) | 942 (858-963) | 872 (845-927) | - |
@@ -151,10 +156,10 @@ range. Edit rows pool the 3 rounds of every run (15 values).
 | 100-query mix p95 (ms) | 83.7 (79.5-103) | 86.4 (85.7-98.6) | - |
 | C# worker WS 5 s after ready (MB) | 971 (957-1003) | 841 (829-860) | - |
 | C# worker private 5 s after ready (MB) | 888 (877-921) | 769 (756-788) | - |
-| C# worker WS after 6 body edits (MB) | 927 (869-955) | 891 (883-918) | - |
-| C# worker private after 6 body edits (MB) | 840 (783-870) | 813 (806-841) | - |
-| C# worker WS after all 12 edits (MB) | 1019 (975-1041) | 1013 (997-1022) | - |
-| C# worker private after all 12 edits (MB) | 931 (888-955) | 933 (916-944) | - |
+| C# worker WS after 8 commits (6 body edits) (MB) | 927 (869-955) | 891 (883-918) | - |
+| C# worker private after 8 commits (6 body edits) (MB) | 840 (783-870) | 813 (806-841) | - |
+| C# worker WS after 14 commits (all 12 edits) (MB) | 1019 (975-1041) | 1013 (997-1022) | - |
+| C# worker private after 14 commits (all 12 edits) (MB) | 931 (888-955) | 933 (916-944) | - |
 | Warm body edit, apply (s) | 1.12 (1.06-1.17) | 1.09 (1.06-1.18) | - |
 | Warm body edit, revert (s) | 1.11 (1.06-1.19) | 1.06 (1.01-1.12) | - |
 | Warm top-level edit, apply (s) | 3.85 (3.74-4.22) | 2.10 (1.99-2.21) | - |
@@ -168,6 +173,11 @@ range. Edit rows pool the 3 rounds of every run (15 values).
 
 † Exit code 3, `query`'s 30 s readiness timeout, in every run; the answer came from the
 second `query`. On v0.10.7 the first `query` answers.
+
+‡ At most the time of the first status (about 0.25 s after the spawn): in some or all runs
+the first status already showed the session `starting`, so the cell is the polling floor,
+not enumeration. Use the OS row. On 0.11, where a snapshot is served before enumeration,
+this column means "host start to worker process", not enumeration.
 
 jellyfin has no TypeScript worker session.
 
@@ -189,10 +199,10 @@ jellyfin has no TypeScript worker session.
 | 100-query mix p95 (ms) | 7.75 (7.06-9.22) | 7.00 (6.35-7.38) |
 | C# worker WS 5 s after ready (MB) | 277 (272-283) | 251 (248-252) |
 | C# worker private 5 s after ready (MB) | 215 (213-218) | 199 (195-200) |
-| C# worker WS after 6 body edits (MB) | 300 (282-302) | 281 (279-282) |
-| C# worker private after 6 body edits (MB) | 226 (214-235) | 218 (216-219) |
-| C# worker WS after all 12 edits (MB) | 324 (310-331) | 305 (304-318) |
-| C# worker private after all 12 edits (MB) | 250 (237-255) | 237 (235-250) |
+| C# worker WS after 8 commits (6 body edits) (MB) | 300 (282-302) | 281 (279-282) |
+| C# worker private after 8 commits (6 body edits) (MB) | 226 (214-235) | 218 (216-219) |
+| C# worker WS after 14 commits (all 12 edits) (MB) | 324 (310-331) | 305 (304-318) |
+| C# worker private after 14 commits (all 12 edits) (MB) | 250 (237-255) | 237 (235-250) |
 | Warm body edit, apply (s) | 0.67 (0.62-0.73) | 0.67 (0.62-0.68) |
 | Warm body edit, revert (s) | 0.67 (0.62-0.68) | 0.62 (0.62-0.68) |
 | Warm top-level edit, apply (s) | 1.09 (1.03-1.29) | 0.93 (0.83-0.98) |
@@ -207,7 +217,10 @@ jellyfin has no TypeScript worker session.
 
 The first `query` answered in every run on both builds. The 9.88 s v0.10.0 maximum is
 the fifth timed run, taken after a discarded run and a 19-minute wait for an idle
-machine; the other four are 5.79-6.50 s.
+machine; the other four are 5.79-6.50 s. It is probably a disturbed run: the harness
+then detected only build and test processes by name, not other CodeContext instances
+or system CPU, and its enumeration figures (3.43-3.97 s against about 1.8 s) are high
+too. It is kept because it was recorded; the median is barely affected.
 
 ### code-context
 
@@ -215,8 +228,8 @@ machine; the other four are 5.79-6.50 s.
 |---|---:|---:|
 | Cold start: spawn `query` to exit 0 (s) | 11.5 (11.2-11.8) | 5.43 (5.41-5.49) |
 | Cold start: spawn to `status == ready` (s) | 11.4 (11.0-11.6) | 5.29 (5.22-5.31) |
-| Host enumeration: spawn to csharp `starting` (s) | 1.61 (1.51-1.89) | 0.25 (0.18-0.26) |
-| Host enumeration: spawn to csharp pid in status (s) | 1.72 (1.61-2.04) | 0.35 (0.32-0.39) |
+| Host enumeration: spawn to csharp `starting` (s) | 1.61 (1.51-1.89) | 0.25 (0.18-0.26) ‡ |
+| Host enumeration: spawn to csharp pid in status (s) | 1.72 (1.61-2.04) | 0.35 (0.32-0.39) ‡ |
 | Host enumeration: host to worker process, OS (s) | 1.53 (1.35-1.75) | 0.10 (0.09-0.11) |
 | Host WS 5 s after ready (MB) | 168 (167-172) | 173 (169-175) |
 | Host private 5 s after ready (MB) | 184 (178-185) | 181 (176-184) |
@@ -227,10 +240,10 @@ machine; the other four are 5.79-6.50 s.
 | 100-query mix p95 (ms) | 57.8 (47.7-62.7) | 51.5 (49.4-56.1) |
 | C# worker WS 5 s after ready (MB) | 390 (386-394) | 359 (354-360) |
 | C# worker private 5 s after ready (MB) | 324 (320-328) | 308 (303-309) |
-| C# worker WS after 6 body edits (MB) | 425 (393-433) | 392 (390-395) |
-| C# worker private after 6 body edits (MB) | 351 (320-360) | 327 (325-331) |
-| C# worker WS after all 12 edits (MB) | 435 (420-458) | 423 (406-472) |
-| C# worker private after all 12 edits (MB) | 354 (339-378) | 350 (334-401) |
+| C# worker WS after 8 commits (6 body edits) (MB) | 425 (393-433) | 392 (390-395) |
+| C# worker private after 8 commits (6 body edits) (MB) | 351 (320-360) | 327 (325-331) |
+| C# worker WS after 14 commits (all 12 edits) (MB) | 435 (420-458) | 423 (406-472) |
+| C# worker private after 14 commits (all 12 edits) (MB) | 354 (339-378) | 350 (334-401) |
 | Warm body edit, apply (s) | 0.89 (0.83-1.00) | 0.84 (0.73-0.99) |
 | Warm body edit, revert (s) | 0.89 (0.84-1.05) | 0.79 (0.73-0.89) |
 | Warm top-level edit, apply (s) | 1.76 (1.61-1.97) | 1.25 (1.19-1.35) |
@@ -243,7 +256,8 @@ machine; the other four are 5.79-6.50 s.
 | Cold start, top file changed: to corrected (s) | 11.5 (10.6-13.0) | 5.15 (5.14-5.31) |
 | TypeScript worker WS 5 s after ready (MB) | 181 (180-181) | 180 (180-181) |
 
-The first `query` answered in every run on both builds.
+The first `query` answered in every run on both builds. ‡ as for jellyfin: on v0.10.7
+the first status showed `starting` in every run.
 
 ### Reading the baselines
 
@@ -254,8 +268,65 @@ The first `query` answered in every run on both builds.
 - Warm body edits did not move between v0.10.0 and v0.10.7 (jellyfin 1.12 s and
   1.09 s). Top-level edits got faster: jellyfin 3.85 s to 2.10 s.
 - The 0.11 acceptance rule (phase 11: warm edit medians within 10 percent plus 0.05 s
-  of the baseline) applies to the v0.10.7 column: jellyfin body 1.09 s, top-level
-  2.10 s; d2-roguelike 0.67 s, 0.93 s; code-context 0.84 s, 1.25 s.
+  of the baseline) applies to v0.10.7 as re-taken in phase 11 with the fixed harness,
+  not to the cells here. For orientation, the v0.10.7 column reads: jellyfin body
+  1.09 s, top-level 2.10 s; d2-roguelike 0.67 s, 0.93 s; code-context 0.84 s, 1.25 s.
+
+## Limitations of these baseline numbers
+
+Found by the review of the phase 0 harness and fixed in the harness since; they apply to
+every recorded cell above. Neither reviewer found a recorded cell that differs from the
+raw results.
+
+- Warm edits include the first edit of their kind (round 0). After the leaf first edit,
+  round 0 of the body edit is the first edit in that project in that process, and round
+  0 of the top-level edit is the first top-level edit. Medians of the timed runs, apply:
+
+  | Repository, build | body round 0 | body rounds 1-2 | top round 0 | top rounds 1-2 |
+  |---|---:|---:|---:|---:|
+  | code-context v0.10.0 | 0.993 | 0.887 | 1.814 | 1.710 |
+  | code-context v0.10.7 | 0.989 | 0.812 | 1.350 | 1.244 |
+  | d2-roguelike v0.10.0 | 0.724 | 0.648 | 1.133 | 1.087 |
+  | d2-roguelike v0.10.7 | 0.673 | 0.648 | 0.931 | 0.881 |
+  | jellyfin v0.10.0 | 1.122 | 1.115 | 3.850 | 3.867 |
+  | jellyfin v0.10.7 | 1.126 | 1.078 | 2.152 | 2.098 |
+
+  The fixed harness runs one priming round per edit kind first, records it as `prime`,
+  and times the following rounds only.
+- Edit detection polled every 52 ms (a 50 ms sleep plus the status call), so near
+  deterministic latencies sit on 52 ms steps: the d2-roguelike body apply values are
+  exactly 0.620, 0.672, 0.724, 0.778 and 0.832 s. Phase 11's rule (10 percent plus
+  0.05 s, about 0.12 s on d2-roguelike) is about two steps wide. The fixed harness sleeps
+  5 ms between polls (sleep plus status call came to about 20 ms per poll on
+  code-context in an untimed check run, against 52 ms before) and
+  records each detection as a bracket [last negative poll sent, first positive poll
+  answered], reporting its midpoint.
+- Memory after the queries, after the body edits and after all edits was sampled at
+  once, with no settle, unlike "5 s after ready". The rows "after 6 body edits" and
+  "after all 12 edits" are after 8 and 14 commits (the two commits of the leaf first
+  edit come first); they are labelled so above. The fixed harness samples immediately and
+  again after the same 5 s, and records the commit count beside each sample.
+- The root first edit ran the instant its cold start returned, while the leaf first
+  edit ran after a 5 s settle. The fixed harness settles 5 s before both.
+- Query latency included client-side JSON parsing of the response; the fixed harness
+  stops the clock when the body has been read.
+- "Spawn `query` to exit 0" was detected by polling the process once per loop iteration,
+  up to 0.10-0.15 s late, which is about 15 percent of a "< 1 s" goal. The fixed harness
+  takes the time in the thread that waits on the process.
+- The enumeration rows "to csharp `starting`" and "to csharp pid in status" cannot be
+  earlier than the first status (about 0.25 s). On v0.10.7 for jellyfin and code-context,
+  and in some v0.10.4 runs, they are that floor (cells marked ‡). The OS row is the only
+  one that measures host start to worker process. The fixed harness records
+  `firstStatus_s` beside them, leaves `sessionStarting_s` empty when the first status
+  already shows a started session, and does not count `hibernated` as starting.
+
+Other changes in the fixed harness, which can move figures slightly against these: a
+file is now replaced atomically (temporary file in the same directory, then rename),
+so the watcher sees a rename where it saw an in-place write; a run counts as disturbed
+also when a CodeContext host or worker that is not the harness's runs, or when system
+CPU outside the harness's own processes averages above 10 percent of all logical
+processors (`--cpu-threshold`); disturbed runs are written to the output with
+`"discarded": true` and the reason.
 
 ## Rows not applicable before the cache
 
@@ -280,14 +351,62 @@ predicts:
 
 ## What was not measured
 
-- Hibernation, wake and snapshot rows: the harness has these paths behind capability
-  checks (`indexing.cache` in status, `--worker-idle-timeout` in `start --help`); they
-  have never run. Phase 11 runs them first.
+- Hibernation, wake and snapshot rows: the harness runs them only when `start --help`
+  lists `--no-cache` (the cache) or `--worker-idle-timeout` (hibernation); presence of
+  `indexing.cache` in status is not taken as the capability, because it is absent until
+  something is loaded or written. They have never run. Phase 11 runs with
+  `--require-cache --require-hibernation`, which makes a missing capability, a cold start
+  that should have loaded a snapshot and did not, a snapshot that is not written and
+  verified in time, or a worker that is still running while `hibernated`, fatal instead
+  of "not applicable". The snapshot row's "after the first scan" figure is taken on a
+  dedicated start with `.codecontext/cache` absent: the harness deletes only a cache
+  directory created during the same invocation; an existing one is moved aside to
+  `.codecontext/cache.ccbench-aside` and back only with `--fresh-cache-ok`, otherwise the
+  harness refuses to start. Before every stop that precedes a cold start, a build with
+  the cache waits until the snapshot holds the current graph (a newer, verified
+  sequence and no further write for 15 s).
 - Convergence: a test result, not a timing; it belongs to phases 6, 8 and 9.
 - v0.10.4: only jellyfin cold start and enumeration were taken (7 min); memory, the
   query mix and edits were not.
 - v0.10.8: not measured; it changes only a coverage label.
 - No run was taken with a cold OS file cache.
+
+## Running the harness on shared repositories
+
+jellyfin and d2-roguelike are measured in place, and other sessions work in them.
+
+- An edit target must be clean in git (or named with `--allow-dirty-target <file>`) and
+  must not already hold the probe statement or `ProbeMethodForMeasurement`; otherwise
+  the harness refuses to start. git runs with `GIT_OPTIONAL_LOCKS=0`, so the harness
+  never takes `index.lock`.
+- How long a file stays edited: a warm or first edit, from the write until its commit is
+  seen (about 0.6-2.2 s), then it is reverted at once. Cold start with a file changed:
+  from just before `query` is spawned until both its answer and the corrected graph are
+  seen, a full cold start (about 4 s on d2-roguelike, 20 s on jellyfin v0.10.7, 50 s on
+  v0.10.0). Hibernation: from the write until the wake commits and the session is
+  `ready`. During those windows another session reading the file sees the edit.
+- The harness stops only an instance it can prove it started (exact root, pid,
+  instanceId, process creation time after its own spawn), through that instance's
+  `/api/shutdown?instanceId=`. An instance it cannot prove is logged and left running.
+
+Recovering after a hard kill (time limit, closed terminal):
+
+1. Recovery copies. Before its first write to a file the harness saves the original
+   bytes to `%TEMP%\ccbench\recover\<hash>.orig` with a manifest `<hash>.json` naming
+   the file, and deletes both when the file is back. If a run was killed, the next run
+   refuses to start and prints the `Copy-Item` command. Check the file (`git diff`)
+   before copying the original back, then delete both recovery files. A killed run can
+   also leave `.<file>.ccbench-tmp` next to a target; the next run deletes it.
+2. A detached instance left running. Run `<exe> list --json` with the same executable,
+   and only if the record's `rootPath` is exactly the measured root and its `startedAt`
+   is from the killed run, stop it with `<exe> stop --path <root>`. Never use
+   `stop --all`, and never stop by `--path` without that check: `stop --path` resolves
+   the closest same-or-ancestor record, which for the code-context bench worktree is the
+   main checkout's instance when the bench instance is gone.
+3. A cache directory moved aside (`--fresh-cache-ok`). `.codecontext/cache.ccbench-aside`
+   and a manifest `%TEMP%\ccbench\recover\<hash>.cache.json` remain; delete the
+   harness's `.codecontext/cache`, rename the aside directory back and delete the
+   manifest.
 
 ## Notes for later phases
 
@@ -302,8 +421,10 @@ predicts:
   `generation 1 committed`. On v0.10.7 for jellyfin and code-context the first status
   already shows `starting`.
 - `indexing.status` turns `ready` only after every worker has committed; on
-  code-context the TypeScript worker commits last. `query` polls readiness every 250 ms,
-  so its exit trails `ready` by 0.1-0.3 s.
+  code-context the TypeScript worker commits last. `query` polls readiness every 250 ms
+  and then prints its answer, so its exit trails `ready`: by 0.12-0.34 s on
+  code-context and d2-roguelike, and by 0.46-0.87 s on jellyfin v0.10.0 and 0.55-0.69 s
+  on v0.10.7.
 - No match is HTTP 200 with `totalMatches: 0`, not 404. An identifier with `/` or `\`
   or a worker-owned extension is a file path (`matchMode: filePath`); a name with no
   exact symbol falls back to substring matching when `exact` is absent.
