@@ -222,6 +222,8 @@ fails it, and two rounds of independent review drove the shape-change cases into
 - Files a project compiles but the file selector refuses, such as gitignored generated
   code, do not bind.
 - `extern alias` on references is not applied.
+- Ignore rules are pinned to the old selector, not to Git, and at least one case differs:
+  `x[!a]b` matches `x/b`. A `git check-ignore` comparison is a follow-up.
 - A source-only package, whose `contentFiles` a build compiles into the project, is not read, so its types do not bind.
 - Code only a non-owner project compiles, because it defines a constant the owner does not,
   has no nodes. Status notes how many such files a project has.

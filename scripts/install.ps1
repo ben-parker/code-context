@@ -156,7 +156,11 @@ if (Test-Path $existingLauncher) {
     try {
         $runningJson = & $existingLauncher list --json 2>$null
         if ($LASTEXITCODE -eq 0 -and $runningJson) {
-            $running = @(ConvertFrom-Json -InputObject ($runningJson -join "`n"))
+            # Windows PowerShell 5.1 hands back a JSON array as ONE object, so an empty
+            # list counted as a running instance there and blocked every upgrade. Passing
+            # it through a script block unrolls it in both editions.
+            $running = @(ConvertFrom-Json -InputObject ($runningJson -join "`n") |
+                ForEach-Object { $_ } | Where-Object { $_ -and $_.pid })
         }
     } catch { }
     if ($running.Count -gt 0) {
