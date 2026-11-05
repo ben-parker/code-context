@@ -825,12 +825,12 @@ activity; snapshot, hibernate and wake commands do not count as busy for
 
 | `cache.state` | Meaning | `servingCached` |
 |---|---|---|
-| absent | cache disabled, or nothing loaded and nothing written yet | - |
+| absent | cache disabled, or nothing loaded and no scan committed yet in this process | - |
 | `ignored` | a snapshot was found and refused; `reason` says why | false |
 | `verifying` | answers come from a snapshot not yet checked | true |
 | `waking` | a hibernated worker is applying changes | true |
 | `unverified` | the verification scan failed; `status` is `error` | true |
-| `verified` | a scan committed since load | false |
+| `verified` | a scan committed in this process, whether or not a snapshot was loaded first. On a first-ever start `snapshotAt`, `snapshotSequence` and `sizeBytes` are absent until the first write completes | false |
 
 `verification` per parser is `pending`, `baseline` (the worker confirmed or patched the
 snapshot) or `replaced` (it re-walked everything). `parsers.sessions[].state` gains
@@ -927,9 +927,14 @@ the end-of-work message repeats the total.
 
 ### Phase 0: baseline numbers and harness
 
-Status: delivered 2026-11-05; reviewed by one Opus and one Sonnet reviewer; fixes in
-progress. Results in `docs/perf/persistent-fact-cache.md`: v0.10.0 and v0.10.7 on all
-three repositories, 1 discarded and 5 timed runs per column.
+Status: accepted 2026-11-05 with items carried into phase 11 (listed there). Reviewed by
+one Opus and one Sonnet reviewer; 22 confirmed findings fixed by a fixer; the rewritten
+script re-reviewed by a Sonnet reviewer, which found no blocker and eight should-fix
+items. Those are carried rather than fixed now, because five of them concern paths that
+can only be validated against a build that has the cache, and the harness is not run on
+jellyfin or d2-roguelike again before then. Results in
+`docs/perf/persistent-fact-cache.md`: v0.10.0 and v0.10.7 on all three repositories, 1
+discarded and 5 timed runs per column. `scripts/bench/test_measure_cache.py`: 44 tests.
 
 Review outcome. Both reviewers recomputed the recorded cells from the raw results and
 every one matched, so the tables stand as a first reading. Neither found the harness safe
@@ -1464,6 +1469,37 @@ asset, interleaved, same day, same commits of the three repositories (recorded p
 this document and to the brief; extend `scripts/verify-publish.ps1` with one step: stop,
 start again on the same directory, and require `indexing.cache.state` to reach `verified`.
 
+First step, before any timed run and before the harness touches jellyfin or d2-roguelike
+again: harden it against the real build. Carried from the phase 0 re-review (each
+confirmed against the script by the coordinator or to be confirmed by the fixer):
+1. Identity: a host counts as ours only if its parent process is one this harness
+   spawned; "exact root and created after our spawn" alone would adopt an instance another
+   session started on the same root within the roughly 0.3 s before ours registers.
+2. A failed `list --json` during stop must not leak our instance: retry it, send the
+   id-checked shutdown whenever our process is alive whatever the registry says, log pid,
+   port and instance id when giving up, and do not start the hibernation run with
+   `--idle-timeout 0`.
+3. `atomic_write` removes its temporary file on every failure path, and `restore_all`
+   removes and reports a leftover `.<name>.ccbench-tmp` in a measured repository.
+4. `CacheDirGuard` writes its manifest only after the rename succeeded, or removes it when
+   the rename fails.
+5. Cold starts on a cache build assert what they are: Fatal if `ignored` was seen on a
+   start expected to be cached; a start expected to be uncached asserts the cache state
+   was absent at first status; each records `cold.cached`; `--warmup` at least 1.
+6. The apply and revert clocks start after the atomic replace, not before the temporary
+   file is written.
+7. Disturbance gating uses a windowed maximum of CPU outside the harness, not the mean of
+   a whole run, and only live, creation-verified processes seed "our" process tree.
+8. `wait_counts_change` fails at once when our instance has died, instead of leaving a
+   file edited for up to 900 s.
+9. A `--check-config` mode that starts each repository once, makes no edit, and proves
+   that every configured identifier (cold symbol, edited method, edited class) yields
+   exactly one `target` line on the build under test; run on all three repositories.
+10. The states the harness waits for are checked against what phase 4 and 9 actually
+    report (see the `cache.state` table in 3.10), on this repository's bench worktree,
+    with one untimed run of every row, before the timed runs.
+A Sonnet and an Opus reviewer review that diff like any phase.
+
 Out of scope: tuning. A missed number is reported with its cause and goes back to the
 coordinator.
 
@@ -1571,10 +1607,15 @@ and private bytes, both reported, because mapped pages count in the first only.
 Kept current by each phase that changes observable behavior; the closing step copies it
 into the release.
 
-- Result lists (`usedBy`, `uses`, matches, related files) are ordered by id, ordinally.
-  Before, the order was unspecified and could differ between runs. (Phase 1)
-- `--tests` naming-heuristic evidence considers the first ten candidate files by path
-  instead of ten in unspecified order. (Phase 1)
+- Result lists keep their ranking (`matches`, `usedBy`, `uses`, related items, test files and
+  methods); where the ranking ties, and in the full view's unranked match list, results are
+  ordered by id, ordinally, so the same graph gives the same response on every run. Before,
+  ties fell to an unspecified order that could differ between runs, and so could which items
+  survived truncation to a cap. Status `nodeTypes` and `edgeTypes` are ordered by type name.
+  (Phase 1)
+- `--tests` naming-heuristic evidence considers the first ten matching files, ordered by path
+  (case-insensitively, then ordinally), instead of the first ten matching nodes in unspecified
+  order, which could name one file several times. (Phase 1)
 
 ## 9. Known items
 
