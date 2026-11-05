@@ -1073,6 +1073,14 @@ Review outcome.
   the shard object, which is today's behaviour and is kept; see section 9).
 - Dismissed: line endings of `GraphAdjacency.cs` (the index copy is LF); the order of
   status `languageBreakdown` (file-metadata repository, not the graph store; section 9).
+- Fix round re-reviewed by a Sonnet reviewer after the commit (2ccda59): no blocker and
+  no correctness bug in the bucket index, the reconciliation fix or the naming
+  heuristic. One should-fix and two nits, all about how strongly the non-heap scenario
+  tests a non-heap shard; carried into phase 8, where that harness is first used with a
+  real mapped shard (listed there). Decision: not fixed now, because the product paths
+  they concern have no non-heap shard until phase 8, the named theory
+  `LegacyMutation_OverANonHeapShard_ReadsAsOverAHeapShard` already covers the fix, and
+  phase 2 is being built in the same tree.
 
 Edit-path cost, measured by the coordinator on the generated shard (26,000 nodes, 298,792
 edges), Release, alternating runs, base against this phase. As first delivered: commit
@@ -1417,6 +1425,27 @@ Out of scope: format changes. If one is needed, bump `formatVersion` and say so.
 
 Details: sections 3.3 and 3.4. A request that hits `SnapshotCorruptException` returns an
 error, and the store drops the shard and asks the coordinator for a full rescan.
+
+Carried from the phase 1 fix-round re-review (2026-11-05); first step of this phase,
+before `MappedShard` is written:
+- The non-heap scenario runs mostly on heap shards. A scoped commit to a key with no
+  shard, `ReplaceAll`, an unscoped commit and every legacy mutation hand back a heap
+  shard, and a shard becomes non-heap again only through a swap (about 3 percent of
+  operations). Measured over 8 seeds x 200 operations: of 1,167 commits, 366 ran with
+  some shard non-heap and 31 with every shard non-heap; 12 legacy mutations replaced a
+  non-heap shard. The runner must re-install the equivalent shard for every live shard
+  after each operation when no reconciliation is staged (this is also what compaction
+  does), and `Generator_CoversEveryOutcome` must count an operation as non-heap only
+  when the shard it addresses is non-heap before it runs.
+- `AsHeapShard` swaps the map without `NotifyMutation` when the legacy mutation then
+  changes nothing (`RemoveEdgesTouchingNode(null)` with no match), so the cached
+  composite adjacency and statistics keep the replaced shard. Harmless over a
+  content-equal heap copy; over a mapped shard it would keep a retired mapping
+  reachable. `AsHeapShard` must notify, with a test that no cache holds the replaced
+  shard afterwards.
+- The reference model routes facts with the product's `ShardKey.ForNode`, `ForEdge` and
+  `From`. State the routing rule in the model itself (path matching through
+  `FilePathMatcher.Matches` stays: the adjacency claims set-equivalence to it).
 
 Tests: `MappedShardEquivalenceTests.MappedStore_MatchesHeapStoreAndReferenceModel(seed)`:
 phase 1's generator drives a heap store and a store whose shards are snapshotted and
