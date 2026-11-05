@@ -167,16 +167,16 @@ edit is classified:
 Dependents keep their reference to the previous compilation across a body-only edit. Its
 declarations are identical, so nothing can bind differently. Unchanged files keep their
 retained facts, and the per-file hash diff still decides what to send. Ownership of ids
-emitted by several files (partial types) is tracked incrementally, so an edit costs its
-re-walked files rather than a pass over every fact.
+emitted by several files (partial types) is settled in one pass over nodes, not edges, and
+only files that could have changed are rebuilt.
 
-First scans walk files in parallel, capped at 8 threads, in project dependency order.
+Walks run in parallel, capped at 8 threads.
 
 Project inputs are stat-checked on each `workspace/open`, which the host sends before
-every mutation. The file watcher also treats names in the worker's `projectMarkers` as
-control events, as it already does for ignore files, so a `.csproj` edit or a restore is
-picked up with no `.cs` edit. Manifest additions: `project.assets.json`,
-`Directory.Build.props`, `Directory.Build.targets`, `Directory.Packages.props`.
+every mutation. A new optional `projectInputs` manifest field names what else to watch, so
+a `.csproj` edit or a restore needs no source edit: the host watches those names everywhere,
+including `obj/`, and answers a change with an empty `workspace/applyChanges`, on which the
+worker rereads its projects. A project that reads as it did keeps its compilation and facts.
 
 ## Results
 
