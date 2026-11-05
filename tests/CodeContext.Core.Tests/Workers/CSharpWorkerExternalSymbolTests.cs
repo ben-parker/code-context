@@ -67,6 +67,36 @@ public class CSharpWorkerExternalSymbolTests : IDisposable
     }
 
     [Fact]
+    public void AFrameworkInheritedThroughAProjectReferenceBindsToItsAssembly()
+    {
+        Write("Lib/Lib.csproj", """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup>
+              <ItemGroup><FrameworkReference Include="Microsoft.AspNetCore.App" /></ItemGroup>
+            </Project>
+            """);
+        Write("App/App.csproj", """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup>
+              <ItemGroup><ProjectReference Include="../Lib/Lib.csproj" /></ItemGroup>
+            </Project>
+            """);
+        var files = new[]
+        {
+            Write("Lib/Lib.cs", "namespace Lib; public class L { }"),
+            Write("App/App.cs", "namespace App; public class Handler { public string Path(Microsoft.AspNetCore.Http.HttpContext context) => context.Request.Path; }"),
+        };
+        var analyzer = new CSharpWorkspaceAnalyzer("test", _root);
+        analyzer.ReplaceFiles(files, CancellationToken.None);
+
+        var result = analyzer.Analyze(CancellationToken.None);
+
+        var context = Assert.Single(result.Nodes, node => node.Name == "HttpContext");
+        Assert.Equal("Microsoft.AspNetCore.Http.Abstractions", context.Metadata!["assembly"]);
+        Assert.Contains(result.Nodes, node => node.Name == "Request");
+    }
+
+    [Fact]
     public void WhatTheCodeNeverUsesHasNoStub()
     {
         var result = Analyze("""

@@ -170,6 +170,17 @@ public sealed class RestoreData
                 var entry = libraries.ValueKind == JsonValueKind.Object && libraries.TryGetProperty(library.Name, out var found)
                     ? found
                     : default;
+                // A shared framework reaches the project through whatever brought it, which
+                // for most projects of a solution is another project.
+                if (library.Value.TryGetProperty("frameworkReferences", out var brought)
+                    && brought.ValueKind == JsonValueKind.Array)
+                {
+                    frameworkReferences.AddRange(brought.EnumerateArray()
+                        .Select(reference => reference.GetString())
+                        .OfType<string>()
+                        .Where(reference => !frameworkReferences.Contains(reference, StringComparer.OrdinalIgnoreCase)));
+                }
+
                 if (kind == "project")
                 {
                     if (entry.ValueKind == JsonValueKind.Object
@@ -182,16 +193,6 @@ public sealed class RestoreData
                 else if (kind == "package")
                 {
                     ReadPackage(library, entry, packageFolders, compile, missing, analyzers);
-
-                    // A package can bring a shared framework with it, which reaches the project.
-                    if (library.Value.TryGetProperty("frameworkReferences", out var brought)
-                        && brought.ValueKind == JsonValueKind.Array)
-                    {
-                        frameworkReferences.AddRange(brought.EnumerateArray()
-                            .Select(reference => reference.GetString())
-                            .OfType<string>()
-                            .Where(reference => !frameworkReferences.Contains(reference, StringComparer.OrdinalIgnoreCase)));
-                    }
                 }
             }
         }

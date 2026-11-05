@@ -66,7 +66,8 @@ third-party SDK such as `Godot.NET.Sdk/4.8.0` is resolved in the package folder 
 | Input | Source, in order |
 |---|---|
 | Package compile assets | `project.assets.json`, matched to the project by its `project.restore.projectPath`, so no location is assumed. Then a file at the evaluated intermediate path. |
-| Framework references | `frameworkReferences` and `downloadDependencies` resolved to `Microsoft.*.App.Ref` ref packs in the package folders, then `<dotnet root>/packs`, then `<dotnet root>/shared` |
+| Framework references | `frameworkReferences` and `downloadDependencies` resolved to `Microsoft.*.App.Ref` ref packs in the package folders, then `<dotnet root>/packs`, then `<dotnet root>/shared`. A framework also arrives through a package or a project reference: restore records both, and without restore data the frameworks referenced projects declare are followed |
+| An assembly arriving twice | One copy per file name, the highest assembly version, as a build's conflict resolution does. Two signed versions would make every type in them ambiguous |
 | `netstandard`, `net4x` | `NETStandard.Library`, `Microsoft.NETFramework.ReferenceAssemblies` or the system reference assemblies, then a newer reference set or the installed runtime, reported as a stand-in |
 | Project references | Restored `projectReferences`, else `<ProjectReference>` |
 | `<Reference HintPath>` | Path as written, after property expansion. A file named like a workspace project's assembly becomes a project reference, which matters for Unity. |
@@ -221,6 +222,7 @@ fails it, and two rounds of independent review drove the shape-change cases into
 - Files a project compiles but the file selector refuses, such as gitignored generated
   code, do not bind.
 - `extern alias` on references is not applied.
+- A source-only package, whose `contentFiles` a build compiles into the project, is not read, so its types do not bind.
 - Code only a non-owner project compiles, because it defines a constant the owner does not,
   has no nodes. Status notes how many such files a project has.
 - A top-level edit in one huge project still re-walks that project. A later step could

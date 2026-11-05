@@ -545,6 +545,104 @@ public class ProjectModelTests : IDisposable
     }
 
     [Fact]
+    public void AFrameworkAProjectReferenceBringsReachesTheProject()
+    {
+        InstallCoreFramework();
+        InstallRefPack("Microsoft.AspNetCore.App.Ref", "8.0.1", "net8.0", "Microsoft.AspNetCore");
+        var project = Write("App/App.csproj", Net8);
+        Write("App/obj/project.assets.json", AssetsJson(project, "net8.0", "net8.0", new { }, new Dictionary<string, object>
+        {
+            ["Web.Lib/1.0.0"] = new { type = "project", frameworkReferences = new[] { "Microsoft.AspNetCore.App" } },
+        }));
+
+        var info = Assert.Single(Load(Source("App/A.cs")).Projects);
+
+        Assert.Empty(info.MissingReferences);
+        Assert.Contains(info.MetadataReferences, reference => reference.EndsWith("Microsoft.AspNetCore.dll", StringComparison.Ordinal));
+    }
+
+    private const string ReferencesLib = """
+        <Project Sdk="Microsoft.NET.Sdk">
+          <PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup>
+          <ItemGroup><ProjectReference Include="../Lib/Lib.csproj" /></ItemGroup>
+        </Project>
+        """;
+
+    [Theory]
+    [InlineData("""<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup><ItemGroup><FrameworkReference Include="Microsoft.AspNetCore.App" /></ItemGroup></Project>""")]
+    [InlineData("""<Project Sdk="Microsoft.NET.Sdk.Web"><PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup></Project>""")]
+    public void WithoutRestoreDataAReferencedProjectsFrameworkStillArrives(string library)
+    {
+        InstallCoreFramework();
+        InstallRefPack("Microsoft.AspNetCore.App.Ref", "8.0.1", "net8.0", "Microsoft.AspNetCore");
+        Write("Lib/Lib.csproj", library);
+        Write("App/App.csproj", ReferencesLib);
+        var file = Source("App/A.cs");
+
+        var model = Load(file, Source("Lib/L.cs"));
+
+        var app = Assert.Single(model.ProjectsCompiling(file));
+        Assert.Empty(app.MissingReferences);
+        Assert.Contains(app.MetadataReferences, reference => reference.EndsWith("Microsoft.AspNetCore.dll", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void AFrameworkAReferenceKeepsPrivateDoesNotArrive()
+    {
+        InstallCoreFramework();
+        InstallRefPack("Microsoft.AspNetCore.App.Ref", "8.0.1", "net8.0", "Microsoft.AspNetCore");
+        Write("Lib/Lib.csproj", """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup>
+              <ItemGroup><FrameworkReference Include="Microsoft.AspNetCore.App" PrivateAssets="all" /></ItemGroup>
+            </Project>
+            """);
+        Write("App/App.csproj", ReferencesLib);
+        var file = Source("App/A.cs");
+
+        var app = Assert.Single(Load(file, Source("Lib/L.cs")).ProjectsCompiling(file));
+
+        Assert.DoesNotContain(app.MetadataReferences, reference => reference.EndsWith("Microsoft.AspNetCore.dll", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void WithoutRestoreDataADesktopFrameworkArrivesThroughAReference()
+    {
+        InstallCoreFramework();
+        InstallRefPack("Microsoft.WindowsDesktop.App.Ref", "8.0.1", "net8.0", "PresentationCore");
+        Write("Lib/Lib.csproj", """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup><TargetFramework>net8.0</TargetFramework><UseWPF>true</UseWPF></PropertyGroup>
+            </Project>
+            """);
+        Write("App/App.csproj", ReferencesLib);
+        var file = Source("App/A.cs");
+
+        var app = Assert.Single(Load(file, Source("Lib/L.cs")).ProjectsCompiling(file));
+
+        Assert.Contains(app.MetadataReferences, reference => reference.EndsWith("PresentationCore.dll", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void AFrameworkThatCannotBeFoundThroughAReferenceIsReported()
+    {
+        InstallCoreFramework();
+        Write("Lib/Lib.csproj", """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup>
+              <ItemGroup><FrameworkReference Include="Microsoft.AspNetCore.App" /></ItemGroup>
+            </Project>
+            """);
+        Write("App/App.csproj", ReferencesLib);
+        var file = Source("App/A.cs");
+
+        var app = Assert.Single(Load(file, Source("Lib/L.cs")).ProjectsCompiling(file));
+
+        Assert.Contains("Microsoft.AspNetCore.App", app.MissingReferences);
+        Assert.Equal(ProjectCoverageState.Partial, app.State);
+    }
+
+    [Fact]
     public void ATargetWithAPlatformIsNotConfusedWithTheSameVersionWithout()
     {
         InstallCoreFramework();

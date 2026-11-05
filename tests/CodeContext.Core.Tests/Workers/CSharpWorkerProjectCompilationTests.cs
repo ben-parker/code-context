@@ -419,6 +419,65 @@ public class CSharpWorkerProjectCompilationTests : IDisposable
         }
         """;
 
+    /// <summary>
+    /// A build keeps one copy of an assembly that arrives twice, the newest. A compiler given
+    /// both sees every type in it twice, when signed, and binds neither.
+    /// </summary>
+    [Fact]
+    public void TwoVersionsOfOneAssemblyBindToTheNewer()
+    {
+        var packages = Path.Combine(_root, "_packages");
+        const string Tool = "namespace Engine; public class Tool { public int Run() => 1; }";
+        CompileSigned("_packages/old.engine/1.0.0/lib/net10.0/Engine.Tools.dll", Tool, "1.0.0.0");
+        CompileSigned("_packages/new.engine/2.0.0/lib/net10.0/Engine.Tools.dll", Tool + " public class Extra { }", "2.0.0.0");
+        Write("game/obj/project.assets.json", JsonSerializer.Serialize(new Dictionary<string, object>
+        {
+            ["targets"] = new Dictionary<string, object>
+            {
+                ["net10.0"] = new Dictionary<string, object>
+                {
+                    ["Old.Engine/1.0.0"] = new { type = "package", compile = new Dictionary<string, object> { ["lib/net10.0/Engine.Tools.dll"] = new { } } },
+                    ["New.Engine/2.0.0"] = new { type = "package", compile = new Dictionary<string, object> { ["lib/net10.0/Engine.Tools.dll"] = new { } } },
+                },
+            },
+            ["libraries"] = new Dictionary<string, object>
+            {
+                ["Old.Engine/1.0.0"] = new { type = "package", path = "old.engine/1.0.0" },
+                ["New.Engine/2.0.0"] = new { type = "package", path = "new.engine/2.0.0" },
+            },
+            ["packageFolders"] = new Dictionary<string, object> { [packages + Path.DirectorySeparatorChar] = new { } },
+            ["project"] = new Dictionary<string, object>
+            {
+                ["restore"] = new { projectPath = Path.GetFullPath(Path.Combine(_root, "game/Game.csproj")) },
+                ["frameworks"] = new Dictionary<string, object>
+                {
+                    ["net10.0"] = new { frameworkReferences = new Dictionary<string, object> { ["Microsoft.NETCore.App"] = new { } } },
+                },
+            },
+        }));
+
+        var result = Analyze(
+            ("game/Game.csproj", Project()),
+            ("game/Player.cs", "namespace Game; public class Player { public int Go() => new Engine.Tool().Run(); }"));
+
+        Assert.Contains(result.Nodes, node => node.Name == "Run" && node.Metadata?.GetValueOrDefault("external") == "true");
+    }
+
+    private void CompileSigned(string relative, string source, string version)
+    {
+        var path = Path.Combine(_root, relative);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        var compilation = CSharpCompilation.Create(
+            "Engine.Tools",
+            [CSharpSyntaxTree.ParseText($"[assembly: System.Reflection.AssemblyVersion(\"{version}\")] {source}")],
+            [MetadataReference.CreateFromFile(typeof(object).Assembly.Location)],
+            new CSharpCompilationOptions(
+                OutputKind.DynamicallyLinkedLibrary,
+                cryptoPublicKey: [.. typeof(CSharpCompilation).Assembly.GetName().GetPublicKey()!],
+                publicSign: true));
+        Assert.True(compilation.Emit(path).Success);
+    }
+
     [Fact]
     public void AValueOfAPackageTypeKeepsWhatIsReachedThroughIt()
     {

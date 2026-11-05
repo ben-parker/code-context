@@ -54,6 +54,9 @@ public sealed class ProjectInfo
     /// <summary>True when no framework assemblies were found for this project.</summary>
     internal bool NoFramework { get; init; }
 
+    /// <summary>Shared frameworks this project declares that reach what references it.</summary>
+    internal IReadOnlyList<string> FlowingFrameworks { get; init; } = [];
+
     /// <summary>Why this project's context is incomplete, beyond its missing references.</summary>
     internal List<string> Gaps { get; init; } = [];
 
@@ -539,10 +542,11 @@ public sealed class ProjectModel
                     : TargetFrameworkName.TryParse(candidate.TargetFramework, out var target2) ? target2.DefaultLanguageVersion : null,
                 GlobalUsings = ReadGlobalUsings(candidate),
                 InternalsVisibleTo = Friends(evaluated),
-                MetadataReferences = references.Distinct(PathComparer).ToList(),
+                MetadataReferences = ReferenceConflicts.KeepNewest(references.Distinct(PathComparer)),
                 MissingReferences = missing.Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
                 AnalyzerPackages = target?.AnalyzerPackages ?? [],
                 NoFramework = noFramework,
+                FlowingFrameworks = ImpliedFrameworkReferences(evaluated, includePrivate: false),
                 Gaps = gaps,
                 Remarks = remarks,
                 HasRestoreData = candidate.Restore is not null,
@@ -563,7 +567,8 @@ public sealed class ProjectModel
                     .Select(friend => friend.Split(',')[0].Trim()))
                 .ToList();
 
-        private FrameworkResolution? ResolveFramework(Candidate candidate, RestoreTarget? target, List<string> folders)
+        private FrameworkResolution? ResolveFramework(
+            Candidate candidate, RestoreTarget? target, List<string> folders, IEnumerable<string>? inherited = null)
         {
             var evaluated = candidate.Evaluated;
 
@@ -583,7 +588,7 @@ public sealed class ProjectModel
 
             return FrameworkReferenceResolver.Resolve(
                 framework,
-                target?.FrameworkReferences ?? ImpliedFrameworkReferences(evaluated),
+                target?.FrameworkReferences ?? [.. ImpliedFrameworkReferences(evaluated, includePrivate: true), .. inherited ?? []],
                 target?.PackDownloads ?? new Dictionary<string, string>(),
                 folders,
                 toolchain,
@@ -591,9 +596,12 @@ public sealed class ProjectModel
         }
 
         /// <summary>What a restore would have recorded, from what the project and its SDK declare.</summary>
-        private static List<string> ImpliedFrameworkReferences(EvaluatedProject evaluated)
+        private static List<string> ImpliedFrameworkReferences(EvaluatedProject evaluated, bool includePrivate)
         {
-            var references = evaluated.ItemsOf("FrameworkReference").Select(item => item.Include).ToList();
+            var references = evaluated.ItemsOf("FrameworkReference")
+                .Where(item => includePrivate || !string.Equals(item.Get("PrivateAssets"), "all", StringComparison.OrdinalIgnoreCase))
+                .Select(item => item.Include)
+                .ToList();
             if (evaluated.SdkNames.Any(sdk => sdk.Equals("Microsoft.NET.Sdk.Web", StringComparison.OrdinalIgnoreCase)
                     || sdk.Equals("Microsoft.NET.Sdk.Razor", StringComparison.OrdinalIgnoreCase)))
             {
@@ -833,6 +841,7 @@ public sealed class ProjectModel
                 info.ProjectReferences = Closure(info, direct);
             }
             AddTransitivePackages(infos);
+            AddTransitiveFrameworks(infos);
         }
 
         private IEnumerable<string> DeclaredProjectReferences(Candidate candidate)
@@ -900,7 +909,7 @@ public sealed class ProjectModel
                 var own = info.MetadataReferences.ToList();
                 own.AddRange(info.ProjectReferences.SelectMany(project => project.MetadataReferences)
                     .Where(path => path.Contains(".nuget", StringComparison.OrdinalIgnoreCase)));
-                info.MetadataReferences = own.Distinct(PathComparer).ToList();
+                info.MetadataReferences = ReferenceConflicts.KeepNewest(own.Distinct(PathComparer));
 
                 // What a reference lacks would have reached this project too.
                 var lacking = info.ProjectReferences.Where(project => project.MissingReferences.Count > 0).ToList();
@@ -909,6 +918,28 @@ public sealed class ProjectModel
                     info.Gaps.Add($"No restore data, and {string.Join(", ", lacking.Select(project => project.Name))} "
                         + "has references that are missing here too.");
                 }
+            }
+        }
+
+        /// <summary>
+        /// A shared framework flows through project references as packages do. Each is found
+        /// for this project's own target, since the referenced one may target something else.
+        /// </summary>
+        private void AddTransitiveFrameworks(Dictionary<string, ProjectInfo> infos)
+        {
+            foreach (var (path, info) in infos.Where(entry => !entry.Value.HasRestoreData))
+            {
+                var inherited = info.ProjectReferences.SelectMany(project => project.FlowingFrameworks)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+                if (inherited.Count == 0) continue;
+
+                var candidate = _candidates[path];
+                if (ResolveFramework(candidate, null, PackageFolders(candidate.Restore), inherited) is not { } framework) continue;
+
+                info.MetadataReferences = ReferenceConflicts.KeepNewest(framework.Assemblies.Concat(info.MetadataReferences).Distinct(PathComparer));
+                info.MissingReferences = info.MissingReferences.Union(framework.Missing, StringComparer.OrdinalIgnoreCase).ToList();
+                info.Gaps.AddRange(framework.Notes.Except(info.Gaps, StringComparer.Ordinal));
             }
         }
 
