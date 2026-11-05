@@ -47,10 +47,7 @@ public sealed class RestoreData
         if (!TargetFrameworkName.TryParse(moniker, out var wanted)) return null;
         foreach (var (alias, target) in Targets)
         {
-            if (TargetFrameworkName.TryParse(alias, out var candidate)
-                && candidate.Identifier == wanted.Identifier
-                && candidate.Version == wanted.Version
-                && candidate.Platform == wanted.Platform)
+            if (TargetFrameworkName.TryParse(alias, out var candidate) && candidate.IsSameTarget(wanted))
             {
                 return target;
             }
@@ -113,8 +110,7 @@ public sealed class RestoreData
             // A key with a slash is a runtime-specific graph, which adds nothing to compile against.
             if (!target.Name.Contains('/')
                 && TargetFrameworkName.TryParse(target.Name, out var candidate)
-                && candidate.Identifier == wanted.Identifier
-                && candidate.Version == wanted.Version)
+                && candidate.IsSameTarget(wanted))
             {
                 return target.Value;
             }
@@ -179,6 +175,16 @@ public sealed class RestoreData
                 else if (kind == "package")
                 {
                     ReadPackage(library, entry, packageFolders, compile, missing, analyzers);
+
+                    // A package can bring a shared framework with it, which reaches the project.
+                    if (library.Value.TryGetProperty("frameworkReferences", out var brought)
+                        && brought.ValueKind == JsonValueKind.Array)
+                    {
+                        frameworkReferences.AddRange(brought.EnumerateArray()
+                            .Select(reference => reference.GetString())
+                            .OfType<string>()
+                            .Where(reference => !frameworkReferences.Contains(reference, StringComparer.OrdinalIgnoreCase)));
+                    }
                 }
             }
         }

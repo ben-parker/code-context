@@ -174,8 +174,8 @@ Walks run in parallel, capped at 8 threads.
 
 Project inputs are stat-checked on each `workspace/open`, which the host sends before
 every mutation. A new optional `projectInputs` manifest field names what else to watch, so
-a `.csproj` edit or a restore needs no source edit: the host watches those names everywhere,
-including `obj/`, and answers a change with an empty `workspace/applyChanges`, on which the
+a `.csproj` edit or a restore needs no source edit: the host watches exact names everywhere,
+including `obj/`, and extensions where it would index, and answers a change with an empty `workspace/applyChanges`, on which the
 worker rereads its projects. A project that reads as it did keeps its compilation and facts.
 
 ## Results

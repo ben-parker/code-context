@@ -136,8 +136,9 @@ files' facts. The contract:
   remove it when nothing uses it.
 - **Project inputs are not source files.** `projectInputs` in the manifest lists file names,
   or extensions starting with a dot, that change what the worker's files mean. The host
-  watches them everywhere, including paths it would not index, and answers a change with
-  an empty `workspace/applyChanges`, on which the worker rereads its projects. The usual
+  watches an exact name wherever it appears, including paths it would not index, and an
+  extension only in files it would. It answers a change with an empty
+  `workspace/applyChanges`, on which the worker rereads its projects. The usual
   rule still holds: emit at least one delta.
 - **Chunks agree.** All chunks of one request carry the same `replacesWorkspace`
   value (the host ORs the flags) and should repeat the full `replacesFiles` list (the

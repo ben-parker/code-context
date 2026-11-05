@@ -88,7 +88,7 @@ public sealed class ProjectModel
 
     private static readonly HashSet<string> SkippedDirectories = new(StringComparer.OrdinalIgnoreCase)
     {
-        ".git", ".vs", ".idea", "node_modules",
+        ".git", ".vs", ".idea", ".venv", ".codecontext", "bin", "node_modules",
     };
 
     private readonly Dictionary<string, List<ProjectInfo>> _compiledBy;
@@ -614,7 +614,7 @@ public sealed class ProjectModel
                     .ToList();
                 var chosen = version is null || version.Contains('*') || version.Contains('[') || version.Contains('(')
                     ? directories.FirstOrDefault()
-                    : directories.FirstOrDefault(directory => Path.GetFileName(directory).Equals(version, StringComparison.OrdinalIgnoreCase));
+                    : directories.FirstOrDefault(directory => IsSameVersion(Path.GetFileName(directory), version));
                 if (chosen is null) continue;
 
                 foreach (var assets in new[] { "ref", "lib" })
@@ -628,6 +628,18 @@ public sealed class ProjectModel
             }
             return null;
         }
+
+        /// <summary>NuGet stores <c>1.0</c> as <c>1.0.0</c>, so the written form may not be the folder's.</summary>
+        private static bool IsSameVersion(string folder, string declared)
+        {
+            if (folder.Equals(declared, StringComparison.OrdinalIgnoreCase)) return true;
+            if (folder.Contains('-') || declared.Contains('-')) return false;
+            return MsBuildExpander.TryVersion(folder, out var left) && MsBuildExpander.TryVersion(declared, out var right)
+                && Normalized(left) == Normalized(right);
+        }
+
+        private static Version Normalized(Version version)
+            => new(version.Major, version.Minor, Math.Max(version.Build, 0), Math.Max(version.Revision, 0));
 
         private static string? BestAssetDirectory(string assets, TargetFrameworkName? framework)
         {

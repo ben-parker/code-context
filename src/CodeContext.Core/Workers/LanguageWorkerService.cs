@@ -19,8 +19,13 @@ public interface ILanguageWorkerService
 
     bool TryGetParserForExtension(string extension, out string parserId);
 
-    /// <summary>Finds the worker that declared this file a project input.</summary>
-    bool TryGetParserForProjectInput(string path, out string parserId);
+    /// <summary>
+    /// Finds the worker that declared this file a project input. An exact name counts
+    /// anywhere, since a build writes such files where nothing is indexed; an extension
+    /// counts only for a file the selector includes, or every package unpacked under an
+    /// excluded directory would refresh the workspace.
+    /// </summary>
+    bool TryGetParserForProjectInput(string path, bool isIncluded, out string parserId);
 
     /// <summary>
     /// Tells a worker its project inputs changed, with no source file changing. It rereads
@@ -121,7 +126,7 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
     public bool TryGetParserForExtension(string extension, out string parserId)
         => _extensionToParser.TryGetValue(extension, out parserId!);
 
-    public bool TryGetParserForProjectInput(string path, out string parserId)
+    public bool TryGetParserForProjectInput(string path, bool isIncluded, out string parserId)
     {
         var name = Path.GetFileName(path);
         foreach (var state in _workers.Values)
@@ -129,7 +134,7 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
             foreach (var input in state.Registration.Manifest.ProjectInputs ?? [])
             {
                 if (input.StartsWith('.')
-                    ? name.EndsWith(input, StringComparison.OrdinalIgnoreCase)
+                    ? isIncluded && name.EndsWith(input, StringComparison.OrdinalIgnoreCase)
                     : name.Equals(input, StringComparison.OrdinalIgnoreCase))
                 {
                     parserId = state.Registration.Manifest.ParserId;

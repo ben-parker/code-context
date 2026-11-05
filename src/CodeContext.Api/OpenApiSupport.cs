@@ -32,8 +32,8 @@ internal static class OpenApiSupport
         // Custom /api/schema endpoint that serves the OpenAPI specification.
         app.MapGet("/api/schema", () => Results.Redirect("/openapi/v1.json"))
             .WithName("GetOpenApiSchema")
-            .WithSummary("Get OpenAPI 3.0 specification")
-            .WithDescription("Returns the OpenAPI 3.0 specification for the CodeContext API");
+            .WithSummary("Get OpenAPI specification")
+            .WithDescription("Returns the OpenAPI specification for the CodeContext API");
     }
 }
 
@@ -52,6 +52,7 @@ internal sealed class ParameterDescriptionTransformer : IOpenApiOperationTransfo
         ["exact"] = "Exact matching; omit for exact-first matching with substring fallback",
         ["includeRelated"] = "Whether to include loosely related same-file/namespace symbols",
         ["includeMetrics"] = "Whether to include heuristic code metrics",
+        ["includeExternal"] = "Whether to include library symbols, which name matches and uses otherwise leave out",
         ["maxMatches"] = "Maximum ambiguous candidate summaries to return (1-50)",
         ["maxRelationships"] = "Maximum entries returned per relationship list (1-100)",
         ["maxCallSites"] = "Maximum locations returned per aggregated relationship (0-100)",

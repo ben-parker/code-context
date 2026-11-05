@@ -465,6 +465,223 @@ public class ProjectModelTests : IDisposable
         Assert.Contains(info.Notes, note => note.Contains("no reference assemblies", StringComparison.Ordinal));
     }
 
+    private string AssetsJson(string projectPath, string targetKey, string alias, object framework, object? libraries = null)
+        => JsonSerializer.Serialize(new Dictionary<string, object>
+        {
+            ["targets"] = new Dictionary<string, object> { [targetKey] = libraries ?? new { } },
+            ["libraries"] = new { },
+            ["packageFolders"] = new Dictionary<string, object> { [PackageFolder + Path.DirectorySeparatorChar] = new { } },
+            ["project"] = new Dictionary<string, object>
+            {
+                ["restore"] = new { projectPath },
+                ["frameworks"] = new Dictionary<string, object> { [alias] = framework },
+            },
+        });
+
+    [Fact]
+    public void AFrameworkReferenceToAPartOfAPackFindsThePack()
+    {
+        InstallCoreFramework();
+        InstallRefPack("Microsoft.WindowsDesktop.App.Ref", "8.0.1", "net8.0", "PresentationCore");
+        var project = Write("App/App.csproj", Net8);
+        Write("App/obj/project.assets.json", AssetsJson(project, "net8.0", "net8.0", new
+        {
+            frameworkReferences = new Dictionary<string, object>
+            {
+                ["Microsoft.NETCore.App"] = new { },
+                ["Microsoft.WindowsDesktop.App.WPF"] = new { },
+            },
+        }));
+
+        var info = Assert.Single(Load(Source("App/A.cs")).Projects);
+
+        Assert.Empty(info.MissingReferences);
+        Assert.Contains(info.MetadataReferences, reference => reference.EndsWith("PresentationCore.dll", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void AFrameworkReferenceNamingAPackAndProfileFindsWhatTheRestoreDownloaded()
+    {
+        InstallCoreFramework();
+        var sdk = Package("Microsoft.Windows.SDK.NET.Ref", "10.0.26100.57", "lib/net8.0/Microsoft.Windows.SDK.NET.dll");
+        var project = Write("App/App.csproj", """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup><TargetFramework>net8.0-windows10.0.26100.0</TargetFramework></PropertyGroup>
+            </Project>
+            """);
+        Write("App/obj/project.assets.json", AssetsJson(project, "net8.0-windows10.0.26100.0", "net8.0-windows10.0.26100.0", new
+        {
+            frameworkReferences = new Dictionary<string, object>
+            {
+                ["Microsoft.NETCore.App"] = new { },
+                ["Microsoft.Windows.SDK.NET.Ref.Windows"] = new { },
+            },
+            downloadDependencies = new[] { new { name = "Microsoft.Windows.SDK.NET.Ref", version = "[10.0.26100.57, 10.0.26100.57]" } },
+        }));
+
+        var info = Assert.Single(Load(Source("App/A.cs")).Projects);
+
+        Assert.Empty(info.MissingReferences);
+        Assert.Contains(sdk, info.MetadataReferences);
+        Assert.Contains("WINDOWS", info.PreprocessorSymbols);
+        Assert.Contains("WINDOWS10_0_26100_0", info.PreprocessorSymbols);
+        Assert.Contains("WINDOWS10_0_26100_0_OR_GREATER", info.PreprocessorSymbols);
+    }
+
+    [Fact]
+    public void AFrameworkAPackageBringsReachesTheProject()
+    {
+        InstallCoreFramework();
+        InstallRefPack("Microsoft.AspNetCore.App.Ref", "8.0.1", "net8.0", "Microsoft.AspNetCore");
+        var project = Write("App/App.csproj", Net8);
+        Write("App/obj/project.assets.json", AssetsJson(project, "net8.0", "net8.0", new { }, new Dictionary<string, object>
+        {
+            ["Web.Lib/1.0.0"] = new { type = "package", frameworkReferences = new[] { "Microsoft.AspNetCore.App" } },
+        }));
+
+        var info = Assert.Single(Load(Source("App/A.cs")).Projects);
+
+        Assert.Contains(info.MetadataReferences, reference => reference.EndsWith("Microsoft.AspNetCore.dll", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void ATargetWithAPlatformIsNotConfusedWithTheSameVersionWithout()
+    {
+        InstallCoreFramework();
+        var windowsOnly = Package("Windows.Only", "1.0.0", "lib/net8.0/Windows.Only.dll");
+        var plain = Package("Plain", "1.0.0", "lib/net8.0/Plain.dll");
+        var project = Write("App/App.csproj", """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup><TargetFrameworks>net8.0-windows;net8.0</TargetFrameworks></PropertyGroup>
+            </Project>
+            """);
+        Write("App/obj/project.assets.json", JsonSerializer.Serialize(new Dictionary<string, object>
+        {
+            ["targets"] = new Dictionary<string, object>
+            {
+                ["net8.0"] = new Dictionary<string, object>
+                {
+                    ["Plain/1.0.0"] = new { type = "package", compile = new Dictionary<string, object> { ["lib/net8.0/Plain.dll"] = new { } } },
+                },
+                ["net8.0-windows7.0"] = new Dictionary<string, object>
+                {
+                    ["Windows.Only/1.0.0"] = new { type = "package", compile = new Dictionary<string, object> { ["lib/net8.0/Windows.Only.dll"] = new { } } },
+                },
+            },
+            ["libraries"] = new Dictionary<string, object>
+            {
+                ["Plain/1.0.0"] = new { type = "package", path = "plain/1.0.0" },
+                ["Windows.Only/1.0.0"] = new { type = "package", path = "windows.only/1.0.0" },
+            },
+            ["packageFolders"] = new Dictionary<string, object> { [PackageFolder + Path.DirectorySeparatorChar] = new { } },
+            ["project"] = new Dictionary<string, object>
+            {
+                ["restore"] = new { projectPath = project },
+                ["frameworks"] = new Dictionary<string, object> { ["net8.0-windows"] = new { }, ["net8.0"] = new { } },
+            },
+        }));
+
+        var info = Assert.Single(Load(Source("App/A.cs")).Projects);
+
+        Assert.Contains(windowsOnly, info.MetadataReferences);
+        Assert.DoesNotContain(plain, info.MetadataReferences);
+    }
+
+    [Fact]
+    public void ALegacyLongFormTargetKeyIsFound()
+    {
+        Write("_reference/v4.8/mscorlib.dll");
+        var assembly = Package("Lib", "1.0.0", "lib/net45/Lib.dll");
+        var project = Write("App/App.csproj", """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup><TargetFramework>net48</TargetFramework></PropertyGroup>
+            </Project>
+            """);
+        Write("App/obj/project.assets.json", JsonSerializer.Serialize(new Dictionary<string, object>
+        {
+            ["targets"] = new Dictionary<string, object>
+            {
+                [".NETFramework,Version=v4.8"] = new Dictionary<string, object>
+                {
+                    ["Lib/1.0.0"] = new { type = "package", compile = new Dictionary<string, object> { ["lib/net45/Lib.dll"] = new { } } },
+                },
+            },
+            ["libraries"] = new Dictionary<string, object> { ["Lib/1.0.0"] = new { type = "package", path = "lib/1.0.0" } },
+            ["packageFolders"] = new Dictionary<string, object> { [PackageFolder + Path.DirectorySeparatorChar] = new { } },
+            ["project"] = new Dictionary<string, object>
+            {
+                ["restore"] = new { projectPath = project },
+                ["frameworks"] = new Dictionary<string, object> { ["net48"] = new { } },
+            },
+        }));
+
+        Assert.Contains(assembly, Assert.Single(Load(Source("App/A.cs")).Projects).MetadataReferences);
+    }
+
+    [Theory]
+    [InlineData("1.0", "1.0.0")]
+    [InlineData("13.0", "13.0.0")]
+    [InlineData("1.2.3.0", "1.2.3")]
+    public void ADeclaredVersionFindsTheFolderNuGetNormalizedItTo(string declared, string folder)
+    {
+        InstallCoreFramework();
+        Write("App/App.csproj", $"""
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup>
+              <ItemGroup><PackageReference Include="Lib" Version="{declared}" /></ItemGroup>
+            </Project>
+            """);
+        var assembly = Package("Lib", folder, "lib/net6.0/Lib.dll");
+
+        Assert.Contains(assembly, Assert.Single(Load(Source("App/A.cs")).Projects).MetadataReferences);
+    }
+
+    [Fact]
+    public void AnSdkStyleFrameworkProjectSeesItsFullVersion()
+    {
+        Write("_reference/v4.7.2/mscorlib.dll");
+        Write("App/App.csproj", """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup><TargetFramework>net472</TargetFramework></PropertyGroup>
+              <ItemGroup Condition="'$(TargetFrameworkVersion)' == 'v4.7.2'"><Compile Remove="Skipped.cs" /></ItemGroup>
+            </Project>
+            """);
+        var skipped = Source("App/Skipped.cs");
+
+        Assert.Equal([skipped], Load(skipped).UnassignedFiles);
+    }
+
+    [Fact]
+    public void AnImportCannotReachAboveTheRepository()
+    {
+        InstallCoreFramework();
+        var outer = Directory.CreateTempSubdirectory("cc-above-").FullName;
+        try
+        {
+            File.WriteAllText(Path.Combine(outer, "Directory.Build.props"), """
+                <Project><PropertyGroup><DefineConstants>$(DefineConstants);ABOVE</DefineConstants></PropertyGroup></Project>
+                """);
+            var repository = Path.Combine(outer, "repo");
+            Directory.CreateDirectory(Path.Combine(repository, ".git"));
+            var app = Path.Combine(repository, "App");
+            Directory.CreateDirectory(app);
+            File.WriteAllText(Path.Combine(repository, "Directory.Build.props"), """
+                <Project><Import Project="$([MSBuild]::GetPathOfFileAbove('Directory.Build.props', '$(MSBuildThisFileDirectory)../'))" /></Project>
+                """);
+            File.WriteAllText(Path.Combine(app, "App.csproj"), Net8);
+            var file = Path.Combine(app, "A.cs");
+            File.WriteAllText(file, "class C { }");
+
+            var info = Assert.Single(ProjectModel.Load(repository, [file], Toolchain).Projects);
+
+            Assert.DoesNotContain("ABOVE", info.PreprocessorSymbols);
+        }
+        finally
+        {
+            Directory.Delete(outer, recursive: true);
+        }
+    }
+
     [Fact]
     public void AMultiTargetedProjectUsesItsFirstTargetAndReportsTheOthers()
     {

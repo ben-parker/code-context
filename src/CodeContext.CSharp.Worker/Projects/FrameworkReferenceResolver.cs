@@ -54,13 +54,13 @@ public static class FrameworkReferenceResolver
         var coreFound = false;
         foreach (var name in frameworkReferences.Prepend(CoreFramework).Distinct(StringComparer.OrdinalIgnoreCase))
         {
-            var pack = name + ".Ref";
-            var directory = FindRefPack(pack, folder, packDownloads.GetValueOrDefault(pack), packageFolders, dotnetRoots);
+            var pack = PackOf(name, packDownloads, packageFolders, dotnetRoots);
+            var directory = FindRefPack(pack, framework, folder, packDownloads.GetValueOrDefault(pack), packageFolders, dotnetRoots);
             if (directory is not null)
             {
                 assemblies.AddRange(Directory.GetFiles(directory, "*.dll").Order(StringComparer.Ordinal));
             }
-            else if (FindRuntime(name, framework.Version, dotnetRoots) is { } runtime)
+            else if (FindRuntime(pack.EndsWith(".Ref", StringComparison.OrdinalIgnoreCase) ? pack[..^4] : name, framework.Version, dotnetRoots) is { } runtime)
             {
                 assemblies.AddRange(ManagedAssemblies(runtime.Directory));
                 notes.Add(runtime.ExactVersion
@@ -77,17 +77,50 @@ public static class FrameworkReferenceResolver
         return new FrameworkResolution(assemblies, coreFound, missing, notes);
     }
 
+    /// <summary>
+    /// The pack behind a framework reference. A pack usually adds <c>.Ref</c> to the name,
+    /// but a reference can name a part of one, as <c>Microsoft.WindowsDesktop.App.WPF</c>
+    /// does, or the pack plus a profile, as <c>Microsoft.Windows.SDK.NET.Ref.Windows</c> does.
+    /// What a restore downloaded is authoritative; otherwise the name is cut back until a
+    /// pack of that name is on this machine.
+    /// </summary>
+    private static string PackOf(
+        string name,
+        IReadOnlyDictionary<string, string> packDownloads,
+        IReadOnlyList<string> packageFolders,
+        IReadOnlyList<string> dotnetRoots)
+    {
+        var direct = name + ".Ref";
+        if (packDownloads.ContainsKey(direct)) return direct;
+
+        var downloaded = packDownloads.Keys
+            .Where(pack => name.StartsWith(pack + ".", StringComparison.OrdinalIgnoreCase))
+            .MaxBy(pack => pack.Length);
+        if (downloaded is not null) return downloaded;
+
+        for (var candidate = name; candidate.Contains('.'); candidate = candidate[..candidate.LastIndexOf('.')])
+        {
+            var pack = candidate + ".Ref";
+            if (PackLocations(pack, packageFolders, dotnetRoots).Exists(Directory.Exists)) return pack;
+        }
+        return direct;
+    }
+
+    private static List<string> PackLocations(
+        string pack, IReadOnlyList<string> packageFolders, IReadOnlyList<string> dotnetRoots)
+        => packageFolders.Select(root => Path.Combine(root, pack.ToLowerInvariant()))
+            .Concat(dotnetRoots.Select(root => Path.Combine(root, "packs", pack)))
+            .ToList();
+
     private static string? FindRefPack(
         string pack,
+        TargetFrameworkName framework,
         string folder,
         string? version,
         IReadOnlyList<string> packageFolders,
         IReadOnlyList<string> dotnetRoots)
     {
-        var lower = pack.ToLowerInvariant();
-        var locations = packageFolders.Select(root => Path.Combine(root, lower))
-            .Concat(dotnetRoots.Select(root => Path.Combine(root, "packs", pack)))
-            .ToList();
+        var locations = PackLocations(pack, packageFolders, dotnetRoots);
 
         if (version is not null)
         {
@@ -95,6 +128,9 @@ public static class FrameworkReferenceResolver
             {
                 var exact = Path.Combine(location, version, "ref", folder);
                 if (Directory.Exists(exact)) return exact;
+
+                // Some packs ship as a library for the oldest framework they support.
+                if (BestLibFolder(Path.Combine(location, version, "lib"), framework) is { } library) return library;
             }
         }
 
@@ -104,6 +140,17 @@ public static class FrameworkReferenceResolver
             .Select(directory => Path.Combine(directory, "ref", folder))
             .Where(Directory.Exists)
             .OrderByDescending(VersionOfPackDirectory)
+            .FirstOrDefault();
+    }
+
+    private static string? BestLibFolder(string lib, TargetFrameworkName framework)
+    {
+        if (!Directory.Exists(lib)) return null;
+        return Directory.GetDirectories(lib)
+            .Select(directory => (Directory: directory, Parsed: TargetFrameworkName.TryParse(Path.GetFileName(directory), out var asset) ? asset : null))
+            .Where(candidate => candidate.Parsed is not null && framework.CanConsume(candidate.Parsed))
+            .OrderByDescending(candidate => candidate.Parsed!.Version)
+            .Select(candidate => candidate.Directory)
             .FirstOrDefault();
     }
 
@@ -177,14 +224,14 @@ public static class FrameworkReferenceResolver
             .OrderByDescending(path => Path.GetDirectoryName(Path.GetDirectoryName(Path.GetDirectoryName(path))) is { } version
                 && MsBuildExpander.TryVersion(Path.GetFileName(version), out var parsed) ? parsed : new Version(0, 0))
             .FirstOrDefault();
-        var directory = library ?? FindRefPack(pack, folder, packDownloads.GetValueOrDefault(pack), packageFolders, dotnetRoots);
+        var directory = library ?? FindRefPack(pack, framework, folder, packDownloads.GetValueOrDefault(pack), packageFolders, dotnetRoots);
         if (directory is not null)
         {
             return new FrameworkResolution(Directory.GetFiles(directory, "*.dll").Order(StringComparer.Ordinal).ToList(), true, [], []);
         }
 
         // 2.1 is a superset of what older targets may use.
-        var wider = FindRefPack(pack, "netstandard2.1", packDownloads.GetValueOrDefault(pack), packageFolders, dotnetRoots);
+        var wider = FindRefPack(pack, framework, "netstandard2.1", packDownloads.GetValueOrDefault(pack), packageFolders, dotnetRoots);
         return wider is null
             ? new FrameworkResolution([], false, [folder], [])
             : new FrameworkResolution(

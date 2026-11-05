@@ -21,6 +21,16 @@ public sealed record TargetFrameworkName(string Moniker, string Identifier, Vers
     private static readonly Version[] NetCoreAppVersions =
         [new(1, 0), new(1, 1), new(2, 0), new(2, 1), new(2, 2), new(3, 0), new(3, 1)];
 
+    /// <summary>The same target, however it was written: <c>net48</c> and <c>.NETFramework,Version=v4.8</c>.</summary>
+    public bool IsSameTarget(TargetFrameworkName other)
+        => Identifier == other.Identifier
+            && ThreePart(Version) == ThreePart(other.Version)
+            && string.Equals(Platform ?? string.Empty, other.Platform ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The version as a build writes it: <c>4.7.2</c>, or <c>8.0</c> with no third part.</summary>
+    public string VersionText(int minimumParts = 2)
+        => Version.ToString(Math.Clamp(Version.Build > 0 ? Math.Max(minimumParts, 3) : minimumParts, 2, Version.Build >= 0 ? 3 : 2));
+
     public bool IsNetCoreApp => Identifier == NetCoreApp;
     public bool IsNetStandard => Identifier == NetStandard;
     public bool IsNetFramework => Identifier == NetFramework;
@@ -133,7 +143,19 @@ public sealed record TargetFrameworkName(string Moniker, string Identifier, Vers
 
         if (Platform is { Length: > 0 } platform)
         {
-            yield return platform.ToUpperInvariant();
+            var name = platform.ToUpperInvariant();
+            yield return name;
+
+            // net8.0-windows10.0.19041 is WINDOWS10_0_19041_0, in the SDK's four parts.
+            var dash = Moniker.IndexOf('-');
+            var version = Moniker[(dash + 1 + platform.Length)..];
+            if (version.Length > 0)
+            {
+                if (version.Count(character => character == '.') == 2) version += ".0";
+                var symbol = name + version.Replace('.', '_');
+                yield return symbol;
+                yield return symbol + "_OR_GREATER";
+            }
         }
     }
 

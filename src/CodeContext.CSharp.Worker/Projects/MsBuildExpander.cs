@@ -10,7 +10,7 @@ namespace CodeContext.CSharp.Worker.Projects;
 /// result empty and sets <see cref="Uncertain"/>, because this reads a project and must
 /// never run anything a project names.
 /// </summary>
-public sealed class MsBuildExpander(Func<string, string?> property, string directory)
+public sealed class MsBuildExpander(Func<string, string?> property, string directory, string? boundary = null)
 {
     private static readonly StringComparison PathComparison =
         OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
@@ -260,7 +260,9 @@ public sealed class MsBuildExpander(Func<string, string?> property, string direc
             case "gettargetframeworkidentifier" when count == 1:
                 return TargetFrameworkName.TryParse(a[0], out var identified) ? identified.Identifier : Unknown();
             case "gettargetframeworkversion" when count >= 1:
-                return TargetFrameworkName.TryParse(a[0], out var versioned) ? versioned.Version.ToString(2) : Unknown();
+                return TargetFrameworkName.TryParse(a[0], out var versioned)
+                    ? versioned.VersionText(count > 1 && int.TryParse(a[1], out var parts) ? parts : 2)
+                    : Unknown();
             case "gettargetplatformidentifier" when count == 1:
                 return TargetFrameworkName.TryParse(a[0], out var platformed) ? platformed.Platform ?? string.Empty : Unknown();
             case "istargetframeworkcompatible" when count == 2:
@@ -356,16 +358,29 @@ public sealed class MsBuildExpander(Func<string, string?> property, string direc
         _ => RuntimeInformation.IsOSPlatform(OSPlatform.Create(platform)),
     };
 
-    /// <summary>Searches this directory and those above it, as the MSBuild function does.</summary>
+    /// <summary>
+    /// Searches this directory and those above it, as the MSBuild function does, but no
+    /// further than the boundary: nothing above a repository changes what it means.
+    /// </summary>
     private string? FileAbove(string file, string? from)
     {
         var start = string.IsNullOrEmpty(from) ? Directory : FullPath(from);
+        if (boundary is not null && !IsWithin(start, boundary)) return null;
         for (var current = start; current is not null; current = Path.GetDirectoryName(current))
         {
             var candidate = Path.Combine(current, file);
             if (File.Exists(candidate)) return candidate;
+            if (boundary is not null && SamePath(current, boundary)) break;
         }
         return null;
+    }
+
+    private static bool IsWithin(string path, string directory)
+    {
+        path = Path.TrimEndingDirectorySeparator(path);
+        directory = Path.TrimEndingDirectorySeparator(directory);
+        return SamePath(path, directory)
+            || path.StartsWith(directory + Path.DirectorySeparatorChar, PathComparison);
     }
 
     private static string EnsureTrailingSlash(string path)

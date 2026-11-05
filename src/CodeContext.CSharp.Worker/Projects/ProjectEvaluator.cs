@@ -302,7 +302,7 @@ public sealed class ProjectEvaluator
     }
 
     private MsBuildExpander Expander(string file)
-        => new(name => Lookup(name, file), Path.GetDirectoryName(file)!);
+        => new(name => Lookup(name, file), Path.GetDirectoryName(file)!, _boundary);
 
     private bool Passes(XElement element, string file)
     {
@@ -554,7 +554,7 @@ public sealed class ProjectEvaluator
             && TargetFrameworkName.TryParse(Get("TargetFramework"), out var framework))
         {
             SetProperty("TargetFrameworkIdentifier", framework.Identifier);
-            SetProperty("TargetFrameworkVersion", "v" + framework.Version.ToString(2));
+            SetProperty("TargetFrameworkVersion", "v" + framework.VersionText());
             constants.AddRange(framework.PreprocessorSymbols());
         }
         SetProperty("DefineConstants", string.Join(';', constants));

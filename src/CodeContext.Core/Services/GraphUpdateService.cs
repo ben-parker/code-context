@@ -67,7 +67,7 @@ public class GraphUpdateService : IGraphUpdateService
 
         foreach (var change in changes)
         {
-            if (_workerService?.TryGetParserForProjectInput(change.Path, out var inputOwner) == true)
+            if (_workerService?.TryGetParserForProjectInput(change.Path, _fileSelector.IsIncluded(change.Path), out var inputOwner) == true)
             {
                 projectChanges.Add(inputOwner);
                 continue;

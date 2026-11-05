@@ -169,9 +169,9 @@ public class FileWatcherService : IHostedService, IDisposable
         // parsed, but must trigger matcher invalidation and atomic reconciliation.
         if (_fileSelector.IsIgnoreFile(path)) return false;
 
-        // Project inputs are read, not indexed, and a build writes them where the selector
-        // refuses to look: a restore lands in obj/.
-        if (_workerService.TryGetParserForProjectInput(path, out _)) return false;
+        // Project inputs are read, not indexed, and some land where the selector refuses to
+        // look: a restore writes into obj/.
+        if (_workerService.TryGetParserForProjectInput(path, _fileSelector.IsIncluded(path), out _)) return false;
 
         var extension = Path.GetExtension(path);
         if (!_workerService.OwnedExtensions.Contains(extension, StringComparer.OrdinalIgnoreCase))
