@@ -20,7 +20,7 @@ delta. Worker alone: project model 0.45-0.6 s, stat of 2,251 files 65 ms, read p
 of all 13 MB 201 ms, process start to first open 0.4-1.0 s. Worker working set after commit
 1,002-1,003 MB; host 585-654 MB. The 11.6 s is `RepositoryFileSelector` running 161
 `.gitignore` regexes, interpreted under Native AOT, on every path (about 18 us per rule per
-path); phase 0A removes it. Not measured by that session: cold disk, any repository but
+path); a 0.10.x patch on `main` removes it (D25). Not measured by that session: cold disk, any repository but
 jellyfin for the breakdown.
 
 ## 1. Goals and non-goals
@@ -31,7 +31,7 @@ Goals, each with the number that decides it:
    process starts, at any repository size, with no binding, parsing or compilation. The answer
    is labelled `cache verifying` until the worker has checked the files (est. 1.2-2.2 s on
    jellyfin plus file enumeration, against about 50 s today). Enumeration is 11.6 s on
-   jellyfin today and must fall below 0.5 s (phase 0A), or verification would take 13 s.
+   jellyfin today and must fall to about 1 s (D25), or verification would take 13 s.
 2. Cold start after edits answers immediately from the snapshot, labelled, and re-walks only
    projects whose fingerprint moved, as ordinary file-scoped deltas.
 3. Host memory for the graph is file-backed pages, not heap: resident grows with what queries
@@ -162,13 +162,24 @@ reason and the alternative rejected.
 - D23 [plan]. A worker waking from hibernation is labelled like an unverified cache. Reason:
   its first delta can take seconds to tens of seconds.
 - D24 [coord]. Syntax-first startup is the final, droppable phase.
-- D25 [coord]. Ignore-rule matching gets a fast path before any cache work (phase 0A).
-  Reason: verification enumerates approved files through the selector, and that alone is
-  11.6 s on jellyfin, 23 percent of a first scan and six times the rest of an unchanged
+- D25 [coord]. Verification depends on an ignore-rule fast path, and this work does not
+  build it. Reason for the dependency: verification enumerates approved files through the
+  selector, and that alone is 11.6 s on jellyfin, six times the rest of an unchanged
   verification. Rejected: verifying from the snapshot's file list plus stat and enumerating
-  later, which would keep two definitions of "the files" alive during verification and
-  break the one-selection-policy invariant in spirit; and leaving it, which would make
-  goal 2 a 13 s wait on any repository with a standard Visual Studio `.gitignore`.
+  later, which would keep two definitions of "the files" alive during verification.
+  Reason for not building it here (revised 2026-11-05, an hour after the plan was
+  committed): the review session reported that the fix was approved as its own 0.10.x
+  patch and is being built by the project-awareness session on a branch from `main`,
+  together with skipping the second project build. Two sessions editing
+  `RepositoryFileSelector` would conflict for no gain, so phase 0A is dropped and this
+  branch merges `main` when the patch lands. The design assumes enumeration under about
+  1 s on jellyfin (their estimate 0.9 s). If the patch has not landed by phase 11,
+  enumeration is reported as measured, the goal-2 figure is reported with and without it,
+  and the coordinator decides then whether to reinstate the phase.
+- D26 [coord]. TieredPGO stays on in the worker and the walk's batch barrier is not
+  touched. Reason: PGO off made top-level edits about 17 percent slower in the profiling
+  session's check, and once the cache exists a full first scan is rare while edits are
+  constant. Both belong to the profiling session.
 
 **Coordinator review of the plan's own decisions, 2026-11-05**
 
@@ -694,7 +705,7 @@ stay dormant.
 | Case on jellyfin | Work | Estimate |
 |---|---|---|
 | First query after a cold start | authenticate, map (materialize until phase 8) | 0.1-0.5 s |
-| `ready`, nothing changed | host enumeration under 0.5 s after phase 0A (11.6 s before it), worker start 0.4-1.0 s, model 0.45-0.6 s, stats and reference mtimes 0.1-0.4 s, state tables 0.05 s | 1.7-2.7 s |
+| `ready`, nothing changed | host enumeration about 0.9 s est. with the 0.10.x patch (11.6 s without it), worker start 0.4-1.0 s, model 0.45-0.6 s, stats and reference mtimes 0.1-0.4 s, state tables 0.05 s | 2.1-3.1 s |
 | First edit, leaf project (Jellyfin.Api) | parse and create its closure, up to 2.4 s; cold walk of the project and its tests; load facts, settle and hash all buckets 0.5-1.0 s | 4-8 s |
 | First edit, root project | the same, with most of the repository as dependents | about 30 s |
 | Second and later edits there | unchanged | 1.3 s body, 3.9 s top-level |
@@ -884,6 +895,11 @@ Details: section 6 defines each number. The 0.10.0 build is the published releas
 release recipe by construction. Rows that need the cache or hibernation are recorded as
 "not applicable in 0.10.0" with the nearest comparable figure (cold start to `ready`).
 
+Host file enumeration is its own column: the time from host start until the C# worker
+process exists, read from `parsers.sessions` while polling. Cold start is recorded on
+0.10.0 now and again after `main`'s enumeration patch is merged into this branch, so the
+0.11 comparison isolates what the cache bought from what the patch bought.
+
 Rules for running it, which also bind phase 11:
 - Never `codecontext stop --all`. Stop only instances this harness started, by path. The
   script refuses to start when `codecontext list --json` already shows an instance on the
@@ -901,7 +917,9 @@ Gates: standard.
 
 ### Phase 0A: ignore-rule fast path
 
-Status: not started
+Status: dropped 2026-11-05, before any work. Built elsewhere as a 0.10.x patch (D25); this
+branch merges `main` when it lands and re-records the cold-start baseline then. The text
+below is kept only so the phase can be reinstated if that patch does not arrive.
 
 Goal: file enumeration through `RepositoryFileSelector` on jellyfin (2,251 approved files,
 161 ignore rules) takes under 0.5 s instead of 11.6 s, with selection results unchanged.
@@ -966,7 +984,8 @@ Details:
   `MightContainTestsForTargetAsync` holds. Today it takes 10 nodes in dictionary order,
   which differs from run to run. This changes which files get `namingHeuristic` evidence.
 - Tests that assert dictionary enumeration order (`GraphAdjacencyTests`, repository tests)
-  are changed to assert canonical order, each change noted in the report.
+  are changed to assert canonical order, each change noted in the report. Golden outputs
+  and any `skill/` text that shows or implies a result order are updated in this phase.
 - Add a `ReferenceGraphModel` test helper: a single-dictionary implementation of the commit
   rules in 3.4, and a seeded `StoreScenarioGenerator` (scoped and whole-shard commits,
   shadowing ids, dangling and cross-shard edges, duplicate identifiers, prune,
@@ -1088,7 +1107,8 @@ and `IGraphUpdateService.cs` (verification scan: full-scan flow), `Workers/Langu
 fresh scan" with the load-then-verify description; add `Snapshots/` to the architecture
 list), `skill/SKILL.md` and `skill/references/operations.md` (the `cache` line and what an
 unverified miss means, in as few words as possible), `DEVELOPMENT.md` (cache location, how
-to clear it).
+to clear it, and that `.codecontext/` must stay out of version control: a snapshot from
+another user or machine is refused, never trusted, so committing it only costs space).
 
 Out of scope: baselines, worker state, mapped shards.
 
@@ -1459,12 +1479,22 @@ and private bytes, both reported, because mapped pages count in the first only.
 - R14. Antivirus or indexers holding a new file can fail the rename or the delete on
   Windows. Both are retried; a failed rename leaves the previous snapshot in force.
 
-## 8. Known items
+## 8. Release notes for 0.11
+
+Kept current by each phase that changes observable behavior; the closing step copies it
+into the release.
+
+- Result lists (`usedBy`, `uses`, matches, related files) are ordered by id, ordinally.
+  Before, the order was unspecified and could differ between runs. (Phase 1)
+- `--tests` naming-heuristic evidence considers the first ten candidate files by path
+  instead of ten in unspecified order. (Phase 1)
+
+## 9. Known items
 
 | Item | Placement |
 |---|---|
 | CS8604 at `CSharpWorkspaceAnalyzer.cs:337` | Phase 6, in `Rebuild`, which that phase rewrites |
-| Redundant second build between open and index | Phase 7: `workspace/open` becomes declarative |
+| Redundant second build between open and index | Being removed on `main` by the 0.10.x patch (D25). Phase 7 makes `workspace/open` declarative on top of whatever `main` holds when it starts; it must not reintroduce the second build |
 | MimeTypes source-only package gap | Out of scope |
 | `JsonRpcConnectionTests.Notification_DispatchesToHandler` 30 s wait | Left as is; the cause of slow tests under suite load is unknown and out of scope. Phase 5 must not shorten it. |
 | Test worker starts needing `TestWorkerOptions.Patient()` | Rule for all phases; new real-worker tests use it |
