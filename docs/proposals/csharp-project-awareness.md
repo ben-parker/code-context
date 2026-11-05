@@ -1,6 +1,6 @@
 # C# worker project awareness
 
-Status: all decisions agreed on 2026-11-04.
+Status: all decisions agreed on 2026-11-04 and delivered on this branch. Results are below.
 
 ## Problem
 
@@ -178,12 +178,25 @@ control events, as it already does for ignore files, so a `.csproj` edit or a re
 picked up with no `.cs` edit. Manifest additions: `project.assets.json`,
 `Directory.Build.props`, `Directory.Build.targets`, `Directory.Packages.props`.
 
-| Target, measured on Release R2R workers | Flat 316k | 20 projects | 
-|---|---|---|
-| Body edit | under 1 s (from 36 s) | under 1 s (from 37 s) |
-| Top-level edit | no worse than 36 s | scales with project plus dependents |
-| First scan | under 46 s | under 47 s |
-| Peak memory | under 1.2 GB, including stubs | under 1.29 GB |
+## Results
+
+Release R2R worker, driven over JSON-RPC, on the same machine as the baseline. Before is
+7a87c85, after is this branch. The graphs differ: after holds library stubs and the usage
+they make visible, which adds 24% edges on the generated corpora.
+
+| Repo | | First scan | Body edit | Top-level edit | Peak memory |
+|---|---|---|---|---|---|
+| Flat, 316k lines, no csproj | before | 46.1 s | 35-37 s | 37 s | 1,206 MB |
+| | after | 25.4 s | 0.07-0.44 s | 13-14 s | 762 MB |
+| 20 projects, 312k lines | before | 47.2 s | 35-41 s | 38 s | 1,286 MB |
+| | after | 24.1 s | 0.08-0.17 s | 6.8-7.0 s | 754 MB |
+| d2-roguelike, 44k lines | before | 13.8 s | 3.4 s | 3.4 s | 397 MB |
+| | after | 5.2 s | 0.05-0.07 s | 0.2-0.5 s | 508 MB |
+| This repo, 39k lines | after | 5.5 s | 0.1 s | 1.9-2.1 s | 395 MB |
+
+d2-roguelike uses more memory than before: it now holds 25 compilations and 26% more nodes.
+That held at about 460 MB across 180 edits rather than growing. This repo's before figures
+are left out because it grew between the two measurements.
 
 ## Invariants
 
