@@ -900,6 +900,13 @@ Rules for all phases: tests that start a real worker use `TestWorkerOptions.Pati
 no fixed short timeouts; commits carry no co-author trailer; a phase leaves `main`-quality
 behavior, and where a phase is dark the option that hides it is named.
 
+Regular expressions (added 2026-11-05; a follow-up after this release adds a build-time
+guard): no `new Regex(...)` with a constant pattern without `[GeneratedRegex]`, and no
+`RegexOptions.Compiled` in Core, Api, Mcp or Parser.Protocol, where it is a no-op under
+Native AOT. `IgnorePattern.cs` and `CompileItemSet.cs` are not changed by this work. Each
+implementer report states whether the phase added a `Regex` or touched either file, and
+the end-of-work message repeats the total.
+
 ### Phase 0: baseline numbers and harness
 
 Status: not started
