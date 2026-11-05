@@ -53,10 +53,14 @@ Each `.csproj` goes through a small static evaluator: properties, items, `Import
 `Directory.Build.props/targets`, `Directory.Packages.props`, and `Condition` expressions
 over those values. `Directory.Build.*` is searched up to the enclosing repository, or the
 workspace root when there is none, so a workspace opened on a subdirectory sees its
-repository's settings and nothing above the repository counts. It runs no tasks and no targets, and it never loads an assembly. Only
-pure string functions and `Exists` are understood. A condition it cannot read counts as
-true and is recorded. `Configuration` is `Debug`, or the first declared configuration
-when a project has no `Debug`.
+repository's settings and nothing above the repository counts. It runs no tasks and no targets, and it never loads an assembly. It
+understands string, path and arithmetic functions, version and target framework
+comparisons, the operating system checks, `Exists` and reading the environment. A condition
+it cannot read counts as true and makes the project `partial`, as does an unreadable
+expression in what reaches the compiler: defines, language version, assembly name, target
+framework, or a compile or reference item. Any other unreadable expression is a note and
+leaves the project `complete`. `Configuration` is `Debug`, or the first declared
+configuration when a project has no `Debug`.
 
 `Microsoft.NET.Sdk*` is built in: default globs, TFM constants, `DEBUG;TRACE`. A
 third-party SDK such as `Godot.NET.Sdk/4.8.0` is resolved in the package folder and its
@@ -143,7 +147,7 @@ today, so this cannot ride on them.
 | State | Meaning |
 |---|---|
 | `complete` | Project evaluated, restore data read, every reference found |
-| `partial` | Compiled as its own project, but some references are missing, for example no restore data. Packages are then tried from the global package folder by declared version and the rest are listed. |
+| `partial` | Compiled as its own project, but some references are missing, for example no restore data, or something deciding what it compiles could not be read. Packages are then tried from the global package folder by declared version and the rest are listed. |
 | `fallback` | Project unreadable, or no framework reference found. Today's behavior. Also used for files in no project. |
 
 Each entry carries the target framework, inactive TFMs, file count, missing references,
