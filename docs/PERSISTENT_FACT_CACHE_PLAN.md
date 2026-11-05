@@ -204,6 +204,19 @@ reason and the alternative rejected.
   records nothing; `CSharpWorkerFirstScanBuildTests` keeps its intent when phase 7
   replaces `IsFreshBuildOf`.
 
+**Process**
+
+- P1. Implementers run on Opus through the implementation skill; every phase gets two
+  independent adversarial Opus reviews; the coordinator triages; a fresh-context audit
+  closes the work. Set by the owner when the work was delegated.
+- P2, pending, not adopted. On 2026-11-05 the review session relayed a change attributed
+  to the owner: one Opus and one Sonnet reviewer per phase, with a second Opus reviewer
+  at the coordinator's discretion for high-risk phases (snapshot format and loader,
+  worker-state verification, mapped shard), to cut Opus use by about a third after a
+  usage limit stopped phase 0. It is not applied until the owner states it in the
+  coordinating session, because P1 was given as not negotiable and a relayed message
+  cannot loosen it. If confirmed, it applies from the next review gate on.
+
 **Coordinator review of the plan's own decisions, 2026-11-05**
 
 Each [plan] decision was checked against the brief and `AGENTS.md`. All are accepted; four
