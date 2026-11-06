@@ -13,8 +13,10 @@ using CodeContext.Core.Snapshots;
 using CodeContext.Core.Tests.Workers;
 using CodeContext.Core.Workers;
 using CodeContext.Parser.Protocol;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using Xunit.Sdk;
 
 namespace CodeContext.Core.Tests.Snapshots;
 
@@ -29,6 +31,7 @@ namespace CodeContext.Core.Tests.Snapshots;
 public sealed class PersistentStateTests : IAsyncLifetime
 {
     private readonly string _base = Directory.CreateTempSubdirectory("cc-state-").FullName;
+    private readonly List<Instance> _started = [];
     private string Root => Path.Combine(_base, "repo");
     private string KeyPath => Path.Combine(_base, "home", "cache.key");
     private string Workspace => Path.Combine(Root, ".codecontext", "cache", "default");
@@ -49,7 +52,15 @@ public sealed class PersistentStateTests : IAsyncLifetime
     }
 
     private Instance Start(string behavior, Func<SnapshotServiceSettings, SnapshotServiceSettings>? configure = null, bool cache = true)
-        => new(Root, KeyPath, ["--behavior", behavior, "--fail-marker", FailMarker], configure, cache);
+    {
+        var instance = new Instance(Root, KeyPath, ["--behavior", behavior, "--fail-marker", FailMarker], configure, cache);
+        _started.Add(instance);
+        return instance;
+    }
+
+    /// <summary>What every host of this test warned about, for a failure message: a save that timed out says so here.</summary>
+    private string Warnings()
+        => _started.SelectMany(instance => instance.Warnings).ToList() is { Count: > 0 } warnings ? string.Join(" | ", warnings) : "none";
 
     /// <summary>A first run that scans, saves the worker's state and writes the snapshot on its way down.</summary>
     private async Task FirstRunAsync(string behavior = "persistent-state")
@@ -58,11 +69,15 @@ public sealed class PersistentStateTests : IAsyncLifetime
         await first.StartAsync();
         await first.WaitForAsync(() => first.ScanState.Phase == ScanPhase.Ready, "the first scan");
         await first.StopAsync();
+        if (behavior == "persistent-state") Assert.True(Newest().Shards.Single().Info.StateFileName is not null, $"The first run saved no state. Warnings: {Warnings()}");
     }
+
+    /// <summary>The highest sequence: an older file another process holds stays until a later retire (see <see cref="AFileBusyAtRetire_StaysUntilTheNextStart_AndIsNotUsed"/>).</summary>
+    private string NewestPath() => Directory.GetFiles(Workspace, "*.ccsnap").Order(StringComparer.Ordinal).Last();
 
     private SnapshotLoadResult Newest()
     {
-        var path = Directory.GetFiles(Workspace, "*.ccsnap").Single();
+        var path = NewestPath();
         var loaded = SnapshotLoader.Load(path, File.ReadAllBytes(KeyPath), new SnapshotExpectations(
             SnapshotServiceSettings.From(new CodeContextOptions { RootPath = Root, CacheEnabled = false }).HostVersion, Path.GetFullPath(Root), OperatingSystem.IsWindows()));
         Assert.True(loaded.Loaded, loaded.Reason);
@@ -71,7 +86,7 @@ public sealed class PersistentStateTests : IAsyncLifetime
 
     private ulong NewestSequence()
     {
-        Assert.True(SnapshotFile.TryParseName(Path.GetFileName(Directory.GetFiles(Workspace, "*.ccsnap").Single()), out var sequence));
+        Assert.True(SnapshotFile.TryParseName(Path.GetFileName(NewestPath()), out var sequence));
         return sequence;
     }
 
@@ -257,6 +272,7 @@ public sealed class PersistentStateTests : IAsyncLifetime
             await first.StartAsync();
             await first.WaitForAsync(() => first.ScanState.Phase == ScanPhase.Ready, "the first scan");
             await first.StopAsync();
+            Assert.Contains(first.Warnings, warning => warning.Contains("did not save its state", StringComparison.Ordinal));
         }
         Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(30), $"took {stopwatch.Elapsed}");
         Assert.Null(Newest().Shards.Single().Info.StateFileName);
@@ -270,10 +286,17 @@ public sealed class PersistentStateTests : IAsyncLifetime
     /// </summary>
     private async Task AssertBreakAsync(Func<Instance, Task> breakIt)
     {
-        var (stateFile, stateFiles, next) = await AfterAPatchedVerificationAsync(breakIt);
-        Assert.Null(stateFile);
-        Assert.Empty(stateFiles);
-        Assert.Equal(CacheState.Replaced, next);
+        try
+        {
+            // What the proof decides. Whether the old file is gone yet is the retire's business, and a busy file may stay.
+            var (stateFile, _, next) = await AfterAPatchedVerificationAsync(breakIt);
+            Assert.Null(stateFile);
+            Assert.Equal(CacheState.Replaced, next);
+        }
+        catch (Exception failure)
+        {
+            throw new XunitException($"{failure.Message}{Environment.NewLine}Warnings: {Warnings()}", failure);
+        }
     }
 
     /// <summary>The state file the capture on the way down recorded, and how the start after verified the shard.</summary>
@@ -325,6 +348,61 @@ public sealed class PersistentStateTests : IAsyncLifetime
             await Assert.ThrowsAsync<ParserWorkerFailedException>(() => instance.Coordinator.RefreshFileAsync(Path.Combine(Root, "a.fake")));
             File.Delete(FailMarker);
         });
+
+    /// <summary>A capture recorded a state just before the request failed: that state goes too, so the next start re-walks.</summary>
+    [Fact]
+    public async Task RequestThatFailedAfterACapture_BreaksThePairingToo()
+    {
+        await FirstRunAsync();
+        File.WriteAllText(Path.Combine(Root, "c.fake"), "c");
+        await using (var second = Start("persistent-state", settings => settings with { QuietPeriod = TimeSpan.FromMilliseconds(50) }))
+        {
+            await second.StartAsync();
+            await second.WaitForAsync(() => second.Snapshots.Status.WritesCompleted == 1, "the quiet-period capture");
+            Assert.NotNull(Newest().Shards.Single().Info.StateFileName);
+
+            File.WriteAllText(FailMarker, "fail");
+            await Assert.ThrowsAsync<ParserWorkerFailedException>(() => second.Coordinator.RefreshFileAsync(Path.Combine(Root, "a.fake")));
+            File.Delete(FailMarker);
+            await second.StopAsync();
+        }
+
+        Assert.Null(Newest().Shards.Single().Info.StateFileName);
+        Assert.Equal(CacheState.Replaced, await NextVerificationAsync());
+    }
+
+    /// <summary>
+    /// A file another process holds when its snapshot retires (a scanner, on Windows) stays, as the retire allows. It is
+    /// referenced by nothing, so it is not offered, and the next start removes it.
+    /// </summary>
+    [Fact]
+    public async Task AFileBusyAtRetire_StaysUntilTheNextStart_AndIsNotUsed()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        await FirstRunAsync();
+        var old = Assert.Single(StateFiles());
+        File.WriteAllText(Path.Combine(Root, "c.fake"), "c");
+        FileStream? held = null;
+        await using (var second = Start("persistent-state", settings => settings with
+        {
+            BeforeRetire = () => held ??= new FileStream(Path.Combine(Workspace, old), FileMode.Open, FileAccess.Read, FileShare.Read),
+        }))
+        {
+            await second.StartAsync();
+            await second.WaitForAsync(() => second.ScanState.Phase == ScanPhase.Ready, "the verification scan");
+            File.WriteAllText(FailMarker, "fail");
+            await Assert.ThrowsAsync<ParserWorkerFailedException>(() => second.Coordinator.RefreshFileAsync(Path.Combine(Root, "a.fake")));
+            File.Delete(FailMarker);
+            await second.StopAsync();
+        }
+        Assert.NotNull(held);
+        Assert.Contains(old, StateFiles());
+        Assert.Null(Newest().Shards.Single().Info.StateFileName);
+        await held!.DisposeAsync();
+
+        Assert.Equal(CacheState.Replaced, await NextVerificationAsync());
+        Assert.DoesNotContain(old, StateFiles());
+    }
 
     [Fact]
     public Task WorkerRestart_BreaksThePairing()
@@ -400,6 +478,12 @@ public sealed class PersistentStateTests : IAsyncLifetime
 
         public Instance(string root, string keyPath, string[] workerArgs,
             Func<SnapshotServiceSettings, SnapshotServiceSettings>? configure, bool cache)
+            : this(root, keyPath, FakeWorker(workerArgs), configure, cache)
+        {
+        }
+
+        public Instance(string root, string keyPath, RegisteredWorker worker,
+            Func<SnapshotServiceSettings, SnapshotServiceSettings>? configure, bool cache)
         {
             Factory = new InMemoryRepositoryFactory(NullLogger<InMemoryRepositoryFactory>.Instance);
             Factory.InitializeAsync(root).Wait();
@@ -408,24 +492,35 @@ public sealed class PersistentStateTests : IAsyncLifetime
             var coverage = AnalysisCoverageRegistry.ForStore(Factory);
             var store = (IGenerationalGraphStore)Factory.CreateGraphRepository();
             Sink = new RecordingSink(new AnalysisDeltaApplier(store, NullLogger<AnalysisDeltaApplier>.Instance, coverage));
-            Workers = new LanguageWorkerService(new StaticWorkerCatalog(FakeWorker(workerArgs)), Sink,
-                Sessions, options, NullLoggerFactory.Instance, TestWorkerOptions.Patient());
+            Workers = new LanguageWorkerService(new StaticWorkerCatalog(worker), Sink,
+                Sessions, options, new WorkerLogFactory(WorkerLog), TestWorkerOptions.Patient());
             var graphUpdate = new GraphUpdateService(Factory, options, NullLogger<GraphUpdateService>.Instance, metadata, Workers);
+            GraphUpdate = graphUpdate;
 
             var settings = SnapshotServiceSettings.From(options.Value);
             settings = configure?.Invoke(settings) ?? settings;
             Startup = new SnapshotStartup(settings, Factory.Database, coverage, Workers.IsIndexedParser,
-                Workers.MarkLoadedFromSnapshot, NullLogger<SnapshotService>.Instance);
+                Workers.MarkLoadedFromSnapshot, SnapshotLog);
             CacheState = new CacheState(settings.Enabled, Startup.Run);
             SnapshotServiceCollectionExtensions.ConnectWorkers(Workers, CacheState, Startup, Factory.Database);
             Coordinator = new IndexCoordinator(graphUpdate, ScanState, options, NullLoggerFactory.Instance, cacheState: CacheState);
             Snapshots = new SnapshotService(Coordinator, Factory.Database, ScanState, settings, Startup, TimeProvider.System,
-                NullLogger<SnapshotService>.Instance, CacheState, Workers);
+                SnapshotLog, CacheState, Workers);
             Status = new StatusService(Factory.CreateNodeRepository(), Factory.CreateEdgeRepository(), metadata, Factory, options,
                 ScanState, Sessions, new ApiMetrics(), coverage: coverage, cacheState: CacheState);
         }
 
         public InMemoryRepositoryFactory Factory { get; }
+        public ListLogger<LanguageWorkerService> WorkerLog { get; } = new();
+        public ListLogger<SnapshotService> SnapshotLog { get; } = new();
+
+        /// <summary>What the worker service and the snapshot service warned about, in that order.</summary>
+        public IEnumerable<string> Warnings => WorkerLog.Entries.Concat(SnapshotLog.Entries)
+            .Where(entry => entry.Level >= LogLevel.Warning)
+            .Select(entry => entry.Message);
+
+        /// <summary>The graph update service the coordinator drives, for tests that deliver a batch while the coordinator is idle.</summary>
+        public GraphUpdateService GraphUpdate { get; }
         public InMemoryDatabase Database => Factory.Database;
         public RecordingSink Sink { get; }
         public ParserSessionRegistry Sessions { get; } = new();
@@ -461,6 +556,21 @@ public sealed class PersistentStateTests : IAsyncLifetime
             Startup.Dispose();
             Coordinator.Dispose();
             await Workers.DisposeAsync();
+        }
+
+        /// <summary>Keeps the worker service's own log; everything else it creates a logger for stays silent.</summary>
+        private sealed class WorkerLogFactory(ILogger<LanguageWorkerService> log) : ILoggerFactory
+        {
+            public ILogger CreateLogger(string categoryName)
+                => categoryName == typeof(LanguageWorkerService).FullName ? log : NullLogger.Instance;
+
+            public void AddProvider(ILoggerProvider provider)
+            {
+            }
+
+            public void Dispose()
+            {
+            }
         }
 
         private static RegisteredWorker FakeWorker(string[] args)

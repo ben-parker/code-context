@@ -350,4 +350,18 @@ public class ShardAnnotationTests
         Assert.False(InMemoryDatabase.SameCoverage([baseline], null));
         Assert.True(InMemoryDatabase.SameCoverage(null, null));
     }
+
+    [Fact]
+    public void SameFingerprints_IgnoresOrder_AndAUnitListedTwiceIsUnequal()
+    {
+        UnitFingerprint F(string unit, string value) => new(unit, value);
+        Assert.True(ShardAnnotation.SameFingerprints([F("a", "1"), F("b", "2")], [F("b", "2"), F("a", "1")]));
+        Assert.False(ShardAnnotation.SameFingerprints([F("a", "1"), F("b", "2")], [F("b", "2"), F("a", "3")]));
+        Assert.False(ShardAnnotation.SameFingerprints([F("a", "1"), F("b", "2")], [F("a", "1"), F("c", "2")]));
+        Assert.False(ShardAnnotation.SameFingerprints([F("a", "1"), F("a", "1")], [F("a", "1"), F("a", "1")]));
+        Assert.False(ShardAnnotation.SameFingerprints([F("a", "1"), F("b", "2")], [F("a", "1"), F("a", "1")]));
+        Assert.False(ShardAnnotation.SameFingerprints([F("A", "1")], [F("a", "1")]));
+        Assert.False(ShardAnnotation.SameFingerprints([F("a", "1")], null));
+        Assert.True(ShardAnnotation.SameFingerprints([], []));
+    }
 }

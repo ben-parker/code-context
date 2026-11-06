@@ -2041,7 +2041,47 @@ Gates: standard and protocol.
 
 ### Phase 6: C# worker, state and verification
 
-Status: not started
+Status: accepted 2026-11-06. One Opus implementer (a second run finished the first's
+stopped work), one Sonnet reviewer (no blocker, 2 should-fix, 7 nits), one Opus fixer; gates
+re-run by the coordinator: 1,749 tests in 2 m 8 s, 35 ExternalTooling, npm SDK 3, Python
+SDK 3. Not run: Linux, macOS, warm edit latency, the publish check, a real host instance.
+The acceptance item "warm edit latency within noise" is therefore open and goes to phase 11.
+
+Review outcome and decisions.
+- Corruption limit, accepted by the coordinator. Requirement 3 holds for structure: header,
+  units, files and hashes tables, and every single-bit flip. It does not hold for a field
+  whose value cannot be validated from the file alone (a redirected string reference, an
+  in-range line, a misspelt edge kind, a coverage count, text). In the seeded re-hashed
+  damage test 4 of 300 cases were accepted with wrong facts (8 before the fix round, which
+  added span, stub, language and edge-target checks). A hand-made state with raised
+  unresolved-name counts was also accepted with wrong coverage; the seeds did not reach this.
+  Reaching any of it needs a matching hash from the authenticated snapshot, so the per-user
+  key or a writer bug. Harm found: wrong answers only, from a sample of the consumers.
+  Skipped as needing a new table: edge kind, node kind, visibility.
+- `RequestThatFailedAfterItsDeltaCommitted_BreaksThePairing` flake: cause not shown. A save
+  past `SaveStateTimeout` is a real mechanism, and a dropped `Assert.Empty(stateFiles)` is
+  an equally plausible one. Production limits stay in the tests; the fake worker no longer
+  fsyncs; `PersistentStateTests` failures now carry the captured warnings, so a recurrence
+  names its cause. It has not recurred in the 3 full runs since.
+- Three tests in `CSharpWorkerStateFileTests.cs` were lost to a scripted cut and rewritten
+  from the requirement. The reviewer confirmed each fails when its check is removed.
+- Recorded, not fixed: a hash-valid 1 GiB file can allocate about 2 GiB up front (counts are
+  bounded by remaining bytes; real states are 2.6 and 18.6 MB); state paths are not
+  intersected with the approved list, they surface as `replacesFiles` for removed files and
+  are never opened; the cost of reading and hashing on a full index is not measured; the two
+  restore guards for moved units are redundant, so removing one alone fails no test.
+- Suite time rose from about 90 s to about 2 m 5 s, inside the 60 s allowance.
+
+Deviations from 3.6 to 3.8, as built.
+- Facts are parsed at restore; lazy facts wait for dormant units.
+- Every file is re-hashed at verification until phase 7. Stored size, mtime and racy stamps
+  are recorded for later use and not consulted.
+- The `verify:` line goes to stderr and the host logs it at Information, because the host
+  does not consume `delta.Diagnostics`.
+- fingerprint(U) also covers whether U binds the worker runtime's references.
+- A symbol declared in several files takes its id from the ordinally first of them. This
+  changes behaviour outside restore; ids move only when the declaring files have different
+  owners.
 
 Goal: the C# worker saves state, restores it, and verifies a baseline without binding
 unchanged projects. Compilations and trees are still built for every project.
@@ -2487,12 +2527,21 @@ into the release.
 - `indexing.cache.verification` can read `baseline`, and `workerStateBytes` reports the
   size of the saved worker state. State files live in `.codecontext/cache/` beside the
   snapshot that names them and are deleted with it. (Phase 5)
+- A restarted instance now confirms its saved C# facts instead of re-walking them: on
+  jellyfin, an unchanged worker restart takes 4.1 s against 18.4 s for a full index, and
+  rewrites no snapshot. (Phase 6)
+- Files changed while CodeContext was down cost only the projects they affect and their
+  dependents. (Phase 6)
+- `indexing.cache` now reports `verification: baseline` and `workerStateBytes` for the C#
+  worker. A rebuilt worker refuses state saved by an earlier build and re-walks everything.
+  (Phase 6)
+- Not run: Linux and macOS. (Phase 6)
 
 ## 9. Known items
 
 | Item | Placement |
 |---|---|
-| CS8604 at `CSharpWorkspaceAnalyzer.cs:337` | Phase 6, in `Rebuild`, which that phase rewrites |
+| CS8604 at `CSharpWorkspaceAnalyzer.cs:337` | Fixed in phase 6 |
 | Redundant second build between open and index | Being removed on `main` by the 0.10.x patch (D25). Phase 7 makes `workspace/open` declarative on top of whatever `main` holds when it starts; it must not reintroduce the second build |
 | MimeTypes source-only package gap | Out of scope |
 | `JsonRpcConnectionTests.Notification_DispatchesToHandler` 30 s wait | Left as is; the cause of slow tests under suite load is unknown and out of scope. Phase 5 must not shorten it. |

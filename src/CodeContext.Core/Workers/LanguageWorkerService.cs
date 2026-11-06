@@ -355,10 +355,10 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
             }
 
             // The request runs on its own token: when ct fires (the capture's time limit), the coordinator moves
-            // on at once, and the request is cancelled in the background with its late result ignored. (A source
-            // without a timer needs no disposal.)
+            // on at once, and the request is cancelled in the background with its late result ignored.
             var abandon = new CancellationTokenSource();
             var request = supervisor.SaveStateAsync(parameters, abandon.Token);
+            var abandoned = false;
             try
             {
                 return await request.WaitAsync(ct).ConfigureAwait(false);
@@ -366,9 +366,12 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
                 _logger.LogWarning("Worker '{ParserId}' did not save its state in time; its shard is written without state.", parserId);
-                // Off this thread: the cancel notification and its grace period must not hold the coordinator.
-                _ = abandon.CancelAsync();
-                _ = request.ContinueWith(task => _ = task.Exception, TaskScheduler.Default);
+                // Off this thread: the cancel notification and its grace period must not hold the coordinator. The
+                // source is disposed once both the cancel and the request are over.
+                abandoned = true;
+                var cancelling = abandon.CancelAsync();
+                var finished = request.ContinueWith(task => _ = task.Exception, TaskScheduler.Default);
+                _ = Task.WhenAll(cancelling, finished).ContinueWith(_ => abandon.Dispose(), TaskScheduler.Default);
                 return null;
             }
             catch (Exception ex)
@@ -376,6 +379,10 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
                 _logger.LogWarning("Worker '{ParserId}' did not save its state ({Message}); its shard is written without state.",
                     parserId, ex.Message);
                 return null;
+            }
+            finally
+            {
+                if (!abandoned) abandon.Dispose();
             }
         }
         finally

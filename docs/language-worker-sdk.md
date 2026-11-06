@@ -172,16 +172,21 @@ What the worker does:
    units it references, and your own build, so a changed worker never trusts an old state).
    The host reads them from the first chunk of a request only, stores the last set per
    workspace and hands it back unread; a request without them clears them, and no baseline
-   is offered from those facts. An entry with a null `unit` or `value` is a protocol
+   is offered from those facts. Order is not significant: the host compares two sets by
+   unit, and a set that names a unit twice equals no other; a stable order still keeps the
+   wire output reproducible. An entry with a null `unit` or `value` is a protocol
    violation.
 3. Answer `workspace/saveState { workspaceId, statePath, stateId }`: write your state to
    `<statePath>.tmp`, flush it to disk, rename it to `statePath`, and answer
    `{ workspaceId, stateId, saved: true, bytes, sha256 }` (the file's length, and the
    lowercase hex SHA-256 of its bytes) only once the file is durable. Write nowhere else.
    `stateId` is opaque: record it in the state and echo it; do not parse it. `saved: false`
-   or an error just means no state this time. The host asks between mutations only, after
-   a quiet period. It waits at most 5 s, then sends `$/cancel`, ignores a late result and
-   deletes `statePath` and its temp file. It discards a result whose `workspaceId` or
+   or an error just means no state this time. The host asks between mutations only: after
+   a quiet period, at the maximum delay after a change, and at shutdown. It waits at most
+   5 s, then sends `$/cancel`, ignores a late result and deletes `statePath` and its temp
+   file. A worker that finishes writing after that leaves a file the host removes at its
+   next successful write or start, so stop writing (and remove your temp file) when
+   `$/cancel` arrives. It discards a result whose `workspaceId` or
    `stateId` differs from the request's, whose `sha256` is not 64 lowercase hex digits, or
    whose `bytes` differs from the file's length.
 4. The host offers a baseline at most once per worker process: with the first mutating

@@ -78,16 +78,27 @@ namespace CodeContext.Core.Repositories
                 && WorkerStateBinding.SamePersisted(first.StateFor(shard), second.StateFor(shard));
         }
 
+        /// <summary>
+        /// The same fingerprints by value, in any order: the same units (ordinal) with the same values. A list that
+        /// names a unit twice is equal to nothing, itself excepted by reference.
+        /// </summary>
         internal static bool SameFingerprints(
             IReadOnlyList<CodeContext.Parser.Protocol.UnitFingerprint>? first,
             IReadOnlyList<CodeContext.Parser.Protocol.UnitFingerprint>? second)
         {
             if (ReferenceEquals(first, second)) return true;
             if (first is null || second is null || first.Count != second.Count) return false;
-            for (var i = 0; i < first.Count; i++)
+            var values = new Dictionary<string, string>(first.Count, StringComparer.Ordinal);
+            foreach (var fingerprint in first)
             {
-                if (!string.Equals(first[i].Unit, second[i].Unit, StringComparison.Ordinal)
-                    || !string.Equals(first[i].Value, second[i].Value, StringComparison.Ordinal)) return false;
+                if (!values.TryAdd(fingerprint.Unit, fingerprint.Value)) return false;
+            }
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var fingerprint in second)
+            {
+                if (!seen.Add(fingerprint.Unit)
+                    || !values.TryGetValue(fingerprint.Unit, out var value)
+                    || !string.Equals(value, fingerprint.Value, StringComparison.Ordinal)) return false;
             }
             return true;
         }

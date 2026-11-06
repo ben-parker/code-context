@@ -303,7 +303,7 @@
         },
         "fingerprints": {
           "type": "array",
-          "description": "Optional; sent by a worker that declared capabilities.persistentState, on the first chunk of every request (the host reads the first chunk's only; later chunks' are ignored). The host stores them and hands them back unread. Replaces the shard's fingerprints when the request commits; a request without them clears them, and no baseline is offered from those facts.",
+          "description": "Optional; sent by a worker that declared capabilities.persistentState, on the first chunk of every request (the host reads the first chunk's only; later chunks' are ignored). The host stores them and hands them back unread. Order is not significant: the host compares them as a set keyed by unit, and a list that names a unit twice equals no other. Replaces the shard's fingerprints when the request commits; a request without them clears them, and no baseline is offered from those facts.",
           "items": { "$ref": "#/$defs/unitFingerprint" }
         },
         "diagnostics": {

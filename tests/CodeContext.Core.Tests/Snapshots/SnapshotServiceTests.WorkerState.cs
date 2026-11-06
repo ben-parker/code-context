@@ -423,5 +423,97 @@ public partial class SnapshotServiceTests
         Assert.Empty(saver.Calls);
     }
 
+    /// <summary>
+    /// The stop waits for a capture already requested. Here that capture's result is handled late, after the
+    /// stop unless the stop waits for it; handled after a stop that did not wait, it would find the service
+    /// stopped and delete the state file the final snapshot names.
+    /// </summary>
+    [Fact]
+    public async Task StopWhileTheQuietCaptureIsSaving_WaitsForIt_SoItCannotDeleteAFileTheFinalSnapshotNames()
+    {
+        var database = new InMemoryDatabase();
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var saver = new StubStateSaver(database) { BeforeSave = _ => release.Task };
+        await using var harness = new SnapshotServiceHarness(database: database, workers: saver);
+        await harness.StartAsync();
+        await harness.CommitAsync(() => harness.CommitFacts(1, annotation: Produced(1)));
+
+        Task? stop = null;
+        harness.Service.BeforeCaptureHandled = () => System.Threading.SpinWait.SpinUntil(() => stop?.IsCompleted == true, TimeSpan.FromSeconds(1));
+        harness.Time.Advance(Quiet);
+        await SnapshotServiceHarness.WaitUntilAsync(() => saver.Calls.Count == 1, "the quiet capture's save");
+        stop = harness.Service.StopAsync(default);
+        release.SetResult();
+        await stop.WaitAsync(TimeSpan.FromSeconds(30));
+        await SnapshotServiceHarness.WaitUntilAsync(() => !harness.Service.IsCaptureRequested, "the quiet capture to be handled");
+
+        var stateName = FakeShardInfo(harness).StateFileName;
+        Assert.NotNull(stateName);
+        Assert.True(File.Exists(Path.Combine(harness.WorkspacePath, stateName)), $"{stateName} is gone");
+        Assert.Single(saver.Calls);
+    }
+
+    /// <summary>
+    /// A stop that timed out while a capture was saving: that capture, handled after the stop, is not written, so
+    /// it un-records the binding it recorded before deleting its file, and the store names no file that is gone.
+    /// </summary>
+    [Fact]
+    public async Task CaptureHandledAfterAStopThatTimedOut_UnRecordsItsStateBeforeDeletingTheFile()
+    {
+        var database = new InMemoryDatabase();
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var saver = new StubStateSaver(database) { BeforeSave = _ => release.Task };
+        await using var harness = new SnapshotServiceHarness(database: database, workers: saver);
+        await harness.StartAsync();
+        await harness.CommitAsync(() => harness.CommitFacts(1, annotation: Produced(1)));
+
+        harness.Time.Advance(Quiet);
+        await SnapshotServiceHarness.WaitUntilAsync(() => saver.Calls.Count == 1, "the quiet capture's save");
+        var stop = harness.Service.StopAsync(default);
+        harness.Time.Advance(harness.Settings.ShutdownFlushTimeout);
+        await stop.WaitAsync(TimeSpan.FromSeconds(30));
+        Assert.Equal(SnapshotCacheMode.Stopped, harness.Service.Status.Mode);
+
+        release.SetResult();
+        // The flag clears before the files are dropped, so the file's going is what says the capture was handled. The
+        // binding must be gone by then: it is un-recorded first.
+        await SnapshotServiceHarness.WaitUntilAsync(() => !harness.StateFiles().Any(), "the state file to be deleted");
+        Assert.Null(database.CurrentShard(SnapshotServiceHarness.Shard).Annotation!.State);
+        Assert.Empty(harness.Snapshots());
+    }
+
+    /// <summary>
+    /// A stop during a scan returns at once even when a capture was requested before it and is queued behind the
+    /// scan's long mutation: waiting for that capture would hold the stop for the whole flush timeout.
+    /// </summary>
+    [Fact]
+    public async Task Shutdown_DuringAScan_DoesNotWaitForACaptureQueuedBehindAMutation()
+    {
+        await using var harness = new SnapshotServiceHarness();
+        await harness.StartAsync();
+        await harness.CommitAsync();
+
+        using var hold = new System.Threading.ManualResetEventSlim();
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        harness.Mutation = () =>
+        {
+            entered.TrySetResult();
+            hold.Wait(TimeSpan.FromSeconds(30));
+        };
+        var mutation = harness.Coordinator.RefreshFileAsync(Path.Combine(harness.RootPath, "A.fake"));
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(15));
+        harness.Time.Advance(Quiet);
+        await SnapshotServiceHarness.WaitUntilAsync(() => harness.Service.IsCaptureRequested, "the quiet capture to be queued");
+        Assert.True(harness.ScanState.TryBeginScan());
+
+        // The clock does not move: only a stop that does not wait for the queued capture completes.
+        await harness.Service.StopAsync(default).WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Empty(harness.Snapshots());
+
+        hold.Set();
+        await mutation;
+        harness.ScanState.CompleteScan();
+    }
+
     private static string NewBase() => Path.Combine(Path.GetTempPath(), "ccsnap-" + Guid.NewGuid().ToString("N"));
 }

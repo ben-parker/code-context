@@ -449,6 +449,10 @@ namespace CodeContext.Core.Snapshots
 
             var newFiles = new List<string>();
             var recorded = new List<(ShardKey Key, WorkerStateBinding Binding)>();
+            // One budget for all of this capture's saves (each still has its own limit), so several slow workers
+            // cannot cost more than a final snapshot may take.
+            using var budget = new CancellationTokenSource(_settings.ShutdownFlushTimeout, _time);
+            using var saves = CancellationTokenSource.CreateLinkedTokenSource(ct, budget.Token);
             if (_workers is not null && directory is not null)
             {
                 var checkedLevels = false;
@@ -467,7 +471,7 @@ namespace CodeContext.Core.Snapshots
                     }
 
                     newFiles.Add(name);
-                    var binding = await SaveStateAsync(directory, key, lineage, name, stateId, ct).ConfigureAwait(false);
+                    var binding = await SaveStateAsync(directory, key, lineage, name, stateId, saves.Token).ConfigureAwait(false);
                     if (binding is null || !_database.TryRecordWorkerState(key, shard, annotation, binding))
                         directory.DeleteWorkerStateQuietly(name);
                     else
@@ -485,6 +489,30 @@ namespace CodeContext.Core.Snapshots
             }
             return capture with { NewStateFiles = newFiles };
         }
+
+        /// <summary>
+        /// The capture of a graceful stop: as <see cref="CaptureAsync(CancellationToken)"/>, with its saves ended by the
+        /// stop's own budget as well as by the coordinator. A capture that runs after the stop gave up asks nothing.
+        /// </summary>
+        private async Task<SnapshotCapture?> FinalCaptureAsync(CancellationToken coordinator, CancellationToken stop)
+        {
+            CancellationTokenSource both;
+            try
+            {
+                both = CancellationTokenSource.CreateLinkedTokenSource(coordinator, stop);
+            }
+            catch (ObjectDisposedException)
+            {
+                return null;
+            }
+            using (both)
+            {
+                return await CaptureAsync(both.Token).ConfigureAwait(false);
+            }
+        }
+
+        /// <summary>Runs before a requested capture's result is handled. Only tests set it, to delay that handling.</summary>
+        internal Action? BeforeCaptureHandled { get; set; }
 
         /// <summary>One worker's save, checked: the id echoed, a SHA-256, and a regular file of the reported length under the name given.</summary>
         private async Task<WorkerStateBinding?> SaveStateAsync(
@@ -537,6 +565,7 @@ namespace CodeContext.Core.Snapshots
         {
             try
             {
+                BeforeCaptureHandled?.Invoke();
                 if (task.IsFaulted) _logger.LogError(task.Exception, "Snapshot capture failed.");
                 var capture = task.IsCompletedSuccessfully ? task.Result : null;
                 var written = false;
@@ -901,19 +930,31 @@ namespace CodeContext.Core.Snapshots
 
             using var timeout = new CancellationTokenSource(_settings.ShutdownFlushTimeout, _time);
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token, cancellationToken);
+            var stop = linked.Token;
             try
             {
+                if (_scanState.Phase == ScanPhase.Scanning)
+                {
+                    // Checked first: a capture requested before the stop may be queued behind the scan's mutation, and
+                    // waiting for it would hold the stop for the whole flush timeout.
+                    _logger.LogInformation("Shutting down during a scan: no final snapshot.");
+                    await inFlight.WaitAsync(stop).ConfigureAwait(false);
+                    return;
+                }
+
                 // A capture already requested (its workers may be saving) is waited for as well as the write: it keeps
                 // what it recorded for the final capture below, which then asks no worker to save again.
-                await requested.WaitAsync(linked.Token).ConfigureAwait(false);
-                await inFlight.WaitAsync(linked.Token).ConfigureAwait(false);
+                await requested.WaitAsync(stop).ConfigureAwait(false);
+                await inFlight.WaitAsync(stop).ConfigureAwait(false);
                 if (_scanState.Phase == ScanPhase.Scanning)
                 {
                     _logger.LogInformation("Shutting down during a scan: no final snapshot.");
                 }
                 else if (!Observe().SameAs(Written()))
                 {
-                    var capture = await _coordinator.RequestSnapshotCaptureAsync(CaptureAsync).WaitAsync(linked.Token).ConfigureAwait(false);
+                    // The final capture's saves end with the stop's budget, not only with the coordinator.
+                    var capture = await _coordinator.RequestSnapshotCaptureAsync(ct => FinalCaptureAsync(ct, stop))
+                        .WaitAsync(stop).ConfigureAwait(false);
                     Task? write = null;
                     lock (_gate)
                     {
@@ -921,7 +962,7 @@ namespace CodeContext.Core.Snapshots
                             write = StartWriteLocked(capture);
                     }
                     if (write is null) DropStateFiles(capture);
-                    if (write is not null) await write.WaitAsync(linked.Token).ConfigureAwait(false);
+                    if (write is not null) await write.WaitAsync(stop).ConfigureAwait(false);
                 }
             }
             catch (OperationCanceledException)

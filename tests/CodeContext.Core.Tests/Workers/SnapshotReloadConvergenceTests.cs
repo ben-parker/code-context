@@ -16,7 +16,7 @@ namespace CodeContext.Core.Tests.Workers;
 /// <summary>
 /// The convergence gate of plan phase 4: a host restarted from its snapshot must end, after its
 /// verification scan, with the graph a fresh scan produces. The edit walk of
-/// <see cref="CSharpWorkerEditWalkConvergenceTests"/> runs through the real C# worker; at every 8th
+/// <see cref="EditWalk"/> runs through the real C# worker; at every 8th
 /// step the host's store is written to a snapshot by the production capture and write path (the
 /// snapshot service's final flush on stop) and thrown away with its worker, the step's edits reach
 /// the disk while it is down, and a new store and a new worker process start from the snapshot
@@ -65,7 +65,7 @@ public sealed class SnapshotReloadConvergenceTests : IAsyncLifetime
     [InlineData(20261104)]
     public async Task EveryStepMatchesAFreshScan(int seed)
     {
-        var walk = new CSharpWorkerEditWalkConvergenceTests.Walk(Root, seed);
+        var walk = new EditWalk(Root, seed);
         walk.WriteAll();
         await _incremental.GraphUpdateService.PerformInitialScanAsync(Root, null, CancellationToken.None);
         await AssertConverged(walk, seed, "initial scan");
@@ -145,7 +145,7 @@ public sealed class SnapshotReloadConvergenceTests : IAsyncLifetime
         await _incremental.GraphUpdateService.PerformInitialScanAsync(Root, null, CancellationToken.None);
     }
 
-    private async Task AssertConverged(CSharpWorkerEditWalkConvergenceTests.Walk walk, int seed, string step)
+    private async Task AssertConverged(EditWalk walk, int seed, string step)
     {
         await _fresh.GraphUpdateService.PerformInitialScanAsync(Root, null, CancellationToken.None);
 

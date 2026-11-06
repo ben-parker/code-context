@@ -331,7 +331,7 @@ internal sealed class WorkerState(string behavior, string? markerPath, string? f
         using (var stream = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None))
         {
             stream.Write(bytes);
-            stream.Flush(flushToDisk: true);
+            stream.Flush();
         }
         File.Move(temp, save.StatePath, overwrite: true);
         var id = behavior == "save-state-wrong-id" ? new string('0', save.StateId.Length) : save.StateId;

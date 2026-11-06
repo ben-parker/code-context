@@ -167,6 +167,24 @@ public class WorkerStatePairingStoreTests
     }
 
     [Fact]
+    public void State_StaysThroughAConfirmationWhoseFingerprintsComeInAnotherOrder()
+    {
+        var database = new InMemoryDatabase();
+        Commit(database, A, [Node(A, "V1")], Produced(1, 1, establishes: true) with
+        {
+            Fingerprints = [new UnitFingerprint("a", "1"), new UnitFingerprint("b", "2")],
+        });
+        RecordState(database, A);
+
+        Commit(database, A, [], Accepted(2, 2, Binding().StateId) with
+        {
+            Fingerprints = [new UnitFingerprint("b", "2"), new UnitFingerprint("a", "1")],
+        }, []);
+        var (shard, annotation) = Latched(database, A);
+        Assert.NotNull(annotation!.StateFor(shard));
+    }
+
+    [Fact]
     public void State_IsDroppedByAFileScopedCommitThatChangesNoFactButMovesTheFingerprintsOrTheParserVersion()
     {
         foreach (var moved in new Func<ShardAnnotation, ShardAnnotation>[]
@@ -358,5 +376,27 @@ public class WorkerStatePairingStoreTests
         await commit;
         database.InsideCommitLock = null;
         Assert.Equal("Two", database.PublishedCoverage().Single().Name);
+    }
+
+    /// <summary>
+    /// A binding un-recorded while a reconciliation is staged is gone from the staged annotations too: the staged
+    /// map started from the published one and carried the binding, and its commit must not bring it back.
+    /// </summary>
+    [Fact]
+    public void ClearWorkerState_DuringAReconciliation_ClearsTheStagedBindingToo()
+    {
+        var database = new InMemoryDatabase();
+        Commit(database, A, [Node(A, "One")], Produced(1, 1, establishes: true));
+        var (shard, annotation) = Latched(database, A);
+        var binding = Binding();
+        Assert.True(database.TryRecordWorkerState(A, shard, annotation!, binding));
+
+        database.BeginReconciliation();
+        Assert.Same(binding, database.CurrentShard(A).Annotation!.State);
+        database.ClearWorkerState(A, binding);
+        Assert.Null(database.CurrentShard(A).Annotation!.State);
+        database.CommitReconciliation();
+
+        Assert.Null(Latched(database, A).Annotation!.State);
     }
 }

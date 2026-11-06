@@ -87,9 +87,12 @@ REST and MCP. The store is intentionally in-memory, with no configurable databas
 backend. Unless the host is started with `--no-cache`, the coordinator's first step
 loads the newest snapshot under `<root>/.codecontext/cache/` that authenticates with
 the per-user key, and answers from it, labelled `cache verifying`, while the startup
-scan re-indexes every worker inside one reconciliation; when that scan commits,
-readers see its result and the label goes. `SnapshotService` writes snapshots after
-commits, off the commit path.
+scan re-checks every worker inside one reconciliation; when that scan commits,
+readers see its result and the label goes. A worker that declares `persistentState`
+(the C# worker) is offered the state it saved with that snapshot and sends only what
+changed while the host was down; any other worker re-walks and replaces its facts.
+`SnapshotService` writes snapshots after commits, off the commit path, and asks such
+workers to save their state when it captures.
 
 ## Architecture invariants
 

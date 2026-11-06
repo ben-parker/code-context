@@ -113,7 +113,11 @@ refused and why, and the last write. Snapshots are authenticated with a per-user
 wrote them. The host version (the informational version) changes with each commit, so a
 host built from a new commit ignores older snapshots; a host rebuilt with uncommitted
 edits has the same version as the build before it and loads its snapshot, labelled
-until the startup scan has re-indexed everything. To start without the saved index,
+until the startup scan has re-checked everything. The C# worker saves its own state
+beside the snapshot (`worker-csharp.*.state`) and, at the next start, confirms the
+snapshot and re-walks only the projects whose inputs moved; a rebuilt worker (each build
+has its own identity, uncommitted edits included) refuses that state and re-walks
+everything, as do workers without the capability. To start without the saved index,
 use `--no-cache` or delete `<root>/.codecontext/cache/` first.
 
 To clear the cache, stop the instance and delete `<root>/.codecontext/cache/`;
