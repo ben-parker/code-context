@@ -1510,6 +1510,17 @@ Review outcome.
   would-block mapping, the per-write chain check, the key mode check have tests that
   return early on Windows); `LinkedLockFile_IsRefused` (needs the symlink privilege);
   Native AOT publish; the SDK suites (no protocol change).
+- Fix round re-reviewed by a Sonnet reviewer after the commit (56e39da): no blocker; five
+  of five further mutations caught. The Unix lock mapping was verified on Linux (.NET 9
+  under WSL): a second open with no sharing throws `IOException` with HResult 11; the
+  macOS value (35) is untested. Two should-fix and two nits are fixed in phase 4's
+  change set: an equal annotation was recognised only by coverage-list reference, so an
+  unchanged rescan made the store dirty and rewrote the snapshot (now compared by
+  value); a read-only planted file at a high sequence could not be deleted and raised
+  the counter past the limit, failing every write (the delete now clears the read-only
+  attribute, and rule 11's counter ignores a file that was opened and refused in this
+  start, since such a file can never be kept); the retire pass gets its own failure
+  handling; a delay outside the int range is clamped instead of rejected.
 
 Goal: the host writes snapshots after commits, safely, without anything reading them yet.
 Dark: `CodeContextOptions.CacheEnabled` defaults to false in this phase.
