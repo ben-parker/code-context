@@ -11,8 +11,10 @@ codecontext query ContextService --tests  # when test evidence matters
 ```
 
 `query` selects the closest registered ancestor, starts a detached instance when none
-exists, waits for indexing, and verifies contract, root, and instance identity. Tests
-are omitted by default; add `--tests` whenever test evidence matters.
+exists, waits for indexing (a restarted instance answers at once from its saved index,
+labelled `cache`, while it re-checks the files), and verifies contract, root, and
+instance identity. Tests are omitted by default; add `--tests` whenever test evidence
+matters.
 
 Use the normalized graph for semantic questions:
 
@@ -53,6 +55,9 @@ rg --files -g '*.cs' -g '*.ts'
   MCP stdio using the same Core services as REST.
 - `src/CodeContext.Core` owns graph models, in-memory repositories, context assembly,
   indexing, file selection/watching, worker discovery/supervision, and delta commits.
+- `src/CodeContext.Core/Snapshots` owns the persistent fact cache: the snapshot file
+  format, its authenticated reader and loader, the cache directory and writer lock, the
+  start-up load step, and the snapshot writer service.
 - `src/CodeContext.Parser.Protocol` owns parser-worker JSON-RPC contracts,
   Content-Length framing, manifests, generated JSON serialization metadata, and the
   canonical cross-language schema.
@@ -78,8 +83,13 @@ generation swap in `InMemoryCodeGraphRepository`. Readers see either the previou
 new complete generation, never a partial worker update.
 
 `ContextService` performs identity resolution and assembles relationships for both
-REST and MCP. The store is intentionally in-memory: every process start performs a
-fresh scan, and there is no configurable database backend.
+REST and MCP. The store is intentionally in-memory, with no configurable database
+backend. Unless the host is started with `--no-cache`, the coordinator's first step
+loads the newest snapshot under `<root>/.codecontext/cache/` that authenticates with
+the per-user key, and answers from it, labelled `cache verifying`, while the startup
+scan re-indexes every worker inside one reconciliation; when that scan commits,
+readers see its result and the label goes. `SnapshotService` writes snapshots after
+commits, off the commit path.
 
 ## Architecture invariants
 

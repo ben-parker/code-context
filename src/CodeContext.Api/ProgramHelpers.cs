@@ -68,7 +68,8 @@ public static class ProgramHelpers
 
         // Register services
         services.AddSingleton<IParserSessionRegistry, ParserSessionRegistry>();
-        services.AddSingleton<IAnalysisCoverageRegistry, AnalysisCoverageRegistry>();
+        // Reads the coverage recorded with the published shards, so it always describes the facts served.
+        services.AddSingleton(sp => AnalysisCoverageRegistry.ForStore(sp.GetRequiredService<IRepositoryFactory>()));
         services.AddSingleton<IRepositoryFileSelector, RepositoryFileSelector>();
         services.AddSingleton<IGraphUpdateService, GraphUpdateService>();
         services.AddSingleton<IContextService, ContextService>();
@@ -103,10 +104,17 @@ public static class ProgramHelpers
         services.AddHostedService(sp => sp.GetRequiredService<IndexCoordinator>());
         // Snapshots: after the coordinator, before the watcher. Hosted services stop in reverse
         // order, so the final capture runs while the coordinator loop and the workers are alive.
-        // Inert unless CodeContext:CacheEnabled is set.
+        // On by default; `start --no-cache` (TurnCacheOff) or CodeContext:CacheEnabled=false turn it off.
         services.AddCodeContextSnapshots();
         services.AddHostedService<FileWatcherService>();
     }
+
+    /// <summary>
+    /// <c>start --no-cache</c>: 0.10 behaviour. No key, no cache directory, no load, no snapshot written,
+    /// and no <c>cache</c> object anywhere. Wins over configuration.
+    /// </summary>
+    public static void TurnCacheOff(IServiceCollection services)
+        => services.PostConfigure<CodeContextOptions>(options => options.CacheEnabled = false);
 
     public static void ConfigureApiEndpoints(WebApplication app)
     {

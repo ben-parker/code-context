@@ -83,7 +83,7 @@ public sealed class CSharpWorkerEditWalkConvergenceTests : IAsyncLifetime
     }
 
     /// <summary>A workspace held as a model, so each edit is known to be of the kind it claims.</summary>
-    private sealed class Walk(string root, int seed)
+    internal sealed class Walk(string root, int seed)
     {
         private static readonly string[] LibraryCalls =
         [

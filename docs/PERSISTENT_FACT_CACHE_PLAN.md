@@ -731,9 +731,16 @@ code does.
     newest first until one opens. Refusals before hashing (name, length, header, host
     meta, Unix claim, size cap) are free; after three refusals at or after
     authentication no more are tried. The first that opens is kept and every other
-    snapshot file is deleted, tried or not. The next sequence is one above the larger of
-    the kept file's sequence and the highest usable sequence among this code's names
-    that could not be deleted. After each write the retire deletes this code's files
+    snapshot file is deleted, tried or not (a read-only file after clearing the
+    attribute). The next sequence is one above the larger of the kept file's sequence
+    and the highest usable sequence among this code's names that could not be deleted,
+    except those refused in this start for a reason that proves they can never be kept
+    (name, length, header, host version, root or path-case mismatch, Unix claim, size
+    cap, authentication, structure). A file refused for I/O (a sharing violation from an
+    antivirus, a backup or another reader) or for an unexpected error, or not tried,
+    still raises the counter: it may be valid and must not outrank a new write. As of
+    phase 4 a sequence of 0 is unusable too, and an I/O refusal after the header and
+    host-meta checks counts toward the three costly refusals. After each write the retire deletes this code's files
     with a usable sequence below the new one and any name outside the usable range; a
     busy file is retried at the next write and the next start. A write that would pass
     999,999,999 fails with an error saying so; real writes cannot reach it. Someone who
@@ -751,11 +758,16 @@ code does.
     shards, annotations and generation from one lock hold, and `PublishLoadedShards`
     takes annotations. (Before this rule a rescan that failed and rolled back left its
     coverage and parser version in side registries, and the next snapshot paired them
-    with the old shard; reproduced by a reviewer.) `AnalysisCoverageRegistry` still
-    serves status and context responses and is not rolled back with a reconciliation;
-    that predates this work and is unchanged.
+    with the old shard; reproduced by a reviewer.) An annotation equal by value to the
+    recorded one keeps the recorded instance, so an unchanged rescan leaves the store
+    clean. As of phase 4 the host's `AnalysisCoverageRegistry` reads the coverage
+    recorded with the published annotations, so the coverage served is rolled back with
+    a reconciliation (in phase 3 it kept its own copy and was not).
 13. In phase 3 the key, directory, lock, `.gitignore` and start-up cleanup run in
-    `SnapshotService.StartAsync`; phase 4 moves them into the coordinator's first step.
+    `SnapshotService.StartAsync`; phase 4 moves them into the coordinator's first step
+    (`SnapshotStartup`), which hands the lock and the loaded view to the service. A
+    read-only instance selects and loads the same way, deletes nothing and computes no
+    sequence.
 
 Startup. The first synchronous step of `IndexCoordinator.ExecuteAsync`: take the lock,
 delete `.tmp` files when holding it, pick the newest valid snapshot, publish its shards
@@ -1078,6 +1090,74 @@ being checked against the files.` A coverage line built from cached coverage end
 `Coverage is from the saved index.` `init --wait` and every client that polls for `ready`
 behave as before: `ready` still means scanned and committed.
 
+Surface as built (phase 4). Where the text above is silent or differs, this is what the
+code does.
+
+1. States and invariants. `verifying` and `unverified` serve cached answers
+   (`servingCached: true`); `ignored`, `verified` and an absent object do not. A served
+   snapshot reads `unverified` exactly while `indexing.status` is `error` and
+   `verifying` while any scan runs, so a refresh or rescan after a failure reads
+   `verifying` again and `verified` once it commits. A single-file refresh or a watcher
+   batch never verifies a snapshot. `indexing.status` becomes `ready` only after the
+   scan's reconciliation has committed and the cache state has left `verifying`: `ready`
+   and `servingCached: true` never appear together. (Before this phase `ready` was set
+   just before the commit, so a poller could see `ready` with the previous graph; that
+   window is closed for first scans and rescans alike.)
+2. Labelling at transitions. The state reads "serving a loaded snapshot" before the
+   loaded shards are published, and every context response and status takes the state
+   before and after its store reads and labels if either reading served cached answers.
+   At a transition an answer may be labelled needlessly, never left unlabelled. This
+   matters because the coordinator's loop, and so the load, runs on a background thread
+   while Kestrel and MCP already accept requests.
+3. `ignored` lasts until a scan commits; then the state is `verified` and the refusal is
+   only in the log. `reason` has the form `<file>: <rejection>: <text>`. A snapshot that
+   authenticates and loads is `verifying` even when the filter dropped every shard;
+   `verification` then lists no parser. When the cache is off for a reason (no profile
+   folder, a link in the cache path, a key problem) status has no cache object and the
+   reason is logged at Warning.
+4. `verification` lists the parsers whose shards were loaded: `pending` until a scan
+   commits, then `replaced` (phase 5 adds `baseline`); it stays `pending` while
+   `unverified`.
+5. Absent, not null: the `cache` object when the cache is off or nothing was loaded and
+   no scan has committed; `reason` except in `ignored`; `snapshotAt`, `snapshotSequence`
+   and `sizeBytes` until a snapshot was loaded or written; `lastWriteMs`, `lastCaptureMs`
+   and `lastWriteError` until a write; `verification` when nothing was loaded;
+   `workerStateBytes` until phase 6; `coverage.cached` unless cached answers are served.
+6. `snapshotAt` is the snapshot's creation time (UTC, ISO 8601): while cached answers are
+   served, of the loaded snapshot; otherwise of the newest snapshot this process wrote, or
+   the loaded one until it writes its own. The notice in a context response always
+   carries the loaded snapshot's time.
+7. Unverified texts. Compact: `cache	unverified	<time>	answers come from the saved
+   index; re-checking the files failed`. Human: `Cached, unverified: answers come from
+   the index saved at <time>; checking them against the files failed.` The way out is
+   `POST /api/index/refresh` or a restart. `query` answers an `unverified` instance with
+   the label and its usual exit codes (hit 0, miss 2); against `ignored` it waits for
+   `ready` as before.
+8. Times. The compact line prints `yyyy-MM-ddTHH:mm:ssZ` and always has four
+   tab-separated fields, with an empty third when the time is unknown. `--human` prints
+   `yyyy-MM-dd HH:mm:ss UTC`; the example above without a zone is superseded (a reviewer
+   read 08:06 for a snapshot saved at 02:06 local).
+9. In `query multi` each result block has its own `cache` line right after its `query`
+   line; `--human` repeats the sentence after each header. In the full view `cache` is
+   the first property. A miss adds no words of its own to the output: the label is the
+   signal, and the skill says a labelled miss is not conclusive. The MCP context tools'
+   descriptions carry one clause saying the same.
+10. Coverage in status and context responses is the coverage recorded with the published
+    shards, so it belongs to the facts served: a staged reconciliation's coverage is not
+    visible until it commits, and a rolled-back one's never. The coverage line ends with
+    `Coverage is from the saved index.` whenever the response carries a cache notice;
+    only status `coverage` has a `cached` field.
+11. `--no-cache` is an option of `start`, passed to a detached child and applied after
+    configuration, so it wins over `CodeContext__CacheEnabled=true`. Against an instance
+    that is already running it prints one line on stderr and attaches; it applies only
+    to a new start. `query`'s automatic start and `init` take no such flag; the
+    environment variable `CodeContext__CacheEnabled=false` covers them.
+12. Known and left: while `verifying`, file counts and the language breakdown in status
+    describe the scan in progress, not the snapshot, so they are lower than the node
+    count suggests; `watchers.ignoredPathCount` is 1 once `.codecontext/` exists; until
+    phase 5 every verification replaces every shard, so each cached start rewrites the
+    snapshot after the quiet period.
+
 ### 3.11 Failure modes
 
 | Failure | Detected by | Result |
@@ -1088,7 +1168,7 @@ behave as before: `ready` still means scanned and committed.
 | Repository moved or copied | root path | ignored; worker state rejected too |
 | Key file missing or unreadable | load | cache disabled for this run, full scan |
 | Cache path contains a link | attribute check | cache disabled, full scan |
-| Writer bug: authenticated but inconsistent bytes | bounds checks | request error, shard dropped, full rescan |
+| Writer bug: authenticated but inconsistent bytes | bounds and consistency checks while loading (phase 8: also while reading in place) | at load the whole file is refused, never partly loaded; the next older is tried or the start scans in full. In place (phase 8): request error, shard dropped, full rescan |
 | Mapped file truncated by another process | deny-write on Windows; not preventable on Unix | Windows: cannot happen; Unix: process fault (risk R4) |
 | Worker state missing, wrong hash, id, version, root or fingerprints | worker | baseline rejected, full re-walk, facts replaced |
 | Worker version changed | host compares at `initialize` | no baseline offered, full re-walk |
@@ -1576,7 +1656,69 @@ Gates: standard.
 
 ### Phase 4: load, then serve; the cache surface; feature on
 
-Status: not started
+Status: accepted 2026-11-06. Reviewed by two Opus reviewers and one Sonnet reviewer; no
+blocker; the confirmed findings fixed by a fixer; gates re-run by the coordinator. The
+surface as built is listed in section 3.10; `CacheEnabled` defaults to true.
+
+Review outcome.
+- Compatibility (Opus, real hosts of this phase and of its base commit side by side):
+  with no cache involved, REST, MCP and CLI output are byte-identical for compact, full,
+  multi, file-path and `--tests` queries; status differs only by `indexing.cache` and
+  `watchers.ignoredPathCount`. A 0.10.x CLI against this host and this CLI against a
+  0.10.x host both work.
+- Start-up and store (Opus): the cache-off and no-snapshot paths are unchanged; a watcher
+  batch or single-file refresh never verifies; generations are sound; no string from a
+  snapshot reaches a path, a process or the environment.
+- Tests (Sonnet): 15 mutations, one survived (a non-scan commit marking the cache
+  verified); after the fix round ten of ten fail a test.
+- Fixed: a cached answer could go out unlabelled at the instant of the load, because the
+  shards were published before the state recorded the load and readers took the label
+  before the store (3.10, rule 2); `ready` could be seen with `servingCached: true`,
+  observed once in 12,212 polls (rule 1); `error` shown with `verifying` while a failing
+  verification finished, and `unverified` not returning to `verifying` on a rescan
+  (rule 1); the sequence counter ignoring a busy valid file (3.5, rule 11); coverage
+  shown while cached belonging to the uncommitted or failed scan (rule 10); the human
+  time printed in UTC without saying so (rule 8); `start --no-cache` attaching silently
+  to a running instance (rule 11); the skill telling an agent with an `unverified`
+  answer to wait for `ready`; `README.md` still saying no repository database is left
+  behind.
+- The convergence gate was rebuilt, because the first version could not see most load
+  bugs: it compared 10 of 18 node fields and no metadata, annotations or coverage, and
+  the full re-walk then replaced every shard. It now writes through the production
+  capture, loads through the production step, and before verification compares every
+  field of every node and edge, the annotations, the restored coverage and
+  `ContextService` answers with the pre-restart store; a loader that nulls a namespace,
+  drops a metadata pair or drops coverage fails it at the first reload. Two seeds of 120
+  steps, 15 reloads each with a fresh real worker, compared with a fresh scan at every
+  step; about 25 s per seed. A third seed passed and was dropped for suite time.
+- Decisions taken in triage: the store generation does not resume from the snapshot
+  (carried item above); the human time is `yyyy-MM-dd HH:mm:ss UTC`, not local time,
+  because a snapshot can be days old and the output must not depend on the machine's
+  zone; coverage is read through the store's annotations rather than re-synced on commit
+  and rollback (nothing to keep in step); `--no-cache` against a running instance warns
+  and attaches, it does not stop or restart anything; not done: OpenAPI `required` and
+  `enum` refinements, restoring file metadata so status file counts match while
+  verifying, `--no-cache` on `init`.
+- Acceptance run by the implementer on a copy of this repository's `src` (114 files),
+  Release build, three runs each, measured from process spawn: first `query` answer
+  1.52 to 1.57 s with the cache (labelled; the load step itself 212 to 222 ms for a 3.3
+  MB snapshot) against 4.94 to 4.99 s with `--no-cache`; `ready` at 5.2 to 5.4 s with
+  the cache. An edit made while the host was down showed the old answer (`usedBy 2/2`)
+  while labelled and the new one (`usedBy 3/3`) after verification. A snapshot with one
+  flipped byte and a snapshot copied to another root were each `ignored` with a reason,
+  then scanned normally. `scripts/verify-publish.ps1` passed for win-x64 before the fix
+  round; it is run again in the closing steps.
+- Tests are kept off the real profile by a guard: a module initializer in the test
+  assembly replaces the default key path with a function that throws, so a test that
+  turns the cache on without its own key path fails. The key file's size and timestamp
+  were the same before and after the full suite and the ExternalTooling run, in the
+  coordinator's runs and a reviewer's.
+- Not run: Linux and macOS; a refusal for another host version on a real host (unit
+  test only); the attach message of `--no-cache` (needs the instance registry); the SDK
+  suites (no protocol change).
+- A real host run with the cache on creates `~/.codecontext/cache.key`. The acceptance
+  run created it on this machine on 2026-11-06 01:41; it was left in place, as the
+  product would leave it.
 
 Goal: a start with a valid snapshot answers at once, labelled, while every worker re-walks
 as today. `CacheEnabled` defaults to true from here.
@@ -1605,9 +1747,13 @@ design.
 
 Carried from phase 2:
 - `PublishLoadedShards` does not set the store generation, so a loaded store reports
-  generation 0 while the header carries `storeGeneration`. This phase decides how the
-  generation resumes, so that a stale delta from before the restart is still rejected
-  and the verification scan's generations are accepted.
+  generation 0 while the header carries `storeGeneration`. Decision (2026-11-06): the
+  generation does not resume from the snapshot; the header's value is informational.
+  Reason, checked against the code by the implementer and a reviewer: the applier
+  allocates the store generation as the last committed one plus one, worker generations
+  and stale-delta checks are kept per process, and no worker survives a restart, so a
+  loaded store at generation 0 rejects no legitimate delta and can receive no stale one.
+  Nothing compares generations across files.
 - At most three candidate files are opened at start, newest first; each refusal is
   reported with its reason (`SnapshotRejection`), the rest are ignored and deleted by
   cleanup. With the 1 GiB cap that bounds the cost of planted files at about 2 s.
@@ -1725,6 +1871,26 @@ edges). Tests under `tests/CodeContext.Core.Tests/Workers/`, with the walk gener
 `CSharpWorkerEditWalkConvergenceTests` extracted to `EditWalk.cs` and extended.
 
 Out of scope: dormant units, deferred open (phase 7); narrowing (phase 10).
+
+Carried from the phase 3 and 4 reviews (rules for phases 5 to 7):
+- A snapshot can be written while the cache is `unverified`: the loaded facts plus
+  watcher deltas, never confirmed by a scan in this process. The host must not offer such
+  a shard as a baseline in a later start as if it had been verified, and a worker's saved
+  state must pair only with a shard that this worker process produced or confirmed. The
+  shard annotation carries what is needed to tell (who produced or confirmed the shard
+  and with which state id); a shard without it gets a full re-walk.
+- A rebuilt development host or worker with uncommitted edits reports the same
+  informational version as the build before it, so the host version check does not
+  separate them. The worker's fingerprint must include something that changes with every
+  build of the worker (its module version id), so a locally changed worker never accepts
+  a baseline written by the previous build.
+- Nothing read from a snapshot or a state file may become a path, a process, an
+  environment variable or a host setting. `stateFile` in ShardMeta is a file name inside
+  the cache directory, validated against this code's own name pattern before use, never
+  joined with separators or `..`.
+- `ShardAnnotation` (3.5, rule 12) is where fingerprints and the state id and hash go;
+  the view compares annotations by value, so an unchanged baseline confirmation keeps the
+  store clean and writes nothing.
 
 Details: sections 3.7 and 3.8. On an accepted baseline this phase still runs today's
 `Rebuild` (model, compilations, parse: about 3 s on jellyfin) and skips only the walk of
@@ -2099,6 +2265,32 @@ into the release.
 - `--tests` naming-heuristic evidence considers the first ten matching files, ordered by path
   (case-insensitively, then ordinally), instead of the first ten matching nodes in unspecified
   order, which could name one file several times. (Phase 1)
+- The index is saved under `<root>/.codecontext/cache/` and, on the next start, answers
+  come from it at once, before the startup scan finishes. Each such answer starts with a
+  `cache verifying` line (`--human`: "Cached, verifying: ..."; JSON: a `cache` object), and
+  the label goes when the scan has re-checked every file. A miss or an empty `usedBy`
+  while labelled is not conclusive. If the re-check fails the label reads `unverified`
+  until a refresh or restart succeeds. (Phase 4)
+- `indexing.status` keeps `scanning`, `ready` and `error` with their meanings, and
+  `init --wait` still waits for `ready`. `ready` is now reported only after the scan has
+  been committed; before, a poller could see `ready` an instant early, with the previous
+  graph. Status gains `indexing.cache` (state `verifying`, `unverified`, `ignored` with
+  its reason, or `verified`, plus the snapshot and last-write fields) and
+  `coverage.cached`. Context responses with no cache involved are unchanged. (Phase 4)
+- Snapshots are authenticated with a per-user key at `~/.codecontext/cache.key`, created
+  on first use, and are used only by the host build and root that wrote them, so the
+  first start after an upgrade, or of a copied repository, is a full scan.
+  `codecontext start --no-cache` (or `CodeContext__CacheEnabled=false`) restores the
+  previous behaviour: nothing is loaded or written. `--no-cache` applies to a new start,
+  not to an instance that is already running. (Phase 4)
+- `.codecontext/` should stay out of version control; the cache directory writes its own
+  `.gitignore`. A committed snapshot is refused for every other user, so it only costs
+  space. Files in `.codecontext/cache/` that are not this version's snapshots are
+  deleted. (Phase 4)
+- Coverage shown in status and context responses now always belongs to the facts served:
+  a rescan that fails and is rolled back no longer leaves its coverage behind. (Phase 4)
+- A `.gitignore` inside a mandatory exclusion (`.git/`, `node_modules/`, `.codecontext/`
+  and the like) no longer triggers a rescan. (Phase 3)
 
 ## 9. Known items
 
@@ -2114,4 +2306,4 @@ into the release.
 | Legacy in-place store writes (`UpsertNode`, `RemoveNode`, `UpsertEdge`, `RemoveEdgesTouchingNode`) during a staged reconciliation reach the live map at once and survive the reconciliation's commit only where the staged map still shares the shard object; a write to a shard the reconciliation already rebuilt, or to a new shard key, is dropped by that commit | Predates this work and is kept; pinned by `LegacyUpsertIntoANewShard_DuringAReconciliation_IsLiveUntilItsCommit` and the phase 1 legacy-mutation tests. No production path writes this way during a reconciliation. Phase 8 must keep a mapped shard behaving as a heap shard here, which those tests check |
 | A shard key whose facts were all removed stays in the shard map; `RemoveNode(null)` throws when any shard exists and returns false on an empty store | Found in phase 1; not changed. Phase 2's writer must skip a shard with no facts; phase 3's capture must not treat an empty key as a change |
 | Status `languageBreakdown` order follows scan history (file-metadata repository) | Out of scope unless a later phase needs byte-identical status |
-| `ParserProcessSupervisorTests.SlowProgressObserver_DoesNotBlockProtocolResponses` failed once in a full-suite run during the phase 1 fix and passed alone and on the re-run | Timing-based, unrelated to the store. Same rule as the two supervisor tests above: re-run once and record |
+| `ParserProcessSupervisorTests.SlowProgressObserver_DoesNotBlockProtocolResponses` failed once in a full-suite run during the phase 1 fix and passed alone and on the re-run | Timing-based, unrelated to the store. Same rule as the two supervisor tests above: re-run once and record. Seen again in the coordinator's phase 4 gate run (2026-11-06, 1 of 1,519 failed; the re-run passed 1,519 of 1,519 and the class alone 27 of 27). Two occurrences in about 20 full-suite runs of this work; phase 9 looks at the supervisor's timing |

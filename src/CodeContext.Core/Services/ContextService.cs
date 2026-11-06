@@ -20,6 +20,7 @@ namespace CodeContext.Core.Services
         private readonly string? _rootPath;
         private readonly ILanguageWorkerService? _workerService;
         private readonly IAnalysisCoverageRegistry? _coverage;
+        private readonly ICacheStateProvider? _cacheState;
 
         private const int MaxCoverageNames = 5;
 
@@ -29,7 +30,8 @@ namespace CodeContext.Core.Services
             IFileMetadataRepository fileMetadataRepository,
             IOptions<CodeContextOptions>? options = null,
             ILanguageWorkerService? workerService = null,
-            IAnalysisCoverageRegistry? coverage = null)
+            IAnalysisCoverageRegistry? coverage = null,
+            ICacheStateProvider? cacheState = null)
         {
             _nodeRepository = nodeRepository;
             _edgeRepository = edgeRepository;
@@ -37,6 +39,7 @@ namespace CodeContext.Core.Services
             _rootPath = options?.Value.RootPath;
             _workerService = workerService;
             _coverage = coverage;
+            _cacheState = cacheState;
         }
 
         /// <summary>The worst state among projects.</summary>
@@ -94,7 +97,8 @@ namespace CodeContext.Core.Services
             }
             ValidateTestBounds(maxTestFiles, maxTestMethods);
 
-            var response = new CompleteContextResponse();
+            // Read before the store and again after it (CacheAfterReads): labelled if either says cached.
+            var response = new CompleteContextResponse { Cache = _cacheState?.GetNotice() };
             var (candidates, isFilePath) = await FindCandidatesAsync(
                 identifier, type, exact, containingType, @namespace, signature, sourceFile);
 
@@ -102,6 +106,7 @@ namespace CodeContext.Core.Services
             {
                 response.DisambiguationHint = await BuildNoMatchHintAsync(
                     identifier, exact, type, containingType, @namespace, signature, sourceFile);
+                response.Cache = CacheAfterReads(response.Cache);
                 return response;
             }
 
@@ -125,8 +130,17 @@ namespace CodeContext.Core.Services
                 response.Matches.Add(contextMatch);
             }
 
+            response.Cache = CacheAfterReads(response.Cache);
             return response;
         }
+
+        /// <summary>
+        /// The notice taken before a response's store reads, or else the one now. A snapshot loaded during
+        /// the reads has no notice before them but has one after (the state is set before the shards are
+        /// published); one verified during them has one before. Either labels: over-labelling at a
+        /// transition is harmless, an unlabelled snapshot answer is not.
+        /// </summary>
+        private CacheNotice? CacheAfterReads(CacheNotice? before) => before ?? _cacheState?.GetNotice();
 
         public async Task<CompactContextResponse> GetCompactContextAsync(
             string identifier,
@@ -153,6 +167,8 @@ namespace CodeContext.Core.Services
             ValidateIdentifier(identifier);
             ValidateQueryBounds(depth, maxMatches, maxRelationships, maxCallSites, maxTestFiles, maxTestMethods);
             var relationKinds = ParseRelationFilter(relation);
+            // Read before the store and again after it (CacheAfterReads): labelled if either says cached.
+            var cacheNotice = _cacheState?.GetNotice();
 
             List<CodeNode> candidates;
             bool isFilePath;
@@ -200,6 +216,7 @@ namespace CodeContext.Core.Services
             var response = new CompactContextResponse
             {
                 ExternalMatchesHidden = externalMatchesHidden,
+                Cache = cacheNotice,
                 MatchMode = matchMode,
                 SubstringSearchSkipped = substringSearchSkipped,
                 TotalMatches = candidates.Count,
@@ -211,6 +228,7 @@ namespace CodeContext.Core.Services
             {
                 response.DisambiguationHint = await BuildNoMatchHintAsync(
                     identifier, matchMode == "exact", type, containingType, @namespace, signature, sourceFile);
+                response.Cache = CacheAfterReads(response.Cache);
                 response.Coverage = CoverageFor(response);
                 return response;
             }
@@ -238,6 +256,7 @@ namespace CodeContext.Core.Services
 
             response.ReturnedMatches = response.Matches.Count;
             response.Truncated = response.ReturnedMatches < response.TotalMatches;
+            response.Cache = CacheAfterReads(response.Cache);
             response.Coverage = CoverageFor(response);
             return response;
         }

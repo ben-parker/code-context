@@ -23,6 +23,9 @@ internal readonly record struct ReadinessOutcome(ReadinessResult Result, StatusR
 /// Polls <c>GET /api/status</c> until an instance reports indexing readiness, validating
 /// the API contract version, the watched root, and the instance identity. Shared by
 /// <c>query</c> (30s cap) and <c>init</c> (5-minute cap) so the validation lives in one place.
+/// With <c>acceptCached</c> (<c>query</c>), an instance that answers from a saved index not yet
+/// verified (<c>indexing.cache.servingCached</c>) counts as ready too; without it (<c>init --wait</c>),
+/// only <c>ready</c> does, which still means scanned and committed.
 /// </summary>
 internal static class ReadinessWaiter
 {
@@ -37,7 +40,8 @@ internal static class ReadinessWaiter
         TimeProvider timeProvider,
         Func<TimeSpan, CancellationToken, Task> delayAsync,
         TimeSpan readinessTimeout,
-        CancellationToken ct)
+        CancellationToken ct,
+        bool acceptCached = false)
     {
         var deadline = timeProvider.GetUtcNow() + readinessTimeout;
         while (true)
@@ -98,7 +102,8 @@ internal static class ReadinessWaiter
                     return ReadinessOutcome.Invalid;
                 }
 
-                if (string.Equals(status.Indexing.Status, "ready", StringComparison.OrdinalIgnoreCase))
+                if (string.Equals(status.Indexing.Status, "ready", StringComparison.OrdinalIgnoreCase)
+                    || (acceptCached && status.Indexing.Cache?.ServingCached == true))
                 {
                     return ReadinessOutcome.Ready(status);
                 }

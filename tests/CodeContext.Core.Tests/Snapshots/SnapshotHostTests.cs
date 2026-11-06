@@ -63,18 +63,20 @@ public class SnapshotHostTests
 
         var snapshot = Assert.Single(Directory.GetFiles(workspace, "*.ccsnap"));
         var loaded = SnapshotLoader.Load(snapshot, File.ReadAllBytes(temp.File("cache.key")),
-            new SnapshotExpectations(SnapshotServiceSettings.From(new CodeContextOptions()).HostVersion, root, OperatingSystem.IsWindows()));
+            new SnapshotExpectations(host.Services.GetRequiredService<SnapshotServiceSettings>().HostVersion, root, OperatingSystem.IsWindows()));
         Assert.True(loaded.Loaded, loaded.Reason);
         Assert.Equal("Final", loaded.Shards.Single().Shard.GetAllNodes().Single().Name);
     }
 
-    [Fact]
-    public async Task CacheOff_ByDefault_CreatesNothing()
+    [Theory]
+    [InlineData(false)]   // start --no-cache
+    [InlineData(true)]    // CodeContext:CacheEnabled=false
+    public async Task CacheOff_CreatesNothing_AndReportsNoCache(bool fromConfiguration)
     {
         using var temp = new SnapshotTempDirectory();
         var root = Directory.CreateDirectory(Path.Combine(temp.Path, "repo")).FullName;
         var key = temp.File("cache.key");
-        using var host = BuildHost(root, cacheEnabled: null, keyPath: key);
+        using var host = BuildHost(root, cacheEnabled: fromConfiguration ? false : null, keyPath: key, noCache: !fromConfiguration);
         await host.StartAsync();
         var scanState = host.Services.GetRequiredService<IScanStateService>();
         await SnapshotServiceHarness.WaitUntilAsync(() => scanState.Phase == ScanPhase.Ready, "the startup scan");
@@ -85,15 +87,61 @@ public class SnapshotHostTests
         await host.StopAsync();
 
         Assert.Equal(SnapshotCacheMode.Disabled, host.Services.GetRequiredService<SnapshotService>().Status.Mode);
+        Assert.Null(host.Services.GetRequiredService<ICacheStateProvider>().GetStatus());
+        Assert.Null(host.Services.GetRequiredService<ICacheStateProvider>().GetNotice());
+        Assert.Null((await host.Services.GetRequiredService<IStatusService>().GetStatusAsync()).Indexing.Cache);
         Assert.Empty(Directory.GetFileSystemEntries(root));
         Assert.False(File.Exists(key));
     }
 
-    private static IHost BuildHost(string root, bool? cacheEnabled, string keyPath)
+    [Fact]
+    public async Task CacheOn_ByDefault_SecondStartLoadsTheFirstStartsSnapshot()
+    {
+        using var temp = new SnapshotTempDirectory();
+        var root = Directory.CreateDirectory(Path.Combine(temp.Path, "repo")).FullName;
+        var key = temp.File("cache.key");
+        using (var first = BuildHost(root, cacheEnabled: null, keyPath: key, acceptAnyParser: true))
+        {
+            await first.StartAsync();
+            var scanState = first.Services.GetRequiredService<IScanStateService>();
+            await SnapshotServiceHarness.WaitUntilAsync(() => scanState.Phase == ScanPhase.Ready, "the startup scan");
+            Assert.Equal(CacheState.Verified, first.Services.GetRequiredService<ICacheStateProvider>().GetStatus()!.State);
+            var database = ((InMemoryRepositoryFactory)first.Services.GetRequiredService<IRepositoryFactory>()).Database;
+            database.TryCommitGeneration(database.LastCommittedGeneration + 1,
+                [SnapshotServiceHarness.Node("Kept")], [], new CommitScope("fake", "default", null));
+            await first.Services.GetRequiredService<IIndexCoordinator>().RefreshFileAsync(Path.Combine(root, "notes.txt"));
+            await first.StopAsync();
+        }
+
+        using var second = BuildHost(root, cacheEnabled: null, keyPath: key, acceptAnyParser: true);
+        await second.StartAsync();
+        var secondScan = second.Services.GetRequiredService<IScanStateService>();
+        await SnapshotServiceHarness.WaitUntilAsync(() => secondScan.Phase == ScanPhase.Ready, "the verification scan");
+        var secondDatabase = ((InMemoryRepositoryFactory)second.Services.GetRequiredService<IRepositoryFactory>()).Database;
+        var status = second.Services.GetRequiredService<ICacheStateProvider>().GetStatus()!;
+        Assert.Equal(CacheState.Verified, status.State);
+        Assert.Equal(1, status.SnapshotSequence);
+        Assert.Equal(CacheState.Replaced, status.Verification!["fake"]);
+        // Verified against the files: A.fake does not exist, so a fresh scan has nothing, and nor does the store.
+        Assert.Empty(secondDatabase.EnumerateNodes());
+        await second.StopAsync();
+    }
+
+    private static IHost BuildHost(string root, bool? cacheEnabled, string keyPath, bool noCache = false, bool acceptAnyParser = false)
     {
         var builder = Host.CreateApplicationBuilder();
         if (cacheEnabled is { } enabled) builder.Configuration["CodeContext:CacheEnabled"] = enabled ? "true" : "false";
         ProgramHelpers.ConfigureCoreServices(builder.Services, root, isProduction: false);
+        if (noCache) ProgramHelpers.TurnCacheOff(builder.Services);
+        if (acceptAnyParser)
+        {
+            // With no worker registered the "fake" shard would be dropped as a removed parser's.
+            builder.Services.AddSingleton(sp => new SnapshotStartup(
+                sp.GetRequiredService<SnapshotServiceSettings>(),
+                ((InMemoryRepositoryFactory)sp.GetRequiredService<IRepositoryFactory>()).Database,
+                sp.GetService<IAnalysisCoverageRegistry>(), null, null,
+                sp.GetRequiredService<ILogger<SnapshotService>>()));
+        }
         // No workers: the startup scan has nothing to start, and the test commits facts itself.
         builder.Services.AddSingleton<IWorkerCatalog>(new StaticWorkerCatalog());
         builder.Services.PostConfigure<CodeContextOptions>(options => options.CacheKeyPath = keyPath);

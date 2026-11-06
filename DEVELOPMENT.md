@@ -102,6 +102,30 @@ After changing host or worker code, stop and restart the running instance. After
 large source rewrite that does not require a restart, request `POST
 /api/index/refresh` and poll `/api/status` until the returned operation has completed.
 
+### The saved index
+
+An instance saves its graph to `<root>/.codecontext/cache/default/graph.*.ccsnap`
+about ten seconds after it changes and when it stops, and the next start answers from that
+snapshot (labelled `cache verifying`) while its startup scan re-checks the files.
+`indexing.cache` in `/api/status` reports which snapshot was loaded, whether it was
+refused and why, and the last write. Snapshots are authenticated with a per-user key,
+`~/.codecontext/cache.key`, and are used only by the host version and the root that
+wrote them. The host version (the informational version) changes with each commit, so a
+host built from a new commit ignores older snapshots; a host rebuilt with uncommitted
+edits has the same version as the build before it and loads its snapshot, labelled
+until the startup scan has re-indexed everything. To start without the saved index,
+use `--no-cache` or delete `<root>/.codecontext/cache/` first.
+
+To clear the cache, stop the instance and delete `<root>/.codecontext/cache/`;
+deleting `~/.codecontext/cache.key` invalidates every snapshot of that user. To run
+without it, start with `--no-cache` (or set `CodeContext__CacheEnabled=false`): no
+key, no directory, nothing loaded or written.
+
+Keep `.codecontext/` out of version control. The cache directory writes its own
+`.gitignore`, and this repository ignores `.codecontext/` too. A committed snapshot
+would be refused on every other machine and for every other user, because it does not
+authenticate with their key: it is never trusted, so committing it only costs space.
+
 ## Packaging checks
 
 Release archives support `win-x64`, `linux-x64`, `osx-x64`, and `osx-arm64`. Packaging

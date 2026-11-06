@@ -824,8 +824,8 @@ namespace CodeContext.Core.Repositories.InMemory
         /// <summary>
         /// <paramref name="current"/> with the annotation <paramref name="scope"/> carries for its shard. A
         /// null coverage keeps the recorded one. An annotation equal to the recorded one (same parser
-        /// version, same coverage list) keeps the recorded instance, so an unchanged commit leaves the
-        /// snapshot writer's view clean.
+        /// version, a coverage list equal entry by entry) keeps the recorded instance, so an unchanged
+        /// commit leaves the snapshot writer's view clean: every delta brings its own list instance.
         /// </summary>
         private static ImmutableSortedDictionary<ShardKey, ShardAnnotation> Annotate(
             ImmutableSortedDictionary<ShardKey, ShardAnnotation> current, CommitScope scope)
@@ -836,12 +836,48 @@ namespace CodeContext.Core.Repositories.InMemory
             var coverage = supplied.Coverage ?? existing?.Coverage;
             if (existing is not null
                 && string.Equals(existing.ParserVersion, supplied.ParserVersion, StringComparison.Ordinal)
-                && ReferenceEquals(existing.Coverage, coverage))
+                && SameCoverage(existing.Coverage, coverage))
             {
                 return current;
             }
             return current.SetItem(key, ReferenceEquals(coverage, supplied.Coverage) ? supplied : supplied with { Coverage = coverage });
         }
+
+        /// <summary>
+        /// Equal entry by entry, in order, each entry field by field with its lists compared by content (a
+        /// record's own equality compares list references, and each delta deserializes new lists). Null
+        /// equals only null.
+        /// </summary>
+        internal static bool SameCoverage(
+            IReadOnlyList<CodeContext.Parser.Protocol.ProjectCoverage>? first,
+            IReadOnlyList<CodeContext.Parser.Protocol.ProjectCoverage>? second)
+        {
+            if (ReferenceEquals(first, second)) return true;
+            if (first is null || second is null || first.Count != second.Count) return false;
+            for (var i = 0; i < first.Count; i++)
+            {
+                if (!SameProject(first[i], second[i])) return false;
+            }
+            return true;
+        }
+
+        private static bool SameProject(CodeContext.Parser.Protocol.ProjectCoverage? a, CodeContext.Parser.Protocol.ProjectCoverage? b)
+            => ReferenceEquals(a, b)
+                || (a is not null && b is not null
+                    && string.Equals(a.Name, b.Name, StringComparison.Ordinal)
+                    && string.Equals(a.Path, b.Path, StringComparison.Ordinal)
+                    && string.Equals(a.State, b.State, StringComparison.Ordinal)
+                    && a.Files == b.Files
+                    && string.Equals(a.TargetFramework, b.TargetFramework, StringComparison.Ordinal)
+                    && SameStrings(a.InactiveTargetFrameworks, b.InactiveTargetFrameworks)
+                    && SameStrings(a.MissingReferences, b.MissingReferences)
+                    && SameStrings(a.AnalyzerPackages, b.AnalyzerPackages)
+                    && a.UnresolvedNames == b.UnresolvedNames
+                    && SameStrings(a.CommonUnresolvedNames, b.CommonUnresolvedNames)
+                    && SameStrings(a.Notes, b.Notes));
+
+        private static bool SameStrings(IReadOnlyList<string>? a, IReadOnlyList<string>? b)
+            => ReferenceEquals(a, b) || (a is not null && b is not null && a.SequenceEqual(b, StringComparer.Ordinal));
 
         /// <summary>Unconditional full replacement (legacy SaveGraph path — no generation check).</summary>
         public void ReplaceAll(IEnumerable<CodeNode> nodes, IEnumerable<CodeEdge> edges)
@@ -932,6 +968,22 @@ namespace CodeContext.Core.Repositories.InMemory
         internal (ImmutableSortedDictionary<ShardKey, IGraphShard> Shards, ImmutableSortedDictionary<ShardKey, ShardAnnotation> Annotations) LatchPublished()
         {
             lock (_commitLock) return (_shards, _annotations);
+        }
+
+        /// <summary>
+        /// The coverage recorded with the published shards, ordered by parser and workspace: what the facts
+        /// readers see were built from. A staged reconciliation's coverage is not here until it commits, and
+        /// is gone with it when it rolls back.
+        /// </summary>
+        internal IReadOnlyList<CodeContext.Parser.Protocol.ProjectCoverage> PublishedCoverage()
+        {
+            ImmutableSortedDictionary<ShardKey, ShardAnnotation> annotations;
+            lock (_commitLock) annotations = _annotations;
+            return annotations
+                .OrderBy(annotation => annotation.Key.ParserId, StringComparer.Ordinal)
+                .ThenBy(annotation => annotation.Key.WorkspaceId, StringComparer.Ordinal)
+                .SelectMany(annotation => annotation.Value.Coverage ?? [])
+                .ToList();
         }
 
         /// <summary>

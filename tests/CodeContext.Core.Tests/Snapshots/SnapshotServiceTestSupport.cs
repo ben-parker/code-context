@@ -134,7 +134,8 @@ internal sealed class SnapshotServiceHarness : IAsyncDisposable
 
     public SnapshotServiceHarness(
         string? basePath = null, Func<SnapshotServiceSettings, SnapshotServiceSettings>? configure = null,
-        bool enabled = true, InMemoryDatabase? database = null)
+        bool enabled = true, InMemoryDatabase? database = null, Func<string, bool>? isIndexedParser = null,
+        IAnalysisCoverageRegistry? coverage = null, Action<IReadOnlyCollection<string>>? onLoaded = null)
     {
         BasePath = basePath ?? Path.Combine(Path.GetTempPath(), "ccsnap-" + Guid.NewGuid().ToString("N"));
         OwnsBase = basePath is null;
@@ -149,8 +150,6 @@ internal sealed class SnapshotServiceHarness : IAsyncDisposable
                 Mutation?.Invoke();
                 return Task.CompletedTask;
             });
-        Coordinator = new IndexCoordinator(
-            _graphUpdate, ScanState, Options.Create(new CodeContextOptions { RootPath = RootPath }), NullLoggerFactory.Instance);
 
         var settings = new SnapshotServiceSettings
         {
@@ -161,8 +160,19 @@ internal sealed class SnapshotServiceHarness : IAsyncDisposable
             InstanceId = new Guid("5d0c9a1e-7b3f-4c0e-9a6d-2f8b1c4e7a90"),
         };
         Settings = configure?.Invoke(settings) ?? settings;
-        Service = new SnapshotService(Coordinator, Database, ScanState, Settings, Time, Logger);
+        Startup = new SnapshotStartup(Settings, Database, coverage, isIndexedParser, onLoaded, Logger);
+        CacheState = new CacheState(Settings.Enabled, Startup.Run);
+        Coordinator = new IndexCoordinator(
+            _graphUpdate, ScanState, Options.Create(new CodeContextOptions { RootPath = RootPath }), NullLoggerFactory.Instance,
+            cacheState: CacheState);
+        Service = new SnapshotService(Coordinator, Database, ScanState, Settings, Startup, Time, Logger, CacheState);
     }
+
+    public SnapshotStartup Startup { get; }
+    public CacheState CacheState { get; }
+
+    /// <summary>The coordinator's scan service, a substitute; its scans commit nothing unless configured.</summary>
+    public IGraphUpdateService GraphUpdate => _graphUpdate;
 
     public string BasePath { get; }
     public bool OwnsBase { get; }
@@ -301,6 +311,7 @@ internal sealed class SnapshotServiceHarness : IAsyncDisposable
         finally
         {
             Service.Dispose();
+            Startup.Dispose();
             Coordinator.Dispose();
             if (OwnsBase)
             {

@@ -17,6 +17,11 @@ namespace CodeContext.Core.Services;
 /// Maintenance commands (a snapshot capture) share the channel so they run between mutations,
 /// never during one, but they are not indexing work: they do not make <see cref="IsBusy"/> true,
 /// so they cannot extend the instance's idle lease.
+///
+/// With the cache on, the first step loads the newest valid snapshot into the empty store (plan
+/// 3.5, "Startup") and the startup scan then runs as a verification scan: the full-scan flow, in
+/// which every worker re-indexes inside one reconciliation. Until it commits, readers see the
+/// loaded shards, labelled; if it fails, they stay, unverified.
 /// </summary>
 public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
 {
@@ -69,6 +74,7 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
     private readonly CodeContextOptions _options;
     private readonly ILogger<IndexCoordinator> _logger;
     private readonly IRepositoryFileSelector _fileSelector;
+    private readonly CacheState? _cacheState;
 
     private int _busy;
     private int _queuedMaintenance;
@@ -79,13 +85,16 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
         IScanStateService scanState,
         IOptions<CodeContextOptions> options,
         ILoggerFactory loggerFactory,
-        IRepositoryFileSelector? fileSelector = null)
+        IRepositoryFileSelector? fileSelector = null,
+        CacheState? cacheState = null)
     {
         _graphUpdateService = graphUpdateService;
         _scanState = scanState;
         _options = options.Value;
         _logger = loggerFactory.CreateLogger<IndexCoordinator>();
         _fileSelector = fileSelector ?? new RepositoryFileSelector(options);
+        _cacheState = cacheState;
+        cacheState?.AttachScanPhase(() => scanState.Phase);
 
         var consoleReporter = new ConsoleScanProgressReporter(
             loggerFactory.CreateLogger<ConsoleScanProgressReporter>());
@@ -171,13 +180,22 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
 
         try
         {
+            // The load step comes before anything that can mutate the store, including a full
+            // rescan requested before this loop started. It never serves early: the loaded shards
+            // are published in one swap, and status says "scanning" until then. The load itself is not
+            // cancellable (it is bounded by the candidate cap and the size cap); a stop that arrived
+            // during it is honoured before the scan starts.
+            var loaded = RunLoadStep();
+            stoppingToken.ThrowIfCancellationRequested();
+
             // Startup scan: resumable, so an instance restarted over a warm metadata
-            // store only re-processes what changed. Runs after the HTTP host has bound,
-            // and inside the try so a shutdown mid-scan still drains queued refresh
+            // store only re-processes what changed; after a load, the full-scan flow, so
+            // every worker replaces what the snapshot holds. Runs after the HTTP host has
+            // bound, and inside the try so a shutdown mid-scan still drains queued refresh
             // waiters in the finally below.
             if (_scanState.TryBeginScan())
             {
-                await RunScanAsync(resumable: true, stoppingToken);
+                await RunScanAsync(resumable: !loaded, stoppingToken);
                 NotifyMutationObserver();
             }
 
@@ -425,6 +443,21 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
         return null;
     }
 
+    /// <summary>The cache's load step; true when a snapshot was published. Never throws: a failure means no cache this run.</summary>
+    private bool RunLoadStep()
+    {
+        if (_cacheState is null) return false;
+        try
+        {
+            return _cacheState.RunLoadStep();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Loading the snapshot failed; scanning without it.");
+            return false;
+        }
+    }
+
     private async Task RunScanAsync(bool resumable, CancellationToken ct)
     {
         Volatile.Write(ref _busy, 1);
@@ -438,6 +471,9 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
             {
                 await _graphUpdateService.PerformInitialScanAsync(_options.RootPath, _progressReporter, ct);
             }
+            // The reconciliation has committed: from here no answer comes from an unchecked snapshot. Ready
+            // only after that, so "ready" never shows the previous graph or a cached answer.
+            _cacheState?.OnScanCommitted();
             _scanState.CompleteScan();
         }
         catch (OperationCanceledException)
@@ -448,6 +484,7 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
         catch (Exception ex)
         {
             _logger.LogError(ex, "Scan failed.");
+            _cacheState?.OnScanFailed();
             _scanState.FailScan(ex.Message);
         }
         finally

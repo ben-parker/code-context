@@ -60,6 +60,12 @@ namespace CodeContext.Core.Snapshots
     /// <summary>The outcome of <see cref="SnapshotFile.Open"/>: an opened file, or the check that refused it.</summary>
     internal sealed record SnapshotOpenResult(SnapshotFile? File, SnapshotRejection Rejection, string? Reason)
     {
+        /// <summary>
+        /// The header and host meta checks passed before the refusal, so the file was (or was being) read and
+        /// hashed in full: an I/O failure from here on costs as much as an authentication failure.
+        /// </summary>
+        public bool PassedHostMeta { get; init; }
+
         public static SnapshotOpenResult Refused(SnapshotRejection rejection, string reason) => new(null, rejection, reason);
     }
 
@@ -212,16 +218,18 @@ namespace CodeContext.Core.Snapshots
                 return SnapshotOpenResult.Refused(SnapshotRejection.Io, exception.Message);
             }
 
-            return OpenMapped(handle, () =>
+            var passedHostMeta = false;
+            var result = OpenMapped(handle, () =>
             {
                 if (!OperatingSystem.IsWindows() && ClaimUnixFile(handle) is { } claimRefusal) return (claimRefusal, null);
                 var length = RandomAccess.GetLength(handle);
                 var refusal = Precheck((buffer, offset) => ReadExactly(handle, buffer, offset), length, nameSequence, key, expected, maxFileLength,
-                    out var header, out var hostMeta);
+                    out var header, out var hostMeta, () => passedHostMeta = true);
                 if (refusal is not null) return (refusal, null);
                 var mapping = MemoryMappedFile.CreateFromFile(handle, null, 0, MemoryMappedFileAccess.Read, HandleInheritability.None, leaveOpen: true);
                 return (null, (mapping, header!, hostMeta!));
             });
+            return result.File is null && passedHostMeta ? result with { PassedHostMeta = true } : result;
         }
 
         /// <summary>
@@ -398,7 +406,7 @@ namespace CodeContext.Core.Snapshots
         /// </summary>
         private static (SnapshotRejection Rejection, string Reason)? Precheck(
             ReadAt read, long length, ulong nameSequence, byte[] key, SnapshotExpectations expected, long maxFileLength,
-            out SnapshotHeader? header, out Dictionary<string, string>? hostMeta)
+            out SnapshotHeader? header, out Dictionary<string, string>? hostMeta, Action? hostMetaPassed = null)
         {
             header = null;
             hostMeta = null;
@@ -420,6 +428,7 @@ namespace CodeContext.Core.Snapshots
                 return (SnapshotRejection.RootPath, $"written for root {Quote(rootPath)}");
             if (header.PathsCaseInsensitive != expected.PathsCaseInsensitive)
                 return (SnapshotRejection.PathCase, "written with another path case rule");
+            hostMetaPassed?.Invoke();
 
             var footer = new byte[SnapshotFormat.FooterSize];
             read(footer, length - SnapshotFormat.FooterSize);

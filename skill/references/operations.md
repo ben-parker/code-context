@@ -12,6 +12,15 @@ Use `codecontext list --json` to inspect registrations. Only after that, use
 A human can pre-warm the index before agent work with `codecontext init --path .`
 (add `--wait`) so the first query skips the cold-start scan.
 
+A restarted instance answers from the index it saved under `.codecontext/cache/` while
+its startup scan re-checks the files; those answers carry a `cache` line (in `query multi`,
+one after each `query` line), and status shows `indexing.cache.state` `verifying`.
+`unverified` (with `indexing.status` `error`) means the re-check failed and answers stay
+from the saved index until `POST /api/index/refresh` (or a restart) re-checks and
+commits; `ignored` with a `reason` means a saved index was refused and the instance
+scanned from scratch.
+`codecontext start --no-cache` runs without it.
+
 Project files and restores are watched, so a changed `.csproj` or a `dotnet restore` takes
 effect without a source edit. Projects are read from their files alone: nothing a repository
 supplies is ever run, including MSBuild, analyzers and source generators. `Directory.Build.*`

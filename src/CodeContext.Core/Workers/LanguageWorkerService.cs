@@ -79,6 +79,9 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
         public ParserProcessSupervisor? Supervisor { get; set; }
         public long Generation { get; set; }
         public bool EverIndexed { get; set; }
+
+        /// <summary>The store holds facts of this parser from a loaded snapshot, which only its own index can replace.</summary>
+        public bool HoldsLoadedFacts { get; set; }
         public HashSet<string> ApprovedFiles { get; } = new(PathComparer);
         public SemaphoreSlim Lock { get; } = new(1, 1);
     }
@@ -125,6 +128,24 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
 
     public bool TryGetParserForExtension(string extension, out string parserId)
         => _extensionToParser.TryGetValue(extension, out parserId!);
+
+    /// <summary>
+    /// Whether a scan indexes this parser: it owns at least one extension. A snapshot shard of any other
+    /// parser would never be replaced by a scan, so it is not loaded.
+    /// </summary>
+    internal bool IsIndexedParser(string parserId) => _extensionToParser.ContainsValue(parserId);
+
+    /// <summary>
+    /// Records, before the first scan, which parsers have facts in the store from a loaded snapshot. Their
+    /// first index then runs even with no files, so a language whose files are all gone is emptied.
+    /// </summary>
+    internal void MarkLoadedFromSnapshot(IReadOnlyCollection<string> parserIds)
+    {
+        foreach (var parserId in parserIds)
+        {
+            if (_workers.TryGetValue(parserId, out var state)) state.HoldsLoadedFacts = true;
+        }
+    }
 
     public bool TryGetParserForProjectInput(string path, bool isIncluded, out string parserId)
     {
@@ -179,10 +200,10 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
         await state.Lock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            if (files.Count == 0 && state.Supervisor is null && !state.EverIndexed)
+            if (files.Count == 0 && state.Supervisor is null && !state.EverIndexed && !state.HoldsLoadedFacts)
             {
-                // Nothing to index and no worker running: don't spawn a process just
-                // to learn there is no work.
+                // Nothing to index, no worker running and nothing loaded to replace: don't
+                // spawn a process just to learn there is no work.
                 return;
             }
 
@@ -195,6 +216,7 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
                 DefaultWorkspaceId, generation, files), ct, progressHandler).ConfigureAwait(false);
             ReplaceApprovedFiles(state, files);
             state.EverIndexed = true;
+            state.HoldsLoadedFacts = false;
         }
         finally
         {

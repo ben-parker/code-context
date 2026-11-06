@@ -351,7 +351,8 @@ public class SnapshotServiceTests
         Assert.Equal(SnapshotCacheMode.Writer, harness.Service.Status.Mode);
         Assert.False(File.Exists(valid));
         Assert.All(forged, path => Assert.False(File.Exists(path)));
-        Assert.Equal(SnapshotService.MaxCostlyRefusals, harness.Logger.Entries.Count(entry => entry.Message.Contains("Authentication")));
+        Assert.Equal(SnapshotService.MaxCostlyRefusals, harness.Logger.Entries.Count(entry =>
+            entry.Message.StartsWith("Ignoring snapshot", StringComparison.Ordinal) && entry.Message.Contains("Authentication")));
 
         await harness.CommitAsync();
         await harness.AdvanceAsync(Quiet);
@@ -360,28 +361,156 @@ public class SnapshotServiceTests
     }
 
     [Fact]
-    public async Task UndeletableHigherFile_RaisesTheCounter()
+    public async Task UndeletableRefusedFile_DoesNotRaiseTheCounter_AndALaterStartKeepsTheNewest()
     {
+        var basePath = Path.Combine(Path.GetTempPath(), "ccsnap-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            string newest;
+            string held;
+            await using (var harness = new SnapshotServiceHarness(basePath))
+            {
+                harness.CommitFacts(1);
+                var valid = harness.PlantSnapshot(5);
+                held = Path.Combine(harness.WorkspacePath, SnapshotFile.FormatName(7, 0xdeadbeef));
+                File.WriteAllBytes(held, new byte[512]);
+
+                // Held open without delete sharing: Windows refuses the delete; Unix deletes an open file.
+                using (new FileStream(held, FileMode.Open, FileAccess.Read, FileShare.Read))
+                {
+                    await harness.StartAsync();
+                    Assert.True(File.Exists(valid));
+                    Assert.Equal(OperatingSystem.IsWindows(), File.Exists(held));
+
+                    // Refused at start, so it can never be kept and does not outrank the next write.
+                    await harness.CommitAsync();
+                    await harness.AdvanceAsync(Quiet);
+                    newest = harness.Snapshots().Single(name => name != Path.GetFileName(held));
+                    Assert.True(SnapshotFile.TryParseName(newest, out var sequence));
+                    Assert.Equal(6UL, sequence);
+                }
+            }
+
+            // Still above the newest real snapshot, refused again, and deleted now that it is free.
+            await using var restarted = new SnapshotServiceHarness(basePath);
+            await restarted.StartAsync();
+            Assert.Equal(new[] { newest }, restarted.Snapshots());
+            Assert.False(File.Exists(held));
+        }
+        finally
+        {
+            Directory.Delete(basePath, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task UndeletableUntriedFile_StillRaisesTheCounter()
+    {
+        // Three costly refusals end the search, so the file below them is never tried; it could still be
+        // valid, so while it cannot be deleted a new write must not take a sequence below it.
         await using var harness = new SnapshotServiceHarness();
         harness.CommitFacts(1);
-        var valid = harness.PlantSnapshot(5);
-        var held = Path.Combine(harness.WorkspacePath, SnapshotFile.FormatName(7, 0xdeadbeef));
-        File.WriteAllBytes(held, new byte[512]);
+        var untried = harness.PlantSnapshot(5);
+        var otherKey = System.Security.Cryptography.RandomNumberGenerator.GetBytes(SnapshotKey.Length);
+        foreach (var sequence in new ulong[] { 6, 7, 8 }) harness.PlantSnapshot(sequence, 0xdeadbeef, otherKey);
 
-        // Held open without delete sharing: Windows refuses the delete; Unix deletes an open file.
-        using (new FileStream(held, FileMode.Open, FileAccess.Read, FileShare.Read))
+        using (new FileStream(untried, FileMode.Open, FileAccess.Read, FileShare.Read))
         {
             await harness.StartAsync();
-            Assert.True(File.Exists(valid));
-            Assert.Equal(OperatingSystem.IsWindows(), File.Exists(held));
+            Assert.Equal(OperatingSystem.IsWindows(), File.Exists(untried));
+            await harness.CommitAsync();
+            await harness.AdvanceAsync(Quiet);
         }
+        var written = harness.Snapshots().Single(name => name != Path.GetFileName(untried));
+        Assert.True(SnapshotFile.TryParseName(written, out var writtenSequence));
+        Assert.Equal(OperatingSystem.IsWindows() ? 6UL : 1UL, writtenSequence);
+    }
 
-        await harness.CommitAsync();
-        await harness.AdvanceAsync(Quiet);
+    /// <summary>
+    /// Snapshots 5 (facts N1) and 9 (facts N2), both valid; 9 is held open with no sharing (an antivirus, a
+    /// backup), so it is refused for I/O and cannot be deleted, and 5 is loaded. An I/O refusal proves
+    /// nothing about the file, so 9 still raises the counter. Then a write of facts N3. Returns the base.
+    /// </summary>
+    private static async Task<(string BasePath, string Written)> BusyNewerSnapshotRunAsync()
+    {
+        var basePath = Path.Combine(Path.GetTempPath(), "ccsnap-" + Guid.NewGuid().ToString("N"));
+        await using var harness = new SnapshotServiceHarness(basePath);
+        harness.CommitFacts(1);
+        harness.PlantSnapshot(5);
+        harness.CommitFacts(2);
+        var busy = harness.PlantSnapshot(9);
+        harness.Database.Reset();
+
+        using (new FileStream(busy, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            await harness.StartAsync();
+            if (OperatingSystem.IsWindows())
+            {
+                Assert.True(File.Exists(busy));
+                Assert.Contains(harness.Logger.Entries, entry => entry.Message.StartsWith("Ignoring snapshot", StringComparison.Ordinal)
+                    && entry.Message.Contains(Path.GetFileName(busy)) && entry.Message.Contains(nameof(SnapshotRejection.Io)));
+                Assert.Equal(new[] { "N1_0", "N1_1", "N1_2" }, harness.Database.EnumerateNodes().Select(node => node.Name));
+            }
+            await harness.CommitAsync(() => harness.CommitFacts(3));
+            await harness.AdvanceAsync(Quiet);
+            Assert.Null(harness.Service.Status.LastWriteError);
+        }
+        return (basePath, harness.Snapshots().Single(name => name != Path.GetFileName(busy)));
+    }
+
+    [Fact]
+    public async Task IoRefusedBusyFile_StillRaisesTheCounter()
+    {
+        var (basePath, written) = await BusyNewerSnapshotRunAsync();
+        try
+        {
+            Assert.True(SnapshotFile.TryParseName(written, out var sequence));
+            // Windows: above the busy 9. Unix deletes an open file, so 9 is gone and the write follows 5.
+            Assert.Equal(OperatingSystem.IsWindows() ? 10UL : 6UL, sequence);
+        }
+        finally
+        {
+            Directory.Delete(basePath, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task IoRefusedBusyFile_TheNextStartLoadsTheNewestFacts()
+    {
+        var (basePath, written) = await BusyNewerSnapshotRunAsync();
+        try
+        {
+            await using var restarted = new SnapshotServiceHarness(basePath);
+            await restarted.StartAsync();
+            Assert.Equal(new[] { "N3_0", "N3_1", "N3_2" }, restarted.Database.EnumerateNodes().Select(node => node.Name));
+            Assert.Equal(new[] { written }, restarted.Snapshots());
+        }
+        finally
+        {
+            Directory.Delete(basePath, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ReadOnlyPlantedFile_IsDeleted_AndWritesContinue()
+    {
+        await using var harness = new SnapshotServiceHarness();
+        Directory.CreateDirectory(harness.WorkspacePath);
+        var planted = Path.Combine(harness.WorkspacePath, "graph.0999999999.deadbeef.ccsnap");
+        File.WriteAllBytes(planted, new byte[512]);
+        File.SetAttributes(planted, FileAttributes.ReadOnly);
+
+        await harness.StartAsync();
+        Assert.False(File.Exists(planted));
+        for (var write = 1; write <= 3; write++)
+        {
+            await harness.CommitAsync();
+            await harness.AdvanceAsync(Quiet);
+            Assert.Equal(write, harness.Service.Status.WritesCompleted);
+            Assert.Null(harness.Service.Status.LastWriteError);
+        }
         Assert.True(SnapshotFile.TryParseName(harness.Snapshots().Single(), out var sequence));
-        Assert.Equal(OperatingSystem.IsWindows() ? 8UL : 6UL, sequence);
-        // Below the new sequence, so the retire removed it once it was free.
-        Assert.False(File.Exists(held));
+        Assert.Equal(3UL, sequence);
     }
 
     [Fact]
@@ -942,8 +1071,13 @@ public class SnapshotServiceTests
         await harness.AdvanceAsync(Quiet);
         Assert.Equal(1, harness.Service.Status.WritesCompleted);
 
-        // A new coverage report alone, with no fact change, makes the store dirty.
+        // An equal coverage report in a new list (as every delta brings) leaves it clean too.
         await harness.CommitAsync(() => harness.CommitNothing(new ShardAnnotation("fake-1.2.3", [.. coverage])));
+        await harness.AdvanceAsync(Quiet);
+        Assert.Equal(1, harness.Service.Status.WritesCompleted);
+
+        // A different coverage report alone, with no fact change, makes the store dirty.
+        await harness.CommitAsync(() => harness.CommitNothing(new ShardAnnotation("fake-1.2.3", [coverage[0] with { Files = 4 }])));
         await harness.AdvanceAsync(Quiet);
         Assert.Equal(2, harness.Service.Status.WritesCompleted);
         // So does a new parser version alone.
@@ -1060,23 +1194,23 @@ public class SnapshotServiceTests
     }
 
     [Fact]
-    public void Configuration_TurnsTheCacheOn_AndDefaultsToOff()
+    public void Configuration_TurnsTheCacheOff_AndDefaultsToOn()
     {
         var options = new CodeContextOptions();
         SnapshotServiceCollectionExtensions.ApplyConfiguration(options, null);
-        Assert.False(options.CacheEnabled);
+        Assert.True(options.CacheEnabled);
 
         var configuration = new Microsoft.Extensions.Configuration.ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
-                ["CodeContext:CacheEnabled"] = "true",
+                ["CodeContext:CacheEnabled"] = "false",
                 ["CodeContext:SnapshotQuietSeconds"] = "3",
                 ["CodeContext:SnapshotMaxDelaySeconds"] = "-1",
             })
             .Build();
         var logger = new ListLogger<SnapshotService>();
         SnapshotServiceCollectionExtensions.ApplyConfiguration(options, configuration, logger);
-        Assert.True(options.CacheEnabled);
+        Assert.False(options.CacheEnabled);
         Assert.Equal(3, options.SnapshotQuietSeconds);
         // Negative: the default stays, with one warning.
         Assert.Equal(120, options.SnapshotMaxDelaySeconds);
@@ -1086,7 +1220,11 @@ public class SnapshotServiceTests
         var settings = SnapshotServiceSettings.From(options);
         Assert.Equal(TimeSpan.FromSeconds(3), settings.QuietPeriod);
         Assert.Equal(TimeSpan.FromSeconds(120), settings.MaxDelay);
-        Assert.Equal(SnapshotKey.DefaultPath(), settings.KeyPath);
+        // Off: no key path is resolved at all.
+        Assert.Null(settings.KeyPath);
+        options.CacheEnabled = true;
+        var home = Path.Combine(Path.GetTempPath(), "home");
+        Assert.Equal(Path.Combine(home, ".codecontext", "cache.key"), SnapshotServiceSettings.From(options, home).KeyPath);
     }
 
     [Theory]
@@ -1094,7 +1232,7 @@ public class SnapshotServiceTests
     [InlineData("+7", " 9 ", 7, 9, 0)]                  // NumberStyles.Integer: sign and surrounding white space
     [InlineData("1,000", "1e3", 10, 120, 2)]            // no group separators, no exponent: defaults, two warnings
     [InlineData("١٢", "abc", 10, 120, 2)]     // not invariant digits
-    [InlineData("99999999999", "-5", 10, 120, 2)]       // beyond int, negative
+    [InlineData("99999999999", "-5", 86_400, 120, 1)]   // beyond int: clamped; negative: default and a warning
     public void Configuration_Delays_AreParsedInvariantly_AndClamped(string quiet, string maxDelay, int expectedQuiet, int expectedMax, int warnings)
     {
         var options = new CodeContextOptions();
@@ -1113,7 +1251,7 @@ public class SnapshotServiceTests
     }
 
     [Fact]
-    public void Configuration_UnparsableSwitch_KeepsTheCacheOff()
+    public void Configuration_UnparsableSwitch_KeepsTheDefault()
     {
         var options = new CodeContextOptions();
         var configuration = new ConfigurationBuilder()
@@ -1121,7 +1259,7 @@ public class SnapshotServiceTests
             .Build();
         var logger = new ListLogger<SnapshotService>();
         SnapshotServiceCollectionExtensions.ApplyConfiguration(options, configuration, logger);
-        Assert.False(options.CacheEnabled);
+        Assert.True(options.CacheEnabled);
         Assert.Equal(1, logger.Count(LogLevel.Warning));
     }
 
@@ -1137,7 +1275,7 @@ public class SnapshotServiceTests
         Assert.Equal(TimeSpan.Zero, settings.MaxDelay);
         Assert.Equal(TimeSpan.FromDays(1), settings.ShutdownFlushTimeout);
         Assert.Equal(TimeSpan.Zero, (settings with { QuietPeriod = TimeSpan.Zero }).QuietPeriod);
-        var fromOptions = SnapshotServiceSettings.From(new CodeContextOptions { SnapshotQuietSeconds = int.MaxValue, SnapshotMaxDelaySeconds = -1 });
+        var fromOptions = SnapshotServiceSettings.From(new CodeContextOptions { CacheEnabled = false, SnapshotQuietSeconds = int.MaxValue, SnapshotMaxDelaySeconds = -1 });
         Assert.Equal(TimeSpan.FromDays(1), fromOptions.QuietPeriod);
         Assert.Equal(TimeSpan.Zero, fromOptions.MaxDelay);
     }
@@ -1186,6 +1324,35 @@ public class SnapshotServiceTests
         Assert.False(CacheDirectory.TryParseTempName(name, out _));
         Assert.False(CacheDirectory.TryParseTempName("graph.0000000043.91F0E2AA.tmp", out _));
         Assert.False(CacheDirectory.TryParseTempName(".gitignore.tmp", out _));
+    }
+
+    [Fact]
+    public async Task RetireFailure_LeavesTheWriteCompleted_AndIsRetriedAtTheNextWrite()
+    {
+        var failRetire = true;
+        await using var harness = new SnapshotServiceHarness(configure: settings => settings with
+        {
+            BeforeRetire = () =>
+            {
+                if (Volatile.Read(ref failRetire)) throw new IOException("the directory cannot be listed");
+            },
+        });
+        await harness.StartAsync();
+        await harness.CommitAsync();
+        await harness.AdvanceAsync(Quiet);
+        await harness.CommitAsync();
+        await harness.AdvanceAsync(Quiet);
+        Assert.Equal(2, harness.Service.Status.WritesCompleted);
+        Assert.Equal(0, harness.Service.Status.WritesFailed);
+        Assert.Null(harness.Service.Status.LastWriteError);
+        Assert.Equal(2, harness.Snapshots().Count);   // nothing retired
+
+        Volatile.Write(ref failRetire, false);
+        await harness.CommitAsync();
+        await harness.AdvanceAsync(Quiet);
+        Assert.Equal(3, harness.Service.Status.WritesCompleted);
+        Assert.True(SnapshotFile.TryParseName(harness.Snapshots().Single(), out var sequence));
+        Assert.Equal(3UL, sequence);
     }
 
     private static void InterlockedMax(ref int target, int value)

@@ -612,6 +612,163 @@ public class QueryCommandHandlerTests
         Assert.Contains("csharp:B.Target", output.ToString());
     }
 
+    private const string CachedHit = """
+        {"view":"compact","matchMode":"exact","totalMatches":1,"returnedMatches":1,"cache":{"state":"verifying","snapshotAt":"2026-11-04T10:12:03.0000000Z"},"matches":[{"target":{"name":"ContextService","type":"Class","file":"src/ContextService.cs","line":15,"identifier":"csharp:ContextService"},"relationships":{"usedByCount":3,"usedByReturnedCount":0}}]}
+        """;
+
+    private static string CachedMiss(string state = "verifying") =>
+        "{\"view\":\"compact\",\"matchMode\":\"substring\",\"totalMatches\":0,\"returnedMatches\":0,"
+        + "\"cache\":{\"state\":\"" + state + "\",\"snapshotAt\":\"2026-11-04T10:12:03.0000000Z\"},"
+        + "\"coverage\":{\"state\":\"partial\",\"incompleteProjects\":1,\"totalProjects\":2,\"names\":[\"Game\"]},\"matches\":[]}";
+
+    private static string CachedStatus(bool servingCached, string indexingStatus = "scanning")
+        => JsonSerializer.Serialize(new
+        {
+            system = new { instanceId = "id" },
+            indexing = new
+            {
+                status = indexingStatus,
+                rootPath = Root,
+                cache = new { state = servingCached ? "verifying" : "ignored", servingCached },
+            },
+            api = new { contractVersion = 1 },
+        });
+
+    [Fact]
+    public async Task CachedAnswer_IsTakenBeforeReady_WithTheCacheLineFirst()
+    {
+        var handler = new RecordingHandler(request => request.RequestUri!.AbsolutePath == "/api/status"
+            ? Json(CachedStatus(servingCached: true)) : Json(CachedHit));
+        var (runtime, output, _) = Runtime(handler, new FakeRegistry(Instance()), readinessTimeout: TimeSpan.Zero);
+
+        var exit = await QueryCommandHandler.ExecuteAsync(
+            new QuerySettings(["ContextService"], Root, 1, false, null, false, false, false), runtime, CancellationToken.None);
+
+        Assert.Equal(0, exit);
+        var newline = Environment.NewLine;
+        Assert.Equal(
+            $"cache\tverifying\t2026-11-04T10:12:03Z\tanswers come from the saved index while files are re-checked{newline}" +
+            $"target\tcsharp:ContextService\tClass\tsrc/ContextService.cs:15{newline}" +
+            $"usedBy\t0/3{newline}",
+            output.ToString());
+    }
+
+    [Fact]
+    public async Task CachedMiss_IsLabelledAndNotConclusive()
+    {
+        var handler = new RecordingHandler(request => request.RequestUri!.AbsolutePath == "/api/status"
+            ? Json(CachedStatus(servingCached: true, "error")) : Json(CachedMiss("unverified")));
+        var (runtime, output, _) = Runtime(handler, new FakeRegistry(Instance()), readinessTimeout: TimeSpan.Zero);
+
+        var exit = await QueryCommandHandler.ExecuteAsync(
+            new QuerySettings(["Foo"], Root, 1, false, null, false, false, false), runtime, CancellationToken.None);
+
+        Assert.Equal(2, exit);
+        var lines = output.ToString().Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries);
+        Assert.Equal("cache\tunverified\t2026-11-04T10:12:03Z\tanswers come from the saved index; re-checking the files failed", lines[0]);
+        Assert.Equal("missing\tFoo", lines[1]);
+        Assert.EndsWith("codecontext status has details. Coverage is from the saved index.", lines[2]);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task HumanOutput_SaysTheAnswerIsCached(bool hit)
+    {
+        var handler = new RecordingHandler(request => request.RequestUri!.AbsolutePath == "/api/status"
+            ? Json(CachedStatus(servingCached: true)) : Json(hit ? CachedHit : CachedMiss()));
+        var (runtime, output, _) = Runtime(handler, new FakeRegistry(Instance()), readinessTimeout: TimeSpan.Zero);
+
+        await QueryCommandHandler.ExecuteAsync(
+            new QuerySettings(["ContextService"], Root, 1, false, null, false, false, false, Human: true), runtime, CancellationToken.None);
+
+        var lines = output.ToString().Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries);
+        Assert.Equal("Cached, verifying: answers come from the index saved at 2026-11-04 10:12:03 UTC and are being checked against the files.", lines[0]);
+        if (hit) Assert.Equal("ContextService [Class]", lines[1]);
+        else
+        {
+            Assert.Equal("No match: ContextService", lines[1]);
+            Assert.EndsWith("Coverage is from the saved index.", lines[2]);
+        }
+    }
+
+    [Fact]
+    public async Task HumanOutput_Unverified_SaysTheTimeInUtc()
+    {
+        var handler = new RecordingHandler(request => request.RequestUri!.AbsolutePath == "/api/status"
+            ? Json(CachedStatus(servingCached: true, "error")) : Json(CachedMiss("unverified")));
+        var (runtime, output, _) = Runtime(handler, new FakeRegistry(Instance()), readinessTimeout: TimeSpan.Zero);
+
+        await QueryCommandHandler.ExecuteAsync(
+            new QuerySettings(["Foo"], Root, 1, false, null, false, false, false, Human: true), runtime, CancellationToken.None);
+
+        var lines = output.ToString().Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries);
+        Assert.Equal("Cached, unverified: answers come from the index saved at 2026-11-04 10:12:03 UTC; checking them against the files failed.", lines[0]);
+    }
+
+    [Fact]
+    public async Task CacheLine_WithoutASnapshotTime_KeepsFourFields()
+    {
+        const string noTime = """
+            {"view":"compact","matchMode":"exact","totalMatches":0,"returnedMatches":0,"cache":{"state":"verifying"},"matches":[]}
+            """;
+        var handler = new RecordingHandler(request => request.RequestUri!.AbsolutePath == "/api/status"
+            ? Json(CachedStatus(servingCached: true)) : Json(noTime));
+        var (runtime, output, _) = Runtime(handler, new FakeRegistry(Instance()), readinessTimeout: TimeSpan.Zero);
+
+        await QueryCommandHandler.ExecuteAsync(
+            new QuerySettings(["Foo"], Root, 1, false, null, false, false, false), runtime, CancellationToken.None);
+
+        var first = output.ToString().Split(Environment.NewLine)[0];
+        Assert.Equal("cache\tverifying\t\tanswers come from the saved index while files are re-checked", first);
+        Assert.Equal(4, first.Split('\t').Length);
+    }
+
+    [Fact]
+    public async Task CachedJson_IsPrintedUnchanged()
+    {
+        var handler = new RecordingHandler(request => request.RequestUri!.AbsolutePath == "/api/status"
+            ? Json(CachedStatus(servingCached: true)) : Json(CachedHit));
+        var (runtime, output, _) = Runtime(handler, new FakeRegistry(Instance()), readinessTimeout: TimeSpan.Zero);
+
+        await QueryCommandHandler.ExecuteAsync(
+            new QuerySettings(["ContextService"], Root, 1, false, null, false, true, false), runtime, CancellationToken.None);
+
+        Assert.Equal(CachedHit, output.ToString());
+    }
+
+    [Fact]
+    public async Task MultiQuery_LabelsEachCachedResult()
+    {
+        var response = "[" + CachedHit + "," + CachedMiss() + "]";
+        var handler = new RecordingHandler(request => request.RequestUri!.AbsolutePath == "/api/status"
+            ? Json(CachedStatus(servingCached: true)) : Json(response));
+        var (runtime, output, _) = Runtime(handler, new FakeRegistry(Instance()), readinessTimeout: TimeSpan.Zero);
+
+        await QueryCommandHandler.ExecuteAsync(
+            new QuerySettings(["ContextService", "Foo"], Root, 1, false, null, false, false, true), runtime, CancellationToken.None);
+
+        var lines = output.ToString().Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries);
+        Assert.Equal("query\tContextService", lines[0]);
+        Assert.StartsWith("cache\tverifying\t", lines[1]);
+        var second = Array.IndexOf(lines, "query\tFoo");
+        Assert.StartsWith("cache\tverifying\t", lines[second + 1]);
+        Assert.Equal("missing\tFoo", lines[second + 2]);
+    }
+
+    [Fact]
+    public async Task ScanningWithoutCachedAnswers_StillWaitsForReady()
+    {
+        // An ignored snapshot serves nothing: the instance is not answerable until ready.
+        var handler = new RecordingHandler(request => request.RequestUri!.AbsolutePath == "/api/status"
+            ? Json(CachedStatus(servingCached: false)) : Json(CachedHit));
+        var (runtime, _, _) = Runtime(handler, new FakeRegistry(Instance()), readinessTimeout: TimeSpan.Zero);
+
+        Assert.Equal(3, await QueryCommandHandler.ExecuteAsync(
+            new QuerySettings(["ContextService"], Root, 1, false, null, false, false, false), runtime, CancellationToken.None));
+        Assert.Single(handler.Requests);
+    }
+
     private static (QueryRuntime Runtime, StringWriter Output, StringWriter Error) Runtime(
         RecordingHandler handler,
         IInstanceRegistry registry,

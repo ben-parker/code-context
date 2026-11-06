@@ -284,13 +284,43 @@ namespace CodeContext.Core.Snapshots
 
         /// <summary>
         /// Deletes one of this code's files. False when it cannot be deleted now (another process has it
-        /// open or mapped on Windows, or an antivirus holds it); the caller retries later.
+        /// open or mapped on Windows, or an antivirus holds it); the caller retries later. A file refused
+        /// because it is read-only (Windows refuses to delete one) has the attribute cleared and is
+        /// deleted again once, so a planted read-only name cannot stay forever. Enumeration skips links,
+        /// so the attribute is cleared on this code's own name, never on a link's target.
         /// </summary>
         public static bool TryDelete(CacheFile file)
         {
             try
             {
                 File.Delete(file.Path);
+                return true;
+            }
+            catch (UnauthorizedAccessException) when (TryClearReadOnly(file.Path))
+            {
+                try
+                {
+                    File.Delete(file.Path);
+                    return true;
+                }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+                {
+                    return false;
+                }
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                return false;
+            }
+        }
+
+        private static bool TryClearReadOnly(string path)
+        {
+            try
+            {
+                var attributes = File.GetAttributes(path);
+                if ((attributes & FileAttributes.ReadOnly) == 0 || (attributes & FileAttributes.ReparsePoint) != 0) return false;
+                File.SetAttributes(path, attributes & ~FileAttributes.ReadOnly);
                 return true;
             }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)

@@ -79,6 +79,10 @@ namespace CodeContext.Core.Services
         public bool SubstringSearchSkipped { get; set; }
         public int TotalMatches { get; set; }
         public int ReturnedMatches { get; set; }
+
+        /// <summary>Present only while answers come from a saved index not yet checked against the files.</summary>
+        public CacheNotice? Cache { get; set; }
+
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
         public bool Truncated { get; set; }
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
@@ -98,6 +102,19 @@ namespace CodeContext.Core.Services
         public CoverageSummary? Coverage { get; set; }
 
         public List<CompactContextMatch> Matches { get; set; } = new();
+    }
+
+    /// <summary>
+    /// Why an answer may be stale: it comes from a saved index (a snapshot) that has not been checked
+    /// against the files yet. <see cref="State"/> is <c>verifying</c> while the check runs and
+    /// <c>unverified</c> when it failed; an answer of nothing is not conclusive in either.
+    /// </summary>
+    public class CacheNotice
+    {
+        public string State { get; set; } = string.Empty;
+
+        /// <summary>When the saved index was captured, ISO 8601 UTC.</summary>
+        public string? SnapshotAt { get; set; }
     }
 
     /// <summary>Which projects were analyzed without all they declare.</summary>
@@ -227,6 +244,9 @@ namespace CodeContext.Core.Services
     /// </summary>
     public class CompleteContextResponse
     {
+        /// <summary>Present only while answers come from a saved index not yet checked against the files.</summary>
+        public CacheNotice? Cache { get; set; }
+
         /// <summary>
         /// Array of matches (even for single results to handle ambiguity)
         /// </summary>

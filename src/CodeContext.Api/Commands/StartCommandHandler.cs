@@ -14,7 +14,8 @@ public record StartSettings(
     bool Detach,
     int IdleTimeoutMinutes,
     string? LogFile,
-    string? InstanceId = null);
+    string? InstanceId = null,
+    bool NoCache = false);
 
 public static class StartCommandHandler
 {
@@ -29,7 +30,7 @@ public static class StartCommandHandler
 
         if (settings.Mcp)
         {
-            return await RunMcpAsync(rootPath, ct);
+            return await RunMcpAsync(rootPath, settings.NoCache, ct);
         }
 
         var registry = new InstanceRegistry();
@@ -40,7 +41,8 @@ public static class StartCommandHandler
                 settings.ExplicitPort,
                 settings.IdleTimeoutMinutes,
                 settings.LogFile,
-                ct);
+                ct,
+                settings.NoCache);
             if (!result.Success || result.Instance is null)
             {
                 Console.Error.WriteLine(result.ErrorMessage ?? "Failed to start the detached process.");
@@ -64,6 +66,7 @@ public static class StartCommandHandler
                 Console.Error.WriteLine(
                     $"CodeContext is already running for {result.Instance.RootPath} " +
                     $"on port {result.Instance.Port} (pid {result.Instance.Pid}){coversSuffix}");
+                if (settings.NoCache) Console.Error.WriteLine(NoCacheIgnoredMessage);
             }
             return 0;
         }
@@ -83,6 +86,7 @@ public static class StartCommandHandler
             {
                 Console.Error.WriteLine($"CodeContext is already running for {existing.RootPath} on port {existing.Port} (pid {existing.Pid}); it covers {rootPath}.");
             }
+            if (settings.NoCache) Console.Error.WriteLine(NoCacheIgnoredMessage);
             Console.WriteLine(JsonSerializer.Serialize(existing, InstanceRegistryJsonContext.Default.InstanceRecord));
             return 0;
         }
@@ -125,12 +129,8 @@ public static class StartCommandHandler
         // adds is dead weight and dead cold-start time. Kestrel, config, and console logging
         // remain (console logging is also ensured by ConfigureCoreServices' AddConsole).
         var builder = WebApplication.CreateSlimBuilder();
-        ProgramHelpers.ConfigureCoreServices(
-            builder.Services, rootPath, builder.Environment.IsProduction(),
-            port, settings.IdleTimeoutMinutes, instanceId, applicationStartTime);
-        ProgramHelpers.AddRestApi(builder.Services);
-        builder.Services.AddSingleton<IdleTracker>();
-        builder.Services.AddHostedService<IdleShutdownService>();
+        ConfigureWebHostServices(
+            builder.Services, rootPath, builder.Environment.IsProduction(), port, settings, instanceId, applicationStartTime);
 
         builder.WebHost.UseUrls($"http://localhost:{port}");
 
@@ -192,11 +192,10 @@ public static class StartCommandHandler
         await app.RunAsync(ct);
     }
 
-    private static async Task<int> RunMcpAsync(string rootPath, CancellationToken ct)
+    private static async Task<int> RunMcpAsync(string rootPath, bool noCache, CancellationToken ct)
     {
         var builder = Host.CreateApplicationBuilder();
-        ProgramHelpers.ConfigureCoreServices(builder.Services, rootPath, builder.Environment.IsProduction());
-        Mcp.ProgramHelpers.AddMcpServer(builder.Services);
+        ConfigureMcpHostServices(builder.Services, rootPath, builder.Environment.IsProduction(), noCache);
 
         // In MCP mode stdout carries the JSON-RPC protocol; any log line written there corrupts
         // the stream. Drop every console provider registered so far (the Host default console and
@@ -217,6 +216,34 @@ public static class StartCommandHandler
         await app.RunAsync(ct);
         return 0;
     }
+
+    /// <summary>The REST host's services; <c>--no-cache</c> turns the cache off here.</summary>
+    internal static void ConfigureWebHostServices(
+        IServiceCollection services, string rootPath, bool isProduction, int port, StartSettings settings,
+        string instanceId, ApplicationStartTime applicationStartTime)
+    {
+        ProgramHelpers.ConfigureCoreServices(
+            services, rootPath, isProduction, port, settings.IdleTimeoutMinutes, instanceId, applicationStartTime);
+        ProgramHelpers.AddRestApi(services);
+        services.AddSingleton<IdleTracker>();
+        services.AddHostedService<IdleShutdownService>();
+        if (settings.NoCache) ProgramHelpers.TurnCacheOff(services);
+    }
+
+    /// <summary>The MCP host's services; <c>--no-cache</c> turns the cache off here.</summary>
+    internal static void ConfigureMcpHostServices(IServiceCollection services, string rootPath, bool isProduction, bool noCache)
+    {
+        ProgramHelpers.ConfigureCoreServices(services, rootPath, isProduction);
+        Mcp.ProgramHelpers.AddMcpServer(services);
+        if (noCache) ProgramHelpers.TurnCacheOff(services);
+    }
+
+    /// <summary>
+    /// Said on stderr when <c>--no-cache</c> attaches to a running instance: the flag applies only to a new
+    /// start, and nothing is stopped or restarted.
+    /// </summary>
+    internal const string NoCacheIgnoredMessage =
+        "--no-cache applies only to a new start: the running instance keeps the cache setting it was started with (on unless it was started with --no-cache).";
 
     private static void RedirectOutputIfRequested(string? logFile)
     {

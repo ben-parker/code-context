@@ -161,7 +161,8 @@ public static class QueryCommandHandler
                 runtime.TimeProvider,
                 runtime.DelayAsync,
                 runtime.ReadinessTimeout,
-                ct);
+                ct,
+                acceptCached: true);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -325,10 +326,11 @@ public static class QueryCommandHandler
         int depth,
         TextWriter output)
     {
+        WriteAgentCache(response.Cache, output);
         if (response.TotalMatches == 0 || response.Matches.Count == 0)
         {
             output.WriteLine($"missing\t{Clean(requestedIdentifier)}");
-            WriteCoverage(response.Coverage, "coverage\t{0}\t", output);
+            WriteCoverage(response.Coverage, "coverage\t{0}\t", response.Cache, output);
             return;
         }
 
@@ -345,7 +347,7 @@ public static class QueryCommandHandler
         }
         if (response.ExternalMatchesHidden > 0)
             output.WriteLine($"externalMatches\t{response.ExternalMatchesHidden}\t--external lists them");
-        WriteCoverage(response.Coverage, "coverage\t{0}\t", output);
+        WriteCoverage(response.Coverage, "coverage\t{0}\t", response.Cache, output);
 
         foreach (var match in response.Matches)
         {
@@ -482,15 +484,46 @@ public static class QueryCommandHandler
     }
 
     /// <summary>Why an empty answer may not mean nothing is there.</summary>
-    private static void WriteCoverage(CoverageSummary? coverage, string prefix, TextWriter output)
+    private static void WriteCoverage(CoverageSummary? coverage, string prefix, CacheNotice? cache, TextWriter output)
     {
         if (coverage is null) return;
         var more = coverage.IncompleteProjects - coverage.Names.Count;
         var names = string.Join(", ", coverage.Names.Select(Clean)) + (more > 0 ? $" and {more} more" : string.Empty);
         output.WriteLine(string.Format(CultureInfo.InvariantCulture, prefix, coverage.State)
             + $"{coverage.IncompleteProjects} of {coverage.TotalProjects} projects analyzed without all they declare: {names}. "
-            + "This answer may be incomplete; codecontext status has details.");
+            + "This answer may be incomplete; codecontext status has details."
+            + (cache is null ? string.Empty : " Coverage is from the saved index."));
     }
+
+    /// <summary>
+    /// The first line of an answer from a saved index not yet checked against the files. Every line
+    /// after it, a miss included, may be stale: a miss is not conclusive until the index is verified.
+    /// Always four fields; the time is empty when the snapshot time is unknown.
+    /// </summary>
+    private static void WriteAgentCache(CacheNotice? cache, TextWriter output)
+    {
+        if (cache is null) return;
+        output.WriteLine($"cache\t{Clean(cache.State)}\t{CacheTime(cache, "yyyy-MM-dd'T'HH:mm:ss'Z'")}\t{CacheMeaning(cache.State)}");
+    }
+
+    private static void WriteHumanCache(CacheNotice? cache, TextWriter output)
+    {
+        if (cache is null) return;
+        var savedAt = CacheTime(cache, "yyyy-MM-dd HH:mm:ss' UTC'") is { } at ? $"the index saved at {at}" : "the saved index";
+        output.WriteLine(cache.State == CacheState.Unverified
+            ? $"Cached, unverified: answers come from {savedAt}; checking them against the files failed."
+            : $"Cached, {cache.State}: answers come from {savedAt} and are being checked against the files.");
+    }
+
+    private static string CacheMeaning(string state) => state == CacheState.Unverified
+        ? "answers come from the saved index; re-checking the files failed"
+        : "answers come from the saved index while files are re-checked";
+
+    private static string? CacheTime(CacheNotice cache, string format)
+        => DateTimeOffset.TryParse(cache.SnapshotAt, CultureInfo.InvariantCulture,
+                DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var at)
+            ? at.UtcDateTime.ToString(format, CultureInfo.InvariantCulture)
+            : null;
 
     private static string? Location(CompactCodeNode node)
         => node.External is { } assembly ? $"external {assembly}"
@@ -519,10 +552,11 @@ public static class QueryCommandHandler
         int depth,
         TextWriter output)
     {
+        WriteHumanCache(response.Cache, output);
         if (response.TotalMatches == 0 || response.Matches.Count == 0)
         {
             output.WriteLine($"No match: {requestedIdentifier}");
-            WriteCoverage(response.Coverage, "Coverage ({0}): ", output);
+            WriteCoverage(response.Coverage, "Coverage ({0}): ", response.Cache, output);
             return;
         }
 
@@ -536,7 +570,7 @@ public static class QueryCommandHandler
         }
         if (response.ExternalMatchesHidden > 0)
             output.WriteLine($"Library symbols of this name: {response.ExternalMatchesHidden} (--external lists them)");
-        WriteCoverage(response.Coverage, "Coverage ({0}): ", output);
+        WriteCoverage(response.Coverage, "Coverage ({0}): ", response.Cache, output);
 
         for (var index = 0; index < response.Matches.Count; index++)
         {

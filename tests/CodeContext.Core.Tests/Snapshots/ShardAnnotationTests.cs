@@ -140,6 +140,78 @@ public class ShardAnnotationTests
         Assert.Same(second, annotation.Coverage);
     }
 
+    /// <summary>The host's wiring: an applier reporting into the registry that reads through the store.</summary>
+    private static (InMemoryRepositoryFactory Factory, IGenerationalGraphStore Store, IAnalysisCoverageRegistry Registry, AnalysisDeltaApplier Applier) Host()
+    {
+        var factory = new InMemoryRepositoryFactory(NullLogger<InMemoryRepositoryFactory>.Instance);
+        var store = (IGenerationalGraphStore)factory.CreateGraphRepository();
+        var registry = AnalysisCoverageRegistry.ForStore(factory);
+        return (factory, store, registry, new AnalysisDeltaApplier(store, NullLogger<AnalysisDeltaApplier>.Instance, registry));
+    }
+
+    private static AnalysisDelta CoverageDelta(long generation, IReadOnlyList<ProjectCoverage>? coverage) => new(
+        ParserId: "fake", ParserVersion: "1.0", WorkspaceId: "ws-1", Generation: generation, RequestId: generation,
+        ReplacesWorkspace: true, ReplacesFiles: [], Nodes: [new ProtocolNode($"fake:ws-1:N{generation}", $"N{generation}", $"N{generation}", "class", "fake", "a.fake")],
+        Edges: [], IsLastForRequest: true, Coverage: coverage);
+
+    private static string Names(IAnalysisCoverageRegistry registry) => string.Join(",", registry.GetProjects().Select(project => project.Name));
+
+    /// <summary>A store loaded from a snapshot whose shard A was built with coverage "Snapshot".</summary>
+    private static void LoadSnapshot(InMemoryDatabase database)
+    {
+        var source = new InMemoryDatabase();
+        Commit(source, A, [Node(A, "Loaded")], null);
+        database.PublishLoadedShards(source.LatchPublished().Shards, [KeyValuePair.Create(A, new ShardAnnotation("0.9", Coverage("Snapshot")))]);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Verification_CoverageServedIsTheSnapshots_UntilTheScanCommits(bool commits)
+    {
+        var (factory, store, registry, applier) = Host();
+        LoadSnapshot(factory.Database);
+        Assert.Equal("Snapshot", Names(registry));
+
+        store.BeginReconciliation();
+        Assert.True(await applier.ApplyAsync(CoverageDelta(1, Coverage("Scan"))));
+        // Staged: the facts served are still the snapshot's, and so is the coverage.
+        Assert.Equal("Snapshot", Names(registry));
+        Assert.Equal("Loaded", factory.Database.EnumerateNodes().Single().Name);
+
+        if (commits) store.CommitReconciliation();
+        else store.RollbackReconciliation();
+        Assert.Equal(commits ? "Scan" : "Snapshot", Names(registry));
+    }
+
+    [Fact]
+    public async Task RolledBackRescan_WithoutACache_RestoresThePreviousCoverage()
+    {
+        var (_, store, registry, applier) = Host();
+        Assert.True(await applier.ApplyAsync(CoverageDelta(1, Coverage("One"))));
+        Assert.Equal("One", Names(registry));
+
+        store.BeginReconciliation();
+        Assert.True(await applier.ApplyAsync(CoverageDelta(2, Coverage("Two"))));
+        Assert.Equal("One", Names(registry));
+        store.RollbackReconciliation();
+        Assert.Equal("One", Names(registry));
+    }
+
+    [Fact]
+    public async Task CommitOutsideAReconciliation_ShowsItsCoverageAtOnce()
+    {
+        // A watcher batch or a single-file refresh: as before, its coverage is served once it commits, and a
+        // delta without coverage keeps the recorded one.
+        var (_, _, registry, applier) = Host();
+        Assert.True(await applier.ApplyAsync(CoverageDelta(1, Coverage("One"))));
+        Assert.Equal("One", Names(registry));
+        Assert.True(await applier.ApplyAsync(CoverageDelta(2, Coverage("Two"))));
+        Assert.Equal("Two", Names(registry));
+        Assert.True(await applier.ApplyAsync(CoverageDelta(3, null)));
+        Assert.Equal("Two", Names(registry));
+    }
+
     [Fact]
     public void CommitWithoutAnAnnotation_KeepsTheRecordedOne()
     {
@@ -227,5 +299,55 @@ public class ShardAnnotationTests
         var target = new InMemoryDatabase();
         target.PublishLoadedShards(loaded, [KeyValuePair.Create(A, annotation)]);
         Assert.Same(annotation, Latched(target, A).Annotation);
+    }
+
+    private static List<ProjectCoverage> RichCoverage(string missing) =>
+    [
+        new("App", "src/App.csproj", ProjectCoverageStates.Partial, 3, "net10.0",
+            InactiveTargetFrameworks: ["net8.0"], MissingReferences: [missing], AnalyzerPackages: ["A"],
+            UnresolvedNames: 2, CommonUnresolvedNames: ["Foo"], Notes: ["n"]),
+        new("Lib", null, ProjectCoverageStates.Complete, 1),
+    ];
+
+    [Fact]
+    public void EqualCoverageInANewList_KeepsTheRecordedInstance_AndTheViewClean()
+    {
+        // Every delta deserializes its own list (and the lists inside each entry): equal by content is equal.
+        var database = new InMemoryDatabase();
+        var recorded = new ShardAnnotation("v1", RichCoverage("Missing.dll"));
+        Commit(database, A, [Node(A, "V1")], recorded);
+        var (shards, annotations) = database.LatchPublished();
+        var before = SnapshotView.Of(shards, annotations);
+
+        Assert.True(database.TryCommitGeneration(database.LastCommittedGeneration + 1, [], [],
+            Scope(A, new ShardAnnotation("v1", RichCoverage("Missing.dll")), [])));
+        Assert.Same(recorded, Latched(database, A).Annotation);
+        var (shardsAfter, annotationsAfter) = database.LatchPublished();
+        Assert.True(before.SameAs(SnapshotView.Of(shardsAfter, annotationsAfter)));
+
+        // A different list (one string deep inside an entry) replaces it.
+        var changed = new ShardAnnotation("v1", RichCoverage("Other.dll"));
+        Assert.True(database.TryCommitGeneration(database.LastCommittedGeneration + 1, [], [], Scope(A, changed, [])));
+        Assert.Same(changed, Latched(database, A).Annotation);
+    }
+
+    [Fact]
+    public void CoverageComparison_KnowsEveryFieldOfProjectCoverage()
+    {
+        // The store compares coverage field by field; a field added to the protocol record must be added there.
+        Assert.Equal(11, typeof(ProjectCoverage).GetConstructors().Single().GetParameters().Length);
+        var baseline = RichCoverage("M")[0];
+        var variants = new[]
+        {
+            baseline with { Name = "x" }, baseline with { Path = "x" }, baseline with { State = "x" },
+            baseline with { Files = 9 }, baseline with { TargetFramework = "x" },
+            baseline with { InactiveTargetFrameworks = ["x"] }, baseline with { MissingReferences = ["x"] },
+            baseline with { AnalyzerPackages = ["x"] }, baseline with { UnresolvedNames = 9 },
+            baseline with { CommonUnresolvedNames = ["x"] }, baseline with { Notes = ["x"] },
+        };
+        Assert.True(InMemoryDatabase.SameCoverage([baseline], RichCoverage("M").Take(1).ToList()));
+        Assert.All(variants, variant => Assert.False(InMemoryDatabase.SameCoverage([baseline], [variant])));
+        Assert.False(InMemoryDatabase.SameCoverage([baseline], null));
+        Assert.True(InMemoryDatabase.SameCoverage(null, null));
     }
 }

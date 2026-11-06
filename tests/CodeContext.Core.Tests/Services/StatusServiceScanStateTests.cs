@@ -24,7 +24,7 @@ namespace CodeContext.Core.Tests.Services
 
         private StatusService CreateService(
             IApiMetrics? apiMetrics = null, ApplicationStartTime? applicationStartTime = null,
-            List<FileMetadata>? files = null)
+            List<FileMetadata>? files = null, IAnalysisCoverageRegistry? coverage = null, ICacheStateProvider? cache = null)
         {
             _nodeRepository.GetAllAsync().Returns(new List<CodeNode>());
             _edgeRepository.GetAllAsync().Returns(new List<CodeEdge>());
@@ -35,7 +35,7 @@ namespace CodeContext.Core.Tests.Services
             return new StatusService(
                 _nodeRepository, _edgeRepository, _fileMetadataRepository,
                 _repositoryFactory, options, _scanState, _sessionRegistry,
-                apiMetrics ?? new ApiMetrics(), applicationStartTime: applicationStartTime);
+                apiMetrics ?? new ApiMetrics(), applicationStartTime: applicationStartTime, coverage: coverage, cacheState: cache);
         }
 
         [Fact]
@@ -208,6 +208,63 @@ namespace CodeContext.Core.Tests.Services
             Assert.Equal(4242, session.Pid);
             Assert.Equal(1, session.ProtocolVersion);
             Assert.Equal("indexing", status.Parsers.Status["fake"]);
+        }
+
+        [Fact]
+        public async Task GetStatusAsync_ReportsTheCacheObject_AndMarksCachedCoverage()
+        {
+            _scanState.Phase.Returns(ScanPhase.Scanning);
+            var coverage = new AnalysisCoverageRegistry();
+            coverage.Report("csharp", "default", [new CodeContext.Parser.Protocol.ProjectCoverage("App", "src/App.csproj", "partial", 3)]);
+            var cache = new CacheState(enabled: true, () => new CodeContext.Core.Services.CacheLoadOutcome(
+                CodeContext.Core.Services.CacheLoadKind.Loaded, null, new DateTime(2026, 11, 4, 10, 12, 3, DateTimeKind.Utc).Ticks, 42, 26_123_456, ["csharp"]));
+            cache.RunLoadStep();
+
+            var status = await CreateService(coverage: coverage, cache: cache).GetStatusAsync();
+            Assert.Equal("scanning", status.Indexing.Status);
+            Assert.Equal("verifying", status.Indexing.Cache!.State);
+            Assert.True(status.Indexing.Cache.ServingCached);
+            Assert.True(status.Coverage!.Cached);
+            var json = JsonSerializer.Serialize(status, CodeContextJsonContext.Default.StatusResponseDto);
+            Assert.Contains("\"operationId\":0,\"cache\":{\"state\":\"verifying\",\"servingCached\":true,\"snapshotAt\":\"2026-11-04T10:12:03.0000000Z\",\"snapshotSequence\":42,\"sizeBytes\":26123456,\"verification\":{\"csharp\":\"pending\"}}", json);
+            Assert.Contains("\"cached\":true", json);
+
+            // Verified: the object stays, nothing is served from the snapshot, coverage is no longer marked.
+            cache.OnScanCommitted();
+            _scanState.Phase.Returns(ScanPhase.Ready);
+            status = await CreateService(coverage: coverage, cache: cache).GetStatusAsync();
+            Assert.Equal("ready", status.Indexing.Status);
+            Assert.Equal("verified", status.Indexing.Cache!.State);
+            Assert.False(status.Indexing.Cache.ServingCached);
+            Assert.Null(status.Coverage!.Cached);
+            Assert.DoesNotContain("\"cached\"", JsonSerializer.Serialize(status, CodeContextJsonContext.Default.StatusResponseDto));
+        }
+
+        [Fact]
+        public void ComposeCache_FollowsTheOnePhaseTheResponseReports()
+        {
+            var verifying = new CacheStatusDto(CacheState.Verifying, true, SnapshotSequence: 42);
+            var unverified = verifying with { State = CacheState.Unverified };
+            var verified = new CacheStatusDto(CacheState.Verified, false, SnapshotSequence: 43);
+
+            // Ready: only after the commit left verifying, so the later reading; never serving with ready.
+            Assert.Same(verified, StatusService.ComposeCache(verifying, verified, ScanPhase.Ready));
+            // Loaded or verified during the reads, before ready: the serving reading wins.
+            Assert.Same(verifying, StatusService.ComposeCache(verifying, verified, ScanPhase.Scanning));
+            Assert.Same(verifying, StatusService.ComposeCache(null, verifying, ScanPhase.Scanning));
+            // Error with a served snapshot is always unverified; a running scan is always verifying.
+            Assert.Equal(CacheState.Unverified, StatusService.ComposeCache(verifying, verifying, ScanPhase.Error)!.State);
+            Assert.Equal(CacheState.Verifying, StatusService.ComposeCache(unverified, unverified, ScanPhase.Scanning)!.State);
+            Assert.Same(verified, StatusService.ComposeCache(verified, verified, ScanPhase.Error));
+            Assert.Null(StatusService.ComposeCache(null, null, ScanPhase.Scanning));
+        }
+
+        [Fact]
+        public async Task GetStatusAsync_WithNoCache_HasNoCacheObject()
+        {
+            _scanState.Phase.Returns(ScanPhase.Ready);
+            var json = JsonSerializer.Serialize(await CreateService().GetStatusAsync(), CodeContextJsonContext.Default.StatusResponseDto);
+            Assert.DoesNotContain("\"cache\"", json);
         }
     }
 }

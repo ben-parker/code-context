@@ -14,11 +14,11 @@ namespace CodeContext.Core
         public string[] IgnorePatterns { get; set; } = ["node_modules/**", "bin/**", "obj/**", ".venv/**", ".git/**", ".codecontext/**"];
 
         /// <summary>
-        /// Writes graph snapshots under <c>&lt;root&gt;/.codecontext/cache/</c> after commits. Off by
-        /// default while nothing reads them; set <c>CodeContext:CacheEnabled</c> (environment
-        /// variable <c>CodeContext__CacheEnabled=true</c>) to turn it on.
+        /// Loads the newest valid graph snapshot under <c>&lt;root&gt;/.codecontext/cache/</c> at start, serves
+        /// it labelled while the startup scan verifies it, and writes snapshots after commits. On by
+        /// default; <c>start --no-cache</c> or <c>CodeContext:CacheEnabled=false</c> turn it off.
         /// </summary>
-        public bool CacheEnabled { get; set; }
+        public bool CacheEnabled { get; set; } = true;
 
         /// <summary>
         /// Seconds without a further commit before a changed graph is written. From configuration,

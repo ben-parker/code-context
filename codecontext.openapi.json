@@ -533,6 +533,107 @@
           }
         }
       },
+      "CacheNotice": {
+        "type": "object",
+        "properties": {
+          "state": {
+            "type": "string"
+          },
+          "snapshotAt": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "CacheStatusDto": {
+        "required": [
+          "state",
+          "servingCached"
+        ],
+        "type": "object",
+        "properties": {
+          "state": {
+            "type": "string"
+          },
+          "servingCached": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "snapshotAt": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "snapshotSequence": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "sizeBytes": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "workerStateBytes": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "lastWriteMs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "lastCaptureMs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "lastWriteError": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "verification": {
+            "type": [
+              "null",
+              "object"
+            ],
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        }
+      },
       "CodeNode": {
         "type": "object",
         "properties": {
@@ -842,6 +943,16 @@
               "string"
             ],
             "format": "int32"
+          },
+          "cache": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CacheNotice"
+              }
+            ]
           },
           "truncated": {
             "type": "boolean"
@@ -1254,6 +1365,16 @@
       "CompleteContextResponse": {
         "type": "object",
         "properties": {
+          "cache": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CacheNotice"
+              }
+            ]
+          },
           "matches": {
             "type": "array",
             "items": {
@@ -1498,6 +1619,12 @@
             "items": {
               "$ref": "#/components/schemas/ProjectCoverage"
             }
+          },
+          "cached": {
+            "type": [
+              "null",
+              "boolean"
+            ]
           }
         }
       },
@@ -1693,6 +1820,16 @@
             ],
             "format": "int64",
             "default": 0
+          },
+          "cache": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CacheStatusDto"
+              }
+            ]
           }
         }
       },

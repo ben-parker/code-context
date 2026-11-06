@@ -19,6 +19,9 @@ namespace CodeContext.Core.Snapshots
     {
         public bool Loaded => Rejection == SnapshotRejection.None;
 
+        /// <summary>See <see cref="SnapshotOpenResult.PassedHostMeta"/>; true for every refusal after the file opened.</summary>
+        public bool PassedHostMeta { get; init; }
+
         /// <summary>The shards in the form <see cref="InMemoryDatabase.PublishLoadedShards"/> takes.</summary>
         public IEnumerable<KeyValuePair<ShardKey, IGraphShard>> ForPublish()
             => Shards.Select(shard => KeyValuePair.Create(shard.Key, (IGraphShard)shard.Shard));
@@ -43,7 +46,8 @@ namespace CodeContext.Core.Snapshots
             string path, byte[] key, SnapshotExpectations expected, Func<ShardKey, bool>? acceptShard = null)
         {
             var opened = SnapshotFile.Open(path, key, expected);
-            if (opened.File is not { } file) return SnapshotLoadResult.Refused(opened.Rejection, opened.Reason);
+            if (opened.File is not { } file)
+                return SnapshotLoadResult.Refused(opened.Rejection, opened.Reason) with { PassedHostMeta = opened.PassedHostMeta };
             using (file) return Materialize(file, acceptShard);
         }
 
@@ -56,7 +60,7 @@ namespace CodeContext.Core.Snapshots
             }
             catch (SnapshotCorruptException exception)
             {
-                return SnapshotLoadResult.Refused(SnapshotRejection.Structure, exception.Message);
+                return SnapshotLoadResult.Refused(SnapshotRejection.Structure, exception.Message) with { PassedHostMeta = true };
             }
         }
 

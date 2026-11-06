@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Net;
+using CodeContext.Api;
 using CodeContext.Api.Commands;
 using CodeContext.Core.Instances;
 
@@ -111,8 +112,69 @@ public class DetachedStartOrchestratorTests
             "--idle-timeout", "37", "--log-file", "C:\\logs\\query.log", "--instance-id"],
             capturedStartInfo!.ArgumentList.Take(10));
         Assert.False(string.IsNullOrWhiteSpace(capturedStartInfo.ArgumentList[10]));
+        // No --no-cache unless asked for.
+        Assert.Equal(11, capturedStartInfo.ArgumentList.Count);
         Assert.Equal(Root, capturedStartInfo.WorkingDirectory);
         Assert.Equal($"http://localhost:{port}/healthz", Assert.Single(requests).ToString());
+    }
+
+    [Fact]
+    public async Task NoCache_IsPassedToTheChild()
+    {
+        ProcessStartInfo? capturedStartInfo = null;
+        var registered = Instance("generated-at-launch", 8123, 456);
+        var runtime = Runtime(startProcess: startInfo =>
+        {
+            capturedStartInfo = startInfo;
+            registered.InstanceId = startInfo.ArgumentList[startInfo.ArgumentList.IndexOf("--instance-id") + 1];
+            return new FakeProcess(456);
+        });
+
+        var result = await new DetachedStartOrchestrator(new SequencedRegistry([], [registered]), runtime).StartAsync(
+            Root, null, 120, "C:\\logs\\query.log", CancellationToken.None, noCache: true);
+
+        Assert.True(result.Success);
+        Assert.Equal("--no-cache", capturedStartInfo!.ArgumentList[^1]);
+    }
+
+    [Fact]
+    public void StartCommand_ParsesNoCache()
+    {
+        var command = Program.CreateRootCommand();
+        var start = command.Subcommands.Single(subcommand => subcommand.Name == "start");
+        Assert.Contains(start.Options, option => option.Name == "--no-cache");
+        Assert.Empty(command.Parse(["start", "--no-cache", "--detach"]).Errors);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void NoCache_TurnsTheCacheOff_InTheRestHostAndTheMcpHost(bool noCache)
+    {
+        // The services each host is built from, as StartCommandHandler configures them; nothing is started.
+        var rest = new Microsoft.Extensions.DependencyInjection.ServiceCollection();
+        StartCommandHandler.ConfigureWebHostServices(
+            rest, Root, isProduction: true, port: 7999,
+            new StartSettings(Root, 7999, Mcp: false, Detach: false, IdleTimeoutMinutes: 30, LogFile: null, NoCache: noCache),
+            "rest-instance", new CodeContext.Core.Services.ApplicationStartTime(DateTimeOffset.UtcNow));
+        var mcp = new Microsoft.Extensions.DependencyInjection.ServiceCollection();
+        StartCommandHandler.ConfigureMcpHostServices(mcp, Root, isProduction: true, noCache);
+
+        foreach (var services in new[] { rest, mcp })
+        {
+            using var provider = Microsoft.Extensions.DependencyInjection.ServiceCollectionContainerBuilderExtensions.BuildServiceProvider(services);
+            var options = Microsoft.Extensions.DependencyInjection.ServiceProviderServiceExtensions
+                .GetRequiredService<Microsoft.Extensions.Options.IOptions<CodeContextOptions>>(provider).Value;
+            Assert.Equal(!noCache, options.CacheEnabled);
+        }
+    }
+
+    [Fact]
+    public void NoCacheHelp_SaysItAppliesOnlyToANewStart()
+    {
+        var start = Program.CreateRootCommand().Subcommands.Single(subcommand => subcommand.Name == "start");
+        Assert.Contains("only to a new start", start.Options.Single(option => option.Name == "--no-cache").Description);
+        Assert.Contains("only to a new start", StartCommandHandler.NoCacheIgnoredMessage);
     }
 
     [Fact]

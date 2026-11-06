@@ -36,6 +36,12 @@ Reading results:
   them before treating an omission as absence, and raise `--limit` for the rest of
   a truncated list. `usedBy` is always printed; other zero-count sections are
   omitted.
+- A `cache verifying` or `cache unverified` line before a result (first, or after each
+  `query` line in `query multi`) means it comes from the index saved by an earlier run,
+  before the files were re-checked: it may be stale, and a `missing` or empty `usedBy` is
+  not conclusive. Query again once `codecontext status --path .` shows `indexing.status`
+  `ready` (for `unverified`, after `POST /api/index/refresh` or a restart), or cross-check
+  with `rg`.
 - `relationships not loaded` means nothing was fetched: the name was ambiguous
   (re-query with a target's identifier) or the depth was 0. It says nothing about
   whether the symbol has users.

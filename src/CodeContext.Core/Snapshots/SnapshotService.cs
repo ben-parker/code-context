@@ -51,19 +51,29 @@ namespace CodeContext.Core.Snapshots
         /// <summary>Test seam: runs between the temp file's flush and its rename (a crash at that point).</summary>
         public Action<string>? BeforeRename { get; init; }
 
+        /// <summary>Test seam: runs as the retire pass after a write starts (a failing directory listing).</summary>
+        public Action? BeforeRetire { get; init; }
+
         /// <summary>Test seam: runs between opening the cache directory and taking the writer lock (a swap at that point).</summary>
         public Action<CacheDirectory>? BeforeLock { get; init; }
 
+        /// <summary>
+        /// Resolves the default key path (<c>~/.codecontext/cache.key</c>). Replaced by the test assembly with
+        /// one that throws, so a test that turns the cache on without its own key path fails instead of
+        /// touching the real profile.
+        /// </summary>
+        internal static Func<string?> DefaultKeyPath { get; set; } = SnapshotKey.DefaultPath;
+
         public static SnapshotServiceSettings From(CodeContextOptions options) => From(options, null);
 
-        /// <summary><see cref="From(CodeContextOptions)"/> with the user profile folder given, for tests.</summary>
+        /// <summary><see cref="From(CodeContextOptions)"/> with the user profile folder given, for tests. No key path is resolved while the cache is off.</summary>
         internal static SnapshotServiceSettings From(CodeContextOptions options, string? userProfile) => new()
         {
             Enabled = options.CacheEnabled,
             RootPath = options.RootPath,
-            KeyPath = !string.IsNullOrEmpty(options.CacheKeyPath)
-                ? options.CacheKeyPath
-                : userProfile is null ? SnapshotKey.DefaultPath() : SnapshotKey.DefaultPath(userProfile),
+            KeyPath = !options.CacheEnabled ? null
+                : !string.IsNullOrEmpty(options.CacheKeyPath) ? options.CacheKeyPath
+                : userProfile is null ? DefaultKeyPath() : SnapshotKey.DefaultPath(userProfile),
             HostVersion = AssemblyVersionInfo.GetInformationalVersion(typeof(SnapshotService).Assembly, "0.0.0"),
             InstanceId = Guid.TryParse(options.InstanceId, out var id) ? id : Guid.Empty,
             QuietPeriod = TimeSpan.FromSeconds(Math.Max(0, options.SnapshotQuietSeconds)),
@@ -151,6 +161,7 @@ namespace CodeContext.Core.Snapshots
         private readonly InMemoryDatabase? _database;
         private readonly IScanStateService _scanState;
         private readonly SnapshotServiceSettings _settings;
+        private readonly SnapshotStartup _startup;
         private readonly TimeProvider _time;
         private readonly ILogger<SnapshotService> _logger;
 
@@ -183,15 +194,19 @@ namespace CodeContext.Core.Snapshots
             InMemoryDatabase? database,
             IScanStateService scanState,
             SnapshotServiceSettings settings,
+            SnapshotStartup startup,
             TimeProvider time,
-            ILogger<SnapshotService> logger)
+            ILogger<SnapshotService> logger,
+            CacheState? cacheState = null)
         {
             _coordinator = coordinator;
             _database = database;
             _scanState = scanState;
             _settings = settings;
+            _startup = startup;
             _time = time;
             _logger = logger;
+            cacheState?.AttachWriter(() => Status);
         }
 
         public SnapshotServiceStatus Status
@@ -223,6 +238,11 @@ namespace CodeContext.Core.Snapshots
             get { lock (_gate) return _writeTask; }
         }
 
+        /// <summary>
+        /// Takes over from the coordinator's start-up step (<see cref="SnapshotStartup"/>), now or once it has
+        /// run: a writer's key, directory, lock and next sequence, and the view of what was loaded, so that
+        /// a start does not rewrite the snapshot it has just loaded.
+        /// </summary>
         public Task StartAsync(CancellationToken cancellationToken)
         {
             if (!_settings.Enabled)
@@ -230,104 +250,57 @@ namespace CodeContext.Core.Snapshots
                 SetStatus(_status with { Mode = SnapshotCacheMode.Disabled, Reason = "the cache is turned off" });
                 return Task.CompletedTask;
             }
+            _startup.OnCompleted(Adopt);
+            return Task.CompletedTask;
+        }
+
+        private void Adopt(SnapshotStartupResult result)
+        {
+            lock (_gate)
+            {
+                // Stopped while the step ran (a slow load): take nothing over; the step's Dispose releases the lock.
+                if (_stopping || _status.Mode == SnapshotCacheMode.Stopped) return;
+            }
+            switch (result.Mode)
+            {
+                case SnapshotCacheMode.ReadOnly:
+                    SetStatus(_status with { Mode = SnapshotCacheMode.ReadOnly, Reason = result.Reason });
+                    return;
+                case SnapshotCacheMode.Writer:
+                    break;
+                default:
+                    // The start-up step has logged why, and holds nothing.
+                    SetStatus(_status with { Mode = SnapshotCacheMode.Disabled, Reason = result.Reason });
+                    return;
+            }
 
             try
             {
-                Prepare();
+                lock (_gate)
+                {
+                    // Stopped before the step ran: the step's own Dispose releases the lock.
+                    if (_stopping) return;
+                    _lock = _startup.TakeLock();
+                    _directory = result.Directory;
+                    _key = result.Key;
+                    _host = result.Host;
+                    _nextSequence = result.NextSequence;
+                    _written = result.LoadedView ?? SnapshotView.Empty;
+                    _lastSeen = _written;
+                }
+                _timer = _time.CreateTimer(_ => OnTimer(), null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+                SetStatus(_status with { Mode = SnapshotCacheMode.Writer, Reason = null });
+                _logger.LogInformation("Snapshot cache enabled: writing snapshots to {Directory}.", result.Directory!.WorkspacePath);
+
+                _coordinator.SetMutationObserver(OnMutationCommandCompleted);
+                // The startup scan may have committed before the observer was attached.
+                OnMutationCommandCompleted();
             }
             catch (Exception exception)
             {
                 // Releases the lock if it was taken, so another instance is not refused for the rest of this run.
                 Disable($"the cache could not be prepared: {exception.Message}");
             }
-            return Task.CompletedTask;
-        }
-
-        /// <summary>
-        /// The start steps of plan 3.5 that belong to the write side: the key, the directory, the lock, then
-        /// (as the lock holder only) the <c>.gitignore</c> and the cleanup of temp files and older snapshots.
-        /// Phase 4 moves these into the coordinator's first step.
-        /// </summary>
-        private void Prepare()
-        {
-            if (_database is null)
-            {
-                Disable("the graph store is not the in-memory store");
-                return;
-            }
-            if (string.IsNullOrEmpty(_settings.RootPath) || !Directory.Exists(_settings.RootPath))
-            {
-                Disable($"the root '{_settings.RootPath}' is not a directory");
-                return;
-            }
-            if (!BitConverter.IsLittleEndian)
-            {
-                Disable("snapshots are written only by little-endian processes");
-                return;
-            }
-            if (string.IsNullOrEmpty(_settings.KeyPath))
-            {
-                Disable("there is no user profile folder to keep the snapshot key in");
-                return;
-            }
-
-            // The key first: a key problem must leave the repository untouched.
-            try
-            {
-                _key = SnapshotKey.LoadOrCreate(_settings.KeyPath);
-            }
-            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException)
-            {
-                Disable($"the snapshot key at '{_settings.KeyPath}' cannot be used: {exception.Message}");
-                return;
-            }
-
-            var directory = CacheDirectory.Open(_settings.RootPath, _settings.WorkspaceId, out var refusal);
-            if (directory is null)
-            {
-                Disable(refusal!);
-                return;
-            }
-
-            _settings.BeforeLock?.Invoke(directory);
-            var lockResult = directory.TryAcquireWriterLock(out var lockStream, out var lockReason);
-            switch (lockResult)
-            {
-                case WriterLockResult.HeldElsewhere:
-                    SetStatus(_status with { Mode = SnapshotCacheMode.ReadOnly, Reason = lockReason });
-                    _logger.LogInformation(
-                        "Snapshot cache is read-only for this instance: another instance writes snapshots for {Root}.",
-                        _settings.RootPath);
-                    return;
-                case WriterLockResult.Refused:
-                    Disable(lockReason!);
-                    return;
-            }
-            lock (_gate)
-            {
-                _lock = lockStream;
-                _directory = directory;
-            }
-
-            if (directory.EnsureGitignore() is { } gitignoreRefusal)
-            {
-                Disable(gitignoreRefusal);
-                return;
-            }
-
-            _host = new SnapshotHostMeta(
-                _settings.HostVersion, Path.GetFullPath(_settings.RootPath), RuntimeInformation.RuntimeIdentifier,
-                OperatingSystem.IsWindows());
-            if (!LevelsStillPlain(directory)) return;
-            CleanUpAtStart(directory);
-
-            _timer = _time.CreateTimer(_ => OnTimer(), null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
-            SetStatus(_status with { Mode = SnapshotCacheMode.Writer, Reason = null });
-            _logger.LogInformation("Snapshot cache enabled: writing snapshots to {Directory}.", directory.WorkspacePath);
-
-            _coordinator.SetMutationObserver(OnMutationCommandCompleted);
-            // The startup scan may have committed before the observer was attached.
-            OnMutationCommandCompleted();
         }
 
         /// <summary>
@@ -342,55 +315,6 @@ namespace CodeContext.Core.Snapshots
         }
 
         private static bool IsUsable(ulong sequence) => sequence is >= 1 and <= MaxSequence;
-
-        /// <summary>A refusal at or after authentication, which costs a full read and hash of the file.</summary>
-        private static bool IsCostly(SnapshotRejection rejection)
-            => rejection is SnapshotRejection.Authentication or SnapshotRejection.Structure or SnapshotRejection.Unexpected;
-
-        /// <summary>
-        /// Start-up cleanup, as the lock holder. Deletes every temp file. Tries the snapshots with a usable
-        /// sequence, newest first, until one opens, giving up after <see cref="MaxCostlyRefusals"/> refusals
-        /// at or after authentication. Keeps the one that opened and deletes every other snapshot file, tried
-        /// or not, including names outside the usable range. The next sequence is one above the kept file's
-        /// and above every usable sequence this code's names still hold because they could not be deleted;
-        /// a name that was deleted never raises it.
-        /// </summary>
-        private void CleanUpAtStart(CacheDirectory directory)
-        {
-            var files = directory.EnumerateOwnFiles();
-
-            CacheFile? kept = null;
-            var costly = 0;
-            foreach (var candidate in files
-                         .Where(file => file.Kind == CacheFileKind.Snapshot && IsUsable(file.Sequence))
-                         .OrderByDescending(file => file.Sequence).ThenBy(file => file.Name, StringComparer.Ordinal))
-            {
-                if (costly >= MaxCostlyRefusals) break;
-                var opened = SnapshotFile.Open(candidate.Path, _key!, Expectations());
-                using (opened.File)
-                {
-                    if (opened.File is not null)
-                    {
-                        kept = candidate;
-                        break;
-                    }
-                }
-                if (IsCostly(opened.Rejection)) costly++;
-                _logger.LogDebug("Ignoring snapshot {Name}: {Rejection} {Reason}.", candidate.Name, opened.Rejection, opened.Reason);
-            }
-
-            ulong highestLeft = 0;
-            var busy = 0;
-            foreach (var file in files)
-            {
-                if (ReferenceEquals(file, kept)) continue;
-                if (CacheDirectory.TryDelete(file)) continue;
-                busy++;
-                if (IsUsable(file.Sequence) && file.Sequence > highestLeft) highestLeft = file.Sequence;
-            }
-            if (busy > 0) _logger.LogDebug("{Count} older snapshot file(s) are in use and will be deleted later.", busy);
-            _nextSequence = Math.Max(kept?.Sequence ?? 0, highestLeft) + 1;
-        }
 
         /// <summary>Called on the coordinator loop after every mutation command. Cheap: O(shards), no I/O.</summary>
         internal void OnMutationCommandCompleted()
@@ -581,7 +505,7 @@ namespace CodeContext.Core.Snapshots
                 var written = new WriteOutcome(WriteOutcomeKind.Written, Sequence: sequence, FileName: name, Length: result.Length,
                     Milliseconds: (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds);
                 // Checked again before deleting anything; the snapshot itself is written either way.
-                if (LevelsStillPlain(directory)) RetireOlderThan(directory, sequence);
+                if (LevelsStillPlain(directory)) TryRetireOlderThan(directory, sequence);
                 return written;
             }
             catch (Exception exception)
@@ -623,15 +547,24 @@ namespace CodeContext.Core.Snapshots
         /// and every one of this code's names outside the usable range. A file another process has open or
         /// mapped stays and is retried at the next write and the next start.
         /// </summary>
-        private void RetireOlderThan(CacheDirectory directory, ulong sequence)
+        private void TryRetireOlderThan(CacheDirectory directory, ulong sequence)
         {
-            var busy = 0;
-            foreach (var file in directory.EnumerateOwnFiles())
+            try
             {
-                if (IsUsable(file.Sequence) && file.Sequence >= sequence) continue;
-                if (!CacheDirectory.TryDelete(file)) busy++;
+                _settings.BeforeRetire?.Invoke();
+                var busy = 0;
+                foreach (var file in directory.EnumerateOwnFiles())
+                {
+                    if (IsUsable(file.Sequence) && file.Sequence >= sequence) continue;
+                    if (!CacheDirectory.TryDelete(file)) busy++;
+                }
+                if (busy > 0) _logger.LogDebug("{Count} older snapshot file(s) are in use and will be deleted later.", busy);
             }
-            if (busy > 0) _logger.LogDebug("{Count} older snapshot file(s) are in use and will be deleted later.", busy);
+            catch (Exception exception)
+            {
+                // The new snapshot is written and verified either way; the retire runs again after the next write.
+                _logger.LogDebug(exception, "Retiring older snapshots failed; retried at the next write.");
+            }
         }
 
         private void FinishWrite(SnapshotCapture capture, WriteOutcome outcome)
@@ -742,7 +675,11 @@ namespace CodeContext.Core.Snapshots
             {
                 if (_status.Mode != SnapshotCacheMode.Writer)
                 {
-                    if (_status.Mode == SnapshotCacheMode.Starting) _status = _status with { Mode = SnapshotCacheMode.Stopped };
+                    if (_status.Mode == SnapshotCacheMode.Starting)
+                    {
+                        _status = _status with { Mode = SnapshotCacheMode.Stopped };
+                        _stopping = true;
+                    }
                     return;
                 }
                 _stopping = true;

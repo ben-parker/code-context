@@ -44,6 +44,7 @@ namespace CodeContext.Core.Tests.Services
             state.TryBeginScan();
             state.ReportProgress(5, 10, "a.cs");
             state.ReportComplete(10, TimeSpan.FromSeconds(2));
+            state.CompleteScan();
 
             Assert.True(state.TryBeginScan());
             Assert.Equal(ScanPhase.Scanning, state.Phase);
@@ -65,15 +66,20 @@ namespace CodeContext.Core.Tests.Services
         }
 
         [Fact]
-        public void ReportComplete_TransitionsToReady_WithDuration()
+        public void ReportComplete_RecordsTheTotals_ButReadyWaitsForTheCommit()
         {
             var state = new ScanStateService();
             state.TryBeginScan();
 
             state.ReportComplete(12, TimeSpan.FromSeconds(3));
 
-            Assert.Equal(ScanPhase.Ready, state.Phase);
+            // The workers are done but the reconciliation has not committed: not ready yet.
+            Assert.Equal(ScanPhase.Scanning, state.Phase);
             Assert.Equal(12, state.FilesProcessed);
+            Assert.Equal(TimeSpan.FromSeconds(3), state.LastScanDuration);
+
+            state.CompleteScan();
+            Assert.Equal(ScanPhase.Ready, state.Phase);
             Assert.Equal(TimeSpan.FromSeconds(3), state.LastScanDuration);
         }
 
