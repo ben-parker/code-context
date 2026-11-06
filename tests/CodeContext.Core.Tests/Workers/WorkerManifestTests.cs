@@ -86,13 +86,6 @@ public class WorkerManifestTests : IDisposable
     }
 
     [Fact]
-    public void ResolveCommand_BareCommandNotBesideManifest_FallsBackToPathLookup()
-    {
-        var manifest = new WorkerManifest(1, "fake", "Fake", "1", "dotnet", null, 1, 1);
-        Assert.Equal("dotnet", manifest.ResolveCommand(_directory));
-    }
-
-    [Fact]
     public void ResolveCommand_DottedWindowsApphost_ProbesExeSuffix()
     {
         if (!OperatingSystem.IsWindows()) return;
@@ -107,15 +100,17 @@ public class WorkerManifestTests : IDisposable
     [Fact]
     public void FromManifest_BuildsLaunchSpecWithManifestWorkingDirectory()
     {
+        var workerPath = Path.Combine(_directory, "worker.exe");
+        File.WriteAllText(workerPath, "");
         var path = WriteManifest("""
             {"manifestVersion": 1, "parserId": "fake", "displayName": "Fake Worker", "version": "1",
-             "command": "dotnet", "args": ["exec", "worker.dll"], "minProtocolVersion": 1, "maxProtocolVersion": 1}
+             "command": "worker.exe", "args": ["exec", "worker.dll"], "minProtocolVersion": 1, "maxProtocolVersion": 1}
             """);
 
         var spec = WorkerLaunchSpec.FromManifest(path);
 
         Assert.Equal("fake", spec.ParserId);
-        Assert.Equal("dotnet", spec.FileName);
+        Assert.Equal(workerPath, spec.FileName);
         Assert.Equal(["exec", "worker.dll"], spec.Arguments);
         Assert.Equal(Path.GetDirectoryName(Path.GetFullPath(path)), spec.WorkingDirectory);
         Assert.Equal(1, spec.MinProtocolVersion);

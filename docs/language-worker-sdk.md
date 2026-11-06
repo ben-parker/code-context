@@ -36,7 +36,8 @@ manifests are never auto-executed.
 ```
 
 A command found beside the manifest is preferred; otherwise a bare command uses
-`PATH`. Explicit relative commands resolve from the manifest directory. Releases
+absolute `PATH` entries, and never the current directory, which is usually the
+repository being indexed. Explicit relative commands resolve from the manifest directory. Releases
 should carry their runtime or a self-contained executable so installing CodeContext
 once is sufficient.
 
