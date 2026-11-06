@@ -1,11 +1,23 @@
 import unittest
 
-from codecontext_worker_sdk import METHODS, MessageDecoder, encode_message
+from codecontext_worker_sdk import (
+    BASELINE_ACCEPTED,
+    BASELINE_REJECTED,
+    CAPABILITIES,
+    METHODS,
+    MessageDecoder,
+    encode_message,
+)
 
 
 class FramingTests(unittest.TestCase):
     def test_exports_analysis_progress_notification_method(self) -> None:
         self.assertEqual("analysis/progress", METHODS["analysis_progress"])
+
+    def test_exports_the_persistent_state_method_capability_and_baseline_answers(self) -> None:
+        self.assertEqual("workspace/saveState", METHODS["save_state"])
+        self.assertEqual("persistentState", CAPABILITIES["persistent_state"])
+        self.assertEqual(("accepted", "rejected"), (BASELINE_ACCEPTED, BASELINE_REJECTED))
 
     def test_fragmented_and_adjacent_frames(self) -> None:
         first = encode_message({"jsonrpc": "2.0", "id": 1, "result": "héllo"})

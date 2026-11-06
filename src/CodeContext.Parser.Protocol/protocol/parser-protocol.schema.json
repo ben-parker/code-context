@@ -61,7 +61,8 @@
             "workspaceAnalysis": { "type": "boolean" },
             "incrementalUpdates": { "type": "boolean" },
             "semanticAnalysis": { "type": "boolean" },
-            "nativeSyntaxTree": { "type": "boolean" }
+            "nativeSyntaxTree": { "type": "boolean" },
+            "persistentState": { "type": "boolean", "default": false, "description": "Optional. True: the worker can save its state on workspace/saveState and restore it from workspace/index's baseline, and sends fingerprints on every request. A host that does not see true sends neither baseline nor workspace/saveState. The initialize request does not say whether the host supports it: a host that does not simply never sends a baseline or workspace/saveState and ignores fingerprints." }
           }
         },
         "spanSemantics": {
@@ -104,7 +105,28 @@
       "properties": {
         "workspaceId": { "type": "string" },
         "generation": { "type": "integer", "description": "Host-assigned, monotonically increasing per workspace. Deltas for a stale generation are discarded." },
-        "files": { "type": "array", "uniqueItems": true, "items": { "type": "string" } }
+        "files": { "type": "array", "uniqueItems": true, "items": { "type": "string" } },
+        "baseline": { "$ref": "#/$defs/indexBaseline" }
+      }
+    },
+    "indexBaseline": {
+      "type": "object",
+      "description": "Optional, only to a worker that declared capabilities.persistentState, and at most once per worker process: with the first mutating request the host sends that process (workspace/index or workspace/applyChanges), so only when that request is a workspace/index (workspace/open does not count). The facts the host already holds were produced by an earlier process of this worker, which saved its state to statePath. Accept it (answer baseline 'accepted' with file-scoped deltas: only files whose facts differ from the baseline, plus removed files) or reject it (answer 'rejected' and replace the workspace, as for a request without one). Reject on any doubt: a missing or unreadable file, a SHA-256 or state id that does not match, another worker version or root, fingerprints that differ from the ones saved. The file is in the repository: treat its bytes as untrusted until the hash matches, and never execute it or deserialize it with a type-driven deserializer.",
+      "required": ["statePath", "stateId", "stateSha256", "fingerprints"],
+      "properties": {
+        "statePath": { "type": "string", "description": "Absolute path, computed by the host, of the state file an earlier workspace/saveState wrote." },
+        "stateId": { "type": "string", "description": "The stateId of that workspace/saveState. Opaque: compare it with the one the state records; never parse it." },
+        "stateSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Lowercase hex SHA-256 of the file's bytes, as that save reported it." },
+        "fingerprints": { "type": "array", "items": { "$ref": "#/$defs/unitFingerprint" }, "description": "The fingerprints of the request that produced the facts, as the worker sent them." }
+      }
+    },
+    "unitFingerprint": {
+      "type": "object",
+      "description": "One unit's fingerprint. Computed by the worker; the host stores it and hands it back, and never interprets it. A null unit or value is a protocol violation.",
+      "required": ["unit", "value"],
+      "properties": {
+        "unit": { "type": "string" },
+        "value": { "type": "string" }
       }
     },
     "indexWorkspaceResult": {
@@ -114,7 +136,29 @@
         "workspaceId": { "type": "string" },
         "generation": { "type": "integer" },
         "deltasEmitted": { "type": "integer" },
-        "complete": { "type": "boolean", "description": "False when some files could not be analyzed; details arrive as delta diagnostics." }
+        "complete": { "type": "boolean", "description": "False when some files could not be analyzed; details arrive as delta diagnostics." },
+        "baseline": { "type": "string", "enum": ["accepted", "rejected"], "description": "Required when the request carried a baseline, forbidden otherwise. 'accepted': every delta of the request is file-scoped (replacesWorkspace false). 'rejected': every delta replaces the workspace. Anything else fails the request." },
+        "baselineReason": { "type": "string", "description": "Optional, for 'rejected': why, for the host log." }
+      }
+    },
+    "saveStateParams": {
+      "type": "object",
+      "required": ["workspaceId", "statePath", "stateId"],
+      "properties": {
+        "workspaceId": { "type": "string" },
+        "statePath": { "type": "string", "description": "Absolute path chosen by the host. Write '<statePath>.tmp', flush it to disk, then rename it to statePath; answer only when the file is durable. Never write anywhere else." },
+        "stateId": { "type": "string", "description": "Host-chosen id, opaque to the worker: record it in the state and echo it in the result; never parse it." }
+      }
+    },
+    "saveStateResult": {
+      "type": "object",
+      "required": ["workspaceId", "stateId", "saved"],
+      "properties": {
+        "workspaceId": { "type": "string" },
+        "stateId": { "type": "string", "description": "Must equal the request's stateId." },
+        "saved": { "type": "boolean", "description": "False: nothing usable was written; the host records no state for this capture." },
+        "bytes": { "type": "integer", "minimum": 0, "description": "Required when saved: the file's length." },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Required when saved: lowercase hex SHA-256 of the file's bytes." }
       }
     },
     "applyChangesParams": {
@@ -137,7 +181,16 @@
         }
       }
     },
-    "applyChangesResult": { "$ref": "#/$defs/indexWorkspaceResult" },
+    "applyChangesResult": {
+      "type": "object",
+      "required": ["workspaceId", "generation", "deltasEmitted", "complete"],
+      "properties": {
+        "workspaceId": { "type": "string" },
+        "generation": { "type": "integer" },
+        "deltasEmitted": { "type": "integer" },
+        "complete": { "type": "boolean", "description": "False when some files could not be analyzed; details arrive as delta diagnostics." }
+      }
+    },
     "nativeSyntaxTreeParams": {
       "type": "object",
       "required": ["workspaceId", "filePath"],
@@ -227,7 +280,7 @@
         "workspaceId": { "type": "string" },
         "generation": { "type": "integer" },
         "requestId": { "type": "integer", "description": "Id of the workspace/index or workspace/applyChanges request this delta answers." },
-        "replacesWorkspace": { "type": "boolean", "description": "True: the delta replaces every fact this parser owns in the workspace (workspace/index responses). False: file-scoped replacement (workspace/applyChanges responses). Every chunk of one request MUST carry the same value - the host ORs the flags across chunks, so a single true chunk widens the whole request to a workspace replacement." },
+        "replacesWorkspace": { "type": "boolean", "description": "True: the delta replaces every fact this parser owns in the workspace (workspace/index responses). False: file-scoped replacement (workspace/applyChanges responses, and a workspace/index whose baseline the worker accepted). Every chunk of one request MUST carry the same value - the host ORs the flags across chunks, so a single true chunk widens the whole request to a workspace replacement." },
         "replacesFiles": { "type": "array", "items": { "type": "string" }, "description": "When replacesWorkspace is false: the files whose facts this delta replaces - the hash-dirty files (including untouched files whose emitted facts changed through cross-file resolution) plus files removed since the last emission. Entries MUST be byte-for-byte the same strings the emitted nodes carry in filePath (the host matches them as raw strings, case-insensitively on Windows, with no normalization). A file listed here with no facts in the request deletes that file's facts. The facts of a file are the nodes carrying it in filePath plus every edge sourced at those nodes, whichever file the edge was found in, so a change to such an edge must list the file that owns its source node. Repeat the full list on every chunk; the host unions across chunks. Empty when replacesWorkspace is true." },
         "nodes": { "type": "array", "items": { "$ref": "#/$defs/node" } },
         "edges": { "type": "array", "items": { "$ref": "#/$defs/edge" } },
@@ -247,6 +300,11 @@
           "type": "array",
           "description": "Optional. How much of each project's declared context was found, for workers with a notion of a project. Replaces the worker's previous report when the request commits. Send it on the first chunk.",
           "items": { "$ref": "#/$defs/projectCoverage" }
+        },
+        "fingerprints": {
+          "type": "array",
+          "description": "Optional; sent by a worker that declared capabilities.persistentState, on the first chunk of every request (the host reads the first chunk's only; later chunks' are ignored). The host stores them and hands them back unread. Replaces the shard's fingerprints when the request commits; a request without them clears them, and no baseline is offered from those facts.",
+          "items": { "$ref": "#/$defs/unitFingerprint" }
         },
         "diagnostics": {
           "type": "array",
@@ -306,6 +364,11 @@
       "description": "Optional (capabilities.nativeSyntaxTree). Returns a parser-native tree behind a common envelope.",
       "params": { "$ref": "#/$defs/nativeSyntaxTreeParams" },
       "result": { "$ref": "#/$defs/nativeSyntaxTreeResult" }
+    },
+    "workspace/saveState": {
+      "description": "Optional (capabilities.persistentState). Saves the worker's state for the facts it has emitted, to a host-named file. Sent only between mutations; never creates a generation and emits no delta. The host waits at most 5 s, then sends $/cancel, ignores a late result and deletes statePath. It discards a result whose workspaceId or stateId differs from the request's, whose sha256 is not 64 lowercase hex digits, or whose bytes differs from the file's length.",
+      "params": { "$ref": "#/$defs/saveStateParams" },
+      "result": { "$ref": "#/$defs/saveStateResult" }
     }
   },
   "notifications": {

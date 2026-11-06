@@ -2,8 +2,10 @@ using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using CodeContext.Core.Repositories;
 using CodeContext.Core.Repositories.InMemory;
 using CodeContext.Core.Services;
+using CodeContext.Core.Workers;
 using CodeContext.Parser.Protocol;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -20,6 +22,7 @@ namespace CodeContext.Core.Snapshots
         private readonly TimeSpan _quietPeriod = TimeSpan.FromSeconds(10);
         private readonly TimeSpan _maxDelay = TimeSpan.FromSeconds(120);
         private readonly TimeSpan _shutdownFlushTimeout = TimeSpan.FromSeconds(10);
+        private readonly TimeSpan _saveStateTimeout = TimeSpan.FromSeconds(5);
 
         public bool Enabled { get; init; }
 
@@ -42,6 +45,12 @@ namespace CodeContext.Core.Snapshots
         public TimeSpan MaxDelay { get => _maxDelay; init => _maxDelay = Cap(value); }
 
         public TimeSpan ShutdownFlushTimeout { get => _shutdownFlushTimeout; init => _shutdownFlushTimeout = Cap(value); }
+
+        /// <summary>
+        /// How long a capture waits for one worker's <c>workspace/saveState</c> (plan 3.5, step 1) before it writes
+        /// that shard without state; 0 to 1 day. Set in code only, never from configuration.
+        /// </summary>
+        public TimeSpan SaveStateTimeout { get => _saveStateTimeout; init => _saveStateTimeout = Cap(value); }
 
         public long MaxFileLength { get; init; } = SnapshotFormat.MaxFileLength;
 
@@ -114,7 +123,8 @@ namespace CodeContext.Core.Snapshots
         double? LastCaptureMilliseconds = null,
         string? LastWriteError = null,
         int WritesCompleted = 0,
-        int WritesFailed = 0);
+        int WritesFailed = 0,
+        long? LastWorkerStateBytes = null);
 
     /// <summary>
     /// Writes the snapshot lifecycle of plan section 3.5, write side.
@@ -164,6 +174,7 @@ namespace CodeContext.Core.Snapshots
         private readonly SnapshotStartup _startup;
         private readonly TimeProvider _time;
         private readonly ILogger<SnapshotService> _logger;
+        private readonly IWorkerStateSaver? _workers;
 
         private readonly object _gate = new();
         private CacheDirectory? _directory;
@@ -180,6 +191,8 @@ namespace CodeContext.Core.Snapshots
         private DateTimeOffset _lastChangeAt;
         private DateTimeOffset? _dirtySince;
         private bool _captureRequested;
+        // Completed once the requested capture has been handled: written, kept for the final capture, or dropped.
+        private TaskCompletionSource _captureHandled = CompletedSource();
         private bool _writing;
         private int _writesInProgress;
         private bool _waitForChange;
@@ -197,7 +210,8 @@ namespace CodeContext.Core.Snapshots
             SnapshotStartup startup,
             TimeProvider time,
             ILogger<SnapshotService> logger,
-            CacheState? cacheState = null)
+            CacheState? cacheState = null,
+            IWorkerStateSaver? workers = null)
         {
             _coordinator = coordinator;
             _database = database;
@@ -206,6 +220,7 @@ namespace CodeContext.Core.Snapshots
             _startup = startup;
             _time = time;
             _logger = logger;
+            _workers = workers;
             cacheState?.AttachWriter(() => Status);
         }
 
@@ -259,19 +274,20 @@ namespace CodeContext.Core.Snapshots
             lock (_gate)
             {
                 // Stopped while the step ran (a slow load): take nothing over; the step's Dispose releases the lock.
+                // The status is set inside this same hold, so a stop cannot run between the check and the set.
                 if (_stopping || _status.Mode == SnapshotCacheMode.Stopped) return;
-            }
-            switch (result.Mode)
-            {
-                case SnapshotCacheMode.ReadOnly:
-                    SetStatus(_status with { Mode = SnapshotCacheMode.ReadOnly, Reason = result.Reason });
-                    return;
-                case SnapshotCacheMode.Writer:
-                    break;
-                default:
-                    // The start-up step has logged why, and holds nothing.
-                    SetStatus(_status with { Mode = SnapshotCacheMode.Disabled, Reason = result.Reason });
-                    return;
+                switch (result.Mode)
+                {
+                    case SnapshotCacheMode.ReadOnly:
+                        _status = _status with { Mode = SnapshotCacheMode.ReadOnly, Reason = result.Reason };
+                        return;
+                    case SnapshotCacheMode.Writer:
+                        break;
+                    default:
+                        // The start-up step has logged why, and holds nothing.
+                        _status = _status with { Mode = SnapshotCacheMode.Disabled, Reason = result.Reason };
+                        return;
+                }
             }
 
             try
@@ -288,8 +304,18 @@ namespace CodeContext.Core.Snapshots
                     _written = result.LoadedView ?? SnapshotView.Empty;
                     _lastSeen = _written;
                 }
-                _timer = _time.CreateTimer(_ => OnTimer(), null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
-                SetStatus(_status with { Mode = SnapshotCacheMode.Writer, Reason = null });
+                var timer = _time.CreateTimer(_ => OnTimer(), null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+                lock (_gate)
+                {
+                    // A stop that ran meanwhile wins: the mode is not set back to Writer after it.
+                    if (_stopping)
+                    {
+                        timer.Dispose();
+                        return;
+                    }
+                    _timer = timer;
+                    _status = _status with { Mode = SnapshotCacheMode.Writer, Reason = null };
+                }
                 _logger.LogInformation("Snapshot cache enabled: writing snapshots to {Directory}.", result.Directory!.WorkspacePath);
 
                 _coordinator.SetMutationObserver(OnMutationCommandCompleted);
@@ -378,14 +404,119 @@ namespace CodeContext.Core.Snapshots
                         return;
                     }
                     _captureRequested = true;
+                    _captureHandled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
                 }
-                _coordinator.RequestSnapshotCaptureAsync(Capture)
+                _coordinator.RequestSnapshotCaptureAsync(CaptureAsync)
                     .ContinueWith(OnCaptured, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
             }
             catch (Exception exception)
             {
                 _logger.LogError(exception, "Snapshot scheduling failed.");
+                // A stop must not wait for a capture that was never requested.
+                lock (_gate) _captureHandled.TrySetResult();
             }
+        }
+
+        private static TaskCompletionSource CompletedSource()
+        {
+            var source = new TaskCompletionSource();
+            source.SetResult();
+            return source;
+        }
+
+        /// <summary>
+        /// The capture of plan 3.5, run on the coordinator loop: step 1, then <see cref="Capture()"/> (step 2). For
+        /// each shard whose annotation proves it holds exactly what a running worker process has emitted (its
+        /// lineage, anchored to the published shard; see <see cref="WorkerStatePairing"/>) and that records
+        /// fingerprints, the worker is asked to save its state to a new file, within
+        /// <see cref="SnapshotServiceSettings.SaveStateTimeout"/>. A result that checks out is recorded with the shard
+        /// (<see cref="InMemoryDatabase.TryRecordWorkerState"/>) before the store is latched, so the capture pairs
+        /// them. A shard whose recorded state file still describes it keeps that file and is not saved again. Any
+        /// failure leaves the shard without state, which costs its worker a full walk at the next start. Null,
+        /// asking nothing, while a reconciliation is staged.
+        /// </summary>
+        internal async Task<SnapshotCapture?> CaptureAsync(CancellationToken ct)
+        {
+            var started = Stopwatch.GetTimestamp();
+            if (_database is null || !_database.TryLatchCommitted(out var shards, out var annotations, out _)) return null;
+            CacheDirectory? directory;
+            ulong sequence;
+            lock (_gate)
+            {
+                directory = _status.Mode == SnapshotCacheMode.Writer ? _directory : null;
+                sequence = _nextSequence;
+            }
+
+            var newFiles = new List<string>();
+            var recorded = new List<(ShardKey Key, WorkerStateBinding Binding)>();
+            if (_workers is not null && directory is not null)
+            {
+                var checkedLevels = false;
+                foreach (var (key, shard) in shards)
+                {
+                    if (key == ShardKey.Default || (shard.NodeCount == 0 && shard.EdgeCount == 0)) continue;
+                    if (!annotations.TryGetValue(key, out var annotation) || annotation.StateFor(shard) is not null) continue;
+                    if (annotation.LineageFor(shard) is not { } lineage || annotation.Fingerprints is null) continue;
+                    var stateId = WorkerStateFile.NewStateId();
+                    if (WorkerStateFile.FormatName(key.ParserId, sequence, stateId) is not { } name) continue;
+                    // The chain is checked again before a worker is told to create anything in it.
+                    if (!checkedLevels)
+                    {
+                        if (!LevelsStillPlain(directory)) break;
+                        checkedLevels = true;
+                    }
+
+                    newFiles.Add(name);
+                    var binding = await SaveStateAsync(directory, key, lineage, name, stateId, ct).ConfigureAwait(false);
+                    if (binding is null || !_database.TryRecordWorkerState(key, shard, annotation, binding))
+                        directory.DeleteWorkerStateQuietly(name);
+                    else
+                        recorded.Add((key, binding));
+                }
+            }
+
+            var capture = Capture(started);
+            if (capture is null)
+            {
+                // Nothing will reference what was recorded: un-record it before its files go.
+                foreach (var (key, binding) in recorded) _database.ClearWorkerState(key, binding);
+                foreach (var name in newFiles) directory?.DeleteWorkerStateQuietly(name);
+                return null;
+            }
+            return capture with { NewStateFiles = newFiles };
+        }
+
+        /// <summary>One worker's save, checked: the id echoed, a SHA-256, and a regular file of the reported length under the name given.</summary>
+        private async Task<WorkerStateBinding?> SaveStateAsync(
+            CacheDirectory directory, ShardKey key, ShardLineage lineage, string name, string stateId, CancellationToken ct)
+        {
+            using var timeout = new CancellationTokenSource(_settings.SaveStateTimeout, _time);
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token, ct);
+            SaveStateResult? result;
+            try
+            {
+                result = await _workers!.SaveStateAsync(key.ParserId, lineage,
+                    new SaveStateParams(key.WorkspaceId, directory.PathOf(name), stateId), linked.Token).ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                _logger.LogWarning("Saving the worker state of shard {Shard} failed: {Message}.", key, exception.Message);
+                return null;
+            }
+            if (result is null) return null;
+            string? refusal = null;
+            if (!result.Saved) refusal = "the worker saved nothing";
+            else if (!string.Equals(result.StateId, stateId, StringComparison.Ordinal)) refusal = "the result names another state id";
+            else if (!string.Equals(result.WorkspaceId, key.WorkspaceId, StringComparison.Ordinal)) refusal = "the result names another workspace";
+            else if (!WorkerStateFile.IsSha256(result.Sha256)) refusal = "the result carries no lowercase hex SHA-256";
+            else if (directory.ExistingWorkerStateFile(key.ParserId, name) is not { } file) refusal = "the state file is not there";
+            else if (result.Bytes != file.Length) refusal = $"the state file is {file.Length} bytes, the worker reported {result.Bytes}";
+            if (refusal is not null)
+            {
+                _logger.LogWarning("The worker state saved for shard {Shard} is not used: {Reason}.", key, refusal);
+                return null;
+            }
+            return new WorkerStateBinding(name, stateId, result.Sha256!, result.Bytes!.Value);
         }
 
         /// <summary>
@@ -393,9 +524,10 @@ namespace CodeContext.Core.Snapshots
         /// each shard's annotation (parser version, coverage) and the generation, from one hold of the
         /// store's commit lock. Null while a reconciliation is staged. No I/O, no serialization.
         /// </summary>
-        internal SnapshotCapture? Capture()
+        internal SnapshotCapture? Capture() => Capture(Stopwatch.GetTimestamp());
+
+        private SnapshotCapture? Capture(long started)
         {
-            var started = Stopwatch.GetTimestamp();
             if (_database is null || !_database.TryLatchCommitted(out var shards, out var annotations, out var generation)) return null;
             return new SnapshotCapture(SnapshotView.Of(shards, annotations), generation, _time.GetUtcNow(),
                 Stopwatch.GetElapsedTime(started).TotalMilliseconds);
@@ -407,26 +539,69 @@ namespace CodeContext.Core.Snapshots
             {
                 if (task.IsFaulted) _logger.LogError(task.Exception, "Snapshot capture failed.");
                 var capture = task.IsCompletedSuccessfully ? task.Result : null;
-                lock (_gate)
+                var written = false;
+                TaskCompletionSource handled;
+                lock (_gate) handled = _captureHandled;
+                try
                 {
-                    _captureRequested = false;
-                    if (_status.Mode != SnapshotCacheMode.Writer || _stopping) return;
-                    // Null: a staged reconciliation (its commit is followed by a mutation notification,
-                    // which re-arms), or a coordinator that has stopped or whose queue is full. Not
-                    // re-armed here, which against a stopped coordinator would spin.
-                    if (capture is null) return;
-                    if (capture.View.SameAs(_written))
+                    lock (_gate)
                     {
-                        _dirtySince = null;
-                        return;
+                        _captureRequested = false;
+                        if (_status.Mode == SnapshotCacheMode.Writer && _stopping)
+                        {
+                            // Stopping: what this capture recorded stays recorded and on disk. The final capture, which
+                            // waits for this one, finds those state files paired with their unchanged shards and
+                            // writes them without asking the workers again; with no final capture they are
+                            // referenced by nothing, and the cleanup at the next start deletes them.
+                            written = true;
+                            return;
+                        }
+                        if (_status.Mode != SnapshotCacheMode.Writer) return;
+                        // Null: a staged reconciliation (its commit is followed by a mutation notification,
+                        // which re-arms), or a coordinator that has stopped or whose queue is full. Not
+                        // re-armed here, which against a stopped coordinator would spin.
+                        if (capture is null) return;
+                        if (capture.View.SameAs(_written))
+                        {
+                            _dirtySince = null;
+                            return;
+                        }
+                        StartWriteLocked(capture);
+                        written = true;
                     }
-                    StartWriteLocked(capture);
+                }
+                finally
+                {
+                    try
+                    {
+                        if (!written) DropStateFiles(capture);
+                    }
+                    finally
+                    {
+                        handled.TrySetResult();
+                    }
                 }
             }
             catch (Exception exception)
             {
                 _logger.LogError(exception, "Snapshot capture failed.");
             }
+        }
+
+        /// <summary>
+        /// A capture that will not be written takes the state files it asked for with it. Each binding it recorded is
+        /// un-recorded first (only while the store still holds that very binding), then the files are deleted, so the
+        /// store never names a state file that is gone.
+        /// </summary>
+        private void DropStateFiles(SnapshotCapture? capture)
+        {
+            if (capture is null || capture.NewStateFiles.Count == 0) return;
+            var names = new HashSet<string>(capture.NewStateFiles, StringComparer.Ordinal);
+            foreach (var shard in capture.View.Shards)
+                if (shard.State is { } state && names.Contains(state.FileName)) _database?.ClearWorkerState(shard.Key, state);
+            CacheDirectory? directory;
+            lock (_gate) directory = _directory;
+            foreach (var name in capture.NewStateFiles) directory?.DeleteWorkerStateQuietly(name);
         }
 
         private Task StartWriteLocked(SnapshotCapture capture)
@@ -505,7 +680,7 @@ namespace CodeContext.Core.Snapshots
                 var written = new WriteOutcome(WriteOutcomeKind.Written, Sequence: sequence, FileName: name, Length: result.Length,
                     Milliseconds: (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds);
                 // Checked again before deleting anything; the snapshot itself is written either way.
-                if (LevelsStillPlain(directory)) TryRetireOlderThan(directory, sequence);
+                if (LevelsStillPlain(directory)) TryRetireOlderThan(directory, sequence, capture);
                 return written;
             }
             catch (Exception exception)
@@ -527,8 +702,20 @@ namespace CodeContext.Core.Snapshots
                     : System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(
                         projects as List<ProjectCoverage> ?? projects.ToList(),
                         ParserProtocolJsonContext.Default.ListProjectCoverage);
-                // Fingerprints (phase 5) and worker state (phase 6) are not captured yet.
-                info[shard.Key] = new SnapshotShardInfo(ParserVersion: shard.Annotation?.ParserVersion, Coverage: coverage);
+                var fingerprints = shard.Annotation?.Fingerprints is not { } units
+                    ? null
+                    : System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(
+                        units as List<UnitFingerprint> ?? units.ToList(),
+                        ParserProtocolJsonContext.Default.ListUnitFingerprint);
+                // The state file only while it still describes the captured shard.
+                var state = shard.State;
+                info[shard.Key] = new SnapshotShardInfo(
+                    ParserVersion: shard.Annotation?.ParserVersion,
+                    StateFileName: state?.FileName,
+                    StateId: state?.StateId,
+                    StateSha256: state?.Sha256,
+                    Coverage: coverage,
+                    Fingerprints: fingerprints);
             }
             return new SnapshotWriteInput
             {
@@ -544,18 +731,21 @@ namespace CodeContext.Core.Snapshots
 
         /// <summary>
         /// Deletes every other snapshot and temp file with a usable sequence below <paramref name="sequence"/>,
-        /// and every one of this code's names outside the usable range. A file another process has open or
-        /// mapped stays and is retried at the next write and the next start.
+        /// and every one of this code's names outside the usable range; and every worker state file the new
+        /// snapshot does not reference, with every state temp file, so state files follow their snapshot. A file
+        /// another process has open or mapped stays and is retried at the next write and the next start.
         /// </summary>
-        private void TryRetireOlderThan(CacheDirectory directory, ulong sequence)
+        private void TryRetireOlderThan(CacheDirectory directory, ulong sequence, SnapshotCapture capture)
         {
             try
             {
                 _settings.BeforeRetire?.Invoke();
+                var referenced = ReferencedStateFiles(capture.View);
                 var busy = 0;
                 foreach (var file in directory.EnumerateOwnFiles())
                 {
-                    if (IsUsable(file.Sequence) && file.Sequence >= sequence) continue;
+                    if (file.Kind == CacheFileKind.WorkerState ? referenced.Contains(file.Name)
+                        : file.Kind != CacheFileKind.WorkerStateTemp && IsUsable(file.Sequence) && file.Sequence >= sequence) continue;
                     if (!CacheDirectory.TryDelete(file)) busy++;
                 }
                 if (busy > 0) _logger.LogDebug("{Count} older snapshot file(s) are in use and will be deleted later.", busy);
@@ -565,6 +755,23 @@ namespace CodeContext.Core.Snapshots
                 // The new snapshot is written and verified either way; the retire runs again after the next write.
                 _logger.LogDebug(exception, "Retiring older snapshots failed; retried at the next write.");
             }
+        }
+
+        private static HashSet<string> ReferencedStateFiles(SnapshotView view)
+        {
+            var names = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var shard in view.Shards)
+                if (shard.State is { } state) names.Add(state.FileName);
+            return names;
+        }
+
+        /// <summary>The total length of the worker state files <paramref name="view"/> references; null when it references none.</summary>
+        internal static long? WorkerStateBytes(SnapshotView view)
+        {
+            long? total = null;
+            foreach (var shard in view.Shards)
+                if (shard.State is { } state) total = (total ?? 0) + state.Bytes;
+            return total;
         }
 
         private void FinishWrite(SnapshotCapture capture, WriteOutcome outcome)
@@ -592,6 +799,7 @@ namespace CodeContext.Core.Snapshots
                                 LastCaptureMilliseconds = capture.CaptureMilliseconds,
                                 LastWriteError = null,
                                 WritesCompleted = _status.WritesCompleted + 1,
+                                LastWorkerStateBytes = WorkerStateBytes(capture.View),
                             };
                             break;
                         case WriteOutcomeKind.Failed:
@@ -664,13 +872,15 @@ namespace CodeContext.Core.Snapshots
 
         /// <summary>
         /// Plan 3.5, graceful shutdown: runs before the coordinator and the worker service stop. Waits for
-        /// a write in flight, then captures a dirty store once more and writes it, all within
+        /// a capture already requested (which, once stopping, keeps the state files it recorded rather than
+        /// deleting them) and a write in flight, then captures a dirty store once more and writes it, all within
         /// <see cref="SnapshotServiceSettings.ShutdownFlushTimeout"/>. Skipped while a scan runs: the store is
         /// then staged and the scan is about to be cancelled.
         /// </summary>
         public async Task StopAsync(CancellationToken cancellationToken)
         {
             Task inFlight;
+            Task requested;
             lock (_gate)
             {
                 if (_status.Mode != SnapshotCacheMode.Writer)
@@ -685,6 +895,7 @@ namespace CodeContext.Core.Snapshots
                 _stopping = true;
                 _timer?.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
                 inFlight = _writeTask;
+                requested = _captureRequested ? _captureHandled.Task : Task.CompletedTask;
             }
             _coordinator.SetMutationObserver(null);
 
@@ -692,6 +903,9 @@ namespace CodeContext.Core.Snapshots
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token, cancellationToken);
             try
             {
+                // A capture already requested (its workers may be saving) is waited for as well as the write: it keeps
+                // what it recorded for the final capture below, which then asks no worker to save again.
+                await requested.WaitAsync(linked.Token).ConfigureAwait(false);
                 await inFlight.WaitAsync(linked.Token).ConfigureAwait(false);
                 if (_scanState.Phase == ScanPhase.Scanning)
                 {
@@ -699,13 +913,14 @@ namespace CodeContext.Core.Snapshots
                 }
                 else if (!Observe().SameAs(Written()))
                 {
-                    var capture = await _coordinator.RequestSnapshotCaptureAsync(Capture).WaitAsync(linked.Token).ConfigureAwait(false);
+                    var capture = await _coordinator.RequestSnapshotCaptureAsync(CaptureAsync).WaitAsync(linked.Token).ConfigureAwait(false);
                     Task? write = null;
                     lock (_gate)
                     {
                         if (capture is not null && !capture.View.SameAs(_written) && _status.Mode == SnapshotCacheMode.Writer)
                             write = StartWriteLocked(capture);
                     }
+                    if (write is null) DropStateFiles(capture);
                     if (write is not null) await write.WaitAsync(linked.Token).ConfigureAwait(false);
                 }
             }

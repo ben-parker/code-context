@@ -36,21 +36,30 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
     /// <summary>Work that only reads the store between mutations and is not indexing.</summary>
     private abstract record MaintenanceCommand : Command
     {
-        public abstract void Run();
+        /// <summary>Runs the command on the loop; awaited, so the loop holds for it. Never throws.</summary>
+        public abstract Task RunAsync(CancellationToken ct);
 
         /// <summary>Completes a command that will never run (shutdown).</summary>
         public abstract void Abandon();
     }
 
-    /// <summary>Latches a snapshot capture at a point where no scan, batch or reconciliation is in flight.</summary>
-    private sealed record SnapshotCommand(Func<SnapshotCapture?> Capture, TaskCompletionSource<SnapshotCapture?> Completion)
+    /// <summary>
+    /// A snapshot capture at a point where no scan, batch or reconciliation is in flight: the workers' state saves
+    /// (plan 3.5, step 1), then the latch. The loop waits for it.
+    /// </summary>
+    private sealed record SnapshotCommand(
+        Func<CancellationToken, Task<SnapshotCapture?>> Capture, TaskCompletionSource<SnapshotCapture?> Completion)
         : MaintenanceCommand
     {
-        public override void Run()
+        public override async Task RunAsync(CancellationToken ct)
         {
             try
             {
-                Completion.TrySetResult(Capture());
+                Completion.TrySetResult(await Capture(ct).ConfigureAwait(false));
+            }
+            catch (OperationCanceledException)
+            {
+                Completion.TrySetResult(null);
             }
             catch (Exception ex)
             {
@@ -121,6 +130,14 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
     /// Never makes <see cref="IsBusy"/> true.
     /// </summary>
     internal Task<SnapshotCapture?> RequestSnapshotCaptureAsync(Func<SnapshotCapture?> capture)
+        => RequestSnapshotCaptureAsync(_ => Task.FromResult(capture()));
+
+    /// <summary>
+    /// <see cref="RequestSnapshotCaptureAsync(Func{SnapshotCapture?})"/> for a capture that awaits (the workers'
+    /// state saves). The loop waits for it, which is all the capture holds the coordinator for; it still never
+    /// makes <see cref="IsBusy"/> true.
+    /// </summary>
+    internal Task<SnapshotCapture?> RequestSnapshotCaptureAsync(Func<CancellationToken, Task<SnapshotCapture?>> capture)
     {
         var command = new SnapshotCommand(
             capture, new TaskCompletionSource<SnapshotCapture?>(TaskCreationOptions.RunContinuationsAsynchronously));
@@ -240,7 +257,7 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
         {
             // Not indexing work: _busy stays as it is.
             Interlocked.Decrement(ref _queuedMaintenance);
-            maintenance.Run();
+            await maintenance.RunAsync(ct);
             return null;
         }
 
@@ -336,7 +353,7 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
             {
                 foreach (var maintenance in deferred)
                 {
-                    if (applied) maintenance.Run();
+                    if (applied) await maintenance.RunAsync(ct);
                     else maintenance.Abandon();
                 }
             }
@@ -453,8 +470,12 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Loading the snapshot failed; scanning without it.");
-            return false;
+            // Facts announced before the failure may be in the store: the full-scan flow then replaces them all.
+            var announced = _cacheState.LoadAnnounced;
+            _logger.LogError(ex, announced
+                ? "Loading the snapshot failed after its facts were published; verifying them with a full scan."
+                : "Loading the snapshot failed; scanning without it.");
+            return announced;
         }
     }
 

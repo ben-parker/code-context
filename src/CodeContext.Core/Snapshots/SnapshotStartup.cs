@@ -40,8 +40,11 @@ namespace CodeContext.Core.Snapshots
     /// parser no registered worker indexes, or whose workspace is not the host's, are dropped.
     ///
     /// Never throws: any failure means no cache for this run, with the reason, and the caller scans as
-    /// it would without one. A snapshot is only data: authenticated graph facts, parser version strings
-    /// and coverage. Nothing in it is used as a path, a command or a setting.
+    /// it would without one. A snapshot is only data: authenticated graph facts, parser version strings,
+    /// coverage, fingerprints and worker state bindings. Nothing in it is used as a command or a setting, and
+    /// the only path made from it is a worker state file's: a name checked against
+    /// <see cref="WorkerStateFile"/>'s pattern, joined to the cache directory. As the lock holder it also deletes
+    /// every worker state file the kept snapshot does not name.
     /// </summary>
     internal sealed class SnapshotStartup : IDisposable
     {
@@ -56,6 +59,7 @@ namespace CodeContext.Core.Snapshots
         private readonly List<Action<SnapshotStartupResult>> _waiters = [];
         private SnapshotStartupResult? _result;
         private FileStream? _lock;
+        private CacheDirectory? _directory;
         private CacheLoadOutcome? _published;
         private bool _disposed;
 
@@ -130,6 +134,15 @@ namespace CodeContext.Core.Snapshots
             if (result is not null) Notify(callback, result);
         }
 
+        /// <summary>
+        /// The cache directory once the step has opened it, for a writer and a read-only instance alike; null when
+        /// the cache is off. Worker state files are found through it (<see cref="WorkerBaselines"/>).
+        /// </summary>
+        public CacheDirectory? Directory
+        {
+            get { lock (_gate) return _directory; }
+        }
+
         /// <summary>Hands the writer lock to the caller, who holds it from now on; null when there is none.</summary>
         public FileStream? TakeLock()
         {
@@ -171,7 +184,7 @@ namespace CodeContext.Core.Snapshots
                 if (_disposed) return Disable("the host is stopping");
             }
             if (_database is null) return Disable("the graph store is not the in-memory store");
-            if (string.IsNullOrEmpty(_settings.RootPath) || !Directory.Exists(_settings.RootPath))
+            if (string.IsNullOrEmpty(_settings.RootPath) || !System.IO.Directory.Exists(_settings.RootPath))
                 return Disable($"the root '{_settings.RootPath}' is not a directory");
             if (!BitConverter.IsLittleEndian) return Disable("snapshots are written only by little-endian processes");
             if (string.IsNullOrEmpty(_settings.KeyPath)) return Disable("there is no user profile folder to keep the snapshot key in");
@@ -189,6 +202,7 @@ namespace CodeContext.Core.Snapshots
 
             var directory = CacheDirectory.Open(_settings.RootPath, _settings.WorkspaceId, out var refusal);
             if (directory is null) return Disable(refusal!);
+            lock (_gate) _directory = directory;
 
             _settings.BeforeLock?.Invoke(directory);
             var lockResult = directory.TryAcquireWriterLock(out var lockStream, out var lockReason);
@@ -233,8 +247,28 @@ namespace CodeContext.Core.Snapshots
         /// antivirus, a backup or another reader) or an <see cref="SnapshotRejection.Unexpected"/> one proves
         /// nothing about the file, which a later start may load.
         /// </summary>
-        internal static bool ProvesInvalid(SnapshotRejection rejection)
-            => rejection is not (SnapshotRejection.None or SnapshotRejection.Io or SnapshotRejection.Unexpected);
+        internal static bool ProvesInvalid(SnapshotRejection rejection) => RejectionsProvingInvalid.Contains(rejection);
+
+        /// <summary>
+        /// The refusals that prove a file can never be kept, listed one by one: a kind added later proves nothing
+        /// until it is listed here or in <see cref="RejectionsProvingNothing"/>, which is the safe direction (the
+        /// file still raises the sequence counter).
+        /// </summary>
+        internal static readonly IReadOnlySet<SnapshotRejection> RejectionsProvingInvalid = new HashSet<SnapshotRejection>
+        {
+            SnapshotRejection.BigEndianProcess, SnapshotRejection.Name, SnapshotRejection.SharedWritable,
+            SnapshotRejection.NotOwned, SnapshotRejection.TooShort, SnapshotRejection.TooLong, SnapshotRejection.Magic,
+            SnapshotRejection.EndianTag, SnapshotRejection.FormatVersion, SnapshotRejection.HeaderSize,
+            SnapshotRejection.LengthMismatch, SnapshotRejection.NameMismatch, SnapshotRejection.HostMeta,
+            SnapshotRejection.HostVersion, SnapshotRejection.RootPath, SnapshotRejection.PathCase, SnapshotRejection.Footer,
+            SnapshotRejection.Authentication, SnapshotRejection.Structure,
+        };
+
+        /// <summary>The kinds that prove nothing about the file (not a refusal, I/O, or a reader bug).</summary>
+        internal static readonly IReadOnlySet<SnapshotRejection> RejectionsProvingNothing = new HashSet<SnapshotRejection>
+        {
+            SnapshotRejection.None, SnapshotRejection.Io, SnapshotRejection.Unexpected,
+        };
 
         /// <summary>
         /// Plan 3.5, rule 11, and the load. Tries the snapshots with a usable sequence, newest first, until one
@@ -256,14 +290,24 @@ namespace CodeContext.Core.Snapshots
             var refusals = new List<Refusal>();
             var costly = 0;
             var files = directory.EnumerateOwnFiles();
-            var (kept, loaded) = TryCandidates(files, key, expectations, load, refusals, ref costly);
+            var (kept, loaded) = TryCandidates(directory, files, key, expectations, load, refusals, ref costly);
             if (kept is null && !writer && refusals.Exists(r => r.Rejection == SnapshotRejection.Io && !File.Exists(r.File.Path)))
             {
                 // A file vanished between selection and open (the writer retired it): select once more.
                 files = directory.EnumerateOwnFiles();
                 (kept, loaded) = TryCandidates(
+                    directory,
                     files.Where(file => !refusals.Exists(r => string.Equals(r.File.Path, file.Path, StringComparison.Ordinal))).ToList(),
                     key, expectations, load, refusals, ref costly);
+            }
+
+            // Worker state files the kept snapshot names stay; every other one, and every state temp file, goes.
+            var referencedState = new HashSet<string>(StringComparer.Ordinal);
+            if (loaded is { } keptLoad)
+            {
+                foreach (var (_, annotation) in keptLoad.Annotations)
+                    if (annotation.State is { } state) referencedState.Add(state.FileName);
+                referencedState.UnionWith(keptLoad.Result.DroppedStateFiles);
             }
 
             ulong nextSequence = 1;
@@ -271,11 +315,14 @@ namespace CodeContext.Core.Snapshots
             {
                 ulong highestLeft = 0;
                 var busy = 0;
-                foreach (var file in files)
+                // Listed again: the state files are not candidates, and a load may have taken a while.
+                foreach (var file in directory.EnumerateOwnFiles())
                 {
                     if (kept is not null && string.Equals(file.Path, kept.Path, StringComparison.Ordinal)) continue;
+                    if (file.Kind == CacheFileKind.WorkerState && referencedState.Contains(file.Name)) continue;
                     if (CacheDirectory.TryDelete(file)) continue;
                     busy++;
+                    if (file.IsWorkerState) continue;
                     var provenInvalid = refusals.Exists(r =>
                         string.Equals(r.File.Path, file.Path, StringComparison.Ordinal) && ProvesInvalid(r.Rejection));
                     if (!provenInvalid && IsUsable(file.Sequence) && file.Sequence > highestLeft) highestLeft = file.Sequence;
@@ -302,8 +349,11 @@ namespace CodeContext.Core.Snapshots
             var (result, annotations, coverage) = loaded.Value;
             var header = result.Header!;
             var parsers = result.Shards.Select(shard => shard.Key.ParserId).Distinct(StringComparer.Ordinal).ToList();
+            long? stateBytes = null;
+            foreach (var (_, annotation) in annotations)
+                if (annotation.State is { } state) stateBytes = (stateBytes ?? 0) + state.Bytes;
             var published = new CacheLoadOutcome(
-                CacheLoadKind.Loaded, null, header.CreatedUtcTicks, header.Sequence, header.FileLength, parsers);
+                CacheLoadKind.Loaded, null, header.CreatedUtcTicks, header.Sequence, header.FileLength, parsers, stateBytes);
             // Readers run while this step does: the state says "serving a loaded snapshot" before any loaded
             // fact is visible, so no answer from it goes unlabelled. A failed publish corrects it (RunLoadStep).
             beforePublish?.Invoke(published);
@@ -329,7 +379,7 @@ namespace CodeContext.Core.Snapshots
 
         private (CacheFile? Kept, (SnapshotLoadResult Result, List<KeyValuePair<ShardKey, ShardAnnotation>> Annotations,
             List<(ShardKey Key, IReadOnlyList<ProjectCoverage> Projects)> Coverage)? Loaded) TryCandidates(
-            IReadOnlyList<CacheFile> files, byte[] key, SnapshotExpectations expectations, bool load, List<Refusal> refusals,
+            CacheDirectory directory, IReadOnlyList<CacheFile> files, byte[] key, SnapshotExpectations expectations, bool load, List<Refusal> refusals,
             ref int costly)
         {
             foreach (var candidate in files
@@ -357,7 +407,7 @@ namespace CodeContext.Core.Snapshots
                     {
                         (rejection, reason, passedHostMeta) = (result.Rejection, result.Reason, result.PassedHostMeta);
                     }
-                    else if (TryAnnotations(result, out var annotations, out var coverage, out var coverageFailure))
+                    else if (TryAnnotations(result, directory, out var annotations, out var coverage, out var coverageFailure))
                     {
                         return (candidate, (result, annotations, coverage));
                     }
@@ -379,12 +429,17 @@ namespace CodeContext.Core.Snapshots
                 && (_isIndexedParser?.Invoke(key.ParserId) ?? true);
 
         /// <summary>
-        /// Each loaded shard's annotation (parser version, coverage) as the store recorded it at capture, and
-        /// the coverage to restore. Coverage that is not a JSON list of projects refuses the file: an
-        /// authenticated file that fails a check is never answered from.
+        /// Each loaded shard's annotation (parser version, coverage, fingerprints, worker state file) as the store
+        /// recorded it at capture, and the coverage to restore. Coverage that is not a JSON list of projects, or
+        /// fingerprints that are not a JSON list of units, refuse the file: an authenticated file that fails a
+        /// check is never answered from. A state file is paired with its loaded shard (anchored to it) only when
+        /// its name is one this code makes for the shard's parser, its id and hash have their forms, and the file
+        /// is in the cache directory now; otherwise the shard is loaded without one. No lineage: no worker
+        /// process of this run has produced it.
         /// </summary>
         private static bool TryAnnotations(
             SnapshotLoadResult result,
+            CacheDirectory directory,
             out List<KeyValuePair<ShardKey, ShardAnnotation>> annotations,
             out List<(ShardKey Key, IReadOnlyList<ProjectCoverage> Projects)> coverage,
             out string? failure)
@@ -412,8 +467,38 @@ namespace CodeContext.Core.Snapshots
                         return false;
                     }
                 }
-                if (shard.Info.ParserVersion is null && projects is null) continue;
-                annotations.Add(KeyValuePair.Create(shard.Key, new ShardAnnotation(shard.Info.ParserVersion, projects)));
+                List<UnitFingerprint>? fingerprints = null;
+                if (shard.Info.Fingerprints is { Length: > 0 } fingerprintBytes)
+                {
+                    try
+                    {
+                        fingerprints = JsonSerializer.Deserialize(fingerprintBytes, ParserProtocolJsonContext.Default.ListUnitFingerprint);
+                    }
+                    catch (JsonException exception)
+                    {
+                        failure = $"the fingerprints of shard {shard.Key} do not parse: {exception.Message}";
+                        return false;
+                    }
+                    if (fingerprints is null || fingerprints.Exists(unit => unit?.Unit is null || unit.Value is null))
+                    {
+                        failure = $"the fingerprints of shard {shard.Key} are not a list of units";
+                        return false;
+                    }
+                }
+                WorkerStateBinding? state = null;
+                if (shard.Info is { StateFileName: { } stateFile, StateId: { } stateId, StateSha256: { } sha256 }
+                    && WorkerStateFile.IsStateId(stateId) && WorkerStateFile.IsSha256(sha256)
+                    && directory.ExistingWorkerStateFile(shard.Key.ParserId, stateFile) is { } existing)
+                {
+                    state = new WorkerStateBinding(stateFile, stateId, sha256, existing.Length);
+                }
+                if (shard.Info.ParserVersion is null && projects is null && fingerprints is null && state is null) continue;
+                annotations.Add(KeyValuePair.Create(shard.Key, new ShardAnnotation(shard.Info.ParserVersion, projects)
+                {
+                    Fingerprints = fingerprints,
+                    State = state,
+                    Anchor = state is null ? null : ShardAnchor.Of(shard.Shard),
+                }));
                 if (projects is not null) coverage.Add((shard.Key, projects));
             }
             return true;
@@ -421,7 +506,11 @@ namespace CodeContext.Core.Snapshots
 
         private SnapshotStartupResult Disable(string reason)
         {
-            lock (_gate) ReleaseLockLocked();
+            lock (_gate)
+            {
+                ReleaseLockLocked();
+                _directory = null;
+            }
             _logger.LogWarning("Snapshot cache disabled for this run: {Reason}.", reason);
             return new SnapshotStartupResult(SnapshotCacheMode.Disabled, reason, CacheLoadOutcome.Disabled(reason));
         }

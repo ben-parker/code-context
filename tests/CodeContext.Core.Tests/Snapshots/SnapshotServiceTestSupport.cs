@@ -40,9 +40,13 @@ internal sealed class ManualTimeProvider : TimeProvider
     /// <summary>Makes <see cref="CreateTimer"/> throw (a failure late in a start).</summary>
     public bool FailTimerCreation { get; set; }
 
+    /// <summary>Runs as a timer is created, before it is returned (something happening at that point of a start).</summary>
+    public Action? OnCreateTimer { get; set; }
+
     public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
     {
         if (FailTimerCreation) throw new InvalidOperationException("no timers here");
+        OnCreateTimer?.Invoke();
         var timer = new ManualTimer(this, callback, state);
         lock (_gate)
         {
@@ -135,7 +139,8 @@ internal sealed class SnapshotServiceHarness : IAsyncDisposable
     public SnapshotServiceHarness(
         string? basePath = null, Func<SnapshotServiceSettings, SnapshotServiceSettings>? configure = null,
         bool enabled = true, InMemoryDatabase? database = null, Func<string, bool>? isIndexedParser = null,
-        IAnalysisCoverageRegistry? coverage = null, Action<IReadOnlyCollection<string>>? onLoaded = null)
+        IAnalysisCoverageRegistry? coverage = null, Action<IReadOnlyCollection<string>>? onLoaded = null,
+        IWorkerStateSaver? workers = null)
     {
         BasePath = basePath ?? Path.Combine(Path.GetTempPath(), "ccsnap-" + Guid.NewGuid().ToString("N"));
         OwnsBase = basePath is null;
@@ -165,7 +170,7 @@ internal sealed class SnapshotServiceHarness : IAsyncDisposable
         Coordinator = new IndexCoordinator(
             _graphUpdate, ScanState, Options.Create(new CodeContextOptions { RootPath = RootPath }), NullLoggerFactory.Instance,
             cacheState: CacheState);
-        Service = new SnapshotService(Coordinator, Database, ScanState, Settings, Startup, Time, Logger, CacheState);
+        Service = new SnapshotService(Coordinator, Database, ScanState, Settings, Startup, Time, Logger, CacheState, workers);
     }
 
     public SnapshotStartup Startup { get; }
@@ -239,6 +244,12 @@ internal sealed class SnapshotServiceHarness : IAsyncDisposable
         => Directory.Exists(WorkspacePath)
             ? Directory.GetFiles(WorkspacePath, "graph.*.ccsnap").Select(path => Path.GetFileName(path))
                 .Where(name => SnapshotFile.TryParseName(name, out _)).Order(StringComparer.Ordinal).ToList()
+            : [];
+
+    /// <summary>The worker state files in the cache directory, by name, ordered.</summary>
+    public IReadOnlyList<string> StateFiles()
+        => Directory.Exists(WorkspacePath)
+            ? Directory.GetFiles(WorkspacePath, "worker-*").Select(path => Path.GetFileName(path)).Order(StringComparer.Ordinal).ToList()
             : [];
 
     public IReadOnlyList<string> TempFiles()
@@ -319,5 +330,51 @@ internal sealed class SnapshotServiceHarness : IAsyncDisposable
                 Assert.False(Directory.Exists(BasePath), $"{BasePath} was not deleted");
             }
         }
+    }
+}
+
+/// <summary>
+/// A worker for capture tests: answers <c>workspace/saveState</c> the way <see cref="Behaviour"/> says, writing a
+/// real state file at the path it is given (as a worker would: temp, flush, rename). Records each call with the
+/// shard annotation the store held at that moment.
+/// </summary>
+internal sealed class StubStateSaver(InMemoryDatabase database) : IWorkerStateSaver
+{
+    public enum Mode { Save, Fail, Null, Hang, WrongId, WrongLength }
+
+    public Mode Behaviour { get; set; } = Mode.Save;
+
+    public List<(string ParserId, ShardLineage Lineage, SaveStateParams Parameters, ShardAnnotation? AnnotationAtSave)> Calls { get; } = [];
+
+    /// <summary>Awaited after a call is recorded and before the worker acts on it (a slow save, or a change meanwhile).</summary>
+    public Func<string, Task>? BeforeSave { get; set; }
+
+    public async Task<SaveStateResult?> SaveStateAsync(string parserId, ShardLineage lineage, SaveStateParams parameters, CancellationToken ct)
+    {
+        Calls.Add((parserId, lineage, parameters,
+            database.CurrentShard(new InMemoryDatabase.ShardKey(parserId, parameters.WorkspaceId)).Annotation));
+        if (BeforeSave is { } before) await before(parserId);
+        switch (Behaviour)
+        {
+            case Mode.Fail: throw new InvalidOperationException("the worker failed");
+            case Mode.Null: return null;
+            case Mode.Hang:
+                try
+                {
+                    await Task.Delay(Timeout.Infinite, ct);
+                }
+                catch (OperationCanceledException)
+                {
+                    return null;
+                }
+                break;
+        }
+        var bytes = System.Text.Encoding.UTF8.GetBytes("state " + parameters.StateId);
+        File.WriteAllBytes(parameters.StatePath + ".tmp", bytes);
+        File.Move(parameters.StatePath + ".tmp", parameters.StatePath, overwrite: true);
+        return new SaveStateResult(parameters.WorkspaceId,
+            Behaviour == Mode.WrongId ? new string('0', 32) : parameters.StateId, Saved: true,
+            Behaviour == Mode.WrongLength ? bytes.Length + 1 : bytes.Length,
+            Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(bytes)));
     }
 }

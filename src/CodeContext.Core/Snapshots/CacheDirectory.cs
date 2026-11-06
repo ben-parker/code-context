@@ -10,9 +10,19 @@ namespace CodeContext.Core.Snapshots
 
         /// <summary><c>graph.&lt;sequence&gt;.&lt;id&gt;.tmp</c>: a write in progress, or left by a crash.</summary>
         Temp,
+
+        /// <summary><c>worker-&lt;parser&gt;.&lt;sequence&gt;.&lt;id&gt;.state</c>: a worker's saved state (<see cref="WorkerStateFile"/>).</summary>
+        WorkerState,
+
+        /// <summary><c>worker-&lt;parser&gt;.&lt;sequence&gt;.&lt;id&gt;.state.tmp</c>: a worker's save in progress, or left by a crash.</summary>
+        WorkerStateTemp,
     }
 
-    internal sealed record CacheFile(string Path, string Name, CacheFileKind Kind, ulong Sequence);
+    /// <summary>One of this code's files; <see cref="Sequence"/> is the snapshot sequence its name carries.</summary>
+    internal sealed record CacheFile(string Path, string Name, CacheFileKind Kind, ulong Sequence)
+    {
+        public bool IsWorkerState => Kind is CacheFileKind.WorkerState or CacheFileKind.WorkerStateTemp;
+    }
 
     /// <summary>How taking the writer lock ended.</summary>
     internal enum WriterLockResult
@@ -239,8 +249,8 @@ namespace CodeContext.Core.Snapshots
         }
 
         /// <summary>
-        /// The snapshot and temp files in the workspace directory, by name. Directories, links and every
-        /// other name are left out, so they are never touched.
+        /// The snapshot, worker state and temp files in the workspace directory, by name. Directories, links
+        /// and every other name are left out, so they are never touched.
         /// </summary>
         public IReadOnlyList<CacheFile> EnumerateOwnFiles()
         {
@@ -260,7 +270,62 @@ namespace CodeContext.Core.Snapshots
                 else if (TryParseTempName(name, out sequence))
                     files.Add(new CacheFile(path, name, CacheFileKind.Temp, sequence));
             }
+            // Matched case-insensitively on Windows, parsed ordinally: an upper-case WORKER-...STATE is never listed or deleted (never made here).
+            foreach (var path in Directory.EnumerateFiles(WorkspacePath, WorkerStateFile.Prefix + "*", enumeration))
+            {
+                var name = Path.GetFileName(path);
+                if (WorkerStateFile.TryParseName(name, out _, out var sequence))
+                    files.Add(new CacheFile(path, name, CacheFileKind.WorkerState, sequence));
+                else if (WorkerStateFile.TryParseTempName(name, out sequence))
+                    files.Add(new CacheFile(path, name, CacheFileKind.WorkerStateTemp, sequence));
+            }
             return files;
+        }
+
+        /// <summary>
+        /// The absolute path of the worker state file <paramref name="fileName"/> of parser
+        /// <paramref name="parserId"/>, and its length, when the name is one this code produces for that parser
+        /// and a regular file (not a link, not a directory) of that name is in the workspace directory; else
+        /// null. The only way a name read from a snapshot becomes a path: the name is checked against
+        /// <see cref="WorkerStateFile"/>'s pattern, which admits no separator, no <c>..</c> and nothing rooted,
+        /// and is joined to this directory.
+        /// </summary>
+        public (string Path, long Length)? ExistingWorkerStateFile(string parserId, string fileName)
+        {
+            if (!WorkerStateFile.TryParseName(fileName, out var owner, out _)
+                || !string.Equals(owner, parserId, StringComparison.Ordinal)) return null;
+            var path = PathOf(fileName);
+            try
+            {
+                if (!TryGetAttributes(path, out var attributes) || CheckNotLink(path, expectDirectory: false) is not null) return null;
+                if ((attributes & FileAttributes.Directory) != 0) return null;
+                return (path, new FileInfo(path).Length);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                return null;
+            }
+        }
+
+        /// <summary>Deletes a worker state file, and its temp file, of this code's names; quietly, for a save that will not be recorded.</summary>
+        public void DeleteWorkerStateQuietly(string fileName)
+        {
+            if (!WorkerStateFile.TryParseName(fileName, out _, out var sequence)) return;
+            foreach (var (name, kind) in new[] { (fileName, CacheFileKind.WorkerState), (WorkerStateFile.TempNameFor(fileName), CacheFileKind.WorkerStateTemp) })
+            {
+                var path = PathOf(name);
+                try
+                {
+                    // Only this code's names, and never through a link: a link or directory there is left alone.
+                    if (TryGetAttributes(path, out var attributes) && (attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) == 0
+                        && new FileInfo(path).LinkTarget is null)
+                        TryDelete(new CacheFile(path, name, kind, sequence));
+                }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+                {
+                    // Left for the next retire pass or start-up cleanup.
+                }
+            }
         }
 
         /// <summary>The temp name a write of <paramref name="snapshotName"/> uses before its rename.</summary>

@@ -183,7 +183,8 @@ public record IndexingStatusDto(
 
 /// <summary>
 /// The persistent cache (plan 3.10). Absent when the cache is off, or when nothing was loaded and no
-/// scan has committed yet. <c>workerStateBytes</c> is reserved for worker state and not reported yet.
+/// scan has committed yet. <c>workerStateBytes</c> is the total size of the worker state files the snapshot
+/// references, absent when it references none.
 /// </summary>
 public record CacheStatusDto(
     [property: JsonPropertyName("state")] string State,

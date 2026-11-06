@@ -49,7 +49,10 @@ namespace CodeContext.Core.Snapshots
             services.AddSingleton(sp =>
             {
                 var startup = sp.GetRequiredService<SnapshotStartup>();
-                return new CacheState(startup.Enabled, startup.Run);
+                var cacheState = new CacheState(startup.Enabled, startup.Run);
+                if (sp.GetService<LanguageWorkerService>() is { } workers)
+                    ConnectWorkers(workers, cacheState, startup, (sp.GetRequiredService<IRepositoryFactory>() as InMemoryRepositoryFactory)?.Database);
+                return cacheState;
             });
             services.AddSingleton<ICacheStateProvider>(sp => sp.GetRequiredService<CacheState>());
             services.AddSingleton(sp => new SnapshotService(
@@ -60,9 +63,21 @@ namespace CodeContext.Core.Snapshots
                 sp.GetRequiredService<SnapshotStartup>(),
                 TimeProvider.System,
                 sp.GetRequiredService<ILogger<SnapshotService>>(),
-                sp.GetRequiredService<CacheState>()));
+                sp.GetRequiredService<CacheState>(),
+                sp.GetService<LanguageWorkerService>()));
             services.AddHostedService(sp => sp.GetRequiredService<SnapshotService>());
             return services;
+        }
+
+        /// <summary>
+        /// Connects the workers to the cache (plan phase 5): with the cache on, a worker's first index finds its
+        /// baseline through the loaded shards and the cache directory, and the cache state learns which parsers
+        /// were verified by a baseline. With the cache off a worker is offered nothing.
+        /// </summary>
+        internal static void ConnectWorkers(LanguageWorkerService workers, CacheState cacheState, SnapshotStartup startup, InMemoryDatabase? database)
+        {
+            cacheState.AttachBaselineOutcome(workers.AcceptedBaseline);
+            if (startup.Enabled && database is not null) workers.BaselineSource = new WorkerBaselines(database, () => startup.Directory);
         }
 
         /// <summary>

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using CodeContext.Core.Repositories;
@@ -9,6 +10,37 @@ using CodeContext.Core.Snapshots;
 namespace CodeContext.Core.Tests.Snapshots;
 
 using ShardKey = InMemoryDatabase.ShardKey;
+
+/// <summary>
+/// The whole-fact comparison of the snapshot gates: every field of every node and edge, metadata pairs in key
+/// order, one line per fact, sorted ordinally, so two stores compare equal exactly when they hold the same facts.
+/// No field is left out.
+/// </summary>
+internal static class GraphFacts
+{
+    public static List<string> Of(IEnumerable<CodeNode> nodes, IEnumerable<CodeEdge> edges)
+        => nodes.Select(node => string.Join('|',
+                "N", F(node.Id), F(node.Identifier), F(node.Name), F(node.Type), F(node.FilePath),
+                I(node.StartLine), I(node.EndLine), I(node.StartCol), I(node.EndCol),
+                F(node.Namespace), F(node.Visibility), F(node.Signature), F(node.Language), F(node.ReturnType),
+                F(node.Parameters), F(node.Modifiers), F(node.Metrics), M(node.Metadata)))
+            .Concat(edges.Select(edge => string.Join('|',
+                "E", F(edge.Id), F(edge.SourceId), F(edge.TargetId), F(edge.Type), M(edge.Metadata))))
+            .Order(StringComparer.Ordinal)
+            .ToList();
+
+    public static List<string> Of(InMemoryDatabase database) => Of(database.EnumerateNodes(), database.EnumerateEdges());
+
+    private static string F(string? value) => value is null
+        ? "<null>"
+        : "\"" + value.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("|", "\\p").Replace("\n", "\\n").Replace("\r", "\\r") + "\"";
+
+    private static string I(int value) => value.ToString(CultureInfo.InvariantCulture);
+
+    private static string M(IReadOnlyDictionary<string, string>? metadata) => metadata is null
+        ? "<null>"
+        : "{" + string.Join(',', metadata.OrderBy(pair => pair.Key, StringComparer.Ordinal).Select(pair => F(pair.Key) + ":" + F(pair.Value))) + "}";
+}
 
 /// <summary>
 /// A temp directory for one test. Disposing deletes it and asserts it is gone, so a snapshot left

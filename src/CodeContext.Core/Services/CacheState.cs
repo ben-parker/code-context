@@ -41,7 +41,8 @@ internal sealed record CacheLoadOutcome(
     long? SnapshotCreatedUtcTicks = null,
     ulong? SnapshotSequence = null,
     long? SizeBytes = null,
-    IReadOnlyList<string>? Parsers = null)
+    IReadOnlyList<string>? Parsers = null,
+    long? WorkerStateBytes = null)
 {
     public static CacheLoadOutcome Disabled(string reason) => new(CacheLoadKind.Disabled, reason);
 }
@@ -67,6 +68,7 @@ public sealed class CacheState : ICacheStateProvider
     public const string Verified = "verified";
 
     public const string Pending = "pending";
+    public const string Baseline = "baseline";
     public const string Replaced = "replaced";
 
     private readonly object _gate = new();
@@ -77,6 +79,8 @@ public sealed class CacheState : ICacheStateProvider
     private CacheLoadOutcome? _outcome;
     private bool _scanCommitted;
     private bool _verificationFailed;
+    private Func<string, bool>? _acceptedBaseline;
+    private HashSet<string>? _verifiedByBaseline;
 
     internal CacheState(bool enabled, Func<CacheLoadOutcome>? load = null)
         : this(enabled, load is null ? null : _ => load())
@@ -115,6 +119,15 @@ public sealed class CacheState : ICacheStateProvider
         return outcome.Kind == CacheLoadKind.Loaded;
     }
 
+    /// <summary>
+    /// Whether the load step announced loaded facts (they may be published), whatever happened after: a step
+    /// that then threw must still be followed by the full-scan flow, which replaces every loaded shard.
+    /// </summary>
+    internal bool LoadAnnounced
+    {
+        get { lock (_gate) return _outcome?.Kind == CacheLoadKind.Loaded; }
+    }
+
     /// <summary>Where the write fields come from: the snapshot writer's status.</summary>
     internal void AttachWriter(Func<SnapshotServiceStatus?> writer)
     {
@@ -131,10 +144,29 @@ public sealed class CacheState : ICacheStateProvider
         lock (_gate) _scanPhase = phase;
     }
 
-    /// <summary>A scan committed: from now on nothing served comes from an unchecked snapshot.</summary>
+    /// <summary>Whether a parser's worker accepted its baseline in the last index (<c>verification: baseline</c>).</summary>
+    internal void AttachBaselineOutcome(Func<string, bool> acceptedBaseline)
+    {
+        lock (_gate) _acceptedBaseline = acceptedBaseline;
+    }
+
+    /// <summary>
+    /// A scan committed: from now on nothing served comes from an unchecked snapshot. The first one decides how
+    /// each loaded parser was verified: <c>baseline</c> when its worker accepted its baseline in that scan,
+    /// else <c>replaced</c>.
+    /// </summary>
     internal void OnScanCommitted()
     {
-        lock (_gate) _scanCommitted = true;
+        lock (_gate)
+        {
+            if (!_scanCommitted && _outcome?.Parsers is { } parsers)
+            {
+                _verifiedByBaseline = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var parser in parsers)
+                    if (_acceptedBaseline?.Invoke(parser) == true) _verifiedByBaseline.Add(parser);
+            }
+            _scanCommitted = true;
+        }
     }
 
     /// <summary>A scan failed and rolled back. Before any scan committed, a loaded snapshot stays served, unverified.</summary>
@@ -151,12 +183,14 @@ public sealed class CacheState : ICacheStateProvider
         CacheLoadOutcome? outcome;
         bool committed, failed;
         Func<SnapshotServiceStatus?>? writerSource;
+        HashSet<string>? byBaseline;
         lock (_gate)
         {
             outcome = _outcome;
             committed = _scanCommitted;
             failed = Failed();
             writerSource = _writer;
+            byBaseline = _verifiedByBaseline;
         }
         if (StateOf(outcome, committed, failed) is not { } state) return null;
 
@@ -173,12 +207,15 @@ public sealed class CacheState : ICacheStateProvider
             SnapshotAt: fromWriter ? FormatTime(writer!.LastWriteAt) : FormatTicks(loaded?.SnapshotCreatedUtcTicks),
             SnapshotSequence: fromWriter ? (long?)writer!.LastSequence : (long?)loaded?.SnapshotSequence,
             SizeBytes: fromWriter ? writer!.LastSizeBytes : loaded?.SizeBytes,
+            WorkerStateBytes: fromWriter ? writer!.LastWorkerStateBytes : loaded?.WorkerStateBytes,
             LastWriteMs: writer?.LastWriteMilliseconds,
             LastCaptureMs: writer?.LastCaptureMilliseconds is { } capture ? (long)Math.Round(capture, MidpointRounding.AwayFromZero) : null,
             LastWriteError: writer?.LastWriteError,
             Verification: loaded?.Parsers is { } parsers
                 ? parsers.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal)
-                    .ToDictionary(parser => parser, _ => committed ? Replaced : Pending, StringComparer.Ordinal)
+                    .ToDictionary(parser => parser,
+                        parser => !committed ? Pending : byBaseline?.Contains(parser) == true ? Baseline : Replaced,
+                        StringComparer.Ordinal)
                 : null);
     }
 

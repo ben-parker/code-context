@@ -18,6 +18,10 @@ namespace CodeContext.Parser.Protocol;
 [JsonSerializable(typeof(OpenWorkspaceResult))]
 [JsonSerializable(typeof(IndexWorkspaceParams))]
 [JsonSerializable(typeof(IndexWorkspaceResult))]
+[JsonSerializable(typeof(IndexBaseline))]
+[JsonSerializable(typeof(UnitFingerprint))]
+[JsonSerializable(typeof(SaveStateParams))]
+[JsonSerializable(typeof(SaveStateResult))]
 [JsonSerializable(typeof(ApplyChangesParams))]
 [JsonSerializable(typeof(ApplyChangesResult))]
 [JsonSerializable(typeof(FileChangeDto))]
@@ -39,6 +43,7 @@ namespace CodeContext.Parser.Protocol;
 [JsonSerializable(typeof(List<UnresolvedReference>))]
 [JsonSerializable(typeof(List<ProtocolDiagnostic>))]
 [JsonSerializable(typeof(List<ProjectCoverage>))]
+[JsonSerializable(typeof(List<UnitFingerprint>))]
 [JsonSerializable(typeof(Dictionary<string, string>))]
 [JsonSerializable(typeof(IReadOnlyDictionary<string, string>))]
 [JsonSourceGenerationOptions(

@@ -7,26 +7,31 @@ namespace CodeContext.Core.Snapshots
 {
     /// <summary>
     /// One shard as a snapshot sees it: the published reference, the annotation the store recorded for
-    /// it in the same commit (parser version, coverage) and, for a heap shard, its in-place version
-    /// (bumped only by a legacy in-place write).
+    /// it (parser version, coverage, fingerprints, the paired worker state) and, for a heap shard, its
+    /// in-place version (bumped only by a legacy in-place write).
     /// </summary>
     internal readonly record struct SnapshotShardView(
         ShardKey Key, IGraphShard Shard, ShardAnnotation? Annotation, long HeapVersion)
     {
+        /// <summary>The worker state file a snapshot of this shard records: the annotation's, only while it describes this shard.</summary>
+        public WorkerStateBinding? State => Annotation?.StateFor(Shard);
+
         public bool SameAs(SnapshotShardView other)
             => Key == other.Key
                 && ReferenceEquals(Shard, other.Shard)
-                && ReferenceEquals(Annotation, other.Annotation)
-                && HeapVersion == other.HeapVersion;
+                && HeapVersion == other.HeapVersion
+                && ShardAnnotation.SamePersisted(Annotation, other.Annotation, Shard);
     }
 
     /// <summary>
-    /// What a snapshot would contain, compared by reference: every shard with at least one fact except
-    /// the un-owned <see cref="ShardKey.Default"/> one (never persisted), in shard key order. A shard
-    /// whose facts were all removed is absent, so an empty key is not a change. Two views are the same
-    /// when every shard reference, annotation and heap version is; a commit that changes nothing
-    /// keeps every reference (the store keeps an equal annotation's instance), so it leaves the view,
-    /// and the store, clean.
+    /// What a snapshot would contain: every shard with at least one fact except the un-owned
+    /// <see cref="ShardKey.Default"/> one (never persisted), in shard key order. A shard whose facts were all
+    /// removed is absent, so an empty key is not a change. Two views are the same when every shard reference
+    /// and heap version is, and every annotation holds the same persisted values
+    /// (<see cref="ShardAnnotation.SamePersisted"/>): a commit that changes no fact keeps every reference, and
+    /// one that confirms what is recorded (a baseline the worker accepted with nothing to change, a rescan
+    /// with an equal coverage report) changes nothing a snapshot holds, so it leaves the view, and the store,
+    /// clean.
     /// </summary>
     internal sealed class SnapshotView
     {
@@ -71,5 +76,12 @@ namespace CodeContext.Core.Snapshots
         SnapshotView View,
         long StoreGeneration,
         DateTimeOffset CapturedAt,
-        double CaptureMilliseconds);
+        double CaptureMilliseconds)
+    {
+        /// <summary>
+        /// Names of the worker state files this capture asked a worker to write (step 1), recorded or not. A
+        /// capture that is not written deletes them, so a state file never outlives the snapshot it was made for.
+        /// </summary>
+        public IReadOnlyList<string> NewStateFiles { get; init; } = [];
+    }
 }

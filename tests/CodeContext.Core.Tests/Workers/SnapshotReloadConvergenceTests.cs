@@ -169,30 +169,12 @@ public sealed class SnapshotReloadConvergenceTests : IAsyncLifetime
     /// <summary>
     /// Every field of every node and edge, metadata pairs in key order, in canonical order. The one fact
     /// comparison of this gate: the loaded store against the store that wrote it, and every step against
-    /// a fresh scan. No field is left out of either.
+    /// a fresh scan. No field is left out of either (<see cref="GraphFacts"/>).
     /// </summary>
     private static async Task<List<string>> Facts(CSharpWorkerPipeline pipeline)
-    {
-        var nodes = await pipeline.RepositoryFactory.CreateNodeRepository().GetAllAsync();
-        var edges = await pipeline.RepositoryFactory.CreateEdgeRepository().GetAllAsync();
-        return nodes.Select(node => string.Join('|',
-                "N", F(node.Id), F(node.Identifier), F(node.Name), F(node.Type), F(node.FilePath),
-                I(node.StartLine), I(node.EndLine), I(node.StartCol), I(node.EndCol),
-                F(node.Namespace), F(node.Visibility), F(node.Signature), F(node.Language), F(node.ReturnType),
-                F(node.Parameters), F(node.Modifiers), F(node.Metrics), M(node.Metadata)))
-            .Concat(edges.Select(edge => string.Join('|',
-                "E", F(edge.Id), F(edge.SourceId), F(edge.TargetId), F(edge.Type), M(edge.Metadata))))
-            .Order(StringComparer.Ordinal)
-            .ToList();
-
-        static string F(string? value) => value is null
-            ? "<null>"
-            : "\"" + value.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("|", "\\p").Replace("\n", "\\n").Replace("\r", "\\r") + "\"";
-        static string I(int value) => value.ToString(CultureInfo.InvariantCulture);
-        static string M(IReadOnlyDictionary<string, string>? metadata) => metadata is null
-            ? "<null>"
-            : "{" + string.Join(',', metadata.OrderBy(pair => pair.Key, StringComparer.Ordinal).Select(pair => F(pair.Key) + ":" + F(pair.Value))) + "}";
-    }
+        => GraphFacts.Of(
+            await pipeline.RepositoryFactory.CreateNodeRepository().GetAllAsync(),
+            await pipeline.RepositoryFactory.CreateEdgeRepository().GetAllAsync());
 
     /// <summary>Each published shard's annotation: parser version and coverage, by shard.</summary>
     private static List<string> Annotations(InMemoryDatabase database)

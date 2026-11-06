@@ -19,6 +19,9 @@ namespace CodeContext.Core.Snapshots
     {
         public bool Loaded => Rejection == SnapshotRejection.None;
 
+        /// <summary>The worker state file names (unchecked) the shards in <see cref="Dropped"/> record, so start-up cleanup keeps what the kept file references.</summary>
+        public IReadOnlyList<string> DroppedStateFiles { get; init; } = [];
+
         /// <summary>See <see cref="SnapshotOpenResult.PassedHostMeta"/>; true for every refusal after the file opened.</summary>
         public bool PassedHostMeta { get; init; }
 
@@ -68,6 +71,7 @@ namespace CodeContext.Core.Snapshots
         {
             var shards = new List<LoadedSnapshotShard>();
             var dropped = new List<ShardKey>();
+            var droppedStateFiles = new List<string>();
             // The store's global invariants, which PublishLoadedShards leaves to the loader: an id, an
             // edge id and an identifier live in at most one shard.
             var nodeIds = new HashSet<string>(StringComparer.Ordinal);
@@ -79,6 +83,7 @@ namespace CodeContext.Core.Snapshots
                 if (acceptShard is not null && !acceptShard(reader.Key))
                 {
                     dropped.Add(reader.Key);
+                    if (reader.Meta.GetValueOrDefault(SnapshotFormat.StateFileKey) is { } stateFile) droppedStateFiles.Add(stateFile);
                     continue;
                 }
 
@@ -111,7 +116,7 @@ namespace CodeContext.Core.Snapshots
                     throw new SnapshotCorruptException($"Shard {reader.Key} holds a fact the writer never writes: {reason}.");
                 shards.Add(new LoadedSnapshotShard(reader.Key, state, reader.ReadInfo()));
             }
-            return new SnapshotLoadResult(SnapshotRejection.None, null, file.Header, shards, dropped);
+            return new SnapshotLoadResult(SnapshotRejection.None, null, file.Header, shards, dropped) { DroppedStateFiles = droppedStateFiles };
         }
     }
 }

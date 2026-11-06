@@ -213,7 +213,8 @@ public sealed class StartupFromSnapshotTests : IAsyncLifetime
             Factory.InitializeAsync(root).Wait();
             var options = Options.Create(new CodeContextOptions { RootPath = root, CacheKeyPath = keyPath });
             var metadata = new InMemoryFileMetadataRepository();
-            var coverage = new AnalysisCoverageRegistry();
+            // The host's registry: it reads the coverage recorded with the published shards.
+            var coverage = AnalysisCoverageRegistry.ForStore(Factory);
             var store = (IGenerationalGraphStore)Factory.CreateGraphRepository();
             Workers = new LanguageWorkerService(
                 behavior is null ? new StaticWorkerCatalog() : new StaticWorkerCatalog(FakeWorker(behavior)),

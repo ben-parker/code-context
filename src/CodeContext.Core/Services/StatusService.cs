@@ -62,6 +62,9 @@ public class StatusService : IStatusService
         var cacheBefore = _cacheState?.GetStatus();
         var fileAggregates = await AggregateFileMetadataAsync();
         var graphStatistics = await GetGraphStatisticsAsync();
+        // Coverage comes from the store too, so it is read before the last cache reading: coverage loaded from a
+        // snapshot is then always labelled by that reading or the one before.
+        var projects = _coverage?.GetProjects() ?? [];
 
         var phase = _scanState.Phase;
         var indexed = phase == ScanPhase.Ready;
@@ -84,7 +87,7 @@ public class StatusService : IStatusService
             Indexed: indexed,
             FileCount: fileAggregates.FileCount,
             NodeCount: graphStatistics.NodeCount,
-            Coverage: GetCoverage(cache?.ServingCached == true)
+            Coverage: GetCoverage(projects, cache?.ServingCached == true)
         );
     }
 
@@ -104,9 +107,8 @@ public class StatusService : IStatusService
         return cache.State == state ? cache : cache with { State = state };
     }
 
-    private CoverageStatusDto? GetCoverage(bool cached)
+    private static CoverageStatusDto? GetCoverage(IReadOnlyList<ProjectCoverage> projects, bool cached)
     {
-        var projects = _coverage?.GetProjects() ?? [];
         return projects.Count == 0
             ? null
             : new CoverageStatusDto(ContextService.OverallState(projects), projects, Cached: cached ? true : null);

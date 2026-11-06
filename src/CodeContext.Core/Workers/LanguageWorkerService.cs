@@ -1,3 +1,4 @@
+using CodeContext.Core.Repositories;
 using CodeContext.Core.Services;
 using CodeContext.Parser.Protocol;
 using Microsoft.Extensions.Hosting;
@@ -58,7 +59,7 @@ public interface ILanguageWorkerService
         CancellationToken ct = default);
 }
 
-public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedService, IAsyncDisposable
+public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedService, IAsyncDisposable, IWorkerStateSaver
 {
     internal const string DefaultWorkspaceId = "default";
 
@@ -82,6 +83,9 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
 
         /// <summary>The store holds facts of this parser from a loaded snapshot, which only its own index can replace.</summary>
         public bool HoldsLoadedFacts { get; set; }
+
+        /// <summary>How the last successful index answered its baseline (<see cref="BaselineOutcomes"/>), or null when it carried none.</summary>
+        public string? LastBaselineOutcome { get; set; }
         public HashSet<string> ApprovedFiles { get; } = new(PathComparer);
         public SemaphoreSlim Lock { get; } = new(1, 1);
     }
@@ -125,6 +129,20 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
     }
 
     public IReadOnlyCollection<string> OwnedExtensions => _extensionToParser.Keys;
+
+    /// <summary>
+    /// Where a first index finds a baseline; null (the cache is off) offers none. Set once while the host is
+    /// composed, before the coordinator runs.
+    /// </summary>
+    internal IWorkerBaselineSource? BaselineSource { get; set; }
+
+    /// <summary>How the parser's last successful index answered its baseline, or null when it was offered none.</summary>
+    internal string? LastBaselineOutcomeFor(string parserId)
+        => _workers.TryGetValue(parserId, out var state) ? state.LastBaselineOutcome : null;
+
+    /// <summary>Whether the parser's last successful index was a baseline its worker accepted.</summary>
+    internal bool AcceptedBaseline(string parserId)
+        => _workers.TryGetValue(parserId, out var state) && state.LastBaselineOutcome == BaselineOutcomes.Accepted;
 
     public bool TryGetParserForExtension(string extension, out string parserId)
         => _extensionToParser.TryGetValue(extension, out parserId!);
@@ -212,8 +230,16 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
             await supervisor.OpenWorkspaceAsync(new OpenWorkspaceParams(
                 DefaultWorkspaceId, _options.RootPath,
                 state.Registration.Manifest.ProjectMarkers ?? [], files), ct).ConfigureAwait(false);
-            await supervisor.IndexWorkspaceAsync(new IndexWorkspaceParams(
-                DefaultWorkspaceId, generation, files), ct, progressHandler).ConfigureAwait(false);
+            // The offer rule (plan 3.6): the source checks the shard and its state file; the supervisor drops the
+            // baseline again unless the worker declared the capability and this is its process's first mutation.
+            var initialized = supervisor.Initialized;
+            var baseline = initialized?.Capabilities.PersistentState == true
+                ? BaselineSource?.TryGetBaseline(parserId, DefaultWorkspaceId, initialized.ParserVersion)
+                : null;
+            state.LastBaselineOutcome = null;
+            var result = await supervisor.IndexWorkspaceAsync(new IndexWorkspaceParams(
+                DefaultWorkspaceId, generation, files, baseline), ct, progressHandler).ConfigureAwait(false);
+            state.LastBaselineOutcome = result.Baseline;
             ReplaceApprovedFiles(state, files);
             state.EverIndexed = true;
             state.HoldsLoadedFacts = false;
@@ -307,6 +333,57 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
         }
     }
 
+    async Task<SaveStateResult?> IWorkerStateSaver.SaveStateAsync(
+        string parserId, ShardLineage lineage, SaveStateParams parameters, CancellationToken ct)
+    {
+        if (!_workers.TryGetValue(parserId, out var state)) return null;
+        try
+        {
+            await state.Lock.WaitAsync(ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            return null;
+        }
+        try
+        {
+            if (state.Supervisor is not { } supervisor
+                || !WorkerStatePairing.Holds(lineage, supervisor.Incarnation, supervisor.LastRequest,
+                    supervisor.IsLive, supervisor.DeclaresPersistentState))
+            {
+                return null;
+            }
+
+            // The request runs on its own token: when ct fires (the capture's time limit), the coordinator moves
+            // on at once, and the request is cancelled in the background with its late result ignored. (A source
+            // without a timer needs no disposal.)
+            var abandon = new CancellationTokenSource();
+            var request = supervisor.SaveStateAsync(parameters, abandon.Token);
+            try
+            {
+                return await request.WaitAsync(ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                _logger.LogWarning("Worker '{ParserId}' did not save its state in time; its shard is written without state.", parserId);
+                // Off this thread: the cancel notification and its grace period must not hold the coordinator.
+                _ = abandon.CancelAsync();
+                _ = request.ContinueWith(task => _ = task.Exception, TaskScheduler.Default);
+                return null;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning("Worker '{ParserId}' did not save its state ({Message}); its shard is written without state.",
+                    parserId, ex.Message);
+                return null;
+            }
+        }
+        finally
+        {
+            state.Lock.Release();
+        }
+    }
+
     private void ReplaceApprovedFiles(WorkerState state, IReadOnlyList<string> files)
     {
         state.ApprovedFiles.Clear();
@@ -347,7 +424,7 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
             _sessionRegistry,
             _options)
         {
-            DeltaHandler = (delta, ct) => _deltaSink.ApplyAsync(delta, ct),
+            OriginDeltaHandler = (delta, origin, ct) => _deltaSink.ApplyAsync(delta, origin, ct),
         };
         state.Supervisor = supervisor;
         return supervisor;

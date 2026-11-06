@@ -228,8 +228,9 @@ namespace CodeContext.Core.Services
             {
                 response.DisambiguationHint = await BuildNoMatchHintAsync(
                     identifier, matchMode == "exact", type, containingType, @namespace, signature, sourceFile);
-                response.Cache = CacheAfterReads(response.Cache);
+                // Coverage is a store read too: it comes before the last cache reading.
                 response.Coverage = CoverageFor(response);
+                response.Cache = CacheAfterReads(response.Cache);
                 return response;
             }
 
@@ -256,8 +257,8 @@ namespace CodeContext.Core.Services
 
             response.ReturnedMatches = response.Matches.Count;
             response.Truncated = response.ReturnedMatches < response.TotalMatches;
-            response.Cache = CacheAfterReads(response.Cache);
             response.Coverage = CoverageFor(response);
+            response.Cache = CacheAfterReads(response.Cache);
             return response;
         }
 

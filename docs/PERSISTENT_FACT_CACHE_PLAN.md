@@ -850,6 +850,96 @@ from the authenticated snapshot, or is still the reference last captured (wake, 
 restart); the shard's recorded parser version equals `InitializeResult.ParserVersion`; a
 state id and hash are recorded; this is the first index of this worker process.
 
+Protocol and pairing as built (phase 5). Where the text above is silent or differs, this
+is what the code does.
+
+1. Why pairing needs a proof. A worker that accepts a baseline sends only what changed
+   while the host was down, on top of the loaded shard. That is correct only if the
+   loaded shard holds exactly the facts the worker's saved state believes the host holds.
+   If the two ever disagree the graph differs from a fresh scan and nothing repairs it.
+   So a state file is recorded with a shard, and a baseline offered from it, only when
+   the host can prove the shard's facts are exactly what that worker process emitted.
+2. Pairing rule. A worker state file is recorded with a shard only by a capture, after
+   the worker's `workspace/saveState` checks out, and only while the shard's lineage
+   pairs: it was established by that worker process (a published workspace replacement,
+   or a published accepted baseline applied to a shard that still carried the recorded
+   state with the state id that baseline offered); every later commit of that process
+   extended it one request at a time; its request is the last mutating request the
+   process was sent; the process is live and declared `persistentState`; and the shard
+   is still the reference and heap version the lineage was recorded against. The
+   supervisor numbers every `workspace/index` and `workspace/applyChanges` request, and
+   a request that fails in any way (an error, a cancel, a crash, a commit the host
+   refused, a baseline answer that does not match) advances the number once more, which
+   leaves a gap. The lineage lives in the shard annotation, so it is staged and rolled
+   back with a reconciliation. A new process is a new incarnation. A loaded shard has no
+   lineage. A foreign sweep, a prune or a legacy in-place write moves the shard off its
+   anchor. The capture also requires the shard to record fingerprints.
+3. What breaks the proof, each with a named test: a reconciliation that rolls back after
+   the worker emitted into it; a request that failed after its delta committed; a worker
+   restart; a foreign sweep; a prune; a legacy in-place write; a commit that does not
+   follow the lineage; a snapshot loaded and then changed without its worker confirming
+   it (so a snapshot written while `unverified` carries no state for that shard). After
+   each, the capture writes the shard without state and the next start re-walks that
+   parser in full, until a published replacement or accepted baseline from the live
+   process re-establishes the lineage.
+4. Keeping a recorded state. A recorded state stays paired only through a file-scoped
+   commit that leaves the shard reference unchanged and carries fingerprints equal by
+   value to the recorded ones and the same parser version (a baseline confirmation, a
+   no-op change). Any other commit drops it, and the lineage, if it still holds, lets the
+   next capture save a fresh state. A capture does not ask a worker to save again while
+   the recorded state still describes the shard: the file is carried into the new
+   snapshot (this is the seam phase 9 uses). A capture that will not be written
+   un-records each binding it recorded before deleting its files; at shutdown the stop
+   waits for a capture already requested, which keeps its bindings and files for the
+   final capture, so the final snapshot references only state files that exist and no
+   worker saves twice.
+5. Offer rule. A baseline is offered at most once per worker process: with the first
+   mutating request the host sends that process (`workspace/index` or
+   `workspace/applyChanges`, not `workspace/open`), so only when that request is a
+   `workspace/index`; and only when the worker declared `persistentState`, the cache
+   directory is open, the shard (the staged one during a reconciliation) carries a state
+   binding still anchored to it, its recorded parser version equals the running
+   worker's, a state id (32 lowercase hex), a SHA-256 (64 lowercase hex) and
+   fingerprints are recorded, and a regular, non-link file under that binding's name
+   exists in the cache directory now. This supersedes "the first index" above: a process
+   whose first request is `workspace/applyChanges` is never offered one. A read-only
+   instance may offer a baseline from the snapshot it loaded (its worker only reads the
+   file); it never saves or deletes state.
+6. State file names and paths. `worker-<parser>.<10-digit sequence of the snapshot it was
+   captured for>.<first 8 hex of the state id>.state`, with `.tmp` appended while
+   saving; the parser id is limited to `[a-z0-9_-]{1,64}`. The name is the only thing
+   from a snapshot that becomes a path: it is parsed against this pattern, checked to
+   belong to the asking parser, and joined to the cache directory. The host stats a
+   state file (existence, regular file, length) and never reads, hashes or parses it;
+   the SHA-256 handed to the worker comes only from the authenticated snapshot or from
+   the worker's own save result, and the worker must verify it before trusting a byte.
+7. Saving. The capture command asks each worker with a pairing lineage to save, before
+   the store is latched, on the coordinator loop, after re-checking the cache directory
+   for links. Limit 5 s per worker (`SaveStateTimeout`, settable in code only): then the
+   capture moves on at once, the request is cancelled in the background (`$/cancel`), a
+   late result is ignored, the path and its temp file are deleted and the session state
+   is not touched. A result is discarded when `saved` is false, when `workspaceId` or
+   `stateId` differs, when `sha256` is not 64 lowercase hex, or when `bytes` differs
+   from the file's length; the shard is then written without state. State files are
+   retired with their snapshot and cleaned at start when no kept snapshot references
+   them (shards the loader dropped count as references).
+8. Baseline answers. A request that carried a baseline must be answered `accepted` or
+   `rejected`. `accepted` with a workspace replacement, `rejected` with a file-scoped
+   delta, an answer to a request that carried none, or no answer to one that did, is a
+   protocol violation handled like the existing ones. Fingerprints are read from a
+   request's first chunk only; an entry with a null `unit` or `value` is a violation; a
+   worker without the capability has its fingerprints dropped and is never sent a
+   baseline or `workspace/saveState`, so its requests are byte-identical to phase 4
+   (compared on the wire by a reviewer: 637 bytes on both builds).
+9. Surface. `verification` per parser: `pending` until the verification scan commits,
+   then `baseline` if that parser's worker accepted its baseline, else `replaced`.
+   `workerStateBytes` is the total length of the state files the snapshot references,
+   absent when there are none.
+10. A worker cannot tell from `initialize` whether the host supports the capability: a
+    host that does not never sends a baseline or `workspace/saveState` and ignores
+    `fingerprints`. In the schema `applyChangesResult` is its own definition, so the
+    baseline fields do not apply to it.
+
 Sequences. H is the host, W the C# worker.
 
 Cold start, nothing changed:
@@ -1829,7 +1919,49 @@ Gates: standard.
 
 ### Phase 5: protocol, persistent state capability
 
-Status: not started
+Status: accepted 2026-11-06. Reviewed by one Opus and one Sonnet reviewer; no blocker;
+the confirmed findings fixed by a fixer; gates re-run by the coordinator, including both
+SDK suites. The protocol and the pairing rule as built are listed in section 3.6.
+`ParserProtocol.Version` is 1; no bundled worker declares the capability yet.
+
+Review outcome.
+- The pairing proof (3.6, rules 1 to 4) is a coordinator requirement added to this
+  phase, because the plan's offer rule alone would have paired a worker's state with a
+  shard after a rolled-back rescan, and the next start would then have trusted
+  mismatched state for good. The Opus reviewer tried, by reading and by tests, to build
+  a sequence that pairs a state file with a shard whose facts differ from it and found
+  none; its own multi-restart test (accept with a file added while down, an edit and a
+  delete while running, capture, more changes while down, accept again) equalled a
+  fresh scan, and a restart with nothing changed wrote nothing.
+- Contract (Sonnet): the 13 new message shapes, serialized by the real serializer, and
+  the examples of 3.6 validate against the JSON schema; names, casing and optionality
+  agree across schema, DTOs, the npm and Python SDKs and the docs; 17 of 20 mutations
+  caught at first, the rest covered after the fix round except the link check on a state
+  file, whose test needs the file-symlink privilege this machine lacks.
+- Fixed: a capture dropped at shutdown deleted a state file the store had already
+  recorded, so the final snapshot named a missing file and the next start re-walked
+  (reproduced 4 of 4); a commit that changed no fact but moved the fingerprints kept the
+  old state, which the worker would then reject at every later start; the accepting
+  commit now checks the shard still carries the offered state id rather than relying on
+  the coordinator being sequential; an abandoned save's late cancellation no longer
+  touches the session state; the worker-author docs contradicted themselves about
+  `replacesWorkspace`; the state-file path guards got direct tests; the fake-worker
+  convergence comparison now uses the whole-fact helper.
+- Also in this change set, from the phase 4 re-review: coverage read before the final
+  cache-state reading; the coverage read no longer takes the commit lock; the order
+  "verified, then `ready`" and the host's coverage wiring pinned by tests.
+- Decisions taken in triage: the baseline goes with the first mutating request, as the
+  code has it, and schema and docs say so; left as is: an orphan state file when a worker
+  renames after an abandoned save was cleaned up (removed by the next retire or start),
+  saves running one after another across several capable workers (5 s each at worst;
+  one capable worker exists), no `if/then` in the schema for `bytes` and `sha256`.
+- Not run: a real host with a capable worker (none is bundled until phase 6); Linux and
+  macOS; Native AOT publish; a 0.10.x host against a worker that declares the capability
+  (by reading: unknown members are ignored).
+- A reviewer of the phase 4 fix round, cut off by the usage limit, left one mutated file
+  (`ProgramHelpers.cs`) in the working tree although told to work only in a scratch
+  copy. The implementer found and restored it, and the coordinator's gate run checked
+  the files that reviewer's mutations touched for differences from the last commit.
 
 Goal: host and contract support baselines, fingerprints and `workspace/saveState`. No
 bundled worker declares the capability yet.
@@ -2309,6 +2441,17 @@ into the release.
   a rescan that fails and is rolled back no longer leaves its coverage behind. (Phase 4)
 - A `.gitignore` inside a mandatory exclusion (`.git/`, `node_modules/`, `.codecontext/`
   and the like) no longer triggers a rescan. (Phase 3)
+- For worker authors: a worker can declare the optional `persistentState` capability.
+  The host then asks it to save its state (`workspace/saveState`) after quiet periods
+  and offers a `baseline` with the first `workspace/index` of the next process, so an
+  unchanged repository is confirmed with one empty file-scoped delta instead of a full
+  re-walk. Such a worker sends `fingerprints` on the first delta chunk of every request;
+  the host stores them and hands them back unread. The protocol version stays 1, and a
+  worker that does not declare the capability sees no change on the wire. See
+  `docs/language-worker-sdk.md`, "persisting state across restarts". (Phase 5)
+- `indexing.cache.verification` can read `baseline`, and `workerStateBytes` reports the
+  size of the saved worker state. State files live in `.codecontext/cache/` beside the
+  snapshot that names them and are deleted with it. (Phase 5)
 
 ## 9. Known items
 

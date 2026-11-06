@@ -26,7 +26,7 @@ using ShardKey = InMemoryDatabase.ShardKey;
 /// what the cache directory may contain. Fake time throughout; the only real waits are for the
 /// coordinator loop and the background write to finish.
 /// </summary>
-public class SnapshotServiceTests
+public partial class SnapshotServiceTests
 {
     private static readonly TimeSpan Quiet = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan Second = TimeSpan.FromSeconds(1);
@@ -222,9 +222,14 @@ public class SnapshotServiceTests
         var planted = Path.Combine(harness.WorkspacePath, SnapshotFile.FormatName(9, 0xdeadbeef));
         File.WriteAllBytes(planted, new byte[512]);
         // Names this code never writes are never deleted.
-        var foreign = new[] { "notes.txt", "graph.1.ccsnap", "graph.0000000002.ZZZZZZZZ.ccsnap", "worker-csharp.0000000005.5d0c9a1e.state" }
+        var foreign = new[] { "notes.txt", "graph.1.ccsnap", "graph.0000000002.ZZZZZZZZ.ccsnap", "worker-CSharp.0000000007.5d0c9a1e.state",
+                "worker-csharp.5.5d0c9a1e.state", "worker-..0000000005.5d0c9a1e.state" }
             .Select(name => Path.Combine(harness.WorkspacePath, name)).ToList();
         foreach (var path in foreign) File.WriteAllText(path, "x");
+        // A worker state file (and a save in progress) that the kept snapshot does not reference is this code's: deleted.
+        var unreferencedState = Path.Combine(harness.WorkspacePath, "worker-csharp.0000000005.5d0c9a1e.state");
+        File.WriteAllText(unreferencedState, "x");
+        File.WriteAllText(unreferencedState + ".tmp", "x");
 
         await harness.StartAsync();
 
@@ -232,6 +237,8 @@ public class SnapshotServiceTests
         Assert.False(File.Exists(older));
         Assert.False(File.Exists(temp));
         Assert.False(File.Exists(planted));
+        Assert.False(File.Exists(unreferencedState));
+        Assert.False(File.Exists(unreferencedState + ".tmp"));
         Assert.All(foreign, path => Assert.True(File.Exists(path), path));
 
         // Sequences continue above the kept snapshot; the deleted names (6, 9) do not raise the counter.

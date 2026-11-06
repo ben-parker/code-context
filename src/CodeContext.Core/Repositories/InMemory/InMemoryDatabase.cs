@@ -465,10 +465,12 @@ namespace CodeContext.Core.Repositories.InMemory
         private ImmutableSortedDictionary<ShardKey, IGraphShard>? _reconciliationState;
         private long _reconciliationGeneration;
 
-        // Each shard's annotation (parser version, coverage), changed only under _commitLock by the
-        // commit that carries it, staged and committed or rolled back with a reconciliation. Read only
-        // under the lock, so a latch sees the shards and their annotations from one commit.
-        private ImmutableSortedDictionary<ShardKey, ShardAnnotation> _annotations = EmptyAnnotations;
+        // Each shard's annotation (parser version, coverage, fingerprints, worker-state pairing), changed only
+        // under _commitLock by the commit that carries it (or the capture recording a state file), staged and
+        // committed or rolled back with a reconciliation. A latch reads it under the lock, so it sees the shards
+        // and their annotations from one commit; the coverage read takes the published reference without the
+        // lock, so a reader never waits for a commit's build.
+        private volatile ImmutableSortedDictionary<ShardKey, ShardAnnotation> _annotations = EmptyAnnotations;
         private ImmutableSortedDictionary<ShardKey, ShardAnnotation>? _reconciliationAnnotations;
 
         private static ImmutableSortedDictionary<ShardKey, ShardAnnotation> EmptyAnnotations { get; } =
@@ -797,7 +799,8 @@ namespace CodeContext.Core.Repositories.InMemory
                 // one changes only its own shard's, and only when it carries one. Foreign shards it
                 // sweeps keep theirs.
                 var annotations = _reconciliationState is not null ? _reconciliationAnnotations ?? _annotations : _annotations;
-                var nextAnnotations = scope is null ? EmptyAnnotations : Annotate(annotations, scope);
+                var nextAnnotations = scope is null ? EmptyAnnotations : Annotate(annotations, scope, current, next);
+                InsideCommitLock?.Invoke();
 
                 if (_reconciliationState is not null)
                 {
@@ -822,25 +825,132 @@ namespace CodeContext.Core.Repositories.InMemory
         }
 
         /// <summary>
-        /// <paramref name="current"/> with the annotation <paramref name="scope"/> carries for its shard. A
-        /// null coverage keeps the recorded one. An annotation equal to the recorded one (same parser
-        /// version, a coverage list equal entry by entry) keeps the recorded instance, so an unchanged
-        /// commit leaves the snapshot writer's view clean: every delta brings its own list instance.
+        /// <paramref name="current"/> with the annotation <paramref name="scope"/> carries for its shard, which
+        /// the commit takes from <paramref name="before"/> to <paramref name="after"/>. A null coverage keeps the
+        /// recorded one; the fingerprints are the commit's, null clearing them. An annotation equal to the
+        /// recorded one (same parser version, a coverage list equal entry by entry, equal fingerprints, the same
+        /// pairing) keeps the recorded instance, so an unchanged commit leaves the snapshot writer's view clean:
+        /// every delta brings its own list instance.
+        ///
+        /// The pairing, valid only while the recorded annotation is anchored to <paramref name="before"/>:
+        /// <list type="bullet">
+        /// <item>Lineage: a workspace replacement starts one. A file-scoped establishing commit (an accepted
+        /// baseline) starts one only when <paramref name="before"/> still carries the recorded state whose id the
+        /// baseline offered; otherwise it is an ordinary file-scoped commit with no lineage. Any other commit
+        /// extends the recorded lineage only when it is the same process's next request; anything else (another
+        /// process, a gap left by a rolled-back or failed request, a shard moved off its anchor) leaves none.</item>
+        /// <item>State: the recorded state file stays paired only with a file-scoped commit that leaves the shard
+        /// reference unchanged and carries the recorded fingerprints (equal by value) and parser version: a
+        /// baseline confirmation, or a change that changes no fact and moves no fingerprint. A replacement, any
+        /// fact change, and any change of fingerprints or parser version drop it, so the next capture saves a
+        /// state that matches what the snapshot records.</item>
+        /// </list>
         /// </summary>
         private static ImmutableSortedDictionary<ShardKey, ShardAnnotation> Annotate(
-            ImmutableSortedDictionary<ShardKey, ShardAnnotation> current, CommitScope scope)
+            ImmutableSortedDictionary<ShardKey, ShardAnnotation> current, CommitScope scope,
+            ImmutableSortedDictionary<ShardKey, IGraphShard> before, ImmutableSortedDictionary<ShardKey, IGraphShard> after)
         {
             if (scope.Annotation is not { } supplied) return current;
             var key = ShardKey.From(scope.ParserId, scope.WorkspaceId);
             current.TryGetValue(key, out var existing);
+            before.TryGetValue(key, out var shardBefore);
+            after.TryGetValue(key, out var shardAfter);
+
             var coverage = supplied.Coverage ?? existing?.Coverage;
+            var previousLineage = existing?.LineageFor(shardBefore);
+            var recordedState = existing?.StateFor(shardBefore);
+            var lineage = supplied.Lineage switch
+            {
+                null => null,
+                { Establishes: true } replacement when scope.ReplacesFiles is null => replacement,
+                // An accepted baseline: only while the shard is still the one the offered state describes.
+                { Establishes: true, BaselineStateId: { } offered } baseline
+                    when recordedState is not null && string.Equals(recordedState.StateId, offered, StringComparison.Ordinal) => baseline,
+                { Establishes: true } => null,
+                { } next when previousLineage is not null && next.Follows(previousLineage) => next,
+                _ => null,
+            };
+            var state = scope.ReplacesFiles is not null && ReferenceEquals(shardBefore, shardAfter)
+                && string.Equals(existing?.ParserVersion, supplied.ParserVersion, StringComparison.Ordinal)
+                && supplied.Fingerprints is not null
+                && ShardAnnotation.SameFingerprints(existing?.Fingerprints, supplied.Fingerprints)
+                ? recordedState
+                : null;
+            var anchor = lineage is null && state is null ? null : ShardAnchor.Of(shardAfter);
+
             if (existing is not null
                 && string.Equals(existing.ParserVersion, supplied.ParserVersion, StringComparison.Ordinal)
-                && SameCoverage(existing.Coverage, coverage))
+                && SameCoverage(existing.Coverage, coverage)
+                && ShardAnnotation.SameFingerprints(existing.Fingerprints, supplied.Fingerprints)
+                && Equals(existing.Lineage, lineage)
+                && ReferenceEquals(existing.State, state)
+                && Equals(existing.Anchor, anchor))
             {
                 return current;
             }
-            return current.SetItem(key, ReferenceEquals(coverage, supplied.Coverage) ? supplied : supplied with { Coverage = coverage });
+            var recorded = ReferenceEquals(supplied.Coverage, coverage) && Equals(supplied.Lineage, lineage)
+                && ReferenceEquals(supplied.State, state) && Equals(supplied.Anchor, anchor)
+                ? supplied
+                : supplied with { Coverage = coverage, Lineage = lineage, State = state, Anchor = anchor };
+            return current.SetItem(key, recorded);
+        }
+
+        /// <summary>
+        /// Records <paramref name="state"/> as the worker state file paired with the published shard
+        /// <paramref name="key"/>, if that shard is still <paramref name="expectedShard"/> with
+        /// <paramref name="expectedAnnotation"/> anchored to it and no reconciliation is staged. Not a commit: no
+        /// fact, generation or other annotation field changes. Run on the coordinator loop by the snapshot
+        /// capture, between mutations.
+        /// </summary>
+        internal bool TryRecordWorkerState(
+            ShardKey key, IGraphShard expectedShard, ShardAnnotation expectedAnnotation, WorkerStateBinding state)
+        {
+            ArgumentNullException.ThrowIfNull(state);
+            lock (_commitLock)
+            {
+                if (_reconciliationState is not null) return false;
+                if (!_shards.TryGetValue(key, out var shard) || !ReferenceEquals(shard, expectedShard)) return false;
+                if (!_annotations.TryGetValue(key, out var annotation) || !ReferenceEquals(annotation, expectedAnnotation)
+                    || !annotation.IsAnchoredTo(shard)) return false;
+                _annotations = _annotations.SetItem(key, annotation with { State = state });
+                return true;
+            }
+        }
+
+        /// <summary>
+        /// Un-records <paramref name="state"/>: when the published annotation of <paramref name="key"/> still holds
+        /// exactly that binding (by reference), it is cleared; anything else is left alone. Run by a capture that
+        /// will not be written, before it deletes the files it asked for, so the store never names a state file
+        /// that is gone. Not a commit.
+        /// </summary>
+        internal void ClearWorkerState(ShardKey key, WorkerStateBinding state)
+        {
+            ArgumentNullException.ThrowIfNull(state);
+            lock (_commitLock)
+            {
+                if (_annotations.TryGetValue(key, out var annotation) && ReferenceEquals(annotation.State, state))
+                    _annotations = _annotations.SetItem(key, annotation with { State = null });
+                // A staged reconciliation started from the published annotations and may carry the binding too.
+                if (_reconciliationAnnotations is { } staged && staged.TryGetValue(key, out var stagedAnnotation)
+                    && ReferenceEquals(stagedAnnotation.State, state))
+                    _reconciliationAnnotations = staged.SetItem(key, stagedAnnotation with { State = null });
+            }
+        }
+
+        /// <summary>
+        /// The shard <paramref name="key"/> and its annotation as the next commit to it would see them: the staged
+        /// map while a reconciliation is staged, else the published one.
+        /// </summary>
+        internal (IGraphShard? Shard, ShardAnnotation? Annotation) CurrentShard(ShardKey key)
+        {
+            lock (_commitLock)
+            {
+                var shards = _reconciliationState ?? _shards;
+                var annotations = _reconciliationState is not null ? _reconciliationAnnotations ?? _annotations : _annotations;
+                shards.TryGetValue(key, out var shard);
+                annotations.TryGetValue(key, out var annotation);
+                return (shard, annotation);
+            }
         }
 
         /// <summary>
@@ -956,6 +1066,9 @@ namespace CodeContext.Core.Repositories.InMemory
                 if (_reconciliationState is not null) return false;
                 if (!_shards.TryGetValue(key, out var current) || !ReferenceEquals(current, expected)) return false;
                 _shards = _shards.SetItem(key, replacement);
+                // The replacement holds the same facts, so a pairing that described the old shard describes it.
+                if (_annotations.TryGetValue(key, out var annotation) && annotation.IsAnchoredTo(expected))
+                    _annotations = _annotations.SetItem(key, annotation with { Anchor = ShardAnchor.Of(replacement) });
                 NotifyMutation();
                 return true;
             }
@@ -977,14 +1090,29 @@ namespace CodeContext.Core.Repositories.InMemory
         /// </summary>
         internal IReadOnlyList<CodeContext.Parser.Protocol.ProjectCoverage> PublishedCoverage()
         {
-            ImmutableSortedDictionary<ShardKey, ShardAnnotation> annotations;
-            lock (_commitLock) annotations = _annotations;
-            return annotations
+            // One volatile read of the published annotations, no lock: a commit's build can take a while, and the
+            // reference it publishes at its end is either the one read here or the next.
+            var annotations = _annotations;
+            var cached = _cachedCoverage;
+            if (cached is not null && ReferenceEquals(cached.Annotations, annotations)) return cached.Projects;
+            var projects = annotations
                 .OrderBy(annotation => annotation.Key.ParserId, StringComparer.Ordinal)
                 .ThenBy(annotation => annotation.Key.WorkspaceId, StringComparer.Ordinal)
                 .SelectMany(annotation => annotation.Value.Coverage ?? [])
-                .ToList();
+                .ToList()
+                .AsReadOnly();
+            _cachedCoverage = new CachedCoverage(annotations, projects);
+            return projects;
         }
+
+        private sealed record CachedCoverage(
+            ImmutableSortedDictionary<ShardKey, ShardAnnotation> Annotations,
+            IReadOnlyList<CodeContext.Parser.Protocol.ProjectCoverage> Projects);
+
+        private volatile CachedCoverage? _cachedCoverage;
+
+        /// <summary>Test seam: runs inside the commit lock of every generation commit, after its state is built.</summary>
+        internal Action? InsideCommitLock { get; set; }
 
         /// <summary>
         /// Latches the published shard map, the shards' annotations and the generation they were committed
