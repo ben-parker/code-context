@@ -313,12 +313,15 @@ namespace CodeContext.Core.Repositories.InMemory
         internal static string[] SortPaths(IEnumerable<string> paths)
         {
             var array = new List<string>(paths).ToArray();
-            Array.Sort(array, static (left, right) =>
-            {
-                var folded = string.Compare(left, right, OrdinalIgnoreCase);
-                return folded != 0 ? folded : string.CompareOrdinal(left, right);
-            });
+            Array.Sort(array, ComparePaths);
             return array;
+        }
+
+        /// <summary>The file-path order: <see cref="StringComparer.OrdinalIgnoreCase"/>, then <see cref="StringComparer.Ordinal"/>.</summary>
+        internal static int ComparePaths(string left, string right)
+        {
+            var folded = string.Compare(left, right, OrdinalIgnoreCase);
+            return folded != 0 ? folded : string.CompareOrdinal(left, right);
         }
     }
 }

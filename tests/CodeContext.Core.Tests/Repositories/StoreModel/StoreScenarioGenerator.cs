@@ -222,14 +222,26 @@ internal sealed class StoreUniverse
 /// map still shares the shard object. The store's named tests cover that case instead.
 ///
 /// Deterministic for a seed: the same seed and the same model state give the same operation.
+///
+/// With <c>persistableFacts</c>, every fact is one a snapshot can persist: no fact is made for
+/// <see cref="ShardKey.Default"/> (its operations go to an owned shard), ids carry the shard's prefix,
+/// edges have a prefixed source, and ownership metadata names the shard. Cross-shard and dangling
+/// targets, shadowing, stale generations, prunes and reconciliations are generated as before. The
+/// default mode draws exactly what it drew before this option existed (the persistable mode applies
+/// its overrides to what was drawn), so its sequences do not change.
 /// </summary>
 internal sealed class StoreScenarioGenerator
 {
     private readonly Random _random;
+    private readonly bool _persistableFacts;
     private readonly SortedSet<string> _issuedIdentifiers = new(StringComparer.Ordinal);
     private int _version;
 
-    public StoreScenarioGenerator(int seed) => _random = new Random(seed);
+    public StoreScenarioGenerator(int seed, bool persistableFacts = false)
+    {
+        _random = new Random(seed);
+        _persistableFacts = persistableFacts;
+    }
 
     /// <summary>Every identifier any generated node has carried so far.</summary>
     public IReadOnlyCollection<string> IssuedIdentifiers => _issuedIdentifiers;
@@ -252,7 +264,7 @@ internal sealed class StoreScenarioGenerator
 
     private StoreOperation ScopedCommit(ReferenceGraphModel model, int roll)
     {
-        var shard = _random.Next(10) == 0 ? ShardKey.Default : Pick(StoreUniverse.OwnedShards);
+        var shard = _random.Next(10) == 0 ? DefaultOrOwned() : Pick(StoreUniverse.OwnedShards);
         var generation = NextGeneration(model);
 
         // A commit with an empty file set and no facts: must leave the shard reference alone.
@@ -282,7 +294,7 @@ internal sealed class StoreScenarioGenerator
     {
         var nodes = new List<CodeNode>();
         var edges = new List<CodeEdge>();
-        foreach (var shard in StoreUniverse.OwnedShards.Append(ShardKey.Default))
+        foreach (var shard in _persistableFacts ? StoreUniverse.OwnedShards : StoreUniverse.OwnedShards.Append(ShardKey.Default))
         {
             for (var i = _random.Next(0, 5); i > 0; i--)
                 nodes.Add(MakeNode(_random.Next(25) == 0 ? null : PickNodeId(shard, model), PickNodePath(shard), shard));
@@ -315,7 +327,7 @@ internal sealed class StoreScenarioGenerator
 
     private StoreOperation LegacyMutation(ReferenceGraphModel model)
     {
-        var shard = _random.Next(6) == 0 ? ShardKey.Default : Pick(StoreUniverse.OwnedShards);
+        var shard = _random.Next(6) == 0 ? DefaultOrOwned() : Pick(StoreUniverse.OwnedShards);
         var roll = _random.Next(20);
         if (roll < 8)
         {
@@ -367,12 +379,20 @@ internal sealed class StoreScenarioGenerator
     // another shard's or none (a scoped commit takes the node into its scope shard regardless; a
     // whole-graph replacement and the legacy upsert route it by this metadata).
     private ShardKey OwnerFor(ShardKey shard)
-        => _random.Next(10) switch
+    {
+        var owner = _random.Next(10) switch
         {
             0 => Pick(StoreUniverse.OwnedShards),
             1 => ShardKey.Default,
             _ => shard,
         };
+        return Persistable(shard) ? shard : owner;
+    }
+
+    private bool Persistable(ShardKey shard) => _persistableFacts && shard != ShardKey.Default;
+
+    // In the persistable mode no fact is made for the un-owned shard, which is never persisted.
+    private ShardKey DefaultOrOwned() => _persistableFacts ? Pick(StoreUniverse.OwnedShards) : ShardKey.Default;
 
     private CodeNode MakeNode(string? id, string? path, ShardKey owner)
     {
@@ -426,6 +446,12 @@ internal sealed class StoreScenarioGenerator
                 < 3 => $"shared-edge:{_random.Next(3)}",
                 _ => $"{shard.ParserId}:{shard.WorkspaceId}:e:{source}>{target}:{type}",
             };
+            if (Persistable(shard))
+            {
+                if (source is null || !source.StartsWith($"{shard.ParserId}:{shard.WorkspaceId}:", StringComparison.Ordinal))
+                    source = StoreUniverse.LocalId(shard, (source?.Length ?? 0) % StoreUniverse.LocalIdsPerShard);
+                id = $"{shard.ParserId}:{shard.WorkspaceId}:e:{source}>{target}:{type}";
+            }
             var metadata = new Dictionary<string, string>(StringComparer.Ordinal) { ["line"] = _random.Next(50).ToString() };
             var owner = OwnerFor(shard);
             if (owner != ShardKey.Default)
@@ -445,7 +471,11 @@ internal sealed class StoreScenarioGenerator
     private string PickNodeId(ShardKey shard, ReferenceGraphModel model)
     {
         var roll = _random.Next(10);
-        if (roll == 0) return StoreUniverse.SharedId(_random.Next(StoreUniverse.SharedIds));
+        if (roll == 0)
+        {
+            var shared = _random.Next(StoreUniverse.SharedIds);
+            return Persistable(shard) ? StoreUniverse.LocalId(shard, shared) : StoreUniverse.SharedId(shared);
+        }
         if (shard == ShardKey.Default) return roll < 5 ? "default:only" : Pick(StoreUniverse.AllNodeIds().ToList());
 
         // Prefer an id this shard holds now, so deltas often shadow carried nodes.

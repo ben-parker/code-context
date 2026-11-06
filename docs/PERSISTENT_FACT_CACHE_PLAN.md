@@ -397,6 +397,121 @@ throws `SnapshotCorruptException`. No span or pointer leaves a read call. A corr
 after authentication (a writer bug) fails the request with an error, drops the shard and
 queues a full rescan. It never crashes and never answers from data that failed a check.
 
+Format as built (phase 2). The text above was written before the code; where it is silent
+or differs, this list is the format. A reader requires exactly this layout.
+
+1. Layout is dense. Host meta starts at 256; the directory at the next 8-byte boundary
+   after it; each blob at the boundary after the previous part; the footer at the boundary
+   after the last blob. Inside a blob each section starts at the boundary after the
+   previous one and the blob ends at the boundary after its last section. Padding is zero.
+2. Section table: kinds 1 to 20, each once, in kind order. Element sizes: ShardMeta 1,
+   StringOffsets 4, StringBytes 1, Nodes 80, Edges 32, IdTable 8, the three hashes 4,
+   BySourceOffsets 4, ByTargetOffsets 4, ByTargetEdges 4, Files 24, NameTable 12,
+   NamePostings 4, Metadata 4, CrossShardEdges 4, TypeHistogram 4, Coverage 1,
+   Fingerprints 1.
+3. Host meta keys are written in the order hostVersion, rootPath, platform, at most 1 MiB;
+   `platform` is not checked on read. ShardMeta holds parserId and workspaceId, then
+   `parserVersion`, `stateFile`, `stateId`, `stateSha256` when present. A key/value block
+   must be consumed exactly, be valid UTF-8 and hold no duplicate key.
+4. Shard header flags and reserved bytes are 0 and `foldedNameFirstRef` is 1. Directory
+   flags and reserved are 0. The directory's node and edge counts equal the shard header's.
+5. `blobSha256` exists for phase 8's byte-for-byte copy of an unchanged blob. The HMAC
+   covers it; it is not verified at load.
+6. Shards are written in ascending `ShardKey` order; a reader requires strictly ascending
+   keys.
+7. Strings: references 1 to nameCount are the folded names in NameTable order (UTF-8 byte
+   order). Every other distinct string follows in ordinal UTF-16 order. The fold is
+   `ToUpperInvariant` under the host's invariant globalization; the mode is not recorded,
+   because a file from another host version is refused.
+8. The id set is every node id, edge source and non-null edge target, sorted ordinally
+   (UTF-16); an id's index is its sid. Ids are read by sid and found through IdHash, never
+   by binary search.
+9. Files: the null-path bucket first if there is one, then raw paths ordered
+   OrdinalIgnoreCase then Ordinal. Each bucket is non-empty; node ranges are contiguous
+   from 0 to N; nodes are in id order inside a bucket. `normalizedKeyStr` is
+   `FilePathMatcher.Normalize(path)`, or 0 for a null or blank path. File flags are 0.
+10. NameTable entry k names string `foldedNameFirstRef + k`; names strictly increase by
+    UTF-8 bytes; postings runs are non-empty, contiguous from 0 and end at the postings
+    length; a run holds node record indexes in node id order. A node with a null name has
+    no entry.
+11. Hashes: IdHash is keyed by every id (value sid + 1); IdentifierHash by every non-blank
+    identifier (value node index + 1), its capacity from that count; EdgeIdHash by the
+    full edge id (value edge index + 1). Capacity is the smallest power of two at or above
+    4 x count / 3, and 0 for no keys. Insertion order: sid order, node record order, edge
+    record order. A probe stops after `capacity` steps.
+12. Edge records are sorted by (source sid, edge id). The writer persists no null source,
+    so `BySourceOffsets[S] == E`; the format still represents one. Null-target edges
+    follow `ByTargetOffsets[S]` in edge id order. Every run is in strictly increasing edge
+    id order; one that is not is corrupt when read.
+13. Edge id form 1 is used only when the target is non-null and the id starts with the
+    source: `idA` runs to the first occurrence of the target at or after the source's
+    length and `idB` is the rest, possibly the empty string. Otherwise form 0 with
+    `idB = 0`.
+14. `line` and `column` are held in the record when the value is canonical decimal int32
+    and not "-2147483648"; otherwise the record holds `int.MinValue` and the pair stays in
+    the metadata set.
+15. Metadata section: `u32 setCount`, then `setCount + 1` u32 byte offsets from the
+    section start (the first set starts at `4 + 4 x (setCount + 1)`, the last offset is the
+    section length), then each set as `u32 pairCount, (keyStr, valueStr)*` with keys in
+    ordinal order. `parserId`, `workspaceId` and record-held `line`/`column` are excluded.
+    Sets are deduplicated and numbered from 1 in first use, nodes in record order and then
+    edges. Reference 0 is the empty set. A null value is legal; a null key is not.
+    Materialized dictionaries are ordinal and enumerate in key order; insertion order is
+    not preserved (the store and `ContextService` read metadata by key only).
+16. Node flags are exactly bit 0 = external, where external means metadata `external` is
+    the ordinal string "true" (the store's prune rule). A record whose flag disagrees with
+    its metadata is corrupt.
+17. CrossShardEdges lists, in strictly ascending record order, the edges whose source or
+    non-null target is no node of the shard. TypeHistogram writes node kinds then edge
+    kinds, each in ordinal type order, skipping null and empty types.
+18. Sections whose length no count fixes: IdentifierHash, CrossShardEdges, the null-target
+    tail of ByTargetEdges, and the self-describing Metadata, ShardMeta, Coverage and
+    Fingerprints. All other section lengths must match their counts exactly.
+19. Validation order, replacing steps 1 to 5 above: (1) the name is
+    `graph.<10 digits>.<8 lowercase hex>.ccsnap` and the header sequence equals the
+    name's, so an older authentic file cannot be renamed to look newer; (2) on Unix,
+    before hashing, on the open handle: refuse a file that grants group or other write,
+    then set its mode to 0600, which only the owner (or root) can do, and refuse it if
+    that fails; (3) at least 296 bytes and at most 1 GiB, before anything is hashed;
+    (4) magic, endian tag, format version, header size, `fileLength`; (5) host meta at
+    exactly 256: host version, root path by the path case rule, path case flag;
+    (6) footer magic, then the HMAC, compared in constant time, with a 32-byte key;
+    (7) map; dense directory and layout; key order; each shard's tables, name table and
+    file buckets. Open costs O(shards + names + files), no per-node or per-edge work.
+    Text from the file quoted in a refusal before authentication is cut to 200 characters
+    with control characters escaped.
+20. Persistability, checked by the writer per shard and again by the loader on every
+    shard it materializes: not the `Default` shard; at least one fact; every node id, edge
+    id and edge source carries `<parserId>:<Uri.EscapeDataString(workspaceId)>:`; targets
+    may be anything, including null; node identifiers are non-null; metadata is a
+    `Dictionary` with the default or ordinal comparer whose `parserId` and `workspaceId`
+    equal the shard key; every non-blank identifier resolves to its own node through the
+    shard's identifier map; every string is well-formed UTF-16. The writer skips a shard
+    that fails and writes the others; the loader refuses the whole file. This replaces the
+    one-line rule in D6.
+21. The loader refuses the whole file for any structural failure in any shard, for a node
+    id, edge id or non-blank identifier that appears twice (in a shard or across shards),
+    and for a shard failing rule 20. It publishes nothing from a refused file.
+22. Limits: per shard, counts below 2^30 and each section and the blob at most
+    `Array.MaxLength` bytes (about 2 GiB), otherwise the shard is skipped; a file at most
+    1 GiB, otherwise nothing is written and the result says why. The 2^31 and 4 GiB
+    figures above are superseded. A big-endian process refuses to read, and the writer
+    throws `PlatformNotSupportedException`.
+23. Files are created 0600 on Unix. The key is 32 random bytes, created 0600 at creation
+    (its directory 0700 if missing) by writing a temp file and moving it into place
+    without overwrite, so concurrent creators agree; a key file that grants group or
+    other any access is refused on Unix. On Windows the profile's ACL applies to the key
+    and deny-write sharing to an open snapshot.
+
+Measured on the generated shard (26,000 nodes, 298,792 edges; Release, median of 5, file
+in the OS cache): 22,143,416 bytes (21.1 MiB; the estimate was 24 to 28 MB); write 850
+ms; open, authenticate, map, validate and materialize to heap shards 605 ms; open without
+materializing 14.8 ms, of which the streaming HMAC is 14.1 ms. Largest sections: Edges
+9.56 MB (43 percent), StringBytes 5.89 MB (27 percent), EdgeIdHash 2.10 MB, Nodes 2.08
+MB, ByTargetEdges 1.20 MB. The writer allocates about 448 MiB in total for that file
+(peak about 191 MiB above baseline); it runs off the commit path. Cold-disk times were
+not measured.
+
 ### 3.3 The shard read interface
 
 `IGraphShard` (internal, `CodeContext.Core.Repositories.InMemory`) is implemented by
@@ -1149,7 +1264,49 @@ Gates: standard.
 
 ### Phase 2: snapshot format, authenticated reader, materializing loader
 
-Status: not started
+Status: accepted 2026-11-05. Reviewed by two Opus reviewers and one Sonnet reviewer; no
+blocker; the confirmed findings fixed by a fixer; gates re-run by the coordinator. The
+format as built is listed at the end of section 3.2.
+
+Review outcome.
+- Fidelity (Opus): a hand-built shard with every null, empty, non-BMP, case-fold and
+  numeric edge case, and scenario stores from the phase 1 generator, read back equal to
+  the heap store through the loader, through the in-place accessors and as a whole store.
+  Layout decoded independently of the reader and matched 3.2.
+- Hostile files (Opus): a structured fuzzer over 32,000 re-signed damaged files produced
+  no exception other than `SnapshotCorruptException`, no hang and no leaked handle. A
+  version of it runs in the suite (3 seeds x 220 files, 3.5 s).
+- Tests (Sonnet): the fixture matches 3.2 byte for byte; five of eight deliberate bugs
+  went unnoticed by the first version's 114 tests. After the fix round all eight fail at
+  least one test.
+- Fixed: a 1 GiB length cap before hashing (a sparse 4 GiB planted file cost 2.6 s per
+  start); Unix mode and ownership checks on the file and the key (rule 19 and 23); the
+  loader applies the writer's persistability rule (re-signed damage could load a null
+  edge source or an id without the shard prefix); index ranges are validated at open (a
+  damaged name table made one query take 4.8 s and return 1.2 million duplicates from a
+  330 KB file); metadata with a non-ordinal comparer makes a shard not persistable; null
+  arguments answer as the heap shard; `Open` releases everything and returns a rejection
+  on any exception; partial files are deleted when a write fails.
+- Decisions taken in triage:
+  - A shard that is not persisted leaves cross-shard edges into it that its worker's later
+    commit does not sweep, where the live store would have swept them. Accepted, not
+    fixed: the result equals a fresh scan (the other worker emits that edge whatever this
+    shard holds, and a fresh store that commits the two in turn keeps it); the live
+    store's sweep depends on history. Pinned by
+    `SkippedShard_LoadedStoreAfterItsWorkerCommits_ReadsAsAFreshScan_NotAsTheLiveStore`.
+    In production only a lone surrogate or the `Default` shard causes a skip.
+  - The length cap is 1 GiB (45 times the jellyfin file). Phase 4 additionally tries at
+    most three candidate files at start, so planted files cost at most about 2 s.
+  - Read leases are not built here; the concurrent-dispose crash is carried to phase 8.
+  - No globalization field in the file; no cap on metadata pairs (see phase 8 carried
+    items for the cost reasoning).
+- Not run: anything on Linux or macOS. The suite runs on Windows locally and in CI; the
+  only Linux SDK at hand (WSL) is .NET 9. The Unix-only paths (0600 creation, the mode and
+  ownership checks, the key mode check) are built and have tests that return early on
+  Windows. No test covers a file owned by another user or a file shrinking between the
+  length check and the mapping.
+- Test seams in production code, internal: `SnapshotFile.OpenInMemory`, the
+  `maxFileLength` overloads, a `wrapStream` parameter on `WriteFile`.
 
 Goal: write a shard map to a file and load it back into heap shards. Dark: nothing calls it.
 
@@ -1210,6 +1367,25 @@ Out of scope: loading, status fields, worker state.
 Details: section 3.5. Hosted-service stop order is the reverse of registration; the final
 capture needs the coordinator loop and the workers alive.
 
+Carried from phase 2:
+- `SnapshotWriter.WriteFile` uses `CreateNew`, deletes its own partial file on failure and
+  never touches a path that existed; the temp name, rename and retire are this phase's.
+- The writer builds every blob in memory before writing anything (about 448 MiB
+  allocated for the jellyfin-sized file, peak about 191 MiB above baseline). It must run
+  on the background task, never under the coordinator.
+- A legacy in-place write during serialization is not detected yet; the
+  `GraphState.Version` check of 3.5 is built here.
+- A shard key whose facts were all removed is skipped by the writer; an empty key is not
+  a change for dirty tracking.
+- `SnapshotWriteResult` reports skipped shards with reasons and `NotWritten` when the
+  capture exceeds 1 GiB; both are logged, and phase 4 surfaces the latter as
+  `lastWriteError`.
+- `SnapshotKey.LoadOrCreate` creates a missing `~/.codecontext` itself (0700 on Unix) and
+  throws for a key file with group or other access on Unix: the service then runs without
+  a cache and says why.
+- On Unix the cache directory is created 0700 and snapshot files 0600; the reader's
+  ownership check (3.2, rule 19) relies on the file, not the directory.
+
 Tests (`SnapshotServiceTests`, fake time): `Commits_AreCoalescedIntoOneWrite`;
 `MaxDelay_ForcesAWriteUnderContinuousCommits`; `OnlyOneWriteRunsAtATime`;
 `CleanStore_WritesNothing`; `CrashBeforeRename_LeavesThePreviousSnapshotValid` (fault
@@ -1253,6 +1429,20 @@ Out of scope: baselines, worker state, mapped shards.
 Details: sections 3.5 (startup), 3.10 and the third sequence of 3.6. Dev builds change
 their informational version on every commit, so a rebuilt host ignores older snapshots by
 design.
+
+Carried from phase 2:
+- `PublishLoadedShards` does not set the store generation, so a loaded store reports
+  generation 0 while the header carries `storeGeneration`. This phase decides how the
+  generation resumes, so that a stale delta from before the restart is still rejected
+  and the verification scan's generations are accepted.
+- At most three candidate files are opened at start, newest first; each refusal is
+  reported with its reason (`SnapshotRejection`), the rest are ignored and deleted by
+  cleanup. With the 1 GiB cap that bounds the cost of planted files at about 2 s.
+- The loader takes an `acceptShard` filter (registered parser, host workspace id) and
+  reports dropped shards; a dropped or skipped shard is absent from the published map and
+  its worker's first commit starts from nothing (the accepted cross-shard edge difference
+  is in the phase 2 review outcome).
+- A loaded fact's metadata dictionary is ordinal and enumerates in key order.
 
 Tests: `StartupFromSnapshotTests` with the fake worker: `AnswersFromTheSnapshotBeforeTheWorkerFinishes`
 (slow-index behavior), `LabelGoesWhenTheScanCommits`, `WorkerFailure_LeavesCachedAnswersLabelledUnverified`,
@@ -1446,6 +1636,25 @@ before `MappedShard` is written:
 - The reference model routes facts with the product's `ShardKey.ForNode`, `ForEdge` and
   `From`. State the routing rule in the model itself (path matching through
   `FilePathMatcher.Matches` stays: the adjacency claims set-equivalence to it).
+
+Carried from the phase 2 reviews (2026-11-05):
+- A read concurrent with `MappedRegion.Dispose` crashes the process. Reproduced by a
+  reviewer: four threads in `GetAllEdges` and `FindNodesByName` while the file is
+  disposed end in a fatal `AccessViolationException` inside the UTF-8 decode, which
+  cannot be caught. Phase 2 is unaffected (the loader is single-threaded and disposes
+  after materializing). The lease per read in this phase's scope is therefore the first
+  thing built after the harness step: every accessor takes a lease, `Dispose` marks the
+  region and unmaps only when the last lease ends, and that reproduction (300 rounds,
+  dispose after a varying spin) is a required test.
+- The loader refuses a shard that fails the writer's persistability rule after
+  materializing it. A mapped shard is not materialized, so the same guarantees must hold
+  per record at read time: a null edge source, an id without the shard's prefix or a null
+  identifier met in place is `SnapshotCorruptException`, not an answer.
+- Proportional cost on an authentic but wrong file is not bounded everywhere, by
+  decision: a metadata set shared by many facts is expanded per fact, and a by-target run
+  may list an edge twice. Both need a writer bug; bounds, termination and the absence of
+  crashes are guaranteed, cost is not. Checking by-target runs for duplicates at open
+  would touch every edge, which this phase's open must not do.
 
 Tests: `MappedShardEquivalenceTests.MappedStore_MatchesHeapStoreAndReferenceModel(seed)`:
 phase 1's generator drives a heap store and a store whose shards are snapshotted and
