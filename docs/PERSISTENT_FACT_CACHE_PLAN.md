@@ -659,6 +659,104 @@ file.
 | Write error (disk full, read-only root) | Logged, exposed as `indexing.cache.lastWriteError`, retried after the next commit. Serving is unaffected. |
 | Second instance on the root | No lock: it loads, never writes or deletes. A snapshot it has mapped cannot be deleted by the writer on Windows; the delete is retried later. If a file vanishes between selection and open, it retries selection, then scans. |
 
+Lifecycle as built (phase 3). Where the text above is silent or differs, this is what the
+code does.
+
+1. Dirty view. The store is dirty when, for any shard with at least one fact other than
+   the un-owned default shard, the published shard reference, its annotation (rule 12) or
+   its heap version differs from the newest snapshot this process wrote. An emptied shard
+   is absent, so an empty key is not a change. A commit that changes no fact and carries
+   an equal annotation keeps every reference and leaves the store clean. Only a change
+   in the view counts as a commit for the quiet period.
+2. Quiet and maximum. A dirty store is captured at the earlier of the quiet period after
+   the last change and the maximum after it first became dirty, so a quiet period longer
+   than the maximum means the maximum wins. `CodeContext:SnapshotQuietSeconds` and
+   `CodeContext:SnapshotMaxDelaySeconds` are parsed as invariant integers and clamped to
+   1 to 86,400 s; a negative or unparsable value keeps its default (10 s, 120 s) and is
+   logged once at Warning. In code any delay is capped at one day and may be 0.
+3. Capture. A maintenance command on the coordinator's queue, run between mutation
+   commands; it only latches. A capture requested while file changes are being coalesced
+   does not end the batch: it runs once the batch is applied and is abandoned on
+   shutdown. A capture is null while a reconciliation is staged, when the coordinator has
+   stopped or when its queue is full; it is not re-armed then, the next mutation
+   notification re-arms it. Maintenance commands are not counted by `IsBusy` and never
+   show as indexing work.
+4. Write. Temp file, `Flush(true)`, close, rename without overwrite, then the file is
+   opened with `SnapshotFile.Open` under the writer's key and expectations; a file that
+   does not open is deleted and counted as a failure. Then older files are retired. One
+   write at a time, on a background task. A shard changed in place during serialization
+   (heap version) discards the file, and the store is captured again after the quiet
+   period.
+5. Failures. A failed write (disk full, read-only root, access denied, key refused,
+   capture over 1 GiB, every shard with facts skipped) is retried only after the store
+   changes again, never in a loop. Each cause is logged once at Warning, then at Debug,
+   and kept as the last write error. A store with no facts writes an empty snapshot.
+6. Shutdown. The service stops after the watcher and before the coordinator and the
+   workers. It waits for a write in flight, then captures and writes if the view
+   differs, within 10 s on the injected clock. If a scan is running, no final capture is
+   taken. A write still running at the timeout keeps the lock only until `Dispose`.
+7. Turning it on, in phase 3: off by default; `CodeContext:CacheEnabled=true` (for
+   example the environment variable `CodeContext__CacheEnabled=true`). The key path
+   cannot be set from configuration; it is `~/.codecontext/cache.key`, and there is no
+   cache when the user profile folder is unknown or not an absolute path. The host
+   version recorded and required is the Core assembly's informational version.
+8. Lock. An exclusive open of `writer.lock` (no sharing; an advisory exclusive lock on
+   Unix), held for the process lifetime and released by the OS on any exit. Acquired:
+   writer. A sharing or lock violation: read-only, writes and deletes nothing. Anything
+   else, a link at the lock path, or a level found to be a link after the open: no cache,
+   with the reason. Whenever the cache is disabled after the lock was taken, the lock is
+   released and the directory dropped for the rest of the run.
+9. Directory. `.codecontext`, `cache` and the workspace directory are created one level
+   at a time (0700 on Unix; lock and `.gitignore` 0600) and refused if any is a link, a
+   reparse point or a file. `cache/.gitignore` holds exactly `*` and a newline; it is
+   created new or replaced through a temp file and rename, never written through. Only
+   names matching `graph.<10 digits>.<8 hex>.ccsnap` or `.tmp` are ever listed, deleted
+   or renamed, and links and directories with such names are skipped. The cache
+   directory is this code's: a repository that tracks files there will see them deleted.
+10. Link re-checks. The three levels are checked when the directory is opened and again
+    right after the lock is opened. On Windows the open lock handle then prevents
+    renaming any level for the rest of the run (a junction swapped in between the first
+    check and the lock was followed before this rule; reproduced by a reviewer). On Unix
+    the chain is checked again before the start-up cleanup, before every write and
+    before every retire pass; a failure disables writing for the run and releases the
+    lock. Residual race, accepted: on Unix a process that can write the repository can
+    replace a level with a symbolic link between a check and the next path-based
+    operation of the same write or retire, which then follows it; snapshot files would
+    be written to, and files with this code's name pattern deleted from, a directory of
+    its choosing. Closing it needs `openat` with `O_NOFOLLOW` against a held directory
+    descriptor through P/Invoke.
+11. Sequences and candidates. A usable sequence is 1 to 999,999,999. A name outside that
+    range is never a candidate, never raises the counter, and is deleted when it can be.
+    At start the lock holder deletes every temp file, then tries the usable snapshots
+    newest first until one opens. Refusals before hashing (name, length, header, host
+    meta, Unix claim, size cap) are free; after three refusals at or after
+    authentication no more are tried. The first that opens is kept and every other
+    snapshot file is deleted, tried or not. The next sequence is one above the larger of
+    the kept file's sequence and the highest usable sequence among this code's names
+    that could not be deleted. After each write the retire deletes this code's files
+    with a usable sequence below the new one and any name outside the usable range; a
+    busy file is retried at the next write and the next start. A write that would pass
+    999,999,999 fails with an error saying so; real writes cannot reach it. Someone who
+    can plant files can make the cache start cold, but cannot make it keep or serve a
+    file that does not authenticate. (Before this rule one planted name near the
+    ten-digit limit exhausted the counter after one write and made later starts keep a
+    stale file and delete the newest; reproduced by a reviewer.)
+12. Annotation. Each shard's parser version and coverage are an annotation held inside
+    `InMemoryDatabase` (`ShardAnnotation`; phase 5 adds fingerprints). It is changed only
+    under the commit lock by the scoped commit that carries it (on `CommitScope`), staged
+    and committed or rolled back with a reconciliation, removed with its shard by a full
+    replacement (`ReplaceAll`, `Reset`, an unscoped commit), and left alone by foreign
+    sweeps, prune and shard swaps. A commit without one keeps it; a null coverage keeps
+    the recorded coverage, as the coverage registry does. `TryLatchCommitted` returns
+    shards, annotations and generation from one lock hold, and `PublishLoadedShards`
+    takes annotations. (Before this rule a rescan that failed and rolled back left its
+    coverage and parser version in side registries, and the next snapshot paired them
+    with the old shard; reproduced by a reviewer.) `AnalysisCoverageRegistry` still
+    serves status and context responses and is not rolled back with a reconciliation;
+    that predates this work and is unchanged.
+13. In phase 3 the key, directory, lock, `.gitignore` and start-up cleanup run in
+    `SnapshotService.StartAsync`; phase 4 moves them into the coordinator's first step.
+
 Startup. The first synchronous step of `IndexCoordinator.ExecuteAsync`: take the lock,
 delete `.tmp` files when holding it, pick the newest valid snapshot, publish its shards
 through `InMemoryDatabase.PublishLoadedShards` (allowed only into an empty store), restore
@@ -1365,7 +1463,53 @@ Gates: standard.
 
 ### Phase 3: snapshot lifecycle, write side
 
-Status: not started
+Status: accepted 2026-11-06. Reviewed by one Opus and one Sonnet reviewer; no blocker;
+the confirmed findings fixed by a fixer; gates re-run by the coordinator. The lifecycle
+as built is listed in section 3.5.
+
+Review outcome.
+- With the cache off `IndexCoordinator` behaves as before (Opus reviewer, line by line
+  against HEAD). Paths that now run with the cache off: a null observer read after each
+  mutation command; `IsBusy` subtracting a counter that stays 0; the file batch running
+  through a moved method; one `ShardAnnotation` and one immutable-map update per applier
+  commit; the watcher's check of ignore-file events; the service resolved and set to
+  Disabled; three configuration keys read.
+- Stress by the Opus reviewer: no lost wake-up in 40 rounds of three writers racing the
+  clock; exactly one final file and no write after stop in 15 rounds of commits, timers
+  and stop racing.
+- Mutation checks: 24 by the Sonnet reviewer, three of which survived (one-write guard
+  about half the time, parser-version recording, the pre-open link check on the lock);
+  after the fix round the first two fail a test 10 of 10 and the third is caught only by
+  a test that needs the symlink privilege, which this machine lacks (windows-latest has
+  it).
+- Fixed: sequence and candidate handling (3.5, rule 11); parser version and coverage
+  moved into the store's commit (rule 12); link re-checks after the lock and, on Unix,
+  per write (rule 10); the lock is released whenever the cache is disabled; only a
+  sharing or lock violation means "held elsewhere"; configured delays parsed invariantly
+  and clamped (rule 2); no key path without an absolute user profile; a discarded write
+  waits for the quiet period; `OnlyOneWriteRunsAtATime` made deterministic.
+- Decisions taken in triage:
+  - The cap of three candidates counts only refusals at or after authentication, so
+    cheap junk cannot hide a valid snapshot; a planter who reaches the hash step can
+    deny the cache, not corrupt it.
+  - The Unix directory-swap race is narrowed, not closed (rule 10).
+  - The host reading `appsettings.json` from the repository is fixed on `main`, not here
+    (see phase 4, carried items).
+  - Left as is: start-up cleanup blocks `StartAsync` for up to three authentications
+    (phase 4 moves it); `IsBusy` can read one too low between the loop's read of a
+    maintenance command and its decrement (microseconds against a 30 s poll; the enqueue
+    side now errs toward busy); a FIFO named like a snapshot would block the open on
+    Unix (needs a local process; git cannot commit one).
+- Acceptance run by the implementer on a temp copy of a small tree with the built host
+  (0.10.24 dev build): first snapshot 10.08 s after the scan committed (223,560 bytes,
+  79 ms write); a newer one about 10 s after an edit and the older retired; a final one
+  on `/api/shutdown` and on idle-timeout exit; `git status` showed nothing from the
+  cache; with the option off nothing was created. The run created the real
+  `~/.codecontext/cache.key`, which the implementer deleted afterwards.
+- Not run: anything on Linux or macOS (0700 and 0600 modes, the advisory lock and its
+  would-block mapping, the per-write chain check, the key mode check have tests that
+  return early on Windows); `LinkedLockFile_IsRefused` (needs the symlink privilege);
+  Native AOT publish; the SDK suites (no protocol change).
 
 Goal: the host writes snapshots after commits, safely, without anything reading them yet.
 Dark: `CodeContextOptions.CacheEnabled` defaults to false in this phase.
@@ -1461,6 +1605,35 @@ Carried from phase 2:
   its worker's first commit starts from nothing (the accepted cross-shard edge difference
   is in the phase 2 review outcome).
 - A loaded fact's metadata dictionary is ordinal and enumerates in key order.
+
+Carried from the phase 3 reviews (2026-11-05):
+- The host reads `appsettings.json` from the indexed repository. Both hosts take the
+  content root from the current directory (`StartCommandHandler.cs`,
+  `WebApplication.CreateSlimBuilder()` and `Host.CreateApplicationBuilder()`), and a
+  detached start runs with the repository root as its working directory. A reviewer's
+  probe confirmed a repository file sets `CodeContext:*` keys in both hosts. This exists
+  on `main` and is not caused by the cache, but it means a repository can switch the
+  cache off or change its delays, and, by reading, set worker environment variables
+  through `CodeContext:WorkerEnvironment` (for example a .NET startup hook), which
+  breaks the rule that nothing from a repository is executed. Reported to the review
+  session on 2026-11-05, which reproduced it on the installed v0.10.8 (a malformed
+  repository `appsettings.json` stops the host starting; one that sets
+  `DOTNET_STARTUP_HOOKS` for the C# worker makes the worker try to load that path) and
+  is fixing it on `main` as a 0.10.x patch. Decision: this phase does not fix it; `main`
+  is merged when the patch lands, and phase 4 builds on it: both builders then take an
+  explicit content root that is not the watched directory, and phase 4 must not
+  reintroduce a configuration source rooted at the watched path or the current
+  directory. Rule for all remaining phases: nothing under the watched root may select a
+  process to launch, an assembly to load, an environment variable for a child process or
+  a host setting; a reviewer finding of that kind is reported to the review session at
+  once, not at the end.
+- Start-up cleanup and candidate selection live in `SnapshotService.StartAsync` in phase
+  3. This phase moves the lock, the cleanup and the selection into the coordinator's
+  first step and loads the kept file; after `PublishLoadedShards` the service's
+  last-written view is set to the loaded view, or every start would rewrite the snapshot
+  it has just loaded.
+- `SnapshotService.Status` (mode, reason, last sequence, file, size, time, write and
+  capture milliseconds, last write error, counts) is the source for `indexing.cache`.
 
 Tests: `StartupFromSnapshotTests` with the fake worker: `AnswersFromTheSnapshotBeforeTheWorkerFinishes`
 (slow-index behavior), `LabelGoesWhenTheScanCommits`, `WorkerFailure_LeavesCachedAnswersLabelledUnverified`,

@@ -130,10 +130,15 @@ public sealed class AnalysisDeltaApplier : IAnalysisDeltaSink
             // The scope names the (parser, workspace) shard this delta replaces (optionally narrowed
             // to the listed files). The store routes and partitions by the ownership metadata that
             // BuildOwnedMetadata stamped onto every node/edge — no scope predicate needed.
+            // The scope also carries what produced the shard (parser version, coverage), which the
+            // store records in the same commit, staged and rolled back with it.
             var scope = new CommitScope(
                 pending.ParserId,
                 pending.WorkspaceId,
-                pending.ReplacesWorkspace ? null : pending.ReplacesFiles.ToList());
+                pending.ReplacesWorkspace ? null : pending.ReplacesFiles.ToList())
+            {
+                Annotation = new ShardAnnotation(pending.ParserVersion, pending.Coverage),
+            };
 
             var committed = false;
             for (var attempt = 0; attempt < 5 && !committed; attempt++)

@@ -1,4 +1,5 @@
 using System.Threading.Channels;
+using CodeContext.Core.Snapshots;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -12,6 +13,10 @@ namespace CodeContext.Core.Services;
 /// quiet window (with a max-latency bound) and applied as one batch, so a burst of
 /// events costs one C# reparse and a change to one path can never cancel another path's
 /// pending work.
+///
+/// Maintenance commands (a snapshot capture) share the channel so they run between mutations,
+/// never during one, but they are not indexing work: they do not make <see cref="IsBusy"/> true,
+/// so they cannot extend the instance's idle lease.
 /// </summary>
 public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
 {
@@ -22,6 +27,34 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
     private sealed record FileChangedCommand(string Path, FileChangeType Type) : Command;
     private sealed record FullScanCommand : Command;
     private sealed record RefreshFileCommand(string Path, TaskCompletionSource Completion) : Command;
+
+    /// <summary>Work that only reads the store between mutations and is not indexing.</summary>
+    private abstract record MaintenanceCommand : Command
+    {
+        public abstract void Run();
+
+        /// <summary>Completes a command that will never run (shutdown).</summary>
+        public abstract void Abandon();
+    }
+
+    /// <summary>Latches a snapshot capture at a point where no scan, batch or reconciliation is in flight.</summary>
+    private sealed record SnapshotCommand(Func<SnapshotCapture?> Capture, TaskCompletionSource<SnapshotCapture?> Completion)
+        : MaintenanceCommand
+    {
+        public override void Run()
+        {
+            try
+            {
+                Completion.TrySetResult(Capture());
+            }
+            catch (Exception ex)
+            {
+                Completion.TrySetException(ex);
+            }
+        }
+
+        public override void Abandon() => Completion.TrySetResult(null);
+    }
 
     private readonly Channel<Command> _commands = Channel.CreateBounded<Command>(
         new BoundedChannelOptions(4096)
@@ -38,6 +71,8 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
     private readonly IRepositoryFileSelector _fileSelector;
 
     private int _busy;
+    private int _queuedMaintenance;
+    private Action? _mutationObserver;
 
     public IndexCoordinator(
         IGraphUpdateService graphUpdateService,
@@ -60,8 +95,32 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
     }
 
     public bool IsBusy => Volatile.Read(ref _busy) == 1
-        || _commands.Reader.Count > 0
+        || _commands.Reader.Count - Volatile.Read(ref _queuedMaintenance) > 0
         || _scanState.Phase == ScanPhase.Scanning;
+
+    /// <summary>
+    /// Registers the callback run on the coordinator loop after every mutation command (startup
+    /// scan, full scan, file batch, single-file refresh), whether or not it changed anything. One
+    /// observer; null detaches it. An exception from it is logged and never reaches the loop.
+    /// </summary>
+    internal void SetMutationObserver(Action? observer) => Volatile.Write(ref _mutationObserver, observer);
+
+    /// <summary>
+    /// Queues <paramref name="capture"/> to run on the coordinator loop between commands, and returns
+    /// what it returned. A capture that arrives while a file batch is being coalesced runs after that
+    /// batch is applied. Completes with null when the coordinator has stopped or its queue is full.
+    /// Never makes <see cref="IsBusy"/> true.
+    /// </summary>
+    internal Task<SnapshotCapture?> RequestSnapshotCaptureAsync(Func<SnapshotCapture?> capture)
+    {
+        var command = new SnapshotCommand(
+            capture, new TaskCompletionSource<SnapshotCapture?>(TaskCreationOptions.RunContinuationsAsynchronously));
+        // Counted after it is queued: until then IsBusy counts it as work (errs toward busy), and a loop
+        // that dequeues it first drives the count to -1 for an instant, which errs the same way.
+        if (_commands.Writer.TryWrite(command)) Interlocked.Increment(ref _queuedMaintenance);
+        else command.Abandon();
+        return command.Completion.Task;
+    }
 
     public async ValueTask NotifyFileChangedAsync(string fullPath, FileChangeType changeType, CancellationToken ct = default)
     {
@@ -119,6 +178,7 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
             if (_scanState.TryBeginScan())
             {
                 await RunScanAsync(resumable: true, stoppingToken);
+                NotifyMutationObserver();
             }
 
             while (await _commands.Reader.WaitToReadAsync(stoppingToken))
@@ -146,6 +206,11 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
                 {
                     refresh.Completion.TrySetCanceled();
                 }
+                else if (remaining is MaintenanceCommand maintenance)
+                {
+                    Interlocked.Decrement(ref _queuedMaintenance);
+                    maintenance.Abandon();
+                }
             }
         }
     }
@@ -153,7 +218,16 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
     /// <summary>Processes one command; returns a follow-up command if one was read while draining.</summary>
     private async Task<Command?> ProcessCommandAsync(Command command, CancellationToken ct)
     {
+        if (command is MaintenanceCommand maintenance)
+        {
+            // Not indexing work: _busy stays as it is.
+            Interlocked.Decrement(ref _queuedMaintenance);
+            maintenance.Run();
+            return null;
+        }
+
         Volatile.Write(ref _busy, 1);
+        var notified = false;
         try
         {
             switch (command)
@@ -178,6 +252,9 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
                             await _graphUpdateService.ProcessFileChangesAsync(
                                 [new FileChange(refresh.Path, FileChangeType.Changed)], ct);
                         }
+                        // Before the caller is released, so the caller observes the observer's reaction.
+                        notified = true;
+                        NotifyMutationObserver();
                         refresh.Completion.TrySetResult();
                     }
                     catch (OperationCanceledException)
@@ -198,13 +275,27 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
         finally
         {
             Volatile.Write(ref _busy, 0);
+            if (!notified) NotifyMutationObserver();
+        }
+    }
+
+    private void NotifyMutationObserver()
+    {
+        try
+        {
+            Volatile.Read(ref _mutationObserver)?.Invoke();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "The mutation observer failed.");
         }
     }
 
     /// <summary>
     /// Coalesces file changes per path until the stream goes quiet (or the max-latency
     /// bound is hit), then applies them as a single batch. A non-change command read
-    /// while draining ends the batch and is returned to the caller.
+    /// while draining ends the batch and is returned to the caller, except a maintenance
+    /// command, which waits and runs once the batch is applied.
     /// </summary>
     private async Task<Command?> ProcessChangeBatchAsync(FileChangedCommand first, CancellationToken ct)
     {
@@ -212,6 +303,32 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
             OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
         AddPending(pending, first);
 
+        Command? interrupting = null;
+        List<MaintenanceCommand>? deferred = null;
+        var applied = false;
+        try
+        {
+            interrupting = await CoalesceAndApplyAsync(pending, ct, maintenance => (deferred ??= []).Add(maintenance));
+            applied = true;
+        }
+        finally
+        {
+            // A maintenance command read while coalescing sees the batch's result; on shutdown it is abandoned.
+            if (deferred is not null)
+            {
+                foreach (var maintenance in deferred)
+                {
+                    if (applied) maintenance.Run();
+                    else maintenance.Abandon();
+                }
+            }
+        }
+        return interrupting;
+    }
+
+    private async Task<Command?> CoalesceAndApplyAsync(
+        Dictionary<string, FileChangeType> pending, CancellationToken ct, Action<MaintenanceCommand> defer)
+    {
         Command? interrupting = null;
         var deadline = DateTimeOffset.UtcNow + MaxBatchLatency;
 
@@ -226,6 +343,12 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
             if (next is FileChangedCommand change)
             {
                 AddPending(pending, change);
+            }
+            else if (next is MaintenanceCommand maintenance)
+            {
+                // Maintenance does not end the batch; it runs once the batch is applied.
+                Interlocked.Decrement(ref _queuedMaintenance);
+                defer(maintenance);
             }
             else
             {

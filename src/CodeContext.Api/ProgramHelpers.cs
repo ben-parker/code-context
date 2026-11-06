@@ -3,6 +3,7 @@ using CodeContext.Core;
 using CodeContext.Core.Repositories;
 using CodeContext.Core.Serialization;
 using CodeContext.Core.Services;
+using CodeContext.Core.Snapshots;
 using CodeContext.Core.Workers;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
@@ -100,6 +101,10 @@ public static class ProgramHelpers
         services.AddSingleton<IndexCoordinator>();
         services.AddSingleton<IIndexCoordinator>(sp => sp.GetRequiredService<IndexCoordinator>());
         services.AddHostedService(sp => sp.GetRequiredService<IndexCoordinator>());
+        // Snapshots: after the coordinator, before the watcher. Hosted services stop in reverse
+        // order, so the final capture runs while the coordinator loop and the workers are alive.
+        // Inert unless CodeContext:CacheEnabled is set.
+        services.AddCodeContextSnapshots();
         services.AddHostedService<FileWatcherService>();
     }
 

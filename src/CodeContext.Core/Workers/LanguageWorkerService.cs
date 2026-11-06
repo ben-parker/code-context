@@ -60,7 +60,7 @@ public interface ILanguageWorkerService
 
 public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedService, IAsyncDisposable
 {
-    private const string DefaultWorkspaceId = "default";
+    internal const string DefaultWorkspaceId = "default";
 
     private readonly IWorkerCatalog _catalog;
     private readonly IAnalysisDeltaSink _deltaSink;

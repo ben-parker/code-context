@@ -120,8 +120,20 @@ namespace CodeContext.Core.Snapshots
             {
                 using (stream)
                 {
-                    using var target = wrapStream?.Invoke(stream);
-                    Emit(target ?? stream, plan, key);
+                    // A test wrapper is flushed and disposed first, so the durability flush sees every byte.
+                    var target = wrapStream?.Invoke(stream);
+                    if (target is null || ReferenceEquals(target, stream))
+                    {
+                        Emit(stream, plan, key);
+                    }
+                    else
+                    {
+                        using (target)
+                        {
+                            Emit(target, plan, key);
+                            target.Flush();
+                        }
+                    }
                     stream.Flush(flushToDisk: true);
                 }
             }

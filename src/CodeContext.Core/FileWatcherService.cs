@@ -24,6 +24,7 @@ public class FileWatcherService : IHostedService, IDisposable
     private readonly CancellationTokenSource _lifetimeCts = new();
     private Task? _watcherRecovery;
     private int _recoveryScheduled;
+    private HashSet<string>? _mandatoryNames;
 
     public FileWatcherService(
         IOptions<CodeContextOptions> options,
@@ -167,7 +168,10 @@ public class FileWatcherService : IHostedService, IDisposable
     {
         // Ignore files themselves are coordinator control events. They are never
         // parsed, but must trigger matcher invalidation and atomic reconciliation.
-        if (_fileSelector.IsIgnoreFile(path)) return false;
+        // Below a mandatory exclusion (.git/, .codecontext/, node_modules/, ...) one
+        // cannot change selection: nothing there is ever selected. The snapshot cache
+        // writes its own .gitignore under .codecontext/.
+        if (_fileSelector.IsIgnoreFile(path)) return IsBelowMandatoryExclusion(path);
 
         // Project inputs are read, not indexed, and some land where the selector refuses to
         // look: a restore writes into obj/.
@@ -180,6 +184,34 @@ public class FileWatcherService : IHostedService, IDisposable
         }
 
         return !_fileSelector.IsIncluded(path);
+    }
+
+    /// <summary>
+    /// Whether a directory above <paramref name="path"/>, inside the root, is one of the
+    /// selector's mandatory exclusions (matched per segment, as the selector does).
+    /// </summary>
+    private bool IsBelowMandatoryExclusion(string path)
+    {
+        var names = _mandatoryNames ??= new HashSet<string>(
+            (_fileSelector.MandatoryExclusions ?? []).Select(name => name.TrimEnd('/')),
+            OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+        string relative;
+        try
+        {
+            relative = Path.GetRelativePath(Path.GetFullPath(_options.RootPath), Path.GetFullPath(path));
+        }
+        catch (Exception exception) when (exception is ArgumentException or NotSupportedException)
+        {
+            return false;
+        }
+        var segments = relative.Split(
+            [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar], StringSplitOptions.RemoveEmptyEntries);
+        if (segments.Length == 0 || segments[0] == "..") return false;
+        for (var i = 0; i < segments.Length - 1; i++)
+        {
+            if (names.Contains(segments[i])) return true;
+        }
+        return false;
     }
 
     public async Task StopAsync(CancellationToken cancellationToken)

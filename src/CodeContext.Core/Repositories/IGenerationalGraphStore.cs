@@ -13,7 +13,23 @@ namespace CodeContext.Core.Repositories
     public sealed record CommitScope(
         string ParserId,
         string WorkspaceId,
-        IReadOnlyCollection<string>? ReplacesFiles);
+        IReadOnlyCollection<string>? ReplacesFiles)
+    {
+        /// <summary>
+        /// What produced the scoped shard, recorded by the store in the same commit as its facts (and
+        /// staged and rolled back with them). Null leaves the shard's annotation as it is.
+        /// </summary>
+        internal ShardAnnotation? Annotation { get; init; }
+    }
+
+    /// <summary>
+    /// What the store keeps beside one (parser, workspace) shard for the snapshot writer: the parser
+    /// version of the commit that last carried an annotation for it, and the coverage list last reported
+    /// for it. Immutable; replaced as a whole. A null <see cref="Coverage"/> in a commit's annotation
+    /// keeps the coverage already recorded, as <see cref="Workers.AnalysisCoverageRegistry"/> keeps its
+    /// report when a delta carries none. Phase 5 adds fingerprints.
+    /// </summary>
+    internal sealed record ShardAnnotation(string? ParserVersion, IReadOnlyList<CodeContext.Parser.Protocol.ProjectCoverage>? Coverage);
 
     /// <summary>
     /// Typed, generation-aware graph commits. Implemented by the in-memory store; the

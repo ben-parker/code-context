@@ -147,5 +147,62 @@ namespace CodeContext.Core.Tests
                 Directory.Delete(tempDir, recursive: true);
             }
         }
+
+        [Fact]
+        public async Task GitIgnoreBelowAMandatoryExclusion_IsNotAControlEvent()
+        {
+            // Nothing below .git/, .codecontext/ or node_modules/ is ever selected, so an ignore file
+            // there cannot change selection and must not trigger a full rescan; one in an ordinary
+            // subdirectory (and one whose own name only resembles an exclusion) still does.
+            var tempDir = Directory.CreateTempSubdirectory("cc-watcher-ignore-").FullName;
+            _mockOptions.Value.Returns(new CodeContextOptions { RootPath = tempDir });
+            var forwarded = new System.Collections.Concurrent.ConcurrentQueue<string>();
+            _mockCoordinator
+                .NotifyFileChangedAsync(Arg.Any<string>(), Arg.Any<FileChangeType>(), Arg.Any<CancellationToken>())
+                .Returns(callInfo =>
+                {
+                    forwarded.Enqueue(callInfo.ArgAt<string>(0));
+                    return ValueTask.CompletedTask;
+                });
+            var excluded = new[] { ".codecontext/cache", ".git", "node_modules/pkg", "src/NODE_MODULES" }
+                .Select(dir => Path.Combine(tempDir, dir.Replace('/', Path.DirectorySeparatorChar))).ToList();
+            var included = new[] { "src", "node_modules.old" }
+                .Select(dir => Path.Combine(tempDir, dir)).ToList();
+            foreach (var dir in excluded.Concat(included)) Directory.CreateDirectory(dir);
+
+            var watcherService = new FileWatcherService(
+                _mockOptions, _mockLogger, _mockCoordinator, _scanState, _mockWorkerService);
+            await watcherService.StartAsync(CancellationToken.None);
+            try
+            {
+                foreach (var dir in excluded.Concat(included))
+                    await File.WriteAllTextAsync(Path.Combine(dir, ".gitignore"), "*\n");
+                var expected = included.Select(dir => Path.Combine(dir, ".gitignore")).ToList();
+                var deadline = DateTime.UtcNow.AddSeconds(10);
+                while (!expected.All(forwarded.Contains) && DateTime.UtcNow < deadline) await Task.Delay(20);
+                // Events arrive in order: a sentinel after the excluded ones were written proves they were seen.
+                var sentinel = Path.Combine(tempDir, "Sentinel.cs");
+                await File.WriteAllTextAsync(sentinel, "class Sentinel { }");
+                while (!forwarded.Contains(sentinel) && DateTime.UtcNow < deadline) await Task.Delay(20);
+
+                Assert.All(expected, path => Assert.Contains(path, forwarded));
+                Assert.Contains(sentinel, forwarded);
+                var unexpected = forwarded.Where(path => Path.GetFileName(path) == ".gitignore").Except(expected).ToList();
+                if (OperatingSystem.IsWindows())
+                {
+                    Assert.Empty(unexpected);
+                }
+                else
+                {
+                    // Ordinal on Unix: src/NODE_MODULES is an ordinary directory there.
+                    Assert.Equal(new[] { Path.Combine(excluded[3], ".gitignore") }, unexpected);
+                }
+            }
+            finally
+            {
+                await watcherService.StopAsync(CancellationToken.None);
+                Directory.Delete(tempDir, recursive: true);
+            }
+        }
     }
 }

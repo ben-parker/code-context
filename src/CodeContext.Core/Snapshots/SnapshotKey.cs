@@ -12,9 +12,18 @@ namespace CodeContext.Core.Snapshots
     {
         public const int Length = 32;
 
-        /// <summary>The default key path. Callers that run under tests pass their own path instead.</summary>
-        public static string DefaultPath()
-            => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codecontext", "cache.key");
+        /// <summary>
+        /// The default key path, or null when the user profile folder is unknown: a relative path would put
+        /// the key under the current directory, which may be the repository. Callers that run under tests
+        /// pass their own path instead.
+        /// </summary>
+        public static string? DefaultPath() => DefaultPath(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
+
+        /// <summary><see cref="DefaultPath()"/> for a given profile folder; null unless it is a fully qualified path.</summary>
+        internal static string? DefaultPath(string? userProfile)
+            => string.IsNullOrWhiteSpace(userProfile) || !Path.IsPathFullyQualified(userProfile)
+                ? null
+                : Path.Combine(userProfile, ".codecontext", "cache.key");
 
         /// <summary>
         /// Reads the key at <paramref name="path"/>, creating it when it does not exist. Throws an

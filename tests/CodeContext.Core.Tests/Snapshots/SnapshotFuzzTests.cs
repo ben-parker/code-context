@@ -35,7 +35,7 @@ public class SnapshotFuzzTests
     [InlineData(101)]
     [InlineData(202)]
     [InlineData(303)]
-    public void StructuredDamage_IsAlwaysAnAnswerACorruptExceptionOrARefusal(int seed)
+    public async Task StructuredDamage_IsAlwaysAnAnswerACorruptExceptionOrARefusal(int seed)
     {
         var graph = new SnapshotGraphGenerator(seed).Generate(maxNodes: 30, maxEdges: 90);
         var database = Commit(graph);
@@ -51,7 +51,9 @@ public class SnapshotFuzzTests
         var random = new Random(seed);
         var failures = new List<string>();
         var opened = 0;
-        using (var temp = new SnapshotTempDirectory())
+        var temp = new SnapshotTempDirectory();
+        var completed = false;
+        try
         {
             for (var iteration = 0; iteration < iterations && failures.Count < 10; iteration++)
             {
@@ -65,12 +67,15 @@ public class SnapshotFuzzTests
                 if (path is not null) File.WriteAllBytes(path, damaged);
 
                 var task = Task.Run(() => Exercise(damaged, path, words, context, failures));
-                if (!task.Wait(TimeSpan.FromSeconds(20)))
+                try
+                {
+                    if (await task.WaitAsync(TimeSpan.FromSeconds(20))) opened++;
+                }
+                catch (TimeoutException)
                 {
                     failures.Add("HANG " + context);
                     break;
                 }
-                if (task.Result) opened++;
                 if (path is not null)
                 {
                     try
@@ -83,8 +88,20 @@ public class SnapshotFuzzTests
                     }
                 }
             }
+            completed = true;
+        }
+        finally
+        {
+            // After a hang a file is still open, and on Windows the delete's exception would replace
+            // the report: with failures the delete is attempted here and its failure added to them.
+            if (failures.Count > 0 || !completed)
+            {
+                try { temp.Dispose(); }
+                catch (Exception exception) { failures.Add($"temp directory not deleted: {exception.Message}"); }
+            }
         }
         Assert.True(failures.Count == 0, string.Join("\n", failures));
+        temp.Dispose();
         Assert.True(opened > 0, "no damaged file opened: the fuzzer only exercised the open checks");
     }
 

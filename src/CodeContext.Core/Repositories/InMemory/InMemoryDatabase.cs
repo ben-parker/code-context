@@ -465,6 +465,15 @@ namespace CodeContext.Core.Repositories.InMemory
         private ImmutableSortedDictionary<ShardKey, IGraphShard>? _reconciliationState;
         private long _reconciliationGeneration;
 
+        // Each shard's annotation (parser version, coverage), changed only under _commitLock by the
+        // commit that carries it, staged and committed or rolled back with a reconciliation. Read only
+        // under the lock, so a latch sees the shards and their annotations from one commit.
+        private ImmutableSortedDictionary<ShardKey, ShardAnnotation> _annotations = EmptyAnnotations;
+        private ImmutableSortedDictionary<ShardKey, ShardAnnotation>? _reconciliationAnnotations;
+
+        private static ImmutableSortedDictionary<ShardKey, ShardAnnotation> EmptyAnnotations { get; } =
+            ImmutableSortedDictionary.Create<ShardKey, ShardAnnotation>(ShardKey.Comparer);
+
         // Each cache publishes {version, payload} as ONE immutable holder swapped through a single
         // volatile reference, so a reader's single reference read observes the version and its payload
         // atomically. A reader can never latch an old payload and then match a version another thread
@@ -729,6 +738,7 @@ namespace CodeContext.Core.Repositories.InMemory
                 if (_reconciliationState is not null)
                     throw new InvalidOperationException("A graph reconciliation is already active.");
                 _reconciliationState = _shards;
+                _reconciliationAnnotations = _annotations;
                 _reconciliationGeneration = _lastCommittedGeneration;
             }
         }
@@ -740,7 +750,9 @@ namespace CodeContext.Core.Repositories.InMemory
                 if (_reconciliationState is null)
                     throw new InvalidOperationException("No graph reconciliation is active.");
                 _shards = _reconciliationState;
+                _annotations = _reconciliationAnnotations ?? _annotations;
                 _reconciliationState = null;
+                _reconciliationAnnotations = null;
                 Interlocked.Exchange(ref _lastCommittedGeneration, _reconciliationGeneration);
                 NotifyMutation();
             }
@@ -751,6 +763,7 @@ namespace CodeContext.Core.Repositories.InMemory
             lock (_commitLock)
             {
                 _reconciliationState = null;
+                _reconciliationAnnotations = null;
                 _reconciliationGeneration = _lastCommittedGeneration;
             }
         }
@@ -780,13 +793,21 @@ namespace CodeContext.Core.Repositories.InMemory
                         edges as IReadOnlyList<CodeEdge> ?? edges.ToList(),
                         scope);
 
+                // An unscoped commit replaces every shard, so every annotation goes with them; a scoped
+                // one changes only its own shard's, and only when it carries one. Foreign shards it
+                // sweeps keep theirs.
+                var annotations = _reconciliationState is not null ? _reconciliationAnnotations ?? _annotations : _annotations;
+                var nextAnnotations = scope is null ? EmptyAnnotations : Annotate(annotations, scope);
+
                 if (_reconciliationState is not null)
                 {
                     _reconciliationState = next;
+                    _reconciliationAnnotations = nextAnnotations;
                     _reconciliationGeneration = generation;
                 }
                 else
                 {
+                    _annotations = nextAnnotations;
                     // An unchanged commit returns the same map: the generation advances, every
                     // shard and cache stays as it is.
                     if (!ReferenceEquals(next, _shards))
@@ -800,12 +821,35 @@ namespace CodeContext.Core.Repositories.InMemory
             }
         }
 
+        /// <summary>
+        /// <paramref name="current"/> with the annotation <paramref name="scope"/> carries for its shard. A
+        /// null coverage keeps the recorded one. An annotation equal to the recorded one (same parser
+        /// version, same coverage list) keeps the recorded instance, so an unchanged commit leaves the
+        /// snapshot writer's view clean.
+        /// </summary>
+        private static ImmutableSortedDictionary<ShardKey, ShardAnnotation> Annotate(
+            ImmutableSortedDictionary<ShardKey, ShardAnnotation> current, CommitScope scope)
+        {
+            if (scope.Annotation is not { } supplied) return current;
+            var key = ShardKey.From(scope.ParserId, scope.WorkspaceId);
+            current.TryGetValue(key, out var existing);
+            var coverage = supplied.Coverage ?? existing?.Coverage;
+            if (existing is not null
+                && string.Equals(existing.ParserVersion, supplied.ParserVersion, StringComparison.Ordinal)
+                && ReferenceEquals(existing.Coverage, coverage))
+            {
+                return current;
+            }
+            return current.SetItem(key, ReferenceEquals(coverage, supplied.Coverage) ? supplied : supplied with { Coverage = coverage });
+        }
+
         /// <summary>Unconditional full replacement (legacy SaveGraph path — no generation check).</summary>
         public void ReplaceAll(IEnumerable<CodeNode> nodes, IEnumerable<CodeEdge> edges)
         {
             lock (_commitLock)
             {
                 _shards = PartitionIntoState(nodes, edges);
+                _annotations = EmptyAnnotations;
                 NotifyMutation();
             }
         }
@@ -815,6 +859,7 @@ namespace CodeContext.Core.Repositories.InMemory
             lock (_commitLock)
             {
                 _shards = EmptyShards;
+                _annotations = EmptyAnnotations;
                 CurrentGraph = null;
                 NotifyMutation();
             }
@@ -824,9 +869,12 @@ namespace CodeContext.Core.Repositories.InMemory
         /// Publishes shards loaded from elsewhere (a snapshot) as one map, in one swap. Allowed only
         /// into a store with no node and no edge and no staged reconciliation; the generation is not
         /// changed. The caller is responsible for the shards' own consistency (global id and
-        /// identifier uniqueness), which a loader checks before it calls this.
+        /// identifier uniqueness), which a loader checks before it calls this. The shards' annotations
+        /// (phase 4 restores them from the snapshot) replace every recorded one; none means none.
         /// </summary>
-        internal void PublishLoadedShards(IEnumerable<KeyValuePair<ShardKey, IGraphShard>> shards)
+        internal void PublishLoadedShards(
+            IEnumerable<KeyValuePair<ShardKey, IGraphShard>> shards,
+            IEnumerable<KeyValuePair<ShardKey, ShardAnnotation>>? annotations = null)
         {
             ArgumentNullException.ThrowIfNull(shards);
             lock (_commitLock)
@@ -845,7 +893,14 @@ namespace CodeContext.Core.Repositories.InMemory
                     ArgumentNullException.ThrowIfNull(shard);
                     builder.Add(key, shard);
                 }
+                var annotationBuilder = ImmutableSortedDictionary.CreateBuilder<ShardKey, ShardAnnotation>(ShardKey.Comparer);
+                foreach (var (key, annotation) in annotations ?? [])
+                {
+                    ArgumentNullException.ThrowIfNull(annotation);
+                    annotationBuilder.Add(key, annotation);
+                }
                 _shards = builder.ToImmutable();
+                _annotations = annotationBuilder.ToImmutable();
                 NotifyMutation();
             }
         }
@@ -867,6 +922,34 @@ namespace CodeContext.Core.Repositories.InMemory
                 _shards = _shards.SetItem(key, replacement);
                 NotifyMutation();
                 return true;
+            }
+        }
+
+        /// <summary>
+        /// The published shard map and the shards' annotations, latched together under the commit lock. A
+        /// staged reconciliation is not visible here until it commits.
+        /// </summary>
+        internal (ImmutableSortedDictionary<ShardKey, IGraphShard> Shards, ImmutableSortedDictionary<ShardKey, ShardAnnotation> Annotations) LatchPublished()
+        {
+            lock (_commitLock) return (_shards, _annotations);
+        }
+
+        /// <summary>
+        /// Latches the published shard map, the shards' annotations and the generation they were committed
+        /// at, from one hold of the commit lock: one consistent cut. Returns false, latching nothing usable,
+        /// while a reconciliation is staged: the published map is then about to be replaced by the staged one.
+        /// </summary>
+        internal bool TryLatchCommitted(
+            out ImmutableSortedDictionary<ShardKey, IGraphShard> shards,
+            out ImmutableSortedDictionary<ShardKey, ShardAnnotation> annotations,
+            out long generation)
+        {
+            lock (_commitLock)
+            {
+                shards = _shards;
+                annotations = _annotations;
+                generation = Interlocked.Read(ref _lastCommittedGeneration);
+                return _reconciliationState is null;
             }
         }
 

@@ -15,6 +15,9 @@ namespace CodeContext.Core.Repositories.InMemory
             _database = new InMemoryDatabase();
         }
 
+        /// <summary>The store every repository of this factory shares; the snapshot writer reads it.</summary>
+        internal InMemoryDatabase Database => _database;
+
         public Task InitializeAsync(string rootPath)
         {
             _logger.LogInformation($"Initialized in-memory database for root path: {rootPath}");

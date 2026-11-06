@@ -289,7 +289,15 @@ namespace CodeContext.Core.Snapshots
                 if (refusal is { } r) return SnapshotOpenResult.Refused(r.Rejection, r.Reason);
                 var (mappedFile, header, hostMeta) = mapped!.Value;
                 mapping = mappedFile;
-                view = mapping.CreateViewAccessor(0, header.FileLength, MemoryMappedFileAccess.Read);
+                try
+                {
+                    view = mapping.CreateViewAccessor(0, header.FileLength, MemoryMappedFileAccess.Read);
+                }
+                catch (ArgumentOutOfRangeException exception)
+                {
+                    // The file shrank after its length was read: a view beyond its end.
+                    return SnapshotOpenResult.Refused(SnapshotRejection.Io, exception.Message);
+                }
                 region = new MappedRegion(view, header.FileLength);
                 view = null;   // the region owns it now
                 file = new SnapshotFile(handle, mapping, region, header, hostMeta);
@@ -305,7 +313,7 @@ namespace CodeContext.Core.Snapshots
             {
                 return SnapshotOpenResult.Refused(SnapshotRejection.Structure, exception.Message);
             }
-            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentOutOfRangeException)
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
             {
                 return SnapshotOpenResult.Refused(SnapshotRejection.Io, exception.Message);
             }
@@ -334,10 +342,12 @@ namespace CodeContext.Core.Snapshots
         /// the HMAC check and every later read are only as trustworthy as the inode: whoever can write the
         /// file can change it after authentication. Two steps close that. A mode that grants group or
         /// others write is refused, because another user may already hold a writable descriptor that no
-        /// later mode change revokes. Then the mode is set to user read/write: fchmod succeeds only for
-        /// the file's owner (or root), so a failure means the file is not this user's, and it is refused.
-        /// After both, only this user (or root) can open the file for writing. The writer creates
-        /// snapshots with mode 0600, so neither step changes a file it wrote.
+        /// later mode change revokes. Then, unless the mode is already exactly 0600 (see
+        /// <see cref="NeedsClaim"/>), the mode is set to user read/write: fchmod succeeds only for the
+        /// file's owner (or root), so a permission failure means the file is not this user's, and it is
+        /// refused; any other failure (a read-only file system) is an I/O refusal. After both, only this
+        /// user (or root) can open the file for writing. The writer creates snapshots with mode 0600, so
+        /// neither step changes a file it wrote, and a file it wrote opens on a read-only mount.
         /// </summary>
         [System.Runtime.Versioning.UnsupportedOSPlatform("windows")]
         private static (SnapshotRejection Rejection, string Reason)? ClaimUnixFile(SafeFileHandle handle)
@@ -345,16 +355,31 @@ namespace CodeContext.Core.Snapshots
             var mode = File.GetUnixFileMode(handle);
             if ((mode & (UnixFileMode.GroupWrite | UnixFileMode.OtherWrite)) != 0)
                 return (SnapshotRejection.SharedWritable, $"group or others may write the file (mode {Convert.ToString((int)mode, 8)})");
+            if (!NeedsClaim(mode)) return null;
             try
             {
-                File.SetUnixFileMode(handle, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+                File.SetUnixFileMode(handle, UserReadWrite);
             }
-            catch (Exception exception) when (exception is UnauthorizedAccessException or IOException)
+            catch (UnauthorizedAccessException)
             {
                 return (SnapshotRejection.NotOwned, "the file is not owned by this user (its mode cannot be set)");
             }
+            catch (IOException exception)
+            {
+                return (SnapshotRejection.Io, $"the file's mode cannot be set: {exception.Message}");
+            }
             return null;
         }
+
+        private const UnixFileMode UserReadWrite = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+
+        /// <summary>
+        /// Whether a file of <paramref name="mode"/> (already free of group and other write) must be claimed
+        /// with fchmod. Not when it is exactly 0600: only its owner (or root) could have opened it for
+        /// reading, so it is this user's already. A readable file owned by someone else must grant group or
+        /// others read, so it still reaches fchmod and fails with a permission error.
+        /// </summary>
+        internal static bool NeedsClaim(UnixFileMode mode) => mode != UserReadWrite;
 
         /// <summary>Reads <paramref name="buffer"/>.Length bytes at <paramref name="offset"/>, or throws an <see cref="IOException"/>.</summary>
         private delegate void ReadAt(Span<byte> buffer, long offset);
