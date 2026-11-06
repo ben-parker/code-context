@@ -1291,6 +1291,28 @@ code does.
 
 ## 5. Phases
 
+Owner decisions of 2026-11-06 (Ben, in the coordinating session, after the work had used
+far more of the account's usage than expected). They supersede P1 and P2 and the phase
+list below where they differ.
+
+- Scope of 0.11: phases 0 to 6, then a reduced phase 11 (measurements) and the closing
+  steps. Phases 7 (dormant units), 8 (mapped shard), 9 (worker hibernation), 10
+  (narrowing) and 12 (syntax-first startup) are deferred to 0.12; their entries and
+  every "Carried from ..." list under them stay as written, for that work. 0.11
+  therefore ships the saved index, the labelled cached start and the C# worker's
+  baseline confirmation, and does not ship file-backed host memory or hibernation.
+- Process P3: per phase, one Opus implementer, one Sonnet reviewer, one fixer (Sonnet
+  for tests and docs, Opus for product logic). No second or third reviewer and no
+  separate re-review of a fix round: the coordinator's own gate run and the next
+  phase's reviewer cover it. The closing audit is done by a fresh Opus agent, not Fable.
+- The coordinator runs on Opus in a fresh session with a short handoff; briefs point at
+  plan sections instead of restating them, and agents return short reports.
+- Reduced phase 11: harden the harness only as far as safety needs (carried items 1 to
+  4 and 8, and the cached-or-uncached assertion of item 5); measure v0.10.7 against the
+  branch build on the three repositories for cold start to first answer and to `ready`
+  (cached and `--no-cache`), warm edits and memory; no hibernation or wake rows, and the
+  memory rows are not expected to improve without phase 8.
+
 Standard gates for every phase: `dotnet build` with no new warnings; `dotnet test`;
 `dotnet test tests/CodeContext.Core.Tests/CodeContext.Core.Tests.csproj --filter
 "Category=ExternalTooling"`; `git diff --check`. Protocol gates, where named:
