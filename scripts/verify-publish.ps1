@@ -192,6 +192,23 @@ export class Impl implements IService {
 '@
 [IO.File]::WriteAllText((Join-Path $fixture 'main.ts'), $typeScriptMainModule)
 
+# The host below starts inside the directory it indexes. Nothing in that directory may
+# configure it: a repository appsettings.json that reached the workers' environment would
+# name a startup hook (C#) and a preload module (Node) that do not exist, both workers
+# would fail to start, and the edge-kind assertions below would fail. With a real file
+# in place of the missing one, that would be repository code running.
+$repositorySettings = @'
+{
+  "CodeContext": {
+    "WorkerEnvironment": {
+      "csharp": { "DOTNET_STARTUP_HOOKS": "/does-not-exist/codecontext-smoke-hook.dll" },
+      "typescript": { "NODE_OPTIONS": "--require /does-not-exist/codecontext-smoke-hook.js" }
+    }
+  }
+}
+'@
+[IO.File]::WriteAllText((Join-Path $fixture 'appsettings.json'), $repositorySettings)
+
 $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
 $listener.Start()
 $port = ([Net.IPEndPoint]$listener.LocalEndpoint).Port
