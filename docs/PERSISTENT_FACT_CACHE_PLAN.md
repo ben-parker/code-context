@@ -1958,6 +1958,19 @@ Review outcome.
 - Not run: a real host with a capable worker (none is bundled until phase 6); Linux and
   macOS; Native AOT publish; a 0.10.x host against a worker that declares the capability
   (by reading: unknown members are ignored).
+- Fix round re-reviewed by a Sonnet reviewer after the commit (e94de81): no blocker;
+  seven of ten further mutations caught. One should-fix, reproduced: a stop waited for a
+  queued capture before checking whether a scan was running, so a stop during a scan
+  with a capture queued behind a long mutation blocked for the whole 10 s flush timeout.
+  That, tests for the three surviving mutations (the stop's wait for a requested
+  capture; un-recording on the drop path after the service stopped being the writer;
+  clearing a binding while a reconciliation is staged), one overall time budget for a
+  capture's saves, an order-independent fingerprint comparison and two doc sentences are
+  fixed in phase 6's change set. One new test,
+  `RequestThatFailedAfterItsDeltaCommitted_BreaksThePairing`, failed once in three
+  full-suite runs on the reviewer's machine after about 9 s and passed alone and in six
+  concurrent runs of its class; phase 6 diagnoses it and may not answer it with a longer
+  wait.
 - A reviewer of the phase 4 fix round, cut off by the usage limit, left one mutated file
   (`ProgramHelpers.cs`) in the working tree although told to work only in a scratch
   copy. The implementer found and restored it, and the coordinator's gate run checked
