@@ -1719,6 +1719,24 @@ Review outcome.
 - A real host run with the cache on creates `~/.codecontext/cache.key`. The acceptance
   run created it on this machine on 2026-11-06 01:41; it was left in place, as the
   product would leave it.
+- Fix round re-reviewed by an Opus reviewer after the commit (69681c5): no blocker.
+  Every path that reached `ready` before still reaches it, checked on real hosts (first
+  scan, full refresh, `.gitignore` rescan, watcher batch, single-file refresh; cold, warm
+  from a snapshot, and an empty tree), with `operationId` and duration unchanged. Status
+  and compact answers are byte-identical to the base commit on a tree with `partial`
+  coverage. A stress test (8 readers through a load and a verification commit, 8 rounds,
+  about 7,000 to 18,000 calls per kind per round) found no unlabelled snapshot answer.
+  Eight of ten mutations were caught. Two should-fix bugs, one test gap and five nits
+  are fixed in phase 5's change set:
+  - coverage was read after the last cache-state reading, and coverage now comes from
+    the store, so at the load transition a miss or a status call could carry the
+    snapshot's coverage with no label (reproduced with a forced interleaving);
+  - the coverage read took the store's commit lock, so a status call or a compact miss
+    waited for an in-flight commit: 247 ms during a 300,000-fact commit, where the
+    statistics read took 2.2 ms (reproduced); it now reads an immutable published
+    reference without the lock;
+  - nothing pinned the order "cache state verified, then `ready`" in the coordinator, and
+    nothing failed when the host was wired back to the old coverage registry.
 
 Goal: a start with a valid snapshot answers at once, labelled, while every worker re-walks
 as today. `CacheEnabled` defaults to true from here.
