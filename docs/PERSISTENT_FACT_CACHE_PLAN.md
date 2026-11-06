@@ -1307,6 +1307,24 @@ Review outcome.
   length check and the mapping.
 - Test seams in production code, internal: `SnapshotFile.OpenInMemory`, the
   `maxFileLength` overloads, a `wrapStream` parameter on `WriteFile`.
+- Fix round re-reviewed by an Opus reviewer after the commit (922a2e8): no blocker. The
+  stricter reader refused none of 3,400 writer-produced graphs built to provoke it (case
+  and fold collisions, UTF-8 against UTF-16 order, colliding normalized paths, shards of
+  only edges or only nodes, power-of-two counts), through the in-place accessors, the
+  loader and, for 340 of them, real files. One should-fix and three nits are fixed in
+  phase 3's change set: the Unix ownership test reported every failure of the mode
+  change as "not owned" (reproduced on a read-only mount); it now runs only when the
+  mode is not already 0600 and reports an I/O failure as one. Recorded, not fixed:
+  - On a file system that does not keep Unix modes (WSL DrvFs without `metadata`, FAT)
+    every file reads back group and other writable, so the key and every snapshot are
+    refused and the cache never runs there. It fails closed and says why.
+  - Root passes the ownership test for any file. A file someone else wrote still needs
+    root's key to authenticate.
+  - Open allocates one reference per string of a shard (1.8 MB on the jellyfin-sized
+    file). Phase 8 keeps or replaces that with its string cache.
+  - Not verified: on a Unix file system without hard links, two first-time key creators
+    might both believe they won; the loser's first snapshots would fail authentication
+    and be rewritten after one rescan.
 
 Goal: write a shard map to a file and load it back into heap shards. Dark: nothing calls it.
 
