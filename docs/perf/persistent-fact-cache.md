@@ -1,19 +1,265 @@
 # Persistent fact cache: performance record
 
 Before and after numbers for the persistent fact cache and worker hibernation
-(`docs/PERSISTENT_FACT_CACHE_PLAN.md`, section 6 defines each number). Every figure was
-taken with `scripts/bench/measure-cache.py` as it stood on 2026-11-05, before its review.
+(`docs/PERSISTENT_FACT_CACHE_PLAN.md`, section 6 defines each number). The section "Phase
+11" holds the after numbers. Every figure after it was taken with
+`scripts/bench/measure-cache.py` as it stood on 2026-11-05, before its review.
 
-These tables are a first reading. The review found limitations in how several of them
+Those later tables are a first reading. The review found limitations in how several of them
 were taken (see "Limitations of these baseline numbers") and the harness has been fixed
-since. Phase 11 therefore re-takes v0.10.7 and the branch build back to back, interleaved,
-on the same day and the same commits, with the fixed harness, and compares those two
-columns; the figures below are not the phase 11 baseline.
+since. Phase 11 therefore re-took v0.10.7 and the branch build back to back, on the same day
+and the same commits, with the fixed harness, and compares those two columns; the "Results"
+figures are not the phase 11 baseline.
 
 The comparison baseline for phase 11 is **v0.10.7**: it contains `main`'s enumeration
 patch (a1f62fc) and largest-files-first walk (f4b16d8), so a 0.11 figure against it
 shows what the cache bought, not what those patches bought. v0.10.0 is kept for history.
 v0.10.4 (enumeration patch only) is recorded for jellyfin cold start.
+
+## Phase 11: v0.10.7 against the branch
+
+Taken 2026-11-06, 16:22-18:11, with the hardened harness (carried items 1-4, 8 and the
+cached-or-uncached assertion of 5; see "Harness as used" below). These tables replace the
+"Results" section below as the comparison; that section stays for history.
+
+Each cell is the median of 5 timed runs after 1 discarded warm-up, then the min-max range.
+Edit rows pool 3 timed rounds of each of the 5 runs (15 values) after one priming round.
+The run order per repository was all of v0.10.7, then all of the branch, back to back; runs
+were not interleaved one by one. Order of repositories: bench worktree, d2-roguelike,
+jellyfin. Same commit and same `git status` hash in every run of both builds of a
+repository: jellyfin 06695fb494, d2-roguelike 8d4f6f9374 (with the other session's
+uncommitted edits, none in an edit target), bench worktree 15bfde8e8c. Node and edge counts
+equal on both builds: 26301/296362, 3818/27594, 6005/52026.
+
+| Label | Build | Reported version |
+|---|---|---|
+| v0.10.7 | release asset, as in "Builds" below | `0.10.7+f4b16d8079` |
+| branch | `dotnet publish` of `src/CodeContext.Api` at ce69208, `-c Release -r win-x64 --self-contained` (Native AOT host, ReadyToRun worker), under `%TEMP%\ccbench\pfc\branch-ce69208` | `0.10.32+ce69208801` |
+
+The branch build is the publish step of `scripts/verify-publish.ps1`, not the whole script:
+the script's checks were not run. Its bundled `node.exe` was copied from the v0.10.7 asset
+(22.15.0, the version `prepare-node-worker-runtime.ps1` pins).
+
+On the branch every unchanged cold start of the timed runs was checked cached by
+`check_cached_start` (the cache seen `verifying` or `verified`, no `ignored`, verification
+`csharp: baseline` at ready; `typescript: replaced` where that worker runs) and its first
+answer carried the `cache` line. The `cold.cached` field of those runs recorded the row's
+expectation, not an observation. Every `--no-cache` start showed no cache state at ready. On v0.10.7 `--no-cache` does not exist: its cold rows
+are the comparison for both.
+
+Machine load. Bench worktree, branch block: 3 runs were discarded for CPU outside the harness
+averaging 11.3-12.7 percent of all logical processors (runs started 16:43-16:50). The 5 kept
+runs of that block had means of 3.1-7.9 percent and peaks of up to 36 percent, so its ranges
+are the least clean of the six blocks. Cause not found: a 5 s sample of all processes at
+about 16:51 showed none above 1 percent of the machine. All other blocks: means of 1.6-2.8
+percent, one run 5.6 percent, no discards. The gate is still the mean of a whole run (carried
+item 7 was not in scope), so a short burst can sit inside a kept run. Nobody else's build or
+test ran during any kept run (`disturbance.processes` empty).
+
+### jellyfin
+
+| jellyfin | v0.10.7 | branch |
+|---|---:|---:|
+| Cold start, unchanged: spawn to first answer (s) | 18.2 (18.2-18.4) | 1.14 (1.10-1.20) |
+| Cold start, unchanged: spawn to `ready` (s) | 17.7 (17.7-17.9) | 5.04 (5.00-5.11) |
+| Cold start, `--no-cache`: to first answer (s) | - | 18.2 (18.1-18.6) |
+| Cold start, `--no-cache`: to `ready` (s) | - | 17.7 (17.7-18.0) |
+| Cold start, cache directory absent: to `ready` (s) | - | 17.8 (17.5-18.1) |
+| Cold start, body file changed: to answer (s) | 18.4 (18.2-18.9) | 1.15 (1.14-1.22) |
+| Cold start, body file changed: to corrected (s) | 17.8 (17.7-18.3) | 12.1 (12.0-13.1) |
+| Cold start, top file changed: to answer (s) | 18.2 (18.1-18.4) | 1.15 (1.12-1.19) |
+| Cold start, top file changed: to corrected (s) | 17.7 (17.6-17.8) | 8.48 (8.35-8.54) |
+| Warm body edit, apply (s) | 0.96 (0.94-1.03) | 0.93 (0.90-1.07) |
+| Warm body edit, revert (s) | 0.95 (0.93-0.99) | 0.94 (0.89-1.02) |
+| Warm top-level edit, apply (s) | 1.90 (1.75-1.96) | 1.79 (1.74-1.83) |
+| Warm top-level edit, revert (s) | 1.80 (1.76-1.88) | 1.78 (1.71-1.86) |
+| First edit after cold start, leaf, apply (s) | 0.89 (0.89-0.90) | 1.27 (1.26-1.29) |
+| First edit after cold start, root, apply (s) | 1.24 (1.23-1.27) | 1.73 (1.72-1.78) |
+| Host WS 5 s after ready (MB) | 769 (748-784) | 448 (444-458) |
+| Host private 5 s after ready (MB) | 862 (839-995) | 469 (466-475) |
+| Host WS after 100 queries (MB) | 1105 (931-1118) | 586 (562-722) |
+| Host private after 100 queries (MB) | 1206 (1134-1309) | 636 (609-768) |
+| C# worker WS 5 s after ready (MB) | 837 (821-841) | 401 (397-401) |
+| C# worker private 5 s after ready (MB) | 765 (749-769) | 363 (359-363) |
+| C# worker WS after all edits (MB) | 1027 (998-1048) | 794 (765-799) |
+| C# worker private after all edits (MB) | 946 (915-970) | 716 (683-722) |
+| Host WS, `--no-cache`, 5 s after ready (MB) | - | 760 (757-791) |
+| C# worker WS, `--no-cache`, 5 s after ready (MB) | - | 848 (826-862) |
+| 100-query mix total (s) | 2.38 (2.33-2.48) | 0.81 (0.74-0.82) |
+| 100-query mix p50 (ms) | 5.93 (5.54-6.14) | 2.82 (2.60-2.92) |
+| 100-query mix p95 (ms) | 78.0 (74.8-78.8) | 20.3 (18.6-21.9) |
+| Snapshot size after first scan (MB) | - | 23.6 (23.6-23.6) |
+| Worker state size (MB) | - | 17.8 (17.8-17.8) |
+| Snapshot write, first scan (ms) | - | 1726 (1653-1751) |
+| Snapshot capture, first scan (ms) | - | 179 (172-180) |
+| Snapshot write, after edits (ms) | - | 1460 (1371-1548) |
+
+### d2-roguelike
+
+| d2-roguelike | v0.10.7 | branch |
+|---|---:|---:|
+| Cold start, unchanged: spawn to first answer (s) | 3.50 (3.47-3.55) | 0.62 (0.61-0.62) |
+| Cold start, unchanged: spawn to `ready` (s) | 3.33 (3.30-3.41) | 2.20 (2.20-2.20) |
+| Cold start, `--no-cache`: to first answer (s) | - | 3.53 (3.33-3.59) |
+| Cold start, `--no-cache`: to `ready` (s) | - | 3.32 (3.31-3.41) |
+| Cold start, cache directory absent: to `ready` (s) | - | 3.35 (3.32-3.42) |
+| Cold start, body file changed: to answer (s) | 3.52 (3.49-3.55) | 0.62 (0.61-0.71) |
+| Cold start, body file changed: to corrected (s) | 3.36 (3.34-3.36) | 3.04 (3.02-3.15) |
+| Cold start, top file changed: to answer (s) | 3.51 (3.48-3.54) | 0.62 (0.61-0.67) |
+| Cold start, top file changed: to corrected (s) | 3.36 (3.28-3.40) | 3.01 (3.00-3.08) |
+| Warm body edit, apply (s) | 0.59 (0.58-0.61) | 0.59 (0.57-0.61) |
+| Warm body edit, revert (s) | 0.58 (0.56-0.59) | 0.58 (0.57-0.59) |
+| Warm top-level edit, apply (s) | 0.83 (0.79-0.84) | 0.81 (0.78-0.84) |
+| Warm top-level edit, revert (s) | 0.82 (0.78-0.84) | 0.82 (0.80-0.83) |
+| First edit after cold start, leaf, apply (s) | 0.68 (0.67-0.69) | 1.03 (1.02-1.04) |
+| First edit after cold start, root, apply (s) | 0.67 (0.67-0.68) | 1.00 (0.99-1.01) |
+| Host WS 5 s after ready (MB) | 120 (110-126) | 71.4 (70.9-71.9) |
+| Host private 5 s after ready (MB) | 118 (108-123) | 70.7 (70.3-71.6) |
+| Host WS after 100 queries (MB) | 160 (127-166) | 114 (110-115) |
+| Host private after 100 queries (MB) | 158 (130-162) | 115 (112-117) |
+| C# worker WS 5 s after ready (MB) | 252 (249-255) | 152 (151-152) |
+| C# worker private 5 s after ready (MB) | 201 (197-204) | 117 (117-117) |
+| C# worker WS after all edits (MB) | 320 (311-338) | 299 (295-303) |
+| C# worker private after all edits (MB) | 242 (232-261) | 217 (214-222) |
+| Host WS, `--no-cache`, 5 s after ready (MB) | - | 114 (102-119) |
+| C# worker WS, `--no-cache`, 5 s after ready (MB) | - | 250 (248-254) |
+| 100-query mix total (s) | 0.23 (0.22-0.26) | 0.14 (0.13-0.14) |
+| 100-query mix p50 (ms) | 1.08 (1.05-1.18) | 0.80 (0.78-0.84) |
+| 100-query mix p95 (ms) | 6.40 (6.07-6.61) | 2.67 (2.38-2.85) |
+| Snapshot size after first scan (MB) | - | 2.43 (2.43-2.43) |
+| Worker state size (MB) | - | 1.64 (1.64-1.64) |
+| Snapshot write, first scan (ms) | - | 116 (114-133) |
+| Snapshot capture, first scan (ms) | - | 23.0 (22.0-24.0) |
+| Snapshot write, after edits (ms) | - | 110 (100-113) |
+
+### code-context (bench worktree)
+
+| code-context (bench worktree) | v0.10.7 | branch |
+|---|---:|---:|
+| Cold start, unchanged: spawn to first answer (s) | 4.86 (4.81-5.14) | 0.65 (0.63-0.70) |
+| Cold start, unchanged: spawn to `ready` (s) | 4.77 (4.74-4.89) | 2.50 (2.42-2.59) |
+| Cold start, `--no-cache`: to first answer (s) | - | 5.13 (4.83-5.45) |
+| Cold start, `--no-cache`: to `ready` (s) | - | 4.96 (4.75-5.19) |
+| Cold start, cache directory absent: to `ready` (s) | - | 4.93 (4.84-5.10) |
+| Cold start, body file changed: to answer (s) | 5.04 (4.83-5.12) | 0.64 (0.63-0.75) |
+| Cold start, body file changed: to corrected (s) | 4.81 (4.75-4.89) | 4.27 (4.12-4.50) |
+| Cold start, top file changed: to answer (s) | 5.03 (4.98-5.09) | 0.64 (0.63-0.71) |
+| Cold start, top file changed: to corrected (s) | 4.90 (4.79-4.92) | 4.20 (4.03-4.47) |
+| Warm body edit, apply (s) | 0.71 (0.70-0.76) | 0.73 (0.70-0.78) |
+| Warm body edit, revert (s) | 0.70 (0.69-0.72) | 0.71 (0.68-0.75) |
+| Warm top-level edit, apply (s) | 1.13 (1.07-1.17) | 1.16 (1.11-1.20) |
+| Warm top-level edit, revert (s) | 1.13 (1.08-1.20) | 1.17 (1.13-1.20) |
+| First edit after cold start, leaf, apply (s) | 0.79 (0.78-0.80) | 1.25 (1.21-1.26) |
+| First edit after cold start, root, apply (s) | 1.00 (0.99-1.01) | 1.41 (1.41-1.42) |
+| Host WS 5 s after ready (MB) | 171 (164-173) | 114 (110-116) |
+| Host private 5 s after ready (MB) | 179 (172-182) | 126 (118-129) |
+| Host WS after 100 queries (MB) | 289 (279-295) | 176 (170-228) |
+| Host private after 100 queries (MB) | 309 (299-342) | 184 (178-237) |
+| C# worker WS 5 s after ready (MB) | 359 (356-362) | 186 (185-186) |
+| C# worker private 5 s after ready (MB) | 307 (305-311) | 152 (151-152) |
+| C# worker WS after all edits (MB) | 456 (435-460) | 390 (378-413) |
+| C# worker private after all edits (MB) | 379 (355-382) | 309 (295-332) |
+| Host WS, `--no-cache`, 5 s after ready (MB) | - | 173 (171-177) |
+| C# worker WS, `--no-cache`, 5 s after ready (MB) | - | 365 (358-370) |
+| 100-query mix total (s) | 1.16 (1.15-1.16) | 0.31 (0.29-0.33) |
+| 100-query mix p50 (ms) | 2.43 (2.01-2.54) | 1.89 (1.73-2.01) |
+| 100-query mix p95 (ms) | 45.1 (44.0-46.9) | 5.85 (5.27-7.43) |
+| Snapshot size after first scan (MB) | - | 4.85 (4.85-4.85) |
+| Worker state size (MB) | - | 3.26 (3.26-3.26) |
+| Snapshot write, first scan (ms) | - | 265 (259-286) |
+| Snapshot capture, first scan (ms) | - | 40.0 (38.0-42.0) |
+| Snapshot write, after edits (ms) | - | 233 (211-263) |
+
+### Reading these numbers
+
+- Cached cold start, first answer: jellyfin 18.2 s to 1.14 s, d2-roguelike 3.50 s to 0.62 s,
+  code-context 4.86 s to 0.65 s. To `ready`: 17.7 s to 5.04 s, 3.33 s to 2.20 s, 4.77 s to
+  2.50 s.
+- `--no-cache` and a start with no cache directory equal v0.10.7 within range. The cache adds
+  no measurable cost to a start that scans everything.
+- With one file changed while stopped, the first answer is as fast as unchanged and carries
+  the `cache` line; the corrected graph comes earlier than on v0.10.7, but much later than an
+  unchanged `ready` (jellyfin body 12.1 s, top-level 8.48 s, against 5.04 s).
+- Warm edits, the phase 6 acceptance item, are within noise. Medians against the rule (10
+  percent plus 0.05 s of v0.10.7), branch minus v0.10.7, apply and revert:
+
+  | Repository | body apply | body revert | top apply | top revert | Rule |
+  |---|---:|---:|---:|---:|---|
+  | jellyfin | -0.033 | -0.012 | -0.113 | -0.014 | met |
+  | d2-roguelike | 0.000 | -0.003 | -0.019 | -0.001 | met |
+  | code-context | +0.017 | +0.012 | +0.028 | +0.039 | met |
+
+  These follow a cached start. After an uncached start there is only the warm-up run of each
+  repository (3 values each, not timed figures): body apply 0.95-0.97, 0.58-0.60, 0.70-0.78 s;
+  top-level apply 1.77-1.94, 0.79-0.84, 1.10-1.15 s; no difference visible.
+- **Regression: the first edit after a cached start is slower.** Leaf: jellyfin 0.89 s to
+  1.27 s, d2-roguelike 0.68 s to 1.03 s, code-context 0.79 s to 1.25 s. Root: 1.24 s to
+  1.73 s, 0.67 s to 1.00 s, 1.00 s to 1.41 s. That is +0.33 to +0.50 s. It was not seen after
+  an uncached start: the evidence is 3 untimed warm-up leaf values (branch, one per
+  repository: 0.90, 0.67, 0.78 s), each after the run that wrote the snapshot, leaf only. It
+  may come with `baseline`, work the worker put off at start; the cause was not traced. The
+  revert of that same edit is at v0.10.7 speed. Later first edits of a kind pay less: the
+  priming rounds, medians, body apply jellyfin 1.02 s to 1.27 s, d2-roguelike 0.63 s to 0.65 s,
+  code-context 0.91 s to 1.02 s; top-level apply 1.92 s to 2.29 s, 0.82 s to 0.91 s, 1.18 s to
+  1.35 s. From the round after that, edits are at warm speed. No section 6 rule covers this row
+  directly. Accepted for 0.11 by the coordinator: about 0.4 s, paid about once per kind of
+  edit, against 3 to 17 s saved on every start. Likely the cost section 3.7 ("The first edit
+  after a verification") and R8 of the plan describe (no old tree to compare after a restore),
+  but not proven. Tracing it moves to 0.12 with phase 10.
+- Memory after a cached start is lower, which the plan did not expect without phase 8. jellyfin
+  5 s after ready: host working set 769 to 448 MB, worker 837 to 401 MB. A `--no-cache` start
+  reads as v0.10.7 (host 760, worker 848 MB), so this comes from the cached start, probably
+  because nothing has yet been built that a full scan builds. Use brings part of it back: worker
+  after all edits 1027 to 794 MB, host after queries 1105 to 586 MB. How far it climbs in a
+  long session was not measured.
+- The query mix is faster: code-context p95 45.1 to 5.85 ms, jellyfin 78.0 to 20.3 ms,
+  d2-roguelike 6.40 to 2.67 ms. Two one-off observations, not in `results11` and not
+  reproducible from it: a `--no-cache` branch instance was also faster (7.47 against 47.6 ms),
+  and all 100 code-context response bodies were byte-identical between v0.10.7 and that branch
+  instance (845,889 bytes). Cause not investigated; jellyfin and d2-roguelike answers were not
+  compared.
+- Reading and hashing the state file on a full index: the harness does not show it apart.
+  What it shows is an upper bound for all of the worker's baseline work on a cached start, the
+  time from session `indexing` to `generation 1 committed`: jellyfin 1.18-1.28 s (17.8 MB state),
+  d2-roguelike 0.15-0.20 s (1.6 MB), code-context 0.26 s (3.3 MB). The same span on a
+  `--no-cache` start is 14.5-14.8 s, 1.33-1.43 s, 2.7-3.1 s.
+- Snapshots: 23.6 MB and 17.8 MB of worker state on jellyfin, written in 1.7 s after a first
+  scan and 1.5 s after edits, off the commit path. The harness's own wait for a stable snapshot
+  before a stop came to about 20 s on every repository, most of it its 15 s check.
+
+### Harness as used
+
+Fixed for this phase: identity by parent process, a stop that survives a failed `list --json`,
+temporary files removed on every failure path, the moved-aside manifest removed when the
+rename fails, `wait_counts_change` failing at once when the instance dies, `ignored` fatal on a
+start expected cached, an uncached-start check, `cold.cached` recorded, `--warmup` at least 1,
+and hibernation no longer started with `--idle-timeout 0`. The timed runs above used the first
+version of the uncached-start check (a null cache at first status), which cached starts also
+show, so it did not tell the two apart. After review it was replaced by a check at `ready`
+(no `verifying` or `ignored` state seen, no cache line, no verification outcome), and
+`cold.cached` now records what was observed, not what the row expected. Neither change was
+in force for the timed runs; the new check was run once, untimed, on the bench worktree.
+Added: the row `cold_nocache` (`start --detach --no-cache`, then `query`, clock from the first
+of the two); `.codecontext/cache` is now guarded on every run of a cache build, not only with
+the snapshot row, and `.codecontext` is removed when the harness's runs created it.
+
+Not fixed (carried items out of this phase's scope): 6, the clocks start before the temporary
+file is written, on both builds alike; 7, disturbance gating by mean; 9, no `--check-config`
+mode; 10 was covered only by one untimed run of every row on the bench worktree, both builds.
+
+`scripts/bench/jellyfin.json`: the top-level symbol is now
+`Emby.Server.Implementations.ApplicationHost`. `ApplicationHost` alone is also a property of
+`CollectionFolder`, so `query` answered `matches 2/2` and the harness's exact-target check,
+newer than the phase 0 runs, stopped the first jellyfin attempt on both builds in the row
+`cold_changed`. Those two attempts are not used. Both cleaned up as designed: the file was
+reverted, the instance stopped, `.codecontext` removed.
+
+After all runs: `git status` of jellyfin, d2-roguelike and the bench worktree is identical to
+before; none holds `.codecontext` or a `.ccbench-tmp` file; `list --json` is empty.
+
+Not run: hibernation and wake rows (deferred to 0.12), `--require-hibernation`, cold OS file
+cache, Linux and macOS, run-by-run interleaving, and the `verify-publish.ps1` step the phase 11
+entry names.
 
 ## Machine
 
@@ -354,11 +600,11 @@ predicts:
 - Hibernation, wake and snapshot rows: the harness runs them only when `start --help`
   lists `--no-cache` (the cache) or `--worker-idle-timeout` (hibernation); presence of
   `indexing.cache` in status is not taken as the capability, because it is absent until
-  something is loaded or written. They have never run. Phase 11 runs with
-  `--require-cache --require-hibernation`, which makes a missing capability, a cold start
-  that should have loaded a snapshot and did not, a snapshot that is not written and
-  verified in time, or a worker that is still running while `hibernated`, fatal instead
-  of "not applicable". The snapshot row's "after the first scan" figure is taken on a
+  something is loaded or written. The snapshot rows ran in phase 11; hibernation and wake
+  have never run and moved to 0.12. `--require-cache` makes a missing capability, a cold
+  start that should have loaded a snapshot and did not, or a snapshot that is not written
+  and verified in time fatal instead of "not applicable"; `--require-hibernation` does the
+  same for a worker that is still running while `hibernated`. The snapshot row's "after the first scan" figure is taken on a
   dedicated start with `.codecontext/cache` absent: the harness deletes only a cache
   directory created during the same invocation; an existing one is moved aside to
   `.codecontext/cache.ccbench-aside` and back only with `--fresh-cache-ok`, otherwise the
@@ -385,9 +631,14 @@ jellyfin and d2-roguelike are measured in place, and other sessions work in them
   seen, a full cold start (about 4 s on d2-roguelike, 20 s on jellyfin v0.10.7, 50 s on
   v0.10.0). Hibernation: from the write until the wake commits and the session is
   `ready`. During those windows another session reading the file sees the edit.
-- The harness stops only an instance it can prove it started (exact root, pid,
-  instanceId, process creation time after its own spawn), through that instance's
-  `/api/shutdown?instanceId=`. An instance it cannot prove is logged and left running.
+- The harness stops only an instance it can prove it started (parent process one it
+  spawned for that start, exact root, created after that spawn; then pid and creation
+  time), through that instance's `/api/shutdown?instanceId=`, also when `list --json`
+  fails or has lost the record. An instance it cannot prove is logged and left running;
+  one it cannot stop is logged with pid, port and instance id.
+- On a build with the cache, `.codecontext/cache` in the measured repository belongs to
+  the harness for the invocation. It refuses an existing one without `--fresh-cache-ok`,
+  and removes what it created, `.codecontext` included, at the end.
 
 Recovering after a hard kill (time limit, closed terminal):
 

@@ -14,7 +14,7 @@
     "top": {
       "kind": "top",
       "file": "Emby.Server.Implementations/ApplicationHost.cs",
-      "symbol": "ApplicationHost",
+      "symbol": "Emby.Server.Implementations.ApplicationHost",
       "project": "Emby.Server.Implementations",
       "role": "near the top: 4 transitive dependents (Jellyfin.Server and tests)"
     },

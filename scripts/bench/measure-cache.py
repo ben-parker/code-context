@@ -27,17 +27,21 @@ answered] and reports its midpoint.
 Safety:
 - Refuses to run while any registered instance is on the repository or an ancestor of it
   (query would pick that instance); waits up to --instance-wait minutes, then exits 3.
-- An instance is "ours" only while `list --json` shows a record with exactly this root, the
-  pid and instanceId seen at attach, and the OS reports the same process creation time; it
-  must also have been created after the spawn that should have started it. Only such an
-  instance is stopped, through its own `/api/shutdown?instanceId=`; anything else is logged
-  and left alone. `stop --all` is never used.
+- A host is "ours" only if its parent process is one this harness spawned for that start
+  (`query`, or `start --detach`), it is registered on exactly this root, and it was created
+  after that spawn. From then on the pid with its creation time identifies it. Only such an
+  instance is stopped, through its own `/api/shutdown?instanceId=`, whatever `list --json`
+  says or fails to say; anything else is logged and left alone, and an instance that cannot
+  be stopped is logged with its pid, port and instance id. `stop --all` is never used.
 - Edit targets must be clean in git (or named with --allow-dirty-target) and must not already
   hold the probe text. The original bytes are saved under %TEMP%\\ccbench\\recover before the
   first write; a leftover recovery file from a killed run makes the script refuse to start
   and print how to restore. Writes go to a temporary file in the same directory and replace
   the target atomically. `git status --porcelain -- <edited files>` must be the same before
   and after (exit 2 otherwise). git runs with GIT_OPTIONAL_LOCKS=0.
+- On a build with the cache the harness owns `.codecontext/cache` of the measured repository
+  for the invocation: it refuses an existing one unless --fresh-cache-ok moves it aside, and
+  puts the starting state back at the end, `.codecontext` itself included.
 
 Standard library only; Windows only (process memory, CPU and listing use the Win32 API, the
 same counters Get-Process reports as WorkingSet64 and PrivateMemorySize64).
@@ -52,10 +56,11 @@ BUSY = re.compile(r"^(dotnet|testhost.*|vstest.*|msbuild|vbcscompiler|"
 CC_HOST = "codecontext.exe"
 CC_WORKERS = {"codecontext.csharp.worker.exe"}
 ALL_ROWS = ["cold", "memory", "first_edit", "queries", "edits", "cold_changed", "first_edit_root",
-            "snapshot", "hibernation"]
+            "cold_nocache", "snapshot", "hibernation"]
 # Rows recorded as "not applicable" and the figure the document compares them with.
 NEAREST_COMPARABLE = {
     "cachedColdStart": "cold.ready_s",
+    "coldNoCache": "cold.ready_s",
     "snapshotFirstScan": None,
     "snapshotAfterEdit": None,
     "hibernation": "memoryAfterReady.settled.host (resident); bodyEdits.apply_s (wake)",
@@ -232,6 +237,25 @@ def remember_own(pid):
     OWN[pid] = creation_time(pid) or time.time()
 
 
+def parent_pid(pid, procs):
+    for p, _, ppid in procs:
+        if p == pid:
+            return ppid
+    return None
+
+
+def spawned_from(ppid, created, spawns, ctime=None):
+    """True when `ppid`, the parent of a process created at `created`, is one of `spawns`
+    ({pid: creation}): the child is no older than that spawn, and a parent still running has
+    the recorded creation time (a reused pid is someone else's)."""
+    ctime = ctime or creation_time
+    recorded = spawns.get(ppid)
+    if recorded is None or created is None or created < recorded:
+        return False
+    live = ctime(ppid)
+    return live is None or abs(live - recorded) < 0.01
+
+
 def foreign_codecontext(procs, own):
     """CodeContext hosts and workers not in `own` (TypeScript workers are node.exe children of
     a codecontext host)."""
@@ -256,7 +280,9 @@ def run_cli(cmd, timeout=120, env=None):
         p.kill()
         p.communicate()
         raise Fatal(f"{' '.join(cmd[:3])} did not finish within {timeout}s")
-    return subprocess.CompletedProcess(cmd, p.returncode, out, err)
+    done = subprocess.CompletedProcess(cmd, p.returncode, out, err)
+    done.pid = p.pid
+    return done
 
 
 class BusyWatch:
@@ -375,11 +401,18 @@ def check_created_after(created, spawned_after, what):
                     f"{spawned_after - created:.3f}s before the harness spawned its start")
 
 
+def check_spawned_by_us(ppid, created, spawns, what):
+    if not spawned_from(ppid, created, spawns):
+        raise Fatal(f"instance not ours: the parent of {what} is pid {ppid}, not a process the "
+                    f"harness spawned for this start ({sorted(spawns)})")
+
+
 class Instance:
     def __init__(self, exe, repo, has_cache=False):
         self.exe, self.repo, self.root = exe, repo, norm(repo)
         self.has_cache = has_cache
         self.spawned_after = None
+        self.spawns = {}             # pid -> creation time of what this start spawned
         self.commits = 0
         self.workers = {}            # worker pid -> creation time
         self._conn = None
@@ -396,17 +429,33 @@ class Instance:
             raise Fatal(f"`list --json` exited {p.returncode}: {p.stderr.strip()[-300:]}")
         return parse_list(p.stdout)
 
+    def list_retry(self, attempts=5, delay=1.0):
+        """`list --json`, retried; None when it stays unreadable."""
+        for i in range(attempts):
+            try:
+                return self.list()
+            except Fatal as e:
+                log(f"warning: `list --json` failed ({i + 1}/{attempts}): {e}")
+                if i + 1 < attempts:
+                    time.sleep(delay)
+        return None
+
     def conflicting(self):
         return conflicting(self.list(), self.root)
 
     def find_own(self, records=None):
-        """A record on exactly this root whose process was created after our last spawn."""
+        """A record on exactly this root whose process was created after our last spawn and
+        whose parent is that spawn. Another session's start on the same root, in the moment
+        before ours registers, fails the second test."""
         if self.spawned_after is None:
             return None
-        for r in self.list() if records is None else records:
+        records = self.list() if records is None else records
+        procs = processes()
+        for r in records:
             if norm(r.get("rootPath", "")) == self.root:
                 ct = creation_time(r.get("pid"))
-                if ct is not None and ct >= self.spawned_after:
+                if (ct is not None and ct >= self.spawned_after
+                        and spawned_from(parent_pid(r.get("pid"), procs), ct, self.spawns)):
                     return r
         return None
 
@@ -416,6 +465,8 @@ class Instance:
                         f"not {self.repo}")
         created = creation_time(rec.get("pid"))
         check_created_after(created, spawned_after, f"host pid {rec.get('pid')}")
+        check_spawned_by_us(parent_pid(rec.get("pid"), processes()), created, self.spawns,
+                            f"host pid {rec.get('pid')}")
         if not rec.get("instanceId"):
             raise Fatal(f"record for {self.repo} has no instanceId; cannot prove it is ours")
         self.port, self.pid, self.instance_id = rec["port"], rec["pid"], rec["instanceId"]
@@ -430,11 +481,8 @@ class Instance:
         self.port = self.pid = self.instance_id = self.created = None
         self.workers = {}
 
-    def is_ours(self):
-        if not self.pid:
-            return False
-        return (find_record(self.list(), self.root, self.pid, self.instance_id) is not None
-                and process_alive(self.pid, self.created))
+    def alive(self):
+        return process_alive(self.pid, self.created)
 
     def request(self, method, path, timeout=30):
         """Request over one keep-alive connection; returns (status, raw body bytes)."""
@@ -470,51 +518,57 @@ class Instance:
         return s
 
     def stop(self):
-        """Shut down our instance through its own port, after proving it is still ours."""
+        """Shut down our instance through its own port. The pid with its creation time proves
+        the process is ours, so a registry that cannot be read, or that no longer shows the
+        record, does not stop the id-checked shutdown; only a process that is gone does."""
         if not self.pid:
             return
-        pid, created, root = self.pid, self.created, self.repo
+        pid, created, port, iid, root = self.pid, self.created, self.port, self.instance_id, self.repo
         try:
             self.status()  # refresh worker pids
-        except Fatal:
-            raise
-        except Exception:
-            pass
+        except Exception as e:
+            log(f"warning: status of pid {pid} failed before stop: {e}")
         workers = dict(self.workers)
-        if not self.is_ours():
-            log(f"not stopping: the instance for {root} (pid {pid}) is no longer the one this "
-                "harness started; leaving whatever is registered alone")
-            self.detach()
-            return
-        try:
-            code, _ = self.request("POST", "/api/shutdown?" + urlencode(
-                {"instanceId": self.instance_id}), timeout=10)
-            if code != 202:
-                log(f"warning: /api/shutdown answered {code}")
-        except (OSError, http.client.HTTPException) as e:
-            log(f"warning: /api/shutdown failed: {e}")
-        if self._conn:
-            self._conn.close()
-            self._conn = None
-        deadline = time.time() + 60
-        while time.time() < deadline and process_alive(pid, created):
-            time.sleep(0.1)
-        if process_alive(pid, created):
-            # Still ours and still running: `stop --path` resolves the closest record, which
-            # is ours because it is registered on exactly this root; it re-validates identity
-            # before killing.
-            if self.is_ours():
-                log(f"warning: pid {pid} ignored /api/shutdown; stop --path")
-                run_cli([self.exe, "stop", "--path", self.repo], timeout=120)
-            deadline = time.time() + 30
+        if self.alive():
+            records = self.list_retry()
+            if records is None or find_record(records, self.root, pid, iid) is None:
+                log(f"warning: registry {'unreadable' if records is None else 'has no record'} "
+                    f"for pid {pid} on {root}; it is still our process, shutting it down")
+            try:
+                code, _ = self.request("POST", "/api/shutdown?" + urlencode(
+                    {"instanceId": iid}), timeout=10)
+                if code != 202:
+                    log(f"warning: /api/shutdown answered {code}")
+            except (OSError, http.client.HTTPException) as e:
+                log(f"warning: /api/shutdown failed: {e}")
+            if self._conn:
+                self._conn.close()
+                self._conn = None
+            deadline = time.time() + 60
             while time.time() < deadline and process_alive(pid, created):
-                time.sleep(0.2)
+                time.sleep(0.1)
+            if process_alive(pid, created):
+                # `stop --path` resolves the closest record, so it is safe only while ours is
+                # registered on exactly this root; it re-validates identity before killing.
+                records = self.list_retry()
+                if records is not None and find_record(records, self.root, pid, iid):
+                    log(f"warning: pid {pid} ignored /api/shutdown; stop --path")
+                    try:
+                        run_cli([self.exe, "stop", "--path", self.repo], timeout=120)
+                    except Fatal as e:
+                        log(f"warning: {e}")
+                deadline = time.time() + 30
+                while time.time() < deadline and process_alive(pid, created):
+                    time.sleep(0.2)
+        else:
+            log(f"the instance for {root} (pid {pid}) is no longer running")
         deadline = time.time() + 60
         while time.time() < deadline and any(process_alive(p, c) for p, c in workers.items()):
             time.sleep(0.2)
         left = [p for p, c in [(pid, created)] + list(workers.items()) if process_alive(p, c)]
         if left:
-            log(f"warning: processes still alive after stop: {left}")
+            log(f"ERROR: giving up on stopping our instance for {root}: host pid {pid}, port "
+                f"{port}, instanceId {iid}; still alive: {left}")
         self.detach()
 
 
@@ -543,14 +597,33 @@ def cache_fields(c):
 
 
 def check_cached_start(states_seen, ready_cache):
-    """A cold start that should have loaded a snapshot really did: the cache was seen
-    `verifying` or `verified`, and the C# verification outcome is recorded at ready."""
+    """A cold start that should have loaded a snapshot really did: `ignored` (a snapshot was
+    refused) was never seen, the cache was seen `verifying` or `verified`, and the C#
+    verification outcome is recorded at ready."""
+    if "ignored" in states_seen:
+        raise Fatal(f"expected a cached cold start; the snapshot was ignored: {ready_cache}")
     if not ({"verifying", "verified"} & set(states_seen)):
         raise Fatal(f"expected a cached cold start; cache states seen: {sorted(states_seen, key=str)}"
                     f", at ready: {ready_cache}")
     v = ((ready_cache or {}).get("verification") or {}).get("csharp")
     if v in (None, "pending"):
         raise Fatal(f"cached cold start: verification.csharp not recorded at ready ({ready_cache})")
+
+
+def check_uncached_start(states_seen, ready_cache, cache_line=False):
+    """A cold start that should have scanned everything loaded nothing. Asserted at `ready`,
+    where a cached start cannot look like this: no `verifying` or `ignored` state was seen,
+    no `cache` line was printed, and no per-worker verification outcome is recorded (a cached
+    start ends with e.g. csharp `baseline`; an uncached one has none). A cached start can
+    read null at its first status, so the first status says nothing."""
+    if {"verifying", "ignored"} & set(states_seen):
+        raise Fatal(f"expected an uncached cold start; cache states seen: "
+                    f"{sorted(states_seen, key=str)}, at ready: {ready_cache}")
+    if cache_line:
+        raise Fatal("expected an uncached cold start; the answer carried a cache line")
+    if isinstance(ready_cache, dict) and (ready_cache.get("verification")
+                                          or ready_cache.get("servingCached")):
+        raise Fatal(f"expected an uncached cold start; cache at ready: {ready_cache}")
 
 
 def snapshot_progress(c, seq_mark):
@@ -687,24 +760,36 @@ def read_bytes(path):
         return f.read()
 
 
+def temp_path(path):
+    d, name = os.path.split(path)
+    return os.path.join(d, "." + name + TMP_SUFFIX)
+
+
 def atomic_write(path, data):
     """Write bytes to a sibling temporary file, flush it to disk, then replace the target, so
-    a kill leaves either the old or the new content, never a truncated file."""
-    d, name = os.path.split(path)
-    tmp = os.path.join(d, "." + name + TMP_SUFFIX)
-    with open(tmp, "wb") as f:
-        f.write(data)
-        f.flush()
-        os.fsync(f.fileno())
-    for attempt in range(20):
+    a kill leaves either the old or the new content, never a truncated file. The temporary
+    file does not outlive a failure."""
+    tmp = temp_path(path)
+    try:
+        with open(tmp, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        for attempt in range(20):
+            try:
+                os.replace(tmp, path)
+                return
+            except PermissionError:
+                if attempt == 19:
+                    raise
+                time.sleep(0.05)
+    except BaseException:
         try:
-            os.replace(tmp, path)
-            return
-        except PermissionError:
-            if attempt == 19:
+            if os.path.exists(tmp):
                 os.remove(tmp)
-                raise
-            time.sleep(0.05)
+        except OSError as e:
+            log(f"ERROR: cannot remove {tmp}: {e}")
+        raise
 
 
 def recovery_paths(recover_dir, path):
@@ -743,7 +828,7 @@ class Edits:
             orig, manifest = recovery_paths(recover_dir, p)
             if os.path.exists(orig) or os.path.exists(manifest):
                 raise Fatal(restore_hint(p, orig, manifest), 2)
-            tmp = os.path.join(os.path.dirname(p), "." + os.path.basename(p) + TMP_SUFFIX)
+            tmp = temp_path(p)
             if os.path.exists(tmp):
                 os.remove(tmp)  # only this script creates files with this name
                 log(f"removed a leftover temporary file {tmp}")
@@ -834,6 +919,15 @@ class Edits:
             except OSError as e:
                 ok = False
                 log(f"ERROR restoring {p}: {e}")
+        for p in self.paths.values():
+            tmp = temp_path(p)
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)  # only this script creates files with this name
+                    log(f"removed a leftover temporary file {tmp}")
+            except OSError as e:
+                ok = False
+                log(f"ERROR: cannot remove the leftover temporary file {tmp}: {e}")
         return ok
 
     def check(self):
@@ -856,8 +950,10 @@ def wait_counts_change(inst, before, t_ref, timeout=900, interval=EDIT_POLL_S):
             s = inst.status()
         except Fatal:
             raise
-        except Exception:
+        except Exception as e:
             s = None
+            if not inst.alive():  # no commit can come: do not leave the file edited
+                raise Fatal(f"our instance (pid {inst.pid}) died while waiting for a commit: {e}")
         if s and s["indexing"]["status"] == "ready" and counts(s) != before:
             hi = time.perf_counter() - t_ref
             inst.commits += 1
@@ -920,8 +1016,11 @@ def spawn_query(exe, repo, ident):
     return p
 
 
-def cold_start(inst, ident, changed_counts_from=None, expect_cached=False, timeout=1800):
+def cold_start(inst, ident, changed_counts_from=None, expect_cached=False, no_cache=False,
+               timeout=1800):
     """Spawn `query <ident>` with no instance running and time everything from that instant.
+    With no_cache the clock starts at `start --detach --no-cache` instead, and `query` is
+    spawned as soon as that returns; `query` itself cannot pass the option.
 
     Returns a dict with: each query attempt's exit code and time (re-spawning on a readiness
     timeout, exit 3, until one exits 0; the exit instant is taken in the thread that waits on
@@ -929,7 +1028,8 @@ def cold_start(inst, ident, changed_counts_from=None, expect_cached=False, timeo
     session timeline, worker creation time from the OS relative to the host's (the headline
     "host start to worker process" figure), and the cache fields at first status, at the
     answer and at ready. If changed_counts_from is given, also the time until status is ready
-    with counts that differ from those (the corrected answer after an offline edit).
+    with counts that differ from those (the corrected answer after an offline edit). On a build
+    with the cache the start is checked to be what it was expected to be, and `cached` says so.
     """
     hits = inst.conflicting()
     if hits:
@@ -937,12 +1037,14 @@ def cold_start(inst, ident, changed_counts_from=None, expect_cached=False, timeo
                         "cold start")
     wall0 = time.time()
     inst.spawned_after = wall0
+    inst.spawns = {}
     t0 = time.perf_counter()
     procs, done_at, threads = [], {}, []
     res = {"queryAttempts": []}
 
     def spawn():
         p = spawn_query(inst.exe, inst.repo, ident)
+        inst.spawns[p.pid] = OWN.get(p.pid)
         idx = len(procs)
         procs.append((p, time.perf_counter()))
 
@@ -954,6 +1056,13 @@ def cold_start(inst, ident, changed_counts_from=None, expect_cached=False, timeo
         threads.append(th)
 
     try:
+        if no_cache:
+            sp = run_cli([inst.exe, "start", "--path", inst.repo, "--detach", "--no-cache"],
+                         timeout=300)
+            inst.spawns[sp.pid] = OWN.get(sp.pid)
+            if sp.returncode:
+                raise Fatal(f"start --no-cache exited {sp.returncode}: {sp.stderr.strip()[-400:]}")
+            res["startDetach_s"] = round(time.perf_counter() - t0, 3)
         spawn()
         rec = None
         sess_seen = pid_seen = ready_at = corrected_at = answered = None
@@ -1081,9 +1190,21 @@ def cold_start(inst, ident, changed_counts_from=None, expect_cached=False, timeo
     if inst.created and worker_ct:
         # Host start to worker process, read from the OS: the headline enumeration figure.
         res["enumerationOs_s"] = round(worker_ct - inst.created, 3)
+    # What was observed: the cache was seen verifying or verified with a snapshot served, and
+    # the answer carried the cache line; not what the row expected.
+    res["cached"] = bool(inst.has_cache and {"verifying", "verified"} & cache_states
+                         and res.get("cacheLine")
+                         and ((res.get("cacheAtReady") or {}).get("verification")))
     if inst.has_cache:
         if expect_cached:
             check_cached_start(cache_states, res.get("cacheAtReady"))
+        else:
+            check_uncached_start(cache_states, res.get("cacheAtReady"), res.get("cacheLine"))
+        if no_cache:
+            if res.get("cacheAtReady") is not None:
+                raise Fatal(f"--no-cache start shows cache {res['cacheAtReady']} at ready")
+            inst.pending_write = False  # nothing is written; what is on disk stays current
+            return res
         inst.seq_at_ready = (res.get("cacheAtReady") or {}).get("snapshotSequence")
         inst.seq_mark = inst.seq_at_ready
         # After an unchanged cached start the snapshot already holds the graph.
@@ -1252,8 +1373,10 @@ def hibernation(inst, edits, key, expected_counts, timeout=900):
     wall0 = time.time()
     inst.spawned_after = wall0
     t0 = time.perf_counter()
-    p = run_cli([inst.exe, "start", "--path", inst.repo, "--detach", "--idle-timeout", "0",
+    # The default --idle-timeout stays, so an instance this harness loses still ends by itself.
+    p = run_cli([inst.exe, "start", "--path", inst.repo, "--detach",
                  "--worker-idle-timeout", "1"], timeout=600)
+    inst.spawns = {p.pid: OWN.get(p.pid)}
     if p.returncode:
         raise Fatal(f"start --worker-idle-timeout failed: {p.stderr.strip()[-400:]}")
     out = p.stdout
@@ -1456,6 +1579,22 @@ def one_run(args, cfg, queries, edits, rows, caps):
                 ensure_snapshot_current(inst, unchanged)
                 inst.stop()
 
+        # ---- cold start with the cache off, on the same files and the same day as "cold"
+        if "cold_nocache" in rows:
+            if inst.has_cache:
+                log("cold start with --no-cache")
+                c4 = cold_start(inst, cfg["coldSymbol"], no_cache=True)
+                if counts(c4.pop("readyStatus")) != unchanged:
+                    raise Fatal(f"--no-cache start found other counts than {unchanged}")
+                r["coldNoCache"] = c4
+                log(f"  answered {c4['answered_s']}s ready {c4['ready_s']}s")
+                if "memory" in rows:
+                    time.sleep(SETTLE_S)
+                    r["memoryNoCache"] = sample_memory(inst)
+                inst.stop()
+            else:
+                r["coldNoCache"] = NA
+
         # ---- hibernation (needs --worker-idle-timeout)
         if "hibernation" in rows:
             if caps["hibernation"]:
@@ -1480,13 +1619,18 @@ def one_run(args, cfg, queries, edits, rows, caps):
         if inst.pid:
             inst.stop()
         else:
-            rec = inst.find_own()  # started by our last spawn but never attached
+            records = inst.list_retry()  # started by our last spawn but never attached?
+            rec = inst.find_own(records) if records is not None else None
             if rec:
                 try:
                     inst.attach(rec, inst.spawned_after)
                     inst.stop()
                 except Fatal as ex:
                     log(f"not stopping {rec.get('rootPath')} pid {rec.get('pid')}: {ex}")
+            elif records is None:
+                hosts = [p for p, n, pp in processes()
+                         if n.lower() == CC_HOST and pp in inst.spawns]
+                log(f"ERROR: cannot read the registry; hosts our last spawn started: {hosts}")
         args.state["snapshot_expected"] = inst.snapshot_expected
     return r
 
@@ -1584,10 +1728,13 @@ def wait_no_instance(inst, minutes):
 class CacheDirGuard:
     """Makes the repository's cache directory one the harness may delete, and puts the
     starting state back at the end: a directory that existed before is moved aside (with
-    --fresh-cache-ok only) to a sibling and moved back; one that did not exist is removed."""
+    --fresh-cache-ok only) to a sibling and moved back; one that did not exist is removed,
+    and so is `.codecontext` if the harness's runs created it."""
 
     def __init__(self, repo, needed, fresh_ok, recover_dir=RECOVER_DIR):
         self.dir, self.aside, self.existed = cache_dir(repo), None, False
+        self.parent = os.path.dirname(self.dir)
+        self.parent_existed = os.path.lexists(self.parent)
         self.manifest = recovery_paths(recover_dir, self.dir)[1].replace(".json", ".cache.json")
         self.active = needed
         if not needed:
@@ -1598,8 +1745,8 @@ class CacheDirGuard:
         self.existed = os.path.lexists(self.dir)
         if self.existed:
             if not fresh_ok:
-                raise Fatal(f"{self.dir} exists and the snapshot row needs a start without it. "
-                            "Pass --fresh-cache-ok to let the harness move it aside for the "
+                raise Fatal(f"{self.dir} exists and a build with the cache must begin without "
+                            "it. Pass --fresh-cache-ok to let the harness move it aside for the "
                             "invocation and move it back afterwards.", 2)
             self.aside = self.dir + ".ccbench-aside"
             if os.path.lexists(self.aside):
@@ -1607,7 +1754,13 @@ class CacheDirGuard:
             os.makedirs(os.path.dirname(self.manifest), exist_ok=True)
             with open(self.manifest, "w", encoding="utf-8") as f:
                 json.dump({"cacheDir": self.dir, "movedTo": self.aside}, f)
-            os.rename(self.dir, self.aside)
+            # The manifest comes first so a kill in between leaves a trace; a rename that
+            # fails moved nothing, so it must not leave one.
+            try:
+                os.rename(self.dir, self.aside)
+            except OSError as e:
+                os.remove(self.manifest)
+                raise Fatal(f"cannot move {self.dir} aside: {e}", 2)
             log(f"moved {self.dir} aside to {self.aside}")
 
     def restore(self):
@@ -1620,6 +1773,8 @@ class CacheDirGuard:
                 os.rename(self.aside, self.dir)
                 os.remove(self.manifest)
                 log(f"moved {self.aside} back to {self.dir}")
+            if not self.parent_existed and os.path.isdir(self.parent):
+                os.rmdir(self.parent)  # fails, and is reported, if it holds something else
             return True
         except (OSError, Fatal) as e:
             log(f"ERROR restoring the cache directory {self.dir}: {e}")
@@ -1633,7 +1788,9 @@ def main(argv=None):
     ap.add_argument("--label", required=True)
     ap.add_argument("--config", required=True, help="per-repository JSON config")
     ap.add_argument("--runs", type=int, default=5)
-    ap.add_argument("--warmup", type=int, default=1, help="discarded runs first")
+    ap.add_argument("--warmup", type=int, default=1,
+                    help="discarded runs first, at least 1: on a build with the cache the first "
+                         "run is the one that writes the snapshot")
     ap.add_argument("--rounds", type=int, default=3,
                     help="timed apply/revert rounds per edit kind, after one priming round")
     ap.add_argument("--rows", default=",".join(ALL_ROWS),
@@ -1656,8 +1813,10 @@ def main(argv=None):
     ap.add_argument("--require-hibernation", action="store_true",
                     help="fail when the build has no worker hibernation")
     ap.add_argument("--fresh-cache-ok", action="store_true",
-                    help="let the snapshot row move an existing .codecontext/cache aside")
+                    help="let a build with the cache move an existing .codecontext/cache aside")
     args = ap.parse_args(argv)
+    if args.warmup < 1:
+        ap.error("--warmup must be at least 1")
     if os.name != "nt":
         raise SystemExit("measure-cache.py uses the Win32 API; run it on Windows")
     args.exe = os.path.abspath(args.exe)
@@ -1683,7 +1842,7 @@ def main(argv=None):
         inst = Instance(args.exe, args.repo)
         wait_no_instance(inst, args.instance_wait)
         edits = Edits(args.repo, cfg["edits"], args.allow_dirty_target)
-        guard = CacheDirGuard(args.repo, caps["cache"] and "snapshot" in rows, args.fresh_cache_ok)
+        guard = CacheDirGuard(args.repo, caps["cache"], args.fresh_cache_ok)
         runs = []
         total = args.warmup + args.runs
         i = retries = 0

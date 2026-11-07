@@ -3,6 +3,7 @@
 Run: python -m unittest discover -s scripts/bench -p "test_*.py"
 """
 import importlib.util, json, os, shutil, subprocess, tempfile, unittest
+from unittest import mock
 
 _spec = importlib.util.spec_from_file_location(
     "measure_cache", os.path.join(os.path.dirname(os.path.abspath(__file__)), "measure-cache.py"))
@@ -403,6 +404,309 @@ class Disk(Tmp):
         g = mc.CacheDirGuard(self.repo, False, False, recover_dir=self.recover)
         self.assertTrue(g.restore())
         self.assertTrue(os.path.exists(d))
+
+
+class TempFiles(Tmp):
+    def test_failed_replace_removes_the_temp_file(self):
+        p = self.put("a.cs", b"old")
+
+        def locked(src, dst):
+            raise PermissionError("locked")
+        with mock.patch.object(mc.os, "replace", locked), mock.patch.object(mc.time, "sleep"):
+            with self.assertRaises(PermissionError):
+                mc.atomic_write(p, b"new")
+        self.assertEqual(os.listdir(self.repo), ["a.cs"])
+        self.assertEqual(mc.read_bytes(p), b"old")
+
+    def test_failed_flush_removes_the_temp_file(self):
+        p = self.put("a.cs", b"old")
+
+        def full(fd):
+            raise OSError("disk full")
+        with mock.patch.object(mc.os, "fsync", full):
+            with self.assertRaises(OSError):
+                mc.atomic_write(p, b"new")
+        self.assertEqual(os.listdir(self.repo), ["a.cs"])
+
+    def test_other_replace_error_removes_the_temp_file(self):
+        p = self.put("a.cs", b"old")
+
+        def gone(src, dst):
+            raise FileNotFoundError("gone")
+        with mock.patch.object(mc.os, "replace", gone):
+            with self.assertRaises(FileNotFoundError):
+                mc.atomic_write(p, b"new")
+        self.assertEqual(os.listdir(self.repo), ["a.cs"])
+
+    def test_restore_all_removes_and_reports_a_leftover(self):
+        self.put("Widget.cs", SRC.encode())
+        e = self.edits({"body": BODY})
+        tmp = self.put(".Widget.cs" + mc.TMP_SUFFIX, b"partial")
+        with mock.patch.object(mc, "log") as log:
+            self.assertTrue(e.restore_all())
+        self.assertFalse(os.path.exists(tmp))
+        self.assertTrue(any(tmp in c.args[0] for c in log.call_args_list))
+
+    def test_restore_all_fails_when_a_leftover_cannot_be_removed(self):
+        self.put("Widget.cs", SRC.encode())
+        e = self.edits({"body": BODY})
+        self.put(".Widget.cs" + mc.TMP_SUFFIX, b"partial")
+
+        def refuse(path):
+            raise PermissionError("in use")
+        with mock.patch.object(mc.os, "remove", refuse):
+            self.assertFalse(e.restore_all())
+
+
+class Identity(unittest.TestCase):
+    live = {7: 100.0}.get
+
+    def test_spawned_from(self):
+        spawns = {7: 100.0}
+        self.assertTrue(mc.spawned_from(7, 101.0, spawns, ctime=self.live))
+        # The parent exited: its pid reads as gone, which is the normal case for `query`.
+        self.assertTrue(mc.spawned_from(7, 101.0, spawns, ctime=lambda p: None))
+
+    def test_foreign_parent_is_not_ours(self):
+        self.assertFalse(mc.spawned_from(8, 101.0, {7: 100.0}, ctime=self.live))
+        self.assertFalse(mc.spawned_from(None, 101.0, {7: 100.0}, ctime=self.live))
+
+    def test_child_older_than_the_spawn_is_not_ours(self):
+        self.assertFalse(mc.spawned_from(7, 99.0, {7: 100.0}, ctime=self.live))
+
+    def test_reused_parent_pid_is_not_ours(self):
+        self.assertFalse(mc.spawned_from(7, 101.0, {7: 100.0}, ctime={7: 100.5}.get))
+
+    def test_unknown_creation_proves_nothing(self):
+        self.assertFalse(mc.spawned_from(7, 101.0, {7: None}, ctime=self.live))
+        self.assertFalse(mc.spawned_from(7, None, {7: 100.0}, ctime=self.live))
+
+    def test_instance_on_our_root_started_by_someone_else_is_not_adopted(self):
+        inst = mc.Instance("cc.exe", r"C:\work\repo")
+        inst.spawned_after, inst.spawns = 100.0, {7: 100.0}
+        rec = {"rootPath": r"C:\work\repo", "pid": 20, "port": 1, "instanceId": "a"}
+        procs = [(20, "codecontext.exe", 99), (7, "codecontext.exe", 1)]
+        ctimes = {20: 100.1, 7: 100.0}.get
+        with mock.patch.object(mc, "processes", lambda: procs), \
+                mock.patch.object(mc, "creation_time", ctimes):
+            self.assertIsNone(inst.find_own([rec]))
+            with self.assertRaises(mc.Fatal) as cm:
+                inst.attach(rec, 100.0)
+            self.assertIn("not ours", str(cm.exception))
+            self.assertIsNone(inst.pid)
+            # The same record with our spawn as its parent is ours.
+            procs[0] = (20, "codecontext.exe", 7)
+            self.assertIs(inst.find_own([rec]), rec)
+            inst.attach(rec, 100.0)
+            self.assertEqual(inst.pid, 20)
+
+
+class Stop(unittest.TestCase):
+    """stop() against a fake registry and port; the process exits when shutdown arrives."""
+
+    class Host(mc.Instance):
+        def __init__(self, records, exits=True):
+            super().__init__("cc.exe", r"C:\work\repo")
+            self.records, self.exits = records, exits
+            self.running, self.posts = True, []
+            self.pid, self.port, self.instance_id, self.created = 10, 5000, "abc", 1.0
+
+        def list(self):
+            if self.records is None:
+                raise mc.Fatal("`list --json` exited 1")
+            return self.records
+
+        def status(self):
+            return {}
+
+        def request(self, method, path, timeout=30):
+            self.posts.append(path)
+            if self.exits:
+                self.running = False
+            return 202, b""
+
+    def stop(self, host):
+        with mock.patch.object(mc, "process_alive", lambda p, c: host.running), \
+                mock.patch.object(mc.time, "sleep"), mock.patch.object(mc, "log") as log, \
+                mock.patch.object(mc, "run_cli") as cli:
+            host.stop()
+        return [c.args[0] for c in log.call_args_list], cli
+
+    def own(self):
+        return {"rootPath": r"C:\work\repo", "pid": 10, "instanceId": "abc"}
+
+    def test_normal_stop(self):
+        h = self.Host([self.own()])
+        logs, _ = self.stop(h)
+        self.assertEqual(h.posts, ["/api/shutdown?instanceId=abc"])
+        self.assertIsNone(h.pid)
+        self.assertFalse(any("ERROR" in x or "warning" in x for x in logs))
+
+    def test_failed_list_does_not_leak_the_instance(self):
+        h = self.Host(None)
+        logs, _ = self.stop(h)
+        self.assertEqual(h.posts, ["/api/shutdown?instanceId=abc"])
+        self.assertEqual(sum("`list --json` failed" in x for x in logs), 5)  # retried
+
+    def test_missing_record_does_not_leak_the_instance(self):
+        h = self.Host([])
+        self.stop(h)
+        self.assertEqual(h.posts, ["/api/shutdown?instanceId=abc"])
+
+    def test_dead_process_gets_no_shutdown(self):
+        h = self.Host([self.own()])
+        h.running = False
+        self.stop(h)
+        self.assertEqual(h.posts, [])
+        self.assertIsNone(h.pid)
+
+    def test_giving_up_names_pid_port_and_instance(self):
+        h = self.Host(None, exits=False)
+        real = mc.time.time
+        ticks = iter(range(0, 100000, 40))
+        with mock.patch.object(mc.time, "time", lambda: real() + next(ticks)):
+            logs, cli = self.stop(h)
+        cli.assert_not_called()  # `stop --path` needs our record in the registry
+        last = [x for x in logs if "ERROR" in x][-1]
+        for part in ("pid 10", "port 5000", "instanceId abc"):
+            self.assertIn(part, last)
+
+    def test_stop_path_only_with_our_record(self):
+        h = self.Host([self.own()], exits=False)
+        real = mc.time.time
+        ticks = iter(range(0, 100000, 40))
+        with mock.patch.object(mc.time, "time", lambda: real() + next(ticks)):
+            _, cli = self.stop(h)
+        cli.assert_called_once()
+        self.assertIn("--path", cli.call_args.args[0])
+        self.assertNotIn("--all", cli.call_args.args[0])
+
+    def test_list_retry_recovers(self):
+        h = self.Host(None)
+        answers = iter([mc.Fatal("x"), mc.Fatal("y"), []])
+
+        def flaky():
+            a = next(answers)
+            if isinstance(a, Exception):
+                raise a
+            return a
+        h.list = flaky
+        with mock.patch.object(mc.time, "sleep"), mock.patch.object(mc, "log"):
+            self.assertEqual(h.list_retry(), [])
+
+
+class DeadInstance(unittest.TestCase):
+    class Fake:
+        pid, commits, pending_write, seq_mark = 10, 0, False, None
+
+        def __init__(self, alive):
+            self.is_alive, self.calls = alive, 0
+
+        def status(self):
+            self.calls += 1
+            raise ConnectionRefusedError("refused")
+
+        def alive(self):
+            return self.is_alive
+
+    def test_death_fails_at_once(self):
+        f = self.Fake(False)
+        with self.assertRaises(mc.Fatal) as cm:
+            mc.wait_counts_change(f, [1, 1], mc.time.perf_counter(), timeout=60, interval=0.001)
+        self.assertEqual(f.calls, 1)
+        self.assertIn("died", str(cm.exception))
+
+    def test_a_status_hiccup_of_a_live_instance_keeps_waiting(self):
+        f = self.Fake(True)
+        with self.assertRaises(mc.Fatal) as cm:
+            mc.wait_counts_change(f, [1, 1], mc.time.perf_counter(), timeout=0.02, interval=0.001)
+        self.assertGreater(f.calls, 1)
+        self.assertIn("did not change", str(cm.exception))
+
+
+class CacheAssertions(unittest.TestCase):
+    def test_ignored_is_fatal_even_when_verified_later(self):
+        ready = {"state": "verified", "verification": {"csharp": "replaced"}}
+        with self.assertRaises(mc.Fatal) as cm:
+            mc.check_cached_start({None, "ignored", "verified"}, ready)
+        self.assertIn("ignored", str(cm.exception))
+
+    # Cache objects as recorded by real runs (results11, code-context, branch build).
+    UNCACHED_READY = {"state": "verified", "servingCached": False, "verification": None,
+                      "snapshotSequence": None, "lastWriteError": None, "reason": None}
+    CACHED_READY = {"state": "verified", "servingCached": False,
+                    "verification": {"csharp": "baseline", "typescript": "replaced"},
+                    "snapshotSequence": 1, "lastWriteError": None, "reason": None}
+
+    def test_uncached_start_passes_on_real_uncached_status(self):
+        mc.check_uncached_start({None, "verified"}, self.UNCACHED_READY, False)
+        mc.check_uncached_start(set(), None, False)  # --no-cache: no cache object at all
+
+    def test_uncached_start_rejects_cached_start_that_read_null_at_first_status(self):
+        # A cached start whose first status showed no cache (seen in the raw data), then
+        # went straight to verified with a verification outcome.
+        with self.assertRaises(mc.Fatal):
+            mc.check_uncached_start({None, "verified"}, self.CACHED_READY, False)
+        # The same start seen verifying, and with the cache line on its answer.
+        with self.assertRaises(mc.Fatal):
+            mc.check_uncached_start({None, "verifying", "verified"}, self.CACHED_READY, True)
+        with self.assertRaises(mc.Fatal):
+            mc.check_uncached_start({"verified"}, self.UNCACHED_READY, True)
+        with self.assertRaises(mc.Fatal):
+            mc.check_uncached_start({None, "ignored", "verified"}, self.UNCACHED_READY, False)
+
+    def test_warmup_of_zero_is_refused(self):
+        with mock.patch("sys.stderr"), self.assertRaises(SystemExit) as cm:
+            mc.main(["--exe", "x", "--repo", "y", "--label", "z", "--config", "c", "--warmup", "0"])
+        self.assertEqual(cm.exception.code, 2)
+
+
+class CacheGuard(Tmp):
+    def test_failed_rename_leaves_no_manifest(self):
+        d = mc.cache_dir(self.repo)
+        os.makedirs(d)
+
+        def refuse(a, b):
+            raise PermissionError("in use")
+        with mock.patch.object(mc.os, "rename", refuse), self.assertRaises(mc.Fatal):
+            mc.CacheDirGuard(self.repo, True, True, recover_dir=self.recover)
+        self.assertEqual(os.listdir(self.recover), [])
+        self.assertTrue(os.path.isdir(d))
+        # So the next run is not refused for a move that never happened.
+        g = mc.CacheDirGuard(self.repo, True, True, recover_dir=self.recover)
+        self.assertTrue(os.path.exists(g.manifest))
+        self.assertTrue(g.restore())
+
+    def test_kept_manifest_during_the_move_refuses_a_second_run(self):
+        os.makedirs(mc.cache_dir(self.repo))
+        mc.CacheDirGuard(self.repo, True, True, recover_dir=self.recover)
+        with self.assertRaises(mc.Fatal):
+            mc.CacheDirGuard(self.repo, True, True, recover_dir=self.recover)
+
+    def test_directories_the_runs_created_are_removed(self):
+        g = mc.CacheDirGuard(self.repo, True, False, recover_dir=self.recover)
+        os.makedirs(os.path.join(mc.cache_dir(self.repo), "default"))
+        self.assertTrue(g.restore())
+        self.assertEqual(os.listdir(self.repo), [])
+
+    def test_an_existing_codecontext_directory_stays(self):
+        parent = os.path.dirname(mc.cache_dir(self.repo))
+        os.makedirs(parent)
+        g = mc.CacheDirGuard(self.repo, True, False, recover_dir=self.recover)
+        os.makedirs(mc.cache_dir(self.repo))
+        self.assertTrue(g.restore())
+        self.assertEqual(os.listdir(parent), [])
+
+    def test_something_else_in_a_new_codecontext_directory_is_reported(self):
+        g = mc.CacheDirGuard(self.repo, True, False, recover_dir=self.recover)
+        d = mc.cache_dir(self.repo)
+        os.makedirs(d)
+        keep = os.path.join(os.path.dirname(d), "theirs")
+        with open(keep, "w") as f:
+            f.write("x")
+        with mock.patch.object(mc, "log"):
+            self.assertFalse(g.restore())
+        self.assertTrue(os.path.exists(keep))
 
 
 if __name__ == "__main__":

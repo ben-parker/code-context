@@ -2333,7 +2333,55 @@ Gates: standard. May be dropped; nothing later depends on it.
 
 ### Phase 11: measurements after, results recorded
 
-Status: not started
+Status: done 2026-11-06, reduced scope (owner decisions at the top of this section). One
+review: no blockers, 3 should-fix findings fixed, nits 1, 2, 4 and 5 of that review recorded
+and left (unrecorded spawn pid if `start --detach` times out, unreadable-registry path only
+logs, manifest `.replace`, doc wrapping). Carried items 1-4, 8 and the cached-or-uncached assertion of 5 fixed;
+`scripts/bench/test_measure_cache.py`: 73 tests. v0.10.7 against a publish of ce69208
+(`0.10.32+ce69208801`), per repository all of v0.10.7 then all of the branch, 1 warm-up and 5
+timed runs each, edits 3 rounds after a priming round. Full tables, machine load and the
+harness as used: `docs/perf/persistent-fact-cache.md`, "Phase 11". Median (range):
+
+| Number | jellyfin v0.10.7 | branch | d2-roguelike v0.10.7 | branch | code-context v0.10.7 | branch |
+|---|---:|---:|---:|---:|---:|---:|
+| Cached cold start, to first answer (s) | 18.2 (18.2-18.4) | 1.14 (1.10-1.20) | 3.50 (3.47-3.55) | 0.62 (0.61-0.62) | 4.86 (4.81-5.14) | 0.65 (0.63-0.70) |
+| Cached cold start, to `ready` (s) | 17.7 (17.7-17.9) | 5.04 (5.00-5.11) | 3.33 (3.30-3.41) | 2.20 (2.20-2.20) | 4.77 (4.74-4.89) | 2.50 (2.42-2.59) |
+| `--no-cache`, to first answer (s) | as above | 18.2 (18.1-18.6) | as above | 3.53 (3.33-3.59) | as above | 5.13 (4.83-5.45) |
+| `--no-cache`, to `ready` (s) | as above | 17.7 (17.7-18.0) | as above | 3.32 (3.31-3.41) | as above | 4.96 (4.75-5.19) |
+| Warm body edit, apply (s) | 0.96 (0.94-1.03) | 0.93 (0.90-1.07) | 0.59 (0.58-0.61) | 0.59 (0.57-0.61) | 0.71 (0.70-0.76) | 0.73 (0.70-0.78) |
+| Warm top-level edit, apply (s) | 1.90 (1.75-1.96) | 1.79 (1.74-1.83) | 0.83 (0.79-0.84) | 0.81 (0.78-0.84) | 1.13 (1.07-1.17) | 1.16 (1.11-1.20) |
+| First edit after cold start, leaf (s) | 0.89 (0.89-0.90) | 1.27 (1.26-1.29) | 0.68 (0.67-0.69) | 1.03 (1.02-1.04) | 0.79 (0.78-0.80) | 1.25 (1.21-1.26) |
+| First edit after cold start, root (s) | 1.24 (1.23-1.27) | 1.73 (1.72-1.78) | 0.67 (0.67-0.68) | 1.00 (0.99-1.01) | 1.00 (0.99-1.01) | 1.41 (1.41-1.42) |
+| Host WS 5 s after ready (MB) | 769 (748-784) | 448 (444-458) | 120 (110-126) | 71.4 (70.9-71.9) | 171 (164-173) | 114 (110-116) |
+| C# worker WS 5 s after ready (MB) | 837 (821-841) | 401 (397-401) | 252 (249-255) | 152 (151-152) | 359 (356-362) | 186 (185-186) |
+| C# worker WS after all edits (MB) | 1027 (998-1048) | 794 (765-799) | 320 (311-338) | 299 (295-303) | 456 (435-460) | 390 (378-413) |
+
+Results.
+- Phase 6's open item "warm edit latency within noise": met. All twelve apply and revert
+  medians are inside 10 percent plus 0.05 s of v0.10.7; the largest rise is +0.039 s.
+- Regression, not tuned: the first edit after a cached start costs +0.33 to +0.50 s against
+  v0.10.7 (table). It was not seen after an uncached start (3 untimed warm-up leaf values,
+  one per repository, each after the run that wrote the snapshot; not a timed figure), and
+  the revert of that edit is at v0.10.7 speed. Accepted for 0.11 by the coordinator: about
+  0.4 s, paid about once per kind of edit, against 3 to 17 s saved on every start. Likely the
+  cost section 3.7 ("The first edit after a verification") and R8 describe (no old tree to
+  compare after a restore), but not proven. Tracing it moves to 0.12 with phase 10.
+- Memory after a cached start is lower than expected without phase 8; `--no-cache` reads as
+  v0.10.7, and use brings part of it back.
+- The 100-query mix is faster (code-context p95 45.1 to 5.85 ms). In a one-off pass, not in
+  `results11`, a `--no-cache` branch instance was also faster (7.47 against 47.6 ms), and all
+  100 code-context bodies were byte-identical between the builds. Cause not investigated.
+- Reading and hashing the state file on a full index is not shown apart by the harness.
+  Upper bound, all the worker's work on a cached start: 1.18-1.28 s, 0.15-0.20 s, 0.26 s.
+
+Deviations. Runs were back to back per repository, not interleaved one by one. The branch
+build is the publish step of `verify-publish.ps1` only. `scripts/bench/jellyfin.json` now names
+`Emby.Server.Implementations.ApplicationHost`, because `ApplicationHost` alone has two exact
+matches. Row added: `cold_nocache`. `.codecontext/cache` is guarded on every cache-build run.
+
+Not done: carried items 6, 7, 9, 10 (one untimed run of every row on the bench worktree stands
+in for 10); the `verify-publish.ps1` step below; hibernation rows; the
+results section for the brief; the review of this diff.
 
 Goal: the after-numbers, and the decision whether the release meets its goals.
 
@@ -2358,8 +2406,11 @@ confirmed against the script by the coordinator or to be confirmed by the fixer)
 4. `CacheDirGuard` writes its manifest only after the rename succeeded, or removes it when
    the rename fails.
 5. Cold starts on a cache build assert what they are: Fatal if `ignored` was seen on a
-   start expected to be cached; a start expected to be uncached asserts the cache state
-   was absent at first status; each records `cold.cached`; `--warmup` at least 1.
+   start expected to be cached; a start expected to be uncached asserts, at `ready`, no
+   `verifying` or `ignored` state, no cache line and no verification outcome (the first
+   version asserted a null cache at first status, which cached starts also show; the timed
+   runs of phase 11 used that version, and a fix after review replaced it); each records
+   `cold.cached` as observed; `--warmup` at least 1.
 6. The apply and revert clocks start after the atomic replace, not before the temporary
    file is written.
 7. Disturbance gating uses a windowed maximum of CPU outside the harness, not the mean of
