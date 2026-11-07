@@ -115,6 +115,20 @@ public static class StartCommandHandler
         }
     }
 
+    // The host's own settings live beside the executable. The default content root is the
+    // current directory, which for a detached host is the repository it indexes and for a
+    // foreground one usually is: an appsettings.json there would configure the host, and
+    // CodeContext:WorkerEnvironment reaches the workers' process environment, where
+    // DOTNET_STARTUP_HOOKS or NODE_OPTIONS is code from the repository being run.
+    // Environment variables are the host owner's and still apply.
+    internal static string ContentRoot => AppContext.BaseDirectory;
+
+    internal static WebApplicationBuilder CreateRestBuilder()
+        => WebApplication.CreateSlimBuilder(new WebApplicationOptions { ContentRootPath = ContentRoot });
+
+    internal static HostApplicationBuilder CreateMcpBuilder()
+        => Host.CreateApplicationBuilder(new HostApplicationBuilderSettings { ContentRootPath = ContentRoot });
+
     private static async Task RunWebHostAsync(
         string rootPath, int port, StartSettings settings, IInstanceRegistry registry, CancellationToken ct)
     {
@@ -128,7 +142,7 @@ public static class StartCommandHandler
         // Slim builder: localhost HTTP only, so the IIS/HTTPS/EventLog wiring a full builder
         // adds is dead weight and dead cold-start time. Kestrel, config, and console logging
         // remain (console logging is also ensured by ConfigureCoreServices' AddConsole).
-        var builder = WebApplication.CreateSlimBuilder();
+        var builder = CreateRestBuilder();
         ConfigureWebHostServices(
             builder.Services, rootPath, builder.Environment.IsProduction(), port, settings, instanceId, applicationStartTime);
 
@@ -194,7 +208,7 @@ public static class StartCommandHandler
 
     private static async Task<int> RunMcpAsync(string rootPath, bool noCache, CancellationToken ct)
     {
-        var builder = Host.CreateApplicationBuilder();
+        var builder = CreateMcpBuilder();
         ConfigureMcpHostServices(builder.Services, rootPath, builder.Environment.IsProduction(), noCache);
 
         // In MCP mode stdout carries the JSON-RPC protocol; any log line written there corrupts
