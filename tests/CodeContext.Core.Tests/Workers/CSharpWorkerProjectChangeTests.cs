@@ -398,7 +398,8 @@ public sealed class CSharpWorkerProjectChangeTests : IAsyncLifetime
         try
         {
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
-            Assert.Single(ProjectModel.Load(_root, [source], null, timeout.Token).Projects);
+            var toolchain = ToolchainLocations.Detect();
+            Assert.Single(ProjectModel.Load(new Disk(_root, toolchain), _root, [source], toolchain, timeout.Token).Projects);
         }
         finally
         {

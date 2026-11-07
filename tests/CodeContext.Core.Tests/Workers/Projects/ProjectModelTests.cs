@@ -86,7 +86,10 @@ public class ProjectModelTests : IDisposable
         return Write(relative, json);
     }
 
-    private ProjectModel Load(params string[] files) => ProjectModel.Load(_root, files, Toolchain);
+    private ProjectModel Load(params string[] files) => LoadFrom(_root, files);
+
+    private ProjectModel LoadFrom(string root, params string[] files)
+        => ProjectModel.Load(new Disk(root, Toolchain), root, files, Toolchain);
 
     private const string Net8 = """
         <Project Sdk="Microsoft.NET.Sdk">
@@ -848,16 +851,6 @@ public class ProjectModelTests : IDisposable
         Assert.DoesNotContain(info.MetadataReferences, reference => reference.Contains("evil", StringComparison.Ordinal));
     }
 
-    [SkippableOnNonWindowsTheory]
-    [InlineData(@"\\host\share\x.dll", @"C:\repo", true)]
-    [InlineData("//host/share/x.dll", @"C:\repo", true)]
-    [InlineData(@"\\host\share\x.dll", null, true)]
-    [InlineData(@"\\other\share\x.dll", @"\\host\share\repo", true)]
-    [InlineData(@"\\HOST\Share\lib\x.dll", @"\\host\share\repo", false)]
-    [InlineData(@"C:\lib\x.dll", @"C:\repo", false)]
-    public void ARepositoryOnAShareMayReadThatShareAlone(string path, string? root, bool foreign)
-        => Assert.Equal(foreign, MsBuildExpander.IsForeignPath(path, root));
-
     [Fact]
     public void RestoreDataNamingAnotherHostIsNotFollowed()
     {
@@ -875,9 +868,12 @@ public class ProjectModelTests : IDisposable
             },
         }));
 
-        var restore = RestoreData.TryRead(Path.Combine(_root, "App", "obj", "project.assets.json"), boundary: _root)!;
+        // It stays listed, as a folder that is not there would, and reads as one that is not.
+        var disk = new Disk(_root, Toolchain);
+        var restore = RestoreData.TryRead(disk, Path.Combine(_root, "App", "obj", "project.assets.json"))!;
 
-        Assert.Equal([PackageFolder + Path.DirectorySeparatorChar], restore.PackageFolders);
+        Assert.Equal([@"\\evil\share\", PackageFolder + Path.DirectorySeparatorChar], restore.PackageFolders);
+        Assert.False(disk.DirectoryExists(restore.PackageFolders[0]));
     }
 
     private sealed class SkippableOnNonWindowsTheoryAttribute : TheoryAttribute
@@ -909,7 +905,7 @@ public class ProjectModelTests : IDisposable
             var file = Path.Combine(app, "A.cs");
             File.WriteAllText(file, "class C { }");
 
-            var info = Assert.Single(ProjectModel.Load(repository, [file], Toolchain).Projects);
+            var info = Assert.Single(LoadFrom(repository, file).Projects);
 
             Assert.DoesNotContain("ABOVE", info.PreprocessorSymbols);
         }
@@ -1286,7 +1282,7 @@ public class ProjectModelTests : IDisposable
             var file = Path.Combine(app, "A.cs");
             File.WriteAllText(file, "class C { }");
 
-            var info = Assert.Single(ProjectModel.Load(app, [file], Toolchain).Projects);
+            var info = Assert.Single(LoadFrom(app, file).Projects);
 
             Assert.DoesNotContain("ABOVE", info.PreprocessorSymbols);
         }
@@ -1307,7 +1303,7 @@ public class ProjectModelTests : IDisposable
         Write("src/App/App.csproj", Net8);
         var file = Source("src/App/A.cs");
 
-        var info = Assert.Single(ProjectModel.Load(Path.Combine(_root, "src"), [file], Toolchain).Projects);
+        var info = Assert.Single(LoadFrom(Path.Combine(_root, "src"), file).Projects);
 
         Assert.Contains("REPOSITORY", info.PreprocessorSymbols);
     }
@@ -1682,6 +1678,6 @@ public class ProjectModelTests : IDisposable
         var path = Write("App/App.csproj", "<!DOCTYPE p [<!ENTITY x \"y\">]><Project>&x;</Project>");
 
         Assert.ThrowsAny<XmlException>(() => ProjectEvaluator.Evaluate(
-            path, _root, [], new Dictionary<string, string>()));
+            new Disk(_root, Toolchain), path, _root, [], new Dictionary<string, string>()));
     }
 }

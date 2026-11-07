@@ -55,8 +55,10 @@ public sealed record ToolchainLocations(
             "/Library/Frameworks/Mono.framework/Versions/Current/lib/mono/4.5",
         };
 
+        // All of these came from this machine's own settings, so their shares may be read.
+        var disk = new Disk(dotnetRoots.Concat(packageFolders).Concat(referenceRoots).Concat(runtimes));
         return new ToolchainLocations(
-            Existing(dotnetRoots), Existing(packageFolders), Existing(referenceRoots), Existing(runtimes));
+            Existing(disk, dotnetRoots), Existing(disk, packageFolders), Existing(disk, referenceRoots), Existing(disk, runtimes));
     }
 
     /// <summary>The install this worker runs from, when it is framework-dependent.</summary>
@@ -72,17 +74,19 @@ public sealed record ToolchainLocations(
     private static IEnumerable<string?> OnPath()
     {
         var name = OperatingSystem.IsWindows() ? "dotnet.exe" : "dotnet";
-        foreach (var entry in (Environment.GetEnvironmentVariable("PATH") ?? string.Empty).Split(Path.PathSeparator))
+        var entries = (Environment.GetEnvironmentVariable("PATH") ?? string.Empty).Split(Path.PathSeparator);
+        var disk = new Disk(entries);
+        foreach (var entry in entries)
         {
             if (entry.Length == 0) continue;
             string? found = null;
             try
             {
                 var candidate = Path.Combine(entry, name);
-                if (File.Exists(candidate))
+                if (disk.FileExists(candidate))
                 {
-                    var target = new FileInfo(candidate).ResolveLinkTarget(returnFinalTarget: true);
-                    found = target is null ? entry : Path.GetDirectoryName(target.FullName);
+                    var target = disk.LinkTarget(candidate);
+                    found = target is null ? entry : Path.GetDirectoryName(target);
                 }
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
@@ -93,10 +97,10 @@ public sealed record ToolchainLocations(
         }
     }
 
-    private static List<string> Existing(IEnumerable<string?> paths)
+    private static List<string> Existing(Disk disk, IEnumerable<string?> paths)
         => paths.OfType<string>()
-            .Where(path => path.Length > 0 && Directory.Exists(path))
-            .Select(Path.GetFullPath)
+            .Where(disk.DirectoryExists)
+            .Select(path => disk.FullPath(path))
             .Distinct(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal)
             .ToList();
 }

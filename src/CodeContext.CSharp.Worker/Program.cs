@@ -166,7 +166,7 @@ internal sealed class CSharpWorkerHost(JsonRpcConnection connection)
             var native = workspace.GetNativeSyntaxTree(
                 request.FilePath, request.Start, request.Length, request.MaxDepth, ct);
             var result = new NativeSyntaxTreeResult(
-                ParserId, ParserVersion, request.WorkspaceId, Path.GetFullPath(request.FilePath),
+                ParserId, ParserVersion, request.WorkspaceId, workspace.FullPath(request.FilePath),
                 "roslyn-csharp-syntax-v1", native.Tree, native.Truncated);
             return JsonSerializer.SerializeToElement(
                 result, ParserProtocolJsonContext.Default.NativeSyntaxTreeResult);

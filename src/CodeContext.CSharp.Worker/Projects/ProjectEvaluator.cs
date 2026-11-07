@@ -62,8 +62,6 @@ public sealed class ProjectEvaluator
     private const string DirectoryBuildTargets = "Directory.Build.targets";
     private const string DirectoryPackagesProps = "Directory.Packages.props";
 
-    private static readonly XmlReaderSettings ReaderSettings = new() { DtdProcessing = DtdProcessing.Prohibit };
-
     private static readonly StringComparer PathComparer =
         OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
 
@@ -89,6 +87,7 @@ public sealed class ProjectEvaluator
         ],
     };
 
+    private readonly Disk _disk;
     private readonly string _projectPath;
     private readonly string _projectDirectory;
     private readonly string _boundary;
@@ -125,12 +124,14 @@ public sealed class ProjectEvaluator
     private Dictionary<string, string>? _globalJsonSdks;
 
     private ProjectEvaluator(
+        Disk disk,
         string projectPath,
         string boundary,
         IReadOnlyList<string> packageFolders,
         IReadOnlyDictionary<string, string> globals,
         string? solutionDirectory)
     {
+        _disk = disk;
         _projectPath = projectPath;
         _projectDirectory = Path.GetDirectoryName(projectPath)!;
         _boundary = boundary;
@@ -139,6 +140,7 @@ public sealed class ProjectEvaluator
         _solutionDirectory = solutionDirectory;
     }
 
+    /// <param name="disk">The way to the file system.</param>
     /// <param name="projectPath">Full path of the project file.</param>
     /// <param name="boundary">The highest directory searched for <c>Directory.Build.*</c>.</param>
     /// <param name="packageFolders">Where a third-party SDK may be found.</param>
@@ -147,12 +149,13 @@ public sealed class ProjectEvaluator
     /// <exception cref="XmlException">The project file is not well formed.</exception>
     /// <exception cref="IOException">The project file cannot be read.</exception>
     public static EvaluatedProject Evaluate(
+        Disk disk,
         string projectPath,
         string boundary,
         IReadOnlyList<string> packageFolders,
         IReadOnlyDictionary<string, string> globals,
         string? solutionDirectory = null)
-        => new ProjectEvaluator(projectPath, boundary, packageFolders, globals, solutionDirectory).Run();
+        => new ProjectEvaluator(disk, projectPath, boundary, packageFolders, globals, solutionDirectory).Run();
 
     private EvaluatedProject Run()
     {
@@ -198,8 +201,7 @@ public sealed class ProjectEvaluator
     private XElement Load(string file)
     {
         if (!_inputs.Contains(file, PathComparer)) _inputs.Add(file);
-        using var reader = XmlReader.Create(file, ReaderSettings);
-        return XDocument.Load(reader).Root
+        return _disk.LoadXml(file).Root
             ?? throw new XmlException($"'{file}' has no root element.");
     }
 
@@ -321,7 +323,7 @@ public sealed class ProjectEvaluator
     }
 
     private MsBuildExpander Expander(string file)
-        => new(name => Lookup(name, file), Path.GetDirectoryName(file)!, _boundary);
+        => new(_disk, name => Lookup(name, file), Path.GetDirectoryName(file)!, _boundary);
 
     private bool Passes(XElement element, string file)
     {
@@ -371,17 +373,12 @@ public sealed class ProjectEvaluator
         }
 
         var path = expander.FullPath(expanded);
-        if (expander.IsForeign(path))
-        {
-            NoteMissingImport(project);
-            return;
-        }
         if (path.Contains('*') || path.Contains('?'))
         {
             foreach (var match in ExpandImportWildcard(path)) ImportFile(match);
             return;
         }
-        if (File.Exists(path))
+        if (_disk.FileExists(path))
         {
             ImportFile(path);
         }
@@ -402,14 +399,14 @@ public sealed class ProjectEvaluator
         _missingImports.Add(project);
     }
 
-    private static IEnumerable<string> ExpandImportWildcard(string path)
+    private IEnumerable<string> ExpandImportWildcard(string path)
     {
         var directory = Path.GetDirectoryName(path);
-        if (directory is null || directory.Contains('*') || directory.Contains('?') || !Directory.Exists(directory))
+        if (directory is null || directory.Contains('*') || directory.Contains('?') || !_disk.DirectoryExists(directory))
         {
             return [];
         }
-        return Directory.GetFiles(directory, Path.GetFileName(path)).Order(StringComparer.Ordinal);
+        return _disk.Files(directory, Path.GetFileName(path)).Order(StringComparer.Ordinal);
     }
 
     private void ImportFile(string path)
@@ -447,7 +444,7 @@ public sealed class ProjectEvaluator
 
             // A file created here later changes what this project means.
             _inputs.Add(candidate);
-            if (File.Exists(candidate)) return candidate;
+            if (_disk.FileExists(candidate)) return candidate;
             if (MsBuildExpander.SamePath(directory, _boundary)) break;
         }
         return null;
@@ -479,7 +476,7 @@ public sealed class ProjectEvaluator
         }
 
         var path = Path.Combine(directory, MsBuildExpander.ToNative(file));
-        if (File.Exists(path)) ImportFile(path);
+        if (_disk.FileExists(path)) ImportFile(path);
     }
 
     private static bool IsDotNetSdk(string name)
@@ -493,15 +490,15 @@ public sealed class ProjectEvaluator
         foreach (var folder in _packageFolders)
         {
             var package = Path.Combine(folder, lower);
-            if (!Directory.Exists(package)) continue;
+            if (!_disk.DirectoryExists(package)) continue;
             if (version is not null)
             {
                 var exact = Path.Combine(package, version.ToLowerInvariant(), "Sdk");
-                if (Directory.Exists(exact)) return exact;
+                if (_disk.DirectoryExists(exact)) return exact;
                 continue;
             }
-            var newest = Directory.GetDirectories(package)
-                .Where(candidate => Directory.Exists(Path.Combine(candidate, "Sdk")))
+            var newest = _disk.Directories(package)
+                .Where(candidate => _disk.DirectoryExists(Path.Combine(candidate, "Sdk")))
                 .OrderByDescending(candidate => MsBuildExpander.TryVersion(Path.GetFileName(candidate), out var parsed)
                     ? parsed
                     : new Version(0, 0))
@@ -520,7 +517,7 @@ public sealed class ProjectEvaluator
         {
             _inputs.Add(file);
             using var document = JsonDocument.Parse(
-                File.ReadAllText(file),
+                _disk.ReadAllText(file),
                 new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true });
             if (document.RootElement.TryGetProperty("msbuild-sdks", out var sdks) && sdks.ValueKind == JsonValueKind.Object)
             {

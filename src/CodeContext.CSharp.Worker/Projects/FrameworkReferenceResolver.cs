@@ -14,11 +14,11 @@ public sealed record FrameworkResolution(
 /// describe what the project compiles against; a runtime directory is a stand-in, which is
 /// said in a note since its API can differ from the reference pack's.
 /// </summary>
-public static class FrameworkReferenceResolver
+public sealed class FrameworkReferenceResolver(Disk disk)
 {
     private const string CoreFramework = "Microsoft.NETCore.App";
 
-    public static FrameworkResolution Resolve(
+    public FrameworkResolution Resolve(
         TargetFrameworkName framework,
         IReadOnlyList<string> frameworkReferences,
         IReadOnlyDictionary<string, string> packDownloads,
@@ -37,7 +37,7 @@ public static class FrameworkReferenceResolver
         return ResolveNetFramework(framework, packageFolders, toolchain);
     }
 
-    private static FrameworkResolution ResolveNetCore(
+    private FrameworkResolution ResolveNetCore(
         TargetFrameworkName framework,
         IReadOnlyList<string> frameworkReferences,
         IReadOnlyDictionary<string, string> packDownloads,
@@ -58,7 +58,7 @@ public static class FrameworkReferenceResolver
             var directory = FindRefPack(pack, framework, folder, packDownloads.GetValueOrDefault(pack), packageFolders, dotnetRoots);
             if (directory is not null)
             {
-                assemblies.AddRange(Directory.GetFiles(directory, "*.dll").Order(StringComparer.Ordinal));
+                assemblies.AddRange(disk.Files(directory, "*.dll").Order(StringComparer.Ordinal));
             }
             else if (FindRuntime(pack.EndsWith(".Ref", StringComparison.OrdinalIgnoreCase) ? pack[..^4] : name, framework.Version, dotnetRoots) is { } runtime)
             {
@@ -84,7 +84,7 @@ public static class FrameworkReferenceResolver
     /// What a restore downloaded is authoritative; otherwise the name is cut back until a
     /// pack of that name is on this machine.
     /// </summary>
-    private static string PackOf(
+    private string PackOf(
         string name,
         IReadOnlyDictionary<string, string> packDownloads,
         IReadOnlyList<string> packageFolders,
@@ -101,18 +101,18 @@ public static class FrameworkReferenceResolver
         for (var candidate = name; candidate.Contains('.'); candidate = candidate[..candidate.LastIndexOf('.')])
         {
             var pack = candidate + ".Ref";
-            if (PackLocations(pack, packageFolders, dotnetRoots).Exists(Directory.Exists)) return pack;
+            if (PackLocations(pack, packageFolders, dotnetRoots).Exists(disk.DirectoryExists)) return pack;
         }
         return direct;
     }
 
-    private static List<string> PackLocations(
+    private List<string> PackLocations(
         string pack, IReadOnlyList<string> packageFolders, IReadOnlyList<string> dotnetRoots)
         => packageFolders.Select(root => Path.Combine(root, pack.ToLowerInvariant()))
             .Concat(dotnetRoots.Select(root => Path.Combine(root, "packs", pack)))
             .ToList();
 
-    private static string? FindRefPack(
+    private string? FindRefPack(
         string pack,
         TargetFrameworkName framework,
         string folder,
@@ -127,7 +127,7 @@ public static class FrameworkReferenceResolver
             foreach (var location in locations)
             {
                 var exact = Path.Combine(location, version, "ref", folder);
-                if (Directory.Exists(exact)) return exact;
+                if (disk.DirectoryExists(exact)) return exact;
 
                 // Some packs ship as a library for the oldest framework they support.
                 if (BestLibFolder(Path.Combine(location, version, "lib"), framework) is { } library) return library;
@@ -135,18 +135,18 @@ public static class FrameworkReferenceResolver
         }
 
         // Unpinned: a pack bundled with the SDK is not in the restore data.
-        return locations.Where(Directory.Exists)
-            .SelectMany(Directory.GetDirectories)
+        return locations.Where(disk.DirectoryExists)
+            .SelectMany(disk.Directories)
             .Select(directory => Path.Combine(directory, "ref", folder))
-            .Where(Directory.Exists)
+            .Where(disk.DirectoryExists)
             .OrderByDescending(VersionOfPackDirectory)
             .FirstOrDefault();
     }
 
-    private static string? BestLibFolder(string lib, TargetFrameworkName framework)
+    private string? BestLibFolder(string lib, TargetFrameworkName framework)
     {
-        if (!Directory.Exists(lib)) return null;
-        return Directory.GetDirectories(lib)
+        if (!disk.DirectoryExists(lib)) return null;
+        return disk.Directories(lib)
             .Select(directory => (Directory: directory, Parsed: TargetFrameworkName.TryParse(Path.GetFileName(directory), out var asset) ? asset : null))
             .Where(candidate => candidate.Parsed is not null && framework.CanConsume(candidate.Parsed))
             .OrderByDescending(candidate => candidate.Parsed!.Version)
@@ -162,13 +162,13 @@ public static class FrameworkReferenceResolver
             : new Version(0, 0);
     }
 
-    private static (string Directory, bool ExactVersion)? FindRuntime(
+    private (string Directory, bool ExactVersion)? FindRuntime(
         string name, Version wanted, IReadOnlyList<string> dotnetRoots)
     {
         var installed = dotnetRoots
             .Select(root => Path.Combine(root, "shared", name))
-            .Where(Directory.Exists)
-            .SelectMany(Directory.GetDirectories)
+            .Where(disk.DirectoryExists)
+            .SelectMany(disk.Directories)
             .Select(directory => (Directory: directory, Version: RuntimeVersion(directory)))
             .Where(candidate => candidate.Version is not null)
             .OrderByDescending(candidate => candidate.Version)
@@ -188,14 +188,14 @@ public static class FrameworkReferenceResolver
     private static Version? RuntimeVersion(string directory)
         => MsBuildExpander.TryVersion(Path.GetFileName(directory), out var version) ? version : null;
 
-    private static IEnumerable<string> ManagedAssemblies(string directory)
-        => Directory.GetFiles(directory, "*.dll").Where(IsManagedAssembly).Order(StringComparer.Ordinal);
+    private IEnumerable<string> ManagedAssemblies(string directory)
+        => disk.Files(directory, "*.dll").Where(IsManagedAssembly).Order(StringComparer.Ordinal);
 
-    private static bool IsManagedAssembly(string path)
+    private bool IsManagedAssembly(string path)
     {
         try
         {
-            using var stream = File.OpenRead(path);
+            using var stream = disk.OpenRead(path);
             using var reader = new PEReader(stream);
             return reader.HasMetadata;
         }
@@ -205,7 +205,7 @@ public static class FrameworkReferenceResolver
         }
     }
 
-    private static FrameworkResolution ResolveNetStandard(
+    private FrameworkResolution ResolveNetStandard(
         TargetFrameworkName framework,
         IReadOnlyDictionary<string, string> packDownloads,
         IReadOnlyList<string> packageFolders,
@@ -217,17 +217,17 @@ public static class FrameworkReferenceResolver
         // NETStandard.Library carries the 2.0 surface in build/, added by its own targets.
         var library = packageFolders
             .Select(root => Path.Combine(root, "netstandard.library"))
-            .Where(Directory.Exists)
-            .SelectMany(Directory.GetDirectories)
+            .Where(disk.DirectoryExists)
+            .SelectMany(disk.Directories)
             .Select(directory => Path.Combine(directory, "build", folder, "ref"))
-            .Where(Directory.Exists)
+            .Where(disk.DirectoryExists)
             .OrderByDescending(path => Path.GetDirectoryName(Path.GetDirectoryName(Path.GetDirectoryName(path))) is { } version
                 && MsBuildExpander.TryVersion(Path.GetFileName(version), out var parsed) ? parsed : new Version(0, 0))
             .FirstOrDefault();
         var directory = library ?? FindRefPack(pack, framework, folder, packDownloads.GetValueOrDefault(pack), packageFolders, dotnetRoots);
         if (directory is not null)
         {
-            return new FrameworkResolution(Directory.GetFiles(directory, "*.dll").Order(StringComparer.Ordinal).ToList(), true, [], []);
+            return new FrameworkResolution(disk.Files(directory, "*.dll").Order(StringComparer.Ordinal).ToList(), true, [], []);
         }
 
         // 2.1 is a superset of what older targets may use.
@@ -235,13 +235,13 @@ public static class FrameworkReferenceResolver
         return wider is null
             ? new FrameworkResolution([], false, [folder], [])
             : new FrameworkResolution(
-                Directory.GetFiles(wider, "*.dll").Order(StringComparer.Ordinal).ToList(),
+                disk.Files(wider, "*.dll").Order(StringComparer.Ordinal).ToList(),
                 true,
                 [],
                 [$"{folder}: no reference assemblies, using netstandard2.1."]);
     }
 
-    private static FrameworkResolution ResolveNetFramework(
+    private FrameworkResolution ResolveNetFramework(
         TargetFrameworkName framework,
         IReadOnlyList<string> packageFolders,
         ToolchainLocations toolchain)
@@ -253,15 +253,15 @@ public static class FrameworkReferenceResolver
 
         var exact = packageFolders
             .Select(root => Path.Combine(root, $"microsoft.netframework.referenceassemblies.{moniker}"))
-            .Where(Directory.Exists)
-            .SelectMany(Directory.GetDirectories)
+            .Where(disk.DirectoryExists)
+            .SelectMany(disk.Directories)
             .Select(directory => Path.Combine(directory, "build", ".NETFramework", "v" + version))
             .Concat(toolchain.ReferenceAssemblyRoots.Select(root => Path.Combine(root, "v" + version)))
             .Concat(toolchain.ReferenceAssemblyRoots.Select(root => Path.Combine(root, version + "-api")))
             .FirstOrDefault(HoldsFramework);
         if (exact is not null)
         {
-            return new FrameworkResolution(FrameworkAssemblies(exact, Directory.GetFiles), true, [], []);
+            return new FrameworkResolution(FrameworkAssemblies(exact, disk.Files), true, [], []);
         }
 
         // A newer framework keeps the older API, and Windows always has its runtime.
@@ -276,9 +276,9 @@ public static class FrameworkReferenceResolver
                 [$".NETFramework v{version}: no reference assemblies, using {standIn}."]);
     }
 
-    private static string? NewerReferenceAssemblies(Version wanted, IReadOnlyList<string> roots)
-        => roots.Where(Directory.Exists)
-            .SelectMany(Directory.GetDirectories)
+    private string? NewerReferenceAssemblies(Version wanted, IReadOnlyList<string> roots)
+        => roots.Where(disk.DirectoryExists)
+            .SelectMany(disk.Directories)
             .Where(HoldsFramework)
             .Select(directory => (Directory: directory, Version: MsBuildExpander.TryVersion(Path.GetFileName(directory), out var parsed) ? parsed : null))
             .Where(candidate => candidate.Version is not null && candidate.Version >= wanted)
@@ -287,13 +287,13 @@ public static class FrameworkReferenceResolver
             .FirstOrDefault();
 
     /// <summary>A language pack can leave a version directory holding only documentation.</summary>
-    private static bool HoldsFramework(string directory) => File.Exists(Path.Combine(directory, "mscorlib.dll"));
+    private bool HoldsFramework(string directory) => disk.FileExists(Path.Combine(directory, "mscorlib.dll"));
 
-    private static List<string> FrameworkAssemblies(string directory, Func<string, string, string[]> list)
+    private List<string> FrameworkAssemblies(string directory, Func<string, string, string[]> list)
     {
         var assemblies = list(directory, "*.dll").Order(StringComparer.Ordinal).ToList();
         var facades = Path.Combine(directory, "Facades");
-        if (Directory.Exists(facades)) assemblies.AddRange(list(facades, "*.dll").Order(StringComparer.Ordinal));
+        if (disk.DirectoryExists(facades)) assemblies.AddRange(list(facades, "*.dll").Order(StringComparer.Ordinal));
         return assemblies;
     }
 }

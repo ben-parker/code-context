@@ -61,6 +61,7 @@ public sealed class CSharpWorkspaceAnalyzer
     /// </summary>
     private static readonly ConcurrentDictionary<(string Path, DateTime Stamp), MetadataReference?> AssemblyReferences = new();
 
+    private readonly Disk _disk;
     private readonly string? _rootPath;
     private readonly List<ProtocolDiagnostic> _pendingDiagnostics = [];
     private readonly string _workspaceIdPrefix;
@@ -124,7 +125,9 @@ public sealed class CSharpWorkspaceAnalyzer
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(workspaceId);
         _workspaceIdPrefix = IdPrefix + Uri.EscapeDataString(workspaceId) + ":";
-        _rootPath = string.IsNullOrWhiteSpace(rootPath) ? null : Path.GetFullPath(rootPath);
+        var root = string.IsNullOrWhiteSpace(rootPath) ? null : rootPath;
+        _disk = new Disk(root, Toolchain.Value);
+        _rootPath = root is null ? null : _disk.FullPath(root);
         _fallback = CreateFallback([]);
         _units = [_fallback];
     }
@@ -152,12 +155,15 @@ public sealed class CSharpWorkspaceAnalyzer
             // Basic runtime references give the semantic model real symbols for core
             // types; when unavailable, syntax-level analysis still works.
             var objectAssembly = typeof(object).Assembly.Location;
-            if (!string.IsNullOrEmpty(objectAssembly) && File.Exists(objectAssembly))
+
+            // The runtime this worker runs on is the machine's own, wherever it is installed.
+            var disk = new Disk([objectAssembly]);
+            if (disk.FileExists(objectAssembly))
             {
-                references.Add(MetadataReference.CreateFromFile(objectAssembly));
-                foreach (var path in FrameworkAssemblies(objectAssembly))
+                references.Add(disk.Reference(objectAssembly));
+                foreach (var path in FrameworkAssemblies(disk, objectAssembly))
                 {
-                    references.Add(MetadataReference.CreateFromFile(path));
+                    references.Add(disk.Reference(path));
                 }
             }
         }
@@ -181,8 +187,8 @@ public sealed class CSharpWorkspaceAnalyzer
     /// dependencies, which analyzed code must not bind against, and <c>*.Native.dll</c>
     /// files share the directory without being assemblies.
     /// </summary>
-    private static IEnumerable<string> FrameworkAssemblies(string coreLibrary)
-        => Directory.EnumerateFiles(Path.GetDirectoryName(coreLibrary)!, "*.dll")
+    private static IEnumerable<string> FrameworkAssemblies(Disk disk, string coreLibrary)
+        => disk.Files(Path.GetDirectoryName(coreLibrary)!, "*.dll")
             .Where(path => !PathComparer.Equals(path, coreLibrary) && IsFrameworkAssembly(Path.GetFileName(path)))
             .Order(StringComparer.Ordinal);
 
@@ -261,7 +267,7 @@ public sealed class CSharpWorkspaceAnalyzer
             && _walked.Count == 0
             && _files.SetEquals(files)
             && !_model.InputsChanged()
-            && files.All(file => File.GetLastWriteTimeUtc(file) < _builtAt);
+            && files.All(file => _disk.LastWriteUtc(file) < _builtAt);
 
     /// <summary>
     /// Reads the projects again. A project that reads as it did keeps its unit and so its
@@ -281,7 +287,7 @@ public sealed class CSharpWorkspaceAnalyzer
         }
 
         var previousOwners = new Dictionary<string, ProjectCompilation>(_owners, PathComparer);
-        _model = _rootPath is null ? null : ProjectModel.Load(_rootPath, files, Toolchain.Value, ct);
+        _model = _rootPath is null ? null : ProjectModel.Load(_disk, _rootPath, files, Toolchain.Value, ct);
         _files = new HashSet<string>(PathComparer);
         _owners.Clear();
         _unitByProject.Clear();
@@ -384,7 +390,7 @@ public sealed class CSharpWorkspaceAnalyzer
     }
 
     /// <summary>Everything about a project that decides how its files bind.</summary>
-    private static string Signature(ProjectInfo project, List<string> files)
+    private string Signature(ProjectInfo project, List<string> files)
     {
         var text = new StringBuilder()
             .AppendJoin('\n', project.PreprocessorSymbols).Append('\0')
@@ -396,7 +402,7 @@ public sealed class CSharpWorkspaceAnalyzer
             .AppendJoin('\n', project.ProjectReferences.Select(reference => reference.Key)).Append('\0');
         foreach (var path in project.MetadataReferences)
         {
-            text.Append(path).Append('|').Append(File.GetLastWriteTimeUtc(path).Ticks).Append('\n');
+            text.Append(path).Append('|').Append(_disk.LastWriteUtc(path).Ticks).Append('\n');
         }
         text.Append('\0').AppendJoin('\n', files.Order(StringComparer.Ordinal));
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text.ToString())));
@@ -419,20 +425,20 @@ public sealed class CSharpWorkspaceAnalyzer
         return references.ToImmutable();
     }
 
-    private static MetadataReference? AssemblyReference(string path)
+    private MetadataReference? AssemblyReference(string path)
     {
-        var stamp = File.GetLastWriteTimeUtc(path);
-        return AssemblyReferences.GetOrAdd((path, stamp), static key =>
+        var stamp = _disk.LastWriteUtc(path);
+        return AssemblyReferences.GetOrAdd((path, stamp), static (key, disk) =>
         {
             try
             {
-                return MetadataReference.CreateFromFile(key.Path);
+                return disk.Reference(key.Path);
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or BadImageFormatException)
             {
                 return null;
             }
-        });
+        }, _disk);
     }
 
     /// <summary>Applies an ordered change batch: deleted files drop their tree, all
@@ -503,7 +509,7 @@ public sealed class CSharpWorkspaceAnalyzer
     {
         try
         {
-            return SourceText.From(File.ReadAllText(path));
+            return SourceText.From(_disk.ReadAllText(path));
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -1200,11 +1206,14 @@ public sealed class CSharpWorkspaceAnalyzer
 
     public sealed record NativeTreeResult(JsonElement Tree, bool Truncated);
 
+    /// <summary>A path the host sent, normalized the way this workspace reads it.</summary>
+    public string FullPath(string path) => _disk.FullPath(path);
+
     /// <summary>Builds a bounded Roslyn-native node/token tree for one cached file.</summary>
     public NativeTreeResult GetNativeSyntaxTree(
         string filePath, int? start, int? length, int maxDepth, CancellationToken ct)
     {
-        var fullPath = Path.GetFullPath(filePath);
+        var fullPath = FullPath(filePath);
         if (!_owners.TryGetValue(fullPath, out var owner))
         {
             throw new ArgumentException("The file is not open in this workspace.", nameof(filePath));

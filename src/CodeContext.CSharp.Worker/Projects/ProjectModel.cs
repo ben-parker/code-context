@@ -94,11 +94,13 @@ public sealed class ProjectModel
         ".git", ".vs", ".idea", ".venv", ".codecontext", "bin", "node_modules",
     };
 
+    private readonly Disk _disk;
     private readonly Dictionary<string, List<ProjectInfo>> _compiledBy;
     private readonly Dictionary<string, DateTime> _inputStamps;
     private readonly List<CompileItemSet> _idleCompileItems;
 
     private ProjectModel(
+        Disk disk,
         IReadOnlyList<ProjectInfo> projects,
         Dictionary<string, List<ProjectInfo>> compiledBy,
         IReadOnlyList<string> unassignedFiles,
@@ -106,6 +108,7 @@ public sealed class ProjectModel
         Dictionary<string, DateTime> inputStamps,
         List<CompileItemSet> idleCompileItems)
     {
+        _disk = disk;
         Projects = projects;
         _compiledBy = compiledBy;
         UnassignedFiles = unassignedFiles;
@@ -156,20 +159,21 @@ public sealed class ProjectModel
     public ProjectInfo? OwnerOf(string file) => ProjectsCompiling(file).FirstOrDefault();
 
     /// <summary>Whether any file this model was read from has changed since.</summary>
-    public bool InputsChanged() => _inputStamps.Any(input => Stamp(input.Key) != input.Value);
+    public bool InputsChanged() => _inputStamps.Any(input => Stamp(_disk, input.Key) != input.Value);
 
     public static ProjectModel Load(
+        Disk disk,
         string rootPath,
         IReadOnlyList<string> approvedFiles,
-        ToolchainLocations? toolchain = null,
+        ToolchainLocations toolchain,
         CancellationToken ct = default)
-        => new Loader(Path.GetFullPath(rootPath), approvedFiles, toolchain ?? ToolchainLocations.Detect(), ct).Run();
+        => new Loader(disk, disk.FullPath(rootPath), approvedFiles, toolchain, ct).Run();
 
-    private static DateTime Stamp(string path)
+    private static DateTime Stamp(Disk disk, string path)
     {
         try
         {
-            return File.GetLastWriteTimeUtc(path);
+            return disk.LastWriteUtc(path);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -196,11 +200,11 @@ public sealed class ProjectModel
         string? TargetFramework,
         IReadOnlyList<string> InactiveTargetFrameworks,
         RestoreData? Restore,
-        string? ExpectedAssetsPath);
+        string ExpectedAssetsPath);
 
-    private sealed class Loader(string root, IReadOnlyList<string> approvedFiles, ToolchainLocations toolchain, CancellationToken ct)
+    private sealed class Loader(Disk disk, string root, IReadOnlyList<string> approvedFiles, ToolchainLocations toolchain, CancellationToken ct)
     {
-        private readonly string _boundary = FindBoundary(root);
+        private readonly string _boundary = FindBoundary(disk, root);
         private readonly Dictionary<string, Candidate> _candidates = new(PathComparer);
         private readonly List<ProjectLoadFailure> _failures = [];
         private readonly Dictionary<string, RestoreData> _restoreByProject = new(PathComparer);
@@ -232,15 +236,15 @@ public sealed class ProjectModel
             var inputs = new Dictionary<string, DateTime>(PathComparer);
             foreach (var project in ordered)
             {
-                foreach (var input in project.Inputs) inputs[input] = Stamp(input);
+                foreach (var input in project.Inputs) inputs[input] = Stamp(disk, input);
             }
-            foreach (var failure in failures) inputs[failure.ProjectPath] = Stamp(failure.ProjectPath);
+            foreach (var failure in failures) inputs[failure.ProjectPath] = Stamp(disk, failure.ProjectPath);
 
             var idle = _candidates
                 .Where(candidate => !infos.ContainsKey(candidate.Key))
                 .Select(candidate => candidate.Value.Evaluated.CompileItems)
                 .ToList();
-            return new ProjectModel(ordered, compiledBy, unassigned, failures, inputs, idle);
+            return new ProjectModel(disk, ordered, compiledBy, unassigned, failures, inputs, idle);
         }
 
         /// <summary>
@@ -248,12 +252,12 @@ public sealed class ProjectModel
         /// subdirectory still sees the repository's <c>Directory.Build.props</c>. Without a
         /// repository it is the workspace itself, so nothing unrelated above it counts.
         /// </summary>
-        private static string FindBoundary(string root)
+        private static string FindBoundary(Disk disk, string root)
         {
             for (string? directory = root; directory is not null; directory = Path.GetDirectoryName(directory))
             {
                 var marker = Path.Combine(directory, ".git");
-                if (Directory.Exists(marker) || File.Exists(marker)) return directory;
+                if (disk.DirectoryExists(marker) || disk.FileExists(marker)) return directory;
             }
             return root;
         }
@@ -269,7 +273,7 @@ public sealed class ProjectModel
                 var directory = pending.Pop();
                 try
                 {
-                    foreach (var file in Directory.EnumerateFiles(directory))
+                    foreach (var file in disk.Files(directory, "*"))
                     {
                         var name = Path.GetFileName(file);
                         if (name.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase)) discovery.Projects.Add(file);
@@ -277,13 +281,10 @@ public sealed class ProjectModel
                         else if (name.EndsWith(".sln", StringComparison.OrdinalIgnoreCase)
                             || name.EndsWith(".slnx", StringComparison.OrdinalIgnoreCase)) discovery.Solutions.Add(file);
                     }
-                    foreach (var child in new DirectoryInfo(directory).EnumerateDirectories())
+                    // A link can lead back here, and whatever it reaches is not this tree's.
+                    foreach (var child in disk.RealDirectories(directory))
                     {
-                        // A link can lead back here, and whatever it reaches is not this tree's.
-                        if (!SkippedDirectories.Contains(child.Name) && !child.Attributes.HasFlag(FileAttributes.ReparsePoint))
-                        {
-                            pending.Push(child.FullName);
-                        }
+                        if (!SkippedDirectories.Contains(Path.GetFileName(child))) pending.Push(child);
                     }
                 }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
@@ -302,13 +303,13 @@ public sealed class ProjectModel
             foreach (var assets in discovery.Assets)
             {
                 ct.ThrowIfCancellationRequested();
-                if (RestoreData.TryRead(assets, boundary: _boundary) is not { ProjectPath: { } path } restore) continue;
-                var full = Path.GetFullPath(MsBuildExpander.ToNative(path));
+                if (RestoreData.TryRead(disk, assets) is not { ProjectPath: { } path } restore) continue;
+                var full = disk.FullPath(MsBuildExpander.ToNative(path));
                 if (!known.Contains(full)) continue;
 
                 // Two restores of one project: the newer one reflects the project as it is.
                 if (!_restoreByProject.TryGetValue(full, out var existing)
-                    || File.GetLastWriteTimeUtc(assets) > File.GetLastWriteTimeUtc(existing.AssetsPath))
+                    || disk.LastWriteUtc(assets) > disk.LastWriteUtc(existing.AssetsPath))
                 {
                     _restoreByProject[full] = restore;
                 }
@@ -338,14 +339,14 @@ public sealed class ProjectModel
             {
                 ["Configuration"] = DefaultConfiguration,
             };
-            var evaluated = ProjectEvaluator.Evaluate(project, _boundary, folders, globals, solution);
+            var evaluated = ProjectEvaluator.Evaluate(disk, project, _boundary, folders, globals, solution);
 
             // The IDE's active configuration: Debug, or the first a project declares without it.
             var configurations = Split(evaluated.Property("Configurations"));
             if (configurations.Count > 0 && !configurations.Contains(DefaultConfiguration, StringComparer.OrdinalIgnoreCase))
             {
                 globals["Configuration"] = configurations[0];
-                evaluated = ProjectEvaluator.Evaluate(project, _boundary, folders, globals, solution);
+                evaluated = ProjectEvaluator.Evaluate(disk, project, _boundary, folders, globals, solution);
             }
 
             var frameworks = Split(evaluated.Property("TargetFrameworks"));
@@ -357,7 +358,7 @@ public sealed class ProjectModel
                 framework = frameworks[0];
                 inactive = frameworks.Skip(1).ToList();
                 globals["TargetFramework"] = framework;
-                evaluated = ProjectEvaluator.Evaluate(project, _boundary, folders, globals, solution);
+                evaluated = ProjectEvaluator.Evaluate(disk, project, _boundary, folders, globals, solution);
             }
             if (framework.Length == 0)
             {
@@ -365,23 +366,22 @@ public sealed class ProjectModel
             }
 
             var expected = ExpectedAssetsPath(evaluated);
-            if (expected is not null && MsBuildExpander.IsForeignPath(expected, _boundary)) expected = null;
-            if (restore is null && expected is not null && File.Exists(expected))
+            if (restore is null && disk.FileExists(expected))
             {
                 // Beside the project but naming another path: the repository moved.
-                restore = RestoreData.TryRead(expected, project, _boundary);
+                restore = RestoreData.TryRead(disk, expected, project);
             }
 
             return new Candidate(evaluated, framework.Length > 0 ? framework : null, inactive, restore, expected);
         }
 
-        private static string? ExpectedAssetsPath(EvaluatedProject evaluated)
+        private string ExpectedAssetsPath(EvaluatedProject evaluated)
         {
             var directory = Path.GetDirectoryName(evaluated.ProjectPath)!;
             var relative = evaluated.Property("MSBuildProjectExtensionsPath");
             if (relative.Length == 0) relative = evaluated.Property("BaseIntermediateOutputPath");
             if (relative.Length == 0) relative = "obj";
-            return Path.GetFullPath(Path.Combine(MsBuildExpander.ToNative(relative), AssetsFileName), directory);
+            return disk.FullPath(Path.Combine(MsBuildExpander.ToNative(relative), AssetsFileName), directory);
         }
 
         private List<string> PackageFolders(RestoreData? restore)
@@ -406,7 +406,7 @@ public sealed class ProjectModel
         private static List<string> Split(string text)
             => text.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
 
-        private string Relative(string path) => Path.GetRelativePath(root, path).Replace('\\', '/');
+        private string Relative(string path) => disk.RelativePath(root, path).Replace('\\', '/');
 
         /// <summary>Which projects compile each approved file, by running each project's item operations.</summary>
         private Dictionary<string, List<string>> AssignFiles(out List<string> unassigned)
@@ -513,7 +513,7 @@ public sealed class ProjectModel
                 ResolvePackagesByName(candidate, packages, folders, references, missing);
             }
 
-            ResolveAssemblyReferences(evaluated, _boundary, references, missing);
+            ResolveAssemblyReferences(evaluated, references, missing);
 
             gaps.AddRange(evaluated.MissingSdks.Select(sdk => $"SDK {sdk} was not found, so its defaults are unknown."));
             gaps.AddRange(evaluated.MissingImports.Select(import => $"Import {import} could not be read."));
@@ -528,7 +528,7 @@ public sealed class ProjectModel
 
             var inputs = evaluated.Inputs.ToList();
             if (candidate.Restore is not null) inputs.Add(candidate.Restore.AssetsPath);
-            else if (candidate.ExpectedAssetsPath is not null) inputs.Add(candidate.ExpectedAssetsPath);
+            else inputs.Add(candidate.ExpectedAssetsPath);
 
             return new ProjectInfo
             {
@@ -546,7 +546,7 @@ public sealed class ProjectModel
                     : TargetFrameworkName.TryParse(candidate.TargetFramework, out var target2) ? target2.DefaultLanguageVersion : null,
                 GlobalUsings = ReadGlobalUsings(candidate),
                 InternalsVisibleTo = Friends(evaluated),
-                MetadataReferences = ReferenceConflicts.KeepNewest(references.Distinct(PathComparer)),
+                MetadataReferences = ReferenceConflicts.KeepNewest(disk, references.Distinct(PathComparer)),
                 MissingReferences = missing.Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
                 AnalyzerPackages = target?.AnalyzerPackages ?? [],
                 NoFramework = noFramework,
@@ -585,12 +585,12 @@ public sealed class ProjectModel
             }
 
             var roots = toolchain.DotnetRoots.ToList();
-            if (target?.DotnetRoot is { } root && Directory.Exists(root) && !roots.Contains(root, PathComparer))
+            if (target?.DotnetRoot is { } root && disk.DirectoryExists(root) && !roots.Contains(root, PathComparer))
             {
                 roots.Insert(0, root);
             }
 
-            return FrameworkReferenceResolver.Resolve(
+            return new FrameworkReferenceResolver(disk).Resolve(
                 framework,
                 target?.FrameworkReferences ?? [.. ImpliedFrameworkReferences(evaluated, includePrivate: true), .. inherited ?? []],
                 target?.PackDownloads ?? new Dictionary<string, string>(),
@@ -618,7 +618,7 @@ public sealed class ProjectModel
             return references;
         }
 
-        private static void ResolvePackagesByName(
+        private void ResolvePackagesByName(
             Candidate candidate,
             IReadOnlyList<ProjectItem> packages,
             List<string> folders,
@@ -650,14 +650,14 @@ public sealed class ProjectModel
         /// this machine. A package with nothing to compile against, such as a build-only
         /// tool, is found and contributes nothing.
         /// </summary>
-        private static List<string>? PackageAssemblies(string id, string? version, List<string> folders, TargetFrameworkName? framework)
+        private List<string>? PackageAssemblies(string id, string? version, List<string> folders, TargetFrameworkName? framework)
         {
             foreach (var folder in folders)
             {
                 var package = Path.Combine(folder, id.ToLowerInvariant());
-                if (!Directory.Exists(package)) continue;
+                if (!disk.DirectoryExists(package)) continue;
 
-                var directories = Directory.GetDirectories(package)
+                var directories = disk.Directories(package)
                     .OrderByDescending(directory => MsBuildExpander.TryVersion(Path.GetFileName(directory), out var parsed) ? parsed : new Version(0, 0))
                     .ToList();
                 var chosen = version is null || version.Contains('*') || version.Contains('[') || version.Contains('(')
@@ -669,7 +669,7 @@ public sealed class ProjectModel
                 {
                     if (BestAssetDirectory(Path.Combine(chosen, assets), framework) is { } best)
                     {
-                        return Directory.GetFiles(best, "*.dll").Order(StringComparer.Ordinal).ToList();
+                        return disk.Files(best, "*.dll").Order(StringComparer.Ordinal).ToList();
                     }
                 }
                 return [];
@@ -689,11 +689,11 @@ public sealed class ProjectModel
         private static Version Normalized(Version version)
             => new(version.Major, version.Minor, Math.Max(version.Build, 0), Math.Max(version.Revision, 0));
 
-        private static string? BestAssetDirectory(string assets, TargetFrameworkName? framework)
+        private string? BestAssetDirectory(string assets, TargetFrameworkName? framework)
         {
-            if (!Directory.Exists(assets)) return null;
+            if (!disk.DirectoryExists(assets)) return null;
             var ranked = new List<(string Directory, TargetFrameworkName Asset)>();
-            foreach (var directory in Directory.GetDirectories(assets))
+            foreach (var directory in disk.Directories(assets))
             {
                 if (TargetFrameworkName.TryParse(Path.GetFileName(directory), out var asset)
                     && (framework is null || framework.CanConsume(asset)))
@@ -708,8 +708,7 @@ public sealed class ProjectModel
                 .FirstOrDefault();
         }
 
-        private static void ResolveAssemblyReferences(
-            EvaluatedProject evaluated, string boundary, List<string> references, List<string> missing)
+        private void ResolveAssemblyReferences(EvaluatedProject evaluated, List<string> references, List<string> missing)
         {
             var directory = Path.GetDirectoryName(evaluated.ProjectPath)!;
             var available = references.Select(Path.GetFileNameWithoutExtension).ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -718,8 +717,8 @@ public sealed class ProjectModel
                 var assembly = reference.Include.Split(',')[0].Trim();
                 if (reference.Get("HintPath") is { Length: > 0 } hint)
                 {
-                    var path = Path.GetFullPath(MsBuildExpander.ToNative(hint), directory);
-                    if (!MsBuildExpander.IsForeignPath(path, boundary) && File.Exists(path)) references.Add(path);
+                    var path = disk.FullPath(MsBuildExpander.ToNative(hint), directory);
+                    if (disk.FileExists(path)) references.Add(path);
                     else missing.Add(assembly);
                 }
                 else if (!available.Contains(assembly))
@@ -744,18 +743,18 @@ public sealed class ProjectModel
         /// The build's own generated file when it is at least as new as the project, since it
         /// is exact, including what the SDK added. Otherwise what the project declares.
         /// </summary>
-        private static string ReadGlobalUsings(Candidate candidate)
+        private string ReadGlobalUsings(Candidate candidate)
         {
             var evaluated = candidate.Evaluated;
             var usings = evaluated.ItemsOf("Using");
             if (usings.Count == 0) return string.Empty;
 
             if (FindGeneratedGlobalUsings(candidate) is { } generated
-                && File.GetLastWriteTimeUtc(generated) >= File.GetLastWriteTimeUtc(evaluated.ProjectPath))
+                && disk.LastWriteUtc(generated) >= disk.LastWriteUtc(evaluated.ProjectPath))
             {
                 try
                 {
-                    return File.ReadAllText(generated);
+                    return disk.ReadAllText(generated);
                 }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
                 {
@@ -777,10 +776,9 @@ public sealed class ProjectModel
             return text.ToString();
         }
 
-        private static string? FindGeneratedGlobalUsings(Candidate candidate)
+        private string? FindGeneratedGlobalUsings(Candidate candidate)
         {
-            var assets = candidate.Restore?.AssetsPath ?? candidate.ExpectedAssetsPath;
-            var intermediate = assets is null ? null : Path.GetDirectoryName(assets);
+            var intermediate = Path.GetDirectoryName(candidate.Restore?.AssetsPath ?? candidate.ExpectedAssetsPath);
             if (intermediate is null) return null;
 
             var configuration = candidate.Evaluated.Property("Configuration");
@@ -790,8 +788,8 @@ public sealed class ProjectModel
                 directories.Insert(0, Path.Combine(intermediate, configuration, framework));
             }
             return directories
-                .Where(Directory.Exists)
-                .SelectMany(directory => Directory.GetFiles(directory, "*.GlobalUsings.g.cs"))
+                .Where(disk.DirectoryExists)
+                .SelectMany(directory => disk.Files(directory, "*.GlobalUsings.g.cs"))
                 .FirstOrDefault();
         }
 
@@ -852,7 +850,7 @@ public sealed class ProjectModel
         {
             var directory = Path.GetDirectoryName(candidate.Evaluated.ProjectPath)!;
             var items = candidate.Evaluated.ItemsOf("ProjectReference")
-                .Select(item => (Item: item, Path: Path.GetFullPath(MsBuildExpander.ToNative(item.Include), directory)))
+                .Select(item => (Item: item, Path: disk.FullPath(MsBuildExpander.ToNative(item.Include), directory)))
                 .ToList();
 
             // A reference kept for build order, or to run a generator, adds nothing to compile against.
@@ -869,7 +867,7 @@ public sealed class ProjectModel
         /// <summary>A referenced project with no indexed files can still be bound through its build output.</summary>
         private string? OutputAssembly(string project)
         {
-            if (MsBuildExpander.IsForeignPath(project, _boundary) || !File.Exists(project)) return null;
+            if (!disk.FileExists(project)) return null;
             TryLoadCandidate(project);
             if (!_candidates.TryGetValue(project, out var candidate)) return null;
 
@@ -883,8 +881,7 @@ public sealed class ProjectModel
                 Path.Combine(MsBuildExpander.ToNative(output), configuration, candidate.TargetFramework ?? string.Empty, name),
                 Path.Combine(MsBuildExpander.ToNative(output), configuration, name),
             };
-            return candidates.Select(path => Path.GetFullPath(path, directory))
-                .FirstOrDefault(path => !MsBuildExpander.IsForeignPath(path, _boundary) && File.Exists(path));
+            return candidates.Select(path => disk.FullPath(path, directory)).FirstOrDefault(disk.FileExists);
         }
 
         private static List<ProjectInfo> Closure(ProjectInfo start, Dictionary<ProjectInfo, List<ProjectInfo>> direct)
@@ -906,14 +903,14 @@ public sealed class ProjectModel
         /// With restore data the assets file already lists what arrives through a project
         /// reference. Without it, a project still sees the packages of what it references.
         /// </summary>
-        private static void AddTransitivePackages(Dictionary<string, ProjectInfo> infos)
+        private void AddTransitivePackages(Dictionary<string, ProjectInfo> infos)
         {
             foreach (var info in infos.Values.Where(info => !info.HasRestoreData))
             {
                 var own = info.MetadataReferences.ToList();
                 own.AddRange(info.ProjectReferences.SelectMany(project => project.MetadataReferences)
                     .Where(path => path.Contains(".nuget", StringComparison.OrdinalIgnoreCase)));
-                info.MetadataReferences = ReferenceConflicts.KeepNewest(own.Distinct(PathComparer));
+                info.MetadataReferences = ReferenceConflicts.KeepNewest(disk, own.Distinct(PathComparer));
 
                 // What a reference lacks would have reached this project too.
                 var lacking = info.ProjectReferences.Where(project => project.MissingReferences.Count > 0).ToList();
@@ -941,7 +938,7 @@ public sealed class ProjectModel
                 var candidate = _candidates[path];
                 if (ResolveFramework(candidate, null, PackageFolders(candidate.Restore), inherited) is not { } framework) continue;
 
-                info.MetadataReferences = ReferenceConflicts.KeepNewest(framework.Assemblies.Concat(info.MetadataReferences).Distinct(PathComparer));
+                info.MetadataReferences = ReferenceConflicts.KeepNewest(disk, framework.Assemblies.Concat(info.MetadataReferences).Distinct(PathComparer));
                 info.MissingReferences = info.MissingReferences.Union(framework.Missing, StringComparer.OrdinalIgnoreCase).ToList();
                 info.Gaps.AddRange(framework.Notes.Except(info.Gaps, StringComparer.Ordinal));
             }
