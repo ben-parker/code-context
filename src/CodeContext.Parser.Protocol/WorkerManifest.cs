@@ -1,3 +1,4 @@
+using System.Runtime.Versioning;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -76,18 +77,23 @@ public sealed record WorkerManifest(
     }
 
     /// <summary>
-    /// Resolves <see cref="Command"/> to an absolute path against the manifest's
-    /// directory. Commands with no directory component that don't exist beside the
-    /// manifest (e.g. <c>dotnet</c>, <c>node</c>) are returned as-is for PATH lookup.
+    /// Resolves <see cref="Command"/> to an absolute path: beside the manifest first, then,
+    /// for a command with no directory component (e.g. <c>dotnet</c>, <c>node</c>), on PATH.
+    /// A bare name never leaves here. Given one, Windows and .NET on Unix both look in the
+    /// current directory, which is usually the repository being indexed, so a program
+    /// committed there would run. A command found nowhere resolves to the path beside the
+    /// manifest, which fails to start like any other missing executable.
     /// </summary>
     public string ResolveCommand(string manifestDirectory)
     {
-        if (Path.IsPathRooted(Command))
+        if (Path.IsPathFullyQualified(Command))
         {
             return Command;
         }
 
-        var candidate = Path.GetFullPath(Path.Combine(manifestDirectory, Command));
+        // Join, not Combine: C:worker is rooted, and Combine would drop the manifest directory
+        // for the current directory on C:.
+        var candidate = Path.GetFullPath(Path.Join(manifestDirectory, Command));
         if (File.Exists(candidate))
         {
             return candidate;
@@ -95,7 +101,7 @@ public sealed record WorkerManifest(
 
         // Manifests stay platform-neutral ("worker" / "node"). Windows apphosts
         // carry an .exe suffix, so also probe the native executable extension before
-        // falling back to PATH lookup.
+        // searching PATH.
         if (OperatingSystem.IsWindows()
             && !candidate.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
         {
@@ -108,6 +114,32 @@ public sealed record WorkerManifest(
 
         return Path.GetDirectoryName(Command) is { Length: > 0 }
             ? candidate // an explicit relative path must resolve against the manifest even if missing
-            : Command;  // bare command name: let the OS resolve it on PATH
+            : FindOnPath(Command) ?? candidate;
     }
+
+    private static string? FindOnPath(string command)
+    {
+        // CreateProcess adds .exe to a name with no extension and to nothing else.
+        var name = OperatingSystem.IsWindows() && !Path.HasExtension(command) ? command + ".exe" : command;
+        var entries = (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
+            .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        foreach (var entry in entries)
+        {
+            // An empty or relative entry means the current directory, the place being avoided.
+            var directory = entry.Trim('"');
+            if (!Path.IsPathFullyQualified(directory)) continue;
+
+            var candidate = Path.Combine(directory, name);
+            if (File.Exists(candidate) && (OperatingSystem.IsWindows() || CanExecute(candidate)))
+            {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    [UnsupportedOSPlatform("windows")]
+    private static bool CanExecute(string path)
+        => (File.GetUnixFileMode(path)
+            & (UnixFileMode.UserExecute | UnixFileMode.GroupExecute | UnixFileMode.OtherExecute)) != 0;
 }
