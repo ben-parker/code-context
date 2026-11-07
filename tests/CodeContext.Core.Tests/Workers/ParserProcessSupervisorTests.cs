@@ -495,4 +495,234 @@ public class ParserProcessSupervisorTests
             return true; // no such process
         }
     }
+
+    // ---- Persistent state (plan phase 5) ----
+
+    /// <summary>A capable worker indexes <paramref name="files"/>, saves its state into <paramref name="directory"/>, and stops.</summary>
+    private static async Task<IndexBaseline> SavedBaselineAsync(string directory, IReadOnlyList<string> files)
+    {
+        IReadOnlyList<UnitFingerprint>? fingerprints = null;
+        await using var first = CreateSupervisor(FakeWorkerSpec("--behavior", "persistent-state"));
+        first.DeltaHandler = (delta, _) =>
+        {
+            fingerprints = delta.Fingerprints;
+            return Task.FromResult(true);
+        };
+        await first.IndexWorkspaceAsync(new IndexWorkspaceParams("ws-1", 1, files));
+        var stateId = new string('5', 32);
+        var path = Path.Combine(directory, "worker-fake.0000000001.55555555.state");
+        var saved = await first.SaveStateAsync(new SaveStateParams("ws-1", path, stateId));
+        Assert.True(saved.Saved);
+        Assert.Equal(stateId, saved.StateId);
+        Assert.Equal(new FileInfo(path).Length, saved.Bytes);
+        Assert.False(File.Exists(path + ".tmp"));
+        await first.ShutdownAsync();
+        return new IndexBaseline(path, stateId, saved.Sha256!, fingerprints!);
+    }
+
+    private static List<AnalysisDelta> Recording(ParserProcessSupervisor supervisor)
+    {
+        var deltas = new List<AnalysisDelta>();
+        supervisor.DeltaHandler = (delta, _) =>
+        {
+            lock (deltas) deltas.Add(delta);
+            return Task.FromResult(true);
+        };
+        return deltas;
+    }
+
+    [Fact]
+    public async Task Baseline_IsSentOnlyToACapableWorker()
+    {
+        // The strict worker fails any request that carries a baseline: the supervisor drops it first.
+        await using var supervisor = CreateSupervisor(FakeWorkerSpec("--behavior", "strict"));
+        var deltas = Recording(supervisor);
+        var result = await supervisor.IndexWorkspaceAsync(new IndexWorkspaceParams("ws-1", 1, ["a.fake"],
+            new IndexBaseline("x.state", new string('1', 32), new string('2', 64), [])));
+        Assert.Null(result.Baseline);
+        Assert.True(Assert.Single(deltas).ReplacesWorkspace);
+        Assert.False(supervisor.DeclaresPersistentState);
+    }
+
+    [Fact]
+    public async Task AcceptedBaseline_CommitsAFileScopedDelta()
+    {
+        var directory = Directory.CreateTempSubdirectory("cc-state-").FullName;
+        try
+        {
+            var baseline = await SavedBaselineAsync(directory, ["a.fake", "b.fake"]);
+
+            // A new process, the same files: accepted, one empty file-scoped delta with fingerprints.
+            await using var second = CreateSupervisor(FakeWorkerSpec("--behavior", "persistent-state"));
+            var deltas = Recording(second);
+            AnalysisProgress? progress = null;
+            var result = await second.IndexWorkspaceAsync(new IndexWorkspaceParams("ws-1", 1, ["a.fake", "b.fake"], baseline),
+                progressHandler: update => progress = update);
+            Assert.Equal(BaselineOutcomes.Accepted, result.Baseline);
+            var delta = Assert.Single(deltas);
+            Assert.False(delta.ReplacesWorkspace);
+            Assert.Empty(delta.Nodes);
+            Assert.Empty(delta.ReplacesFiles);
+            Assert.Equal(baseline.Fingerprints, delta.Fingerprints);
+            Assert.Equal(2, progress!.FilesProcessed);
+
+            // A second index of the same process is offered no baseline, whatever the caller passes.
+            deltas.Clear();
+            result = await second.IndexWorkspaceAsync(new IndexWorkspaceParams("ws-1", 2, ["a.fake", "b.fake"], baseline));
+            Assert.Null(result.Baseline);
+            Assert.True(Assert.Single(deltas).ReplacesWorkspace);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task AcceptedBaseline_SendsOnlyTheFilesThatChangedWhileDown()
+    {
+        var directory = Directory.CreateTempSubdirectory("cc-state-").FullName;
+        try
+        {
+            var baseline = await SavedBaselineAsync(directory, ["a.fake", "b.fake"]);
+            await using var second = CreateSupervisor(FakeWorkerSpec("--behavior", "persistent-state"));
+            var deltas = Recording(second);
+            var result = await second.IndexWorkspaceAsync(new IndexWorkspaceParams("ws-1", 1, ["a.fake", "c.fake"], baseline));
+            Assert.Equal(BaselineOutcomes.Accepted, result.Baseline);
+            var delta = Assert.Single(deltas);
+            Assert.False(delta.ReplacesWorkspace);
+            Assert.Equal(["c.fake", "b.fake"], delta.ReplacesFiles);
+            Assert.All(delta.Nodes, node => Assert.Equal("c.fake", node.FilePath));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData("baseline-reject", null)]
+    [InlineData("persistent-state", "wrong-hash")]
+    [InlineData("persistent-state", "missing")]
+    public async Task RejectedBaseline_ReplacesTheWorkspace(string behavior, string? damage)
+    {
+        var directory = Directory.CreateTempSubdirectory("cc-state-").FullName;
+        try
+        {
+            var baseline = await SavedBaselineAsync(directory, ["a.fake"]);
+            if (damage == "wrong-hash") baseline = baseline with { StateSha256 = new string('0', 64) };
+            if (damage == "missing") File.Delete(baseline.StatePath);
+
+            await using var second = CreateSupervisor(FakeWorkerSpec("--behavior", behavior));
+            var deltas = Recording(second);
+            var result = await second.IndexWorkspaceAsync(new IndexWorkspaceParams("ws-1", 1, ["a.fake"], baseline));
+            Assert.Equal(BaselineOutcomes.Rejected, result.Baseline);
+            Assert.NotNull(result.BaselineReason);
+            var delta = Assert.Single(deltas);
+            Assert.True(delta.ReplacesWorkspace);
+            Assert.Equal(2, delta.Nodes.Count);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData("accept-with-replacement", true)]
+    [InlineData("reject-with-file-scope", true)]
+    [InlineData("unsolicited-baseline", false)]
+    public async Task BaselineAnswerThatDoesNotMatchTheRequest_FailsIt(string behavior, bool sendBaseline)
+    {
+        var directory = Directory.CreateTempSubdirectory("cc-state-").FullName;
+        try
+        {
+            var baseline = sendBaseline ? await SavedBaselineAsync(directory, ["a.fake"]) : null;
+            await using var supervisor = CreateSupervisor(FakeWorkerSpec("--behavior", behavior));
+            supervisor.DeltaHandler = (_, _) => Task.FromResult(true);
+            var before = supervisor.LastRequest;
+            var failure = await Assert.ThrowsAsync<ParserWorkerFailedException>(() =>
+                supervisor.IndexWorkspaceAsync(new IndexWorkspaceParams("ws-1", 1, ["a.fake"], baseline)));
+            Assert.Contains("baseline", failure.Message);
+            Assert.Equal(ParserSessionState.Failed, supervisor.Snapshot.State);
+            // The failed request leaves a gap in the numbering: nothing it committed can be extended.
+            Assert.Equal(before + 2, supervisor.LastRequest);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task SaveState_RequiresTheCapability()
+    {
+        await using var supervisor = CreateSupervisor(FakeWorkerSpec("--behavior", "strict"));
+        // No process: nothing is started to save state.
+        await Assert.ThrowsAsync<ParserWorkerUnavailableException>(() =>
+            supervisor.SaveStateAsync(new SaveStateParams("ws-1", "x.state", new string('1', 32))));
+        Assert.Null(supervisor.Snapshot.ProcessId);
+
+        await supervisor.EnsureInitializedAsync();
+        var pid = supervisor.Snapshot.ProcessId;
+        // The strict worker would fail the request; it is never sent.
+        await Assert.ThrowsAsync<NotSupportedException>(() =>
+            supervisor.SaveStateAsync(new SaveStateParams("ws-1", "x.state", new string('1', 32))));
+        Assert.Equal(ParserSessionState.Ready, supervisor.Snapshot.State);
+        Assert.Equal(pid, supervisor.Snapshot.ProcessId);
+    }
+
+    [Fact]
+    public async Task Requests_AreNumberedPerSupervisor_AndEachProcessIsANewIncarnation()
+    {
+        var marker = Path.Combine(Path.GetTempPath(), $"cc-crash-once-{Guid.NewGuid():N}");
+        try
+        {
+            await using var supervisor = CreateSupervisor(FakeWorkerSpec("--behavior", "crash-once", "--marker", marker));
+            supervisor.DeltaHandler = (_, _) => Task.FromResult(true);
+            await supervisor.EnsureInitializedAsync();
+            var first = supervisor.Incarnation;
+            await Assert.ThrowsAsync<ParserWorkerFailedException>(() => supervisor.IndexWorkspaceAsync(new IndexWorkspaceParams("ws-1", 1, ["a.fake"])));
+            Assert.Equal(2, supervisor.LastRequest);
+            await supervisor.IndexWorkspaceAsync(new IndexWorkspaceParams("ws-1", 2, ["a.fake"]));
+            Assert.Equal(3, supervisor.LastRequest);
+            Assert.NotEqual(first, supervisor.Incarnation);
+        }
+        finally
+        {
+            File.Delete(marker);
+        }
+    }
+
+    [Fact]
+    public async Task AbandonedSave_WhenItsCancelLands_LeavesTheSessionStateAlone()
+    {
+        await using var supervisor = CreateSupervisor(FakeWorkerSpec("--behavior", "save-state-hangs"));
+        supervisor.DeltaHandler = (_, _) => Task.FromResult(true);
+        await supervisor.IndexWorkspaceAsync(new IndexWorkspaceParams("ws-1", 1, ["a.fake"]));
+        var before = supervisor.Snapshot;
+
+        // The host gave up on the save; its cancel lands later, possibly while a later mutation is indexing, so it
+        // must not set the session to Ready (or touch it at all).
+        using var abandon = new CancellationTokenSource();
+        var save = supervisor.SaveStateAsync(new SaveStateParams("ws-1", Path.Combine(Path.GetTempPath(), "never.state"), new string('1', 32)),
+            abandon.Token);
+        await abandon.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => save);
+        Assert.Same(before, supervisor.Snapshot);
+        Assert.Equal(ParserSessionState.Ready, supervisor.Snapshot.State);
+    }
+
+    [Fact]
+    public async Task Fingerprints_FromAWorkerWithoutTheCapability_AreDropped()
+    {
+        await using var supervisor = CreateSupervisor(FakeWorkerSpec("--behavior", "fingerprints-without-capability"));
+        var deltas = Recording(supervisor);
+        await supervisor.IndexWorkspaceAsync(new IndexWorkspaceParams("ws-1", 1, ["a.fake"]));
+        await supervisor.ApplyChangesAsync(new ApplyChangesParams("ws-1", 2, [new FileChangeDto("a.fake", FileChangeKinds.Changed)]));
+        Assert.Equal(2, deltas.Count);
+        // The worker sent them; nothing will ever hand them back to a worker without the capability, so none is kept.
+        Assert.All(deltas, delta => Assert.Null(delta.Fingerprints));
+        Assert.False(supervisor.DeclaresPersistentState);
+    }
 }

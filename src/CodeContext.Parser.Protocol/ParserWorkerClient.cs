@@ -46,6 +46,12 @@ public sealed class ParserWorkerClient(JsonRpcConnection connection)
             ParserProtocolJsonContext.Default.NativeSyntaxTreeParams,
             ParserProtocolJsonContext.Default.NativeSyntaxTreeResult, ct);
 
+    public Task<SaveStateResult> SaveStateAsync(SaveStateParams parameters, CancellationToken ct = default)
+        => Connection.InvokeAsync(
+            ParserProtocolMethods.SaveState, parameters,
+            ParserProtocolJsonContext.Default.SaveStateParams,
+            ParserProtocolJsonContext.Default.SaveStateResult, ct);
+
     public Task ShutdownAsync(CancellationToken ct = default)
         => Connection.InvokeVoidAsync(ParserProtocolMethods.Shutdown, ct);
 }

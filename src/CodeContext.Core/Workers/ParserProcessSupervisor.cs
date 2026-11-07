@@ -28,12 +28,14 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
         public ActiveMutation(
             string workspaceId,
             long generation,
+            DeltaOrigin origin,
             HashSet<string>? expectedFiles = null,
             Action<AnalysisProgress>? progressHandler = null,
             Action<Exception>? progressErrorHandler = null)
         {
             WorkspaceId = workspaceId;
             Generation = generation;
+            Origin = origin;
             ExpectedFiles = expectedFiles;
             _progressUpdates = progressHandler is null
                 ? null
@@ -51,11 +53,14 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
 
         public string WorkspaceId { get; }
         public long Generation { get; }
+        public DeltaOrigin Origin { get; }
         public HashSet<string>? ExpectedFiles { get; }
         public int LastFilesProcessed { get; set; } = -1;
         public bool SawTerminalProgress { get; set; }
         public int DeltasReceived { get; set; }
         public bool SawLastDelta { get; set; }
+        public bool SawWorkspaceReplacement { get; set; }
+        public bool SawFileScopedDelta { get; set; }
 
         public void PublishProgress(AnalysisProgress progress)
         {
@@ -101,6 +106,9 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
     private static readonly StringComparer PathComparer =
         OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
 
+    /// <summary>Process starts in this host process, across supervisors, so an incarnation id names one worker process.</summary>
+    private static long s_incarnations;
+
     private readonly WorkerLaunchSpec _spec;
     private readonly ParserWorkerOptions _options;
     private readonly ILogger _logger;
@@ -121,12 +129,39 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
     private bool _unavailable;
     private volatile bool _stopping;
     private volatile bool _disposed;
+    private long _incarnation;
+    private long _requests;
+    private long _requestsThisIncarnation;
 
     /// <summary>
     /// Receives every <c>analysis/delta</c> notification, awaited inline on the
     /// connection's read loop so deltas complete before the request's response.
     /// </summary>
     public Func<AnalysisDelta, CancellationToken, Task<bool>>? DeltaHandler { get; set; }
+
+    /// <summary>
+    /// Like <see cref="DeltaHandler"/>, and used instead of it when set, with the worker process and request
+    /// the delta answers; null for a worker that did not declare <c>persistentState</c>.
+    /// </summary>
+    internal Func<AnalysisDelta, DeltaOrigin?, CancellationToken, Task<bool>>? OriginDeltaHandler { get; set; }
+
+    /// <summary>The current worker process (unique in this host process), 0 before the first start.</summary>
+    internal long Incarnation => Interlocked.Read(ref _incarnation);
+
+    /// <summary>
+    /// The ordinal of the last mutating request sent (index or apply), across processes. A request that fails
+    /// in any way advances it once more, so no later commit can follow on from it (<see cref="DeltaOrigin"/>).
+    /// </summary>
+    internal long LastRequest => Interlocked.Read(ref _requests);
+
+    /// <summary>Whether a worker process is running, initialized and connected now.</summary>
+    internal bool IsLive => _process is { HasExited: false } && _connection?.Completion is { IsCompleted: false } && _initializeResult is not null;
+
+    /// <summary>The running process's handshake, or null when none is initialized.</summary>
+    internal InitializeResult? Initialized => _initializeResult;
+
+    /// <summary>Whether the running worker process declared <c>persistentState</c>.</summary>
+    internal bool DeclaresPersistentState => IsLive && _initializeResult?.Capabilities.PersistentState == true;
 
     public ParserProcessSupervisor(
         WorkerLaunchSpec spec,
@@ -402,6 +437,8 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
         }
 
         _initializeResult = result;
+        Interlocked.Exchange(ref _incarnation, Interlocked.Increment(ref s_incarnations));
+        Interlocked.Exchange(ref _requestsThisIncarnation, 0);
         Transition(ParserSessionState.Ready,
             $"initialized {result.DisplayName} {result.ParserVersion} (protocol v{result.ProtocolVersion})");
         return result;
@@ -445,10 +482,23 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
             throw new ParserProtocolViolationException(
                 $"analysis/delta arrived after the final chunk for request {delta.RequestId}.");
         }
-        if (DeltaHandler is null)
+        if (DeltaHandler is null && OriginDeltaHandler is null)
         {
             throw new ParserProtocolViolationException(
                 $"Worker emitted analysis/delta for request {delta.RequestId}, but no graph-delta handler is configured.");
+        }
+        if (delta.Fingerprints is { } fingerprints)
+        {
+            if (!initialized.Capabilities.PersistentState)
+            {
+                // Opaque data nothing will hand back to a worker without the capability: not kept.
+                delta = delta with { Fingerprints = null };
+            }
+            else if (fingerprints.Any(fingerprint => fingerprint?.Unit is null || fingerprint.Value is null))
+            {
+                throw new ParserProtocolViolationException(
+                    $"analysis/delta for request {delta.RequestId} carried a fingerprint without a unit or a value.");
+            }
         }
 
         var ownershipPrefix = $"{delta.ParserId}:{Uri.EscapeDataString(delta.WorkspaceId)}:";
@@ -464,7 +514,9 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
         }
 
         var normalizedDelta = NormalizeSpans(delta, initialized.SpanSemantics);
-        var accepted = await DeltaHandler(normalizedDelta, _shutdown.Token).ConfigureAwait(false);
+        var accepted = OriginDeltaHandler is { } withOrigin
+            ? await withOrigin(normalizedDelta, initialized.Capabilities.PersistentState ? active.Origin : null, _shutdown.Token).ConfigureAwait(false)
+            : await DeltaHandler!(normalizedDelta, _shutdown.Token).ConfigureAwait(false);
         if (!accepted)
         {
             throw new ParserProtocolViolationException(
@@ -472,6 +524,8 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
         }
         active.DeltasReceived++;
         active.SawLastDelta = delta.IsLastForRequest;
+        if (delta.ReplacesWorkspace) active.SawWorkspaceReplacement = true;
+        else active.SawFileScopedDelta = true;
     }
 
     private Task OnProgressNotificationAsync(JsonElement? paramsElement)
@@ -666,6 +720,14 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
     {
         var expectedFiles = CreateExpectedFileSet(parameters.Files);
         var client = await GetReadyClientAsync(ct).ConfigureAwait(false);
+        // A baseline goes only to a worker that declared the capability, and only on the first mutating request
+        // of its process: anything the process did before would already have changed what the baseline describes.
+        if (parameters.Baseline is not null
+            && (_initializeResult?.Capabilities.PersistentState != true || Interlocked.Read(ref _requestsThisIncarnation) > 0))
+        {
+            parameters = parameters with { Baseline = null };
+        }
+        var origin = BeginMutation(parameters.Baseline?.StateId);
         Transition(ParserSessionState.Indexing, $"generation {parameters.Generation} ({parameters.Files.Count} files)");
         ActiveMutation? active = null;
         long requestId = 0;
@@ -675,7 +737,7 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
             {
                 requestId = id;
                 active = new ActiveMutation(
-                    parameters.WorkspaceId, parameters.Generation, expectedFiles, progressHandler,
+                    parameters.WorkspaceId, parameters.Generation, origin, expectedFiles, progressHandler,
                     ex => _logger.LogWarning(ex,
                         "Progress observer failed for parser '{ParserId}', generation {Generation}.",
                         _spec.ParserId, parameters.Generation));
@@ -688,13 +750,72 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
                 parameters.WorkspaceId, parameters.Generation,
                 result.WorkspaceId, result.Generation, result.DeltasEmitted, result.Complete,
                 active, "workspace/index");
+            ValidateBaselineResult(parameters, result, active!);
             TransitionAfterMutation($"generation {result.Generation} committed");
             return result;
+        }
+        catch
+        {
+            EndFailedMutation();
+            throw;
         }
         finally
         {
             if (active is not null) await active.CompleteProgressAsync().ConfigureAwait(false);
             if (requestId != 0) _activeMutations.TryRemove(requestId, out _);
+        }
+    }
+
+    /// <summary>Numbers a mutating request about to be sent to the running process.</summary>
+    private DeltaOrigin BeginMutation(string? offeredStateId)
+    {
+        Interlocked.Increment(ref _requestsThisIncarnation);
+        return new DeltaOrigin(Incarnation, Interlocked.Increment(ref _requests), offeredStateId);
+    }
+
+    /// <summary>
+    /// A mutating request failed after it was numbered (an error, a cancel, a crash, a commit the host refused
+    /// or a violation found in its result): the worker may hold state the host does not, so the numbering
+    /// skips one and no later commit of this process can extend the lineage of what it committed before.
+    /// </summary>
+    private void EndFailedMutation() => Interlocked.Increment(ref _requests);
+
+    /// <summary>
+    /// The baseline answer must match the request: none without a baseline; with one, <c>accepted</c> and only
+    /// file-scoped deltas, or <c>rejected</c> and only workspace replacements. Anything else is a protocol
+    /// violation, failing the request like the other result checks.
+    /// </summary>
+    private void ValidateBaselineResult(IndexWorkspaceParams parameters, IndexWorkspaceResult result, ActiveMutation active)
+    {
+        string? failure = null;
+        if (parameters.Baseline is null)
+        {
+            if (result.Baseline is not null)
+                failure = $"workspace/index answered baseline '{result.Baseline}' to a request that carried none.";
+        }
+        else if (result.Baseline == BaselineOutcomes.Accepted)
+        {
+            if (active.SawWorkspaceReplacement)
+                failure = "workspace/index accepted its baseline but replaced the workspace.";
+        }
+        else if (result.Baseline == BaselineOutcomes.Rejected)
+        {
+            if (active.SawFileScopedDelta)
+                failure = "workspace/index rejected its baseline but sent a file-scoped delta.";
+        }
+        else
+        {
+            failure = $"workspace/index answered a baseline with '{result.Baseline ?? "nothing"}', not 'accepted' or 'rejected'.";
+        }
+
+        if (failure is not null)
+        {
+            Transition(ParserSessionState.Failed, lastError: failure);
+            throw new ParserWorkerFailedException(failure);
+        }
+        if (result.Baseline == BaselineOutcomes.Rejected)
+        {
+            _logger.LogInformation("[{ParserId}] baseline rejected: {Reason}", _spec.ParserId, result.BaselineReason ?? "no reason given");
         }
     }
 
@@ -716,6 +837,7 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
     public async Task<ApplyChangesResult> ApplyChangesAsync(ApplyChangesParams parameters, CancellationToken ct = default)
     {
         var client = await GetReadyClientAsync(ct).ConfigureAwait(false);
+        var origin = BeginMutation(offeredStateId: null);
         Transition(ParserSessionState.Indexing, $"applying {parameters.Changes.Count} change(s)");
         ActiveMutation? active = null;
         long requestId = 0;
@@ -724,7 +846,7 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
             var result = await RunRequestAsync(() => client.ApplyChangesAsync(parameters, ct, id =>
             {
                 requestId = id;
-                active = new ActiveMutation(parameters.WorkspaceId, parameters.Generation);
+                active = new ActiveMutation(parameters.WorkspaceId, parameters.Generation, origin);
                 if (!_activeMutations.TryAdd(id, active))
                 {
                     throw new InvalidOperationException($"Request id {id} is already active.");
@@ -736,6 +858,11 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
                 active, "workspace/applyChanges");
             TransitionAfterMutation($"generation {result.Generation} committed");
             return result;
+        }
+        catch
+        {
+            EndFailedMutation();
+            throw;
         }
         finally
         {
@@ -754,6 +881,29 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
                 $"Worker '{_spec.ParserId}' does not expose native syntax trees.");
         }
         return await RunRequestAsync(() => client.GetNativeSyntaxTreeAsync(parameters, ct)).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// <c>workspace/saveState</c> to the running process. Never starts one: a new process holds no state worth
+    /// saving, so with none running this throws <see cref="ParserWorkerUnavailableException"/>; a worker that did
+    /// not declare <c>persistentState</c> is never sent the request (<see cref="NotSupportedException"/>). Not a
+    /// mutation: nothing is committed and the request numbering does not move.
+    /// </summary>
+    public async Task<SaveStateResult> SaveStateAsync(SaveStateParams parameters, CancellationToken ct = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        var client = _client;
+        if (!IsLive || client is null)
+        {
+            throw new ParserWorkerUnavailableException($"Worker '{_spec.ParserId}' has no running process to save state.");
+        }
+        if (_initializeResult?.Capabilities.PersistentState != true)
+        {
+            throw new NotSupportedException($"Worker '{_spec.ParserId}' does not declare persistentState.");
+        }
+        // A save leaves the session state alone: its cancel lands in the background after the host has given up on
+        // it (the capture's time limit), possibly while a later mutation is indexing, so it must not set Ready.
+        return await RunRequestAsync(() => client.SaveStateAsync(parameters, ct), transitionOnCancel: false).ConfigureAwait(false);
     }
 
     private void ValidateMutationResult(
@@ -829,7 +979,7 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
     /// Translates connection loss during a request into a worker failure. Cancellation
     /// and remote JSON-RPC errors pass through: the worker is still healthy then.
     /// </summary>
-    private async Task<T> RunRequestAsync<T>(Func<Task<T>> request)
+    private async Task<T> RunRequestAsync<T>(Func<Task<T>> request, bool transitionOnCancel = true)
     {
         try
         {
@@ -845,7 +995,7 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
         {
             // Cooperative cancel: the worker answered (or was given its grace period);
             // the session stays usable.
-            Transition(ParserSessionState.Ready, "request cancelled");
+            if (transitionOnCancel) Transition(ParserSessionState.Ready, "request cancelled");
             throw;
         }
         // A valid JSON-RPC error (invalid params, unsupported optional operation,

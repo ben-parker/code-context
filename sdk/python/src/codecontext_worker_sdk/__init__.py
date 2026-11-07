@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, TypedDict
 
 PROTOCOL_VERSION = 1
 METHODS = {
@@ -12,11 +12,54 @@ METHODS = {
     "index_workspace": "workspace/index",
     "apply_changes": "workspace/applyChanges",
     "get_native_syntax_tree": "syntaxTree/get",
+    "save_state": "workspace/saveState",
     "cancel": "$/cancel",
     "analysis_delta": "analysis/delta",
     "analysis_progress": "analysis/progress",
     "shutdown": "shutdown",
 }
+# Optional capability names, as declared in initialize's capabilities.
+CAPABILITIES = {
+    "persistent_state": "persistentState",
+}
+# Values of "baseline" in a workspace/index result.
+BASELINE_ACCEPTED = "accepted"
+BASELINE_REJECTED = "rejected"
+
+
+class UnitFingerprint(TypedDict):
+    """One unit's fingerprint: computed by the worker, stored and handed back by the host."""
+
+    unit: str
+    value: str
+
+
+class IndexBaseline(TypedDict):
+    """workspace/index params' optional baseline, sent only to a worker that declared persistentState."""
+
+    statePath: str
+    stateId: str
+    stateSha256: str
+    fingerprints: list[UnitFingerprint]
+
+
+class SaveStateParams(TypedDict):
+    workspaceId: str
+    statePath: str
+    stateId: str
+
+
+class _SaveStateResultRequired(TypedDict):
+    workspaceId: str
+    stateId: str
+    saved: bool
+
+
+class SaveStateResult(_SaveStateResultRequired, total=False):
+    """workspace/saveState result; bytes and sha256 (lowercase hex) are required when saved."""
+
+    bytes: int
+    sha256: str
 
 
 def encode_message(message: Any) -> bytes:

@@ -5,7 +5,7 @@ namespace CodeContext.Core.Services
     /// <summary>
     /// Canonical file-path normalization and matching used both by <see cref="ContextService"/>
     /// (when resolving a file-path identifier and aggregating file-level relationships) and by the
-    /// in-memory adjacency index (<c>GraphAdjacency.NodesByFilePath</c>). Kept in one place so the
+    /// in-memory adjacency index (the file-path buckets of <c>GraphAdjacency</c>). Kept in one place so the
     /// index cannot silently drift from the semantics <c>ContextService</c> exposes.
     ///
     /// Matching is <see cref="System.StringComparison.OrdinalIgnoreCase"/> on <em>every</em>

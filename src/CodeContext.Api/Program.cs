@@ -58,6 +58,13 @@ public class Program
             Hidden = true,
         };
 
+        Option<bool> noCacheOption = new("--no-cache")
+        {
+            Description = "Neither load nor write the saved index under <path>/.codecontext/cache (every start scans everything, as before 0.11). " +
+                "Applies only to a new start: an instance already running keeps its setting.",
+            DefaultValueFactory = parseResult => false,
+        };
+
         Option<bool> allOption = new("--all")
         {
             Description = "Stop all running instances.",
@@ -87,6 +94,7 @@ public class Program
             idleTimeoutOption,
             logFileOption,
             instanceIdOption,
+            noCacheOption,
         };
         startCommand.SetAction((ParseResult parseResult, CancellationToken ct) =>
             StartCommandHandler.ExecuteAsync(
@@ -97,7 +105,8 @@ public class Program
                     parseResult.GetValue(detachOption),
                     parseResult.GetValue(idleTimeoutOption),
                     parseResult.GetValue(logFileOption),
-                    parseResult.GetValue(instanceIdOption)),
+                    parseResult.GetValue(instanceIdOption),
+                    parseResult.GetValue(noCacheOption)),
                 ct));
 
         Option<bool> initWaitOption = new("--wait")
@@ -155,7 +164,8 @@ public class Program
 
         var queryCommand = new Command(
             "query",
-            "Discovers or starts an instance, waits for indexing, and queries one identifier.");
+            "Discovers or starts an instance, waits for indexing (or answers at once from the saved index, " +
+            "labelled cache, while it is re-checked), and queries one identifier.");
         Argument<string> queryIdentifierArgument = new("identifier")
         {
             Description = "A symbol name, canonical identifier, or source file path.",

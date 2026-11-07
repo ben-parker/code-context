@@ -152,7 +152,9 @@ public record StatusResponseDto(
 /// <summary>How much of the workspace's declared context the workers found.</summary>
 public record CoverageStatusDto(
     [property: JsonPropertyName("state")] string State,
-    [property: JsonPropertyName("projects")] IReadOnlyList<ProjectCoverage> Projects
+    [property: JsonPropertyName("projects")] IReadOnlyList<ProjectCoverage> Projects,
+    // True while the coverage comes from a loaded snapshot that has not been checked yet; absent otherwise.
+    [property: JsonPropertyName("cached")] bool? Cached = null
 );
 
 public record SystemStatusDto(
@@ -175,7 +177,27 @@ public record IndexingStatusDto(
     [property: JsonPropertyName("filesProcessed")] int FilesProcessed = 0,
     [property: JsonPropertyName("filesTotal")] int FilesTotal = 0,
     [property: JsonPropertyName("lastError")] string? LastError = null,
-    [property: JsonPropertyName("operationId")] long OperationId = 0
+    [property: JsonPropertyName("operationId")] long OperationId = 0,
+    [property: JsonPropertyName("cache")] CacheStatusDto? Cache = null
+);
+
+/// <summary>
+/// The persistent cache (plan 3.10). Absent when the cache is off, or when nothing was loaded and no
+/// scan has committed yet. <c>workerStateBytes</c> is the total size of the worker state files the snapshot
+/// references, absent when it references none.
+/// </summary>
+public record CacheStatusDto(
+    [property: JsonPropertyName("state")] string State,
+    [property: JsonPropertyName("servingCached")] bool ServingCached,
+    [property: JsonPropertyName("reason")] string? Reason = null,
+    [property: JsonPropertyName("snapshotAt")] string? SnapshotAt = null,
+    [property: JsonPropertyName("snapshotSequence")] long? SnapshotSequence = null,
+    [property: JsonPropertyName("sizeBytes")] long? SizeBytes = null,
+    [property: JsonPropertyName("workerStateBytes")] long? WorkerStateBytes = null,
+    [property: JsonPropertyName("lastWriteMs")] long? LastWriteMs = null,
+    [property: JsonPropertyName("lastCaptureMs")] long? LastCaptureMs = null,
+    [property: JsonPropertyName("lastWriteError")] string? LastWriteError = null,
+    [property: JsonPropertyName("verification")] Dictionary<string, string>? Verification = null
 );
 
 public record DatabaseStatusDto(
@@ -272,6 +294,7 @@ public record NativeSyntaxTreeRequestDto(
 [JsonSerializable(typeof(CoverageSummary))]
 [JsonSerializable(typeof(SystemStatusDto))]
 [JsonSerializable(typeof(IndexingStatusDto))]
+[JsonSerializable(typeof(CacheStatusDto))]
 [JsonSerializable(typeof(DatabaseStatusDto))]
 [JsonSerializable(typeof(WatcherStatusDto))]
 [JsonSerializable(typeof(ParserStatusDto))]
@@ -287,6 +310,7 @@ public record NativeSyntaxTreeRequestDto(
 [JsonSerializable(typeof(JsonElement))]
 [JsonSerializable(typeof(CompleteContextResponse))]
 [JsonSerializable(typeof(CompactContextResponse))]
+[JsonSerializable(typeof(CacheNotice))]
 [JsonSerializable(typeof(CompactMatchFacets))]
 [JsonSerializable(typeof(CompactContextMatch))]
 [JsonSerializable(typeof(CompactCodeNode))]

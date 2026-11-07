@@ -8,13 +8,13 @@ namespace CodeContext.Core.Tests.Workers;
 
 public class AnalysisDeltaApplierTests
 {
+    private readonly InMemoryRepositoryFactory _factory = new(NullLogger<InMemoryRepositoryFactory>.Instance);
     private readonly IGenerationalGraphStore _store;
     private readonly AnalysisDeltaApplier _applier;
 
     public AnalysisDeltaApplierTests()
     {
-        _store = (IGenerationalGraphStore)new InMemoryRepositoryFactory(
-            NullLogger<InMemoryRepositoryFactory>.Instance).CreateGraphRepository();
+        _store = (IGenerationalGraphStore)_factory.CreateGraphRepository();
         _applier = new AnalysisDeltaApplier(_store, NullLogger<AnalysisDeltaApplier>.Instance);
     }
 
@@ -196,5 +196,55 @@ public class AnalysisDeltaApplierTests
         Assert.False(staleFinal);
         var repo = (ICodeGraphRepository)_store;
         Assert.Equal(["fake:ws-1:new"], (await repo.GetGraphAsync())!.Nodes.Select(n => n.Id));
+    }
+
+    private ShardAnnotation? AnnotationOf(string workspaceId = "ws-1")
+    {
+        return _factory.Database.CurrentShard(new InMemoryDatabase.ShardKey("fake", workspaceId)).Annotation;
+    }
+
+    [Fact]
+    public async Task Fingerprints_AreStoredOnCommitAndClearedWhenAbsent()
+    {
+        IReadOnlyList<UnitFingerprint> first = [new("p1", "a"), new("p2", "b")];
+        // The first chunk's fingerprints are the request's; a later chunk's are ignored.
+        Assert.True(await _applier.ApplyAsync(Delta(1, [Node("fake:ws-1:A", "a.fake")], isLastForRequest: false) with { Fingerprints = first }));
+        Assert.True(await _applier.ApplyAsync(Delta(1, [Node("fake:ws-1:B", "b.fake")]) with { Fingerprints = [new("p1", "other")] }));
+        Assert.Same(first, AnnotationOf()!.Fingerprints);
+
+        // A commit that carries none clears them; coverage would be kept, fingerprints are not.
+        Assert.True(await _applier.ApplyAsync(Delta(2, [Node("fake:ws-1:A", "a.fake")], replacesWorkspace: false, replacesFiles: ["a.fake"])));
+        Assert.Null(AnnotationOf()!.Fingerprints);
+    }
+
+    [Fact]
+    public async Task Origin_BecomesTheCommitsLineage_EstablishingOnAReplacementOrABaseline()
+    {
+        var sink = (IAnalysisDeltaSink)_applier;
+        Assert.True(await sink.ApplyAsync(Delta(1, [Node("fake:ws-1:A", "a.fake")]), new DeltaOrigin(5, 1, OfferedStateId: null), default));
+        Assert.Equal(new ShardLineage(5, 1, Establishes: true), AnnotationOf()!.Lineage);
+
+        Assert.True(await sink.ApplyAsync(Delta(2, [Node("fake:ws-1:A", "a.fake")], replacesWorkspace: false, replacesFiles: ["a.fake"]),
+            new DeltaOrigin(5, 2, OfferedStateId: null), default));
+        Assert.Equal(new ShardLineage(5, 2, Establishes: false), AnnotationOf()!.Lineage);
+
+        // A file-scoped answer to a request that carried a baseline is an accepted baseline: it starts a lineage, as
+        // long as the shard still carries the recorded state the baseline offered.
+        var key = new InMemoryDatabase.ShardKey("fake", "ws-1");
+        var (shard, annotation) = _factory.Database.CurrentShard(key);
+        var binding = new WorkerStateBinding("worker-fake.0000000001.aaaaaaaa.state", new string('a', 32), new string('b', 64));
+        Assert.True(_factory.Database.TryRecordWorkerState(key, shard!, annotation!, binding));
+        Assert.True(await sink.ApplyAsync(Delta(3, [], replacesWorkspace: false, replacesFiles: []),
+            new DeltaOrigin(6, 3, OfferedStateId: binding.StateId), default));
+        Assert.Equal(new ShardLineage(6, 3, Establishes: true, BaselineStateId: binding.StateId), AnnotationOf()!.Lineage);
+
+        // One whose offered state is not the one recorded: an ordinary file-scoped commit, with no lineage.
+        Assert.True(await sink.ApplyAsync(Delta(4, [], replacesWorkspace: false, replacesFiles: []),
+            new DeltaOrigin(7, 4, OfferedStateId: new string('c', 32)), default));
+        Assert.Null(AnnotationOf()!.Lineage);
+
+        // Without an origin (a worker without the capability) there is no lineage at all.
+        Assert.True(await _applier.ApplyAsync(Delta(5, [Node("fake:ws-1:A", "a.fake")])));
+        Assert.Null(AnnotationOf()!.Lineage);
     }
 }

@@ -10,7 +10,7 @@ namespace CodeContext.Core.Tests.Instances
 
         public InstanceRegistryTests()
         {
-            _baseDir = Path.Combine(Path.GetTempPath(), "cc-registry-tests", Guid.NewGuid().ToString("N"));
+            _baseDir = Path.Combine(Path.GetTempPath(), "cc-registry-tests-" + Guid.NewGuid().ToString("N"));
         }
 
         public void Dispose()

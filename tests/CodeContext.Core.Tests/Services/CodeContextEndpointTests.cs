@@ -235,6 +235,29 @@ public class CodeContextEndpointTests
         Assert.Contains("CONTEXT_ERROR", json);
     }
 
+    [Fact]
+    public async Task ContextEndpoints_CarryTheCacheNotice()
+    {
+        var notice = new CacheNotice { State = "verifying", SnapshotAt = "2026-11-04T10:12:03.0000000Z" };
+        var service = Substitute.For<IContextService>();
+        service.GetCompactContextAsync(
+                "Target", null, 1, false, false, null, false, false, 5, 10, false)
+            .Returns(new CompactContextResponse { Cache = notice });
+        service.GetCompleteContextAsync(
+                "Target", null, 1, false, false, false, false, false)
+            .Returns(new CompleteContextResponse { Cache = notice });
+        service.GetMultipleCompactContextAsync(Arg.Any<MultiContextRequest>())
+            .Returns([new CompactContextResponse { Cache = notice }]);
+        await using var app = await StartAppAsync(service);
+        var client = app.GetTestClient();
+        const string expected = "\"cache\":{\"state\":\"verifying\",\"snapshotAt\":\"2026-11-04T10:12:03.0000000Z\"}";
+
+        Assert.Contains(expected, await client.GetStringAsync("/api/context/complete?identifier=Target"));
+        Assert.Contains(expected, await client.GetStringAsync("/api/context/complete?identifier=Target&view=full"));
+        var multi = await client.PostAsJsonAsync("/api/context/multi", new { identifiers = new[] { "Target" } });
+        Assert.Contains(expected, await multi.Content.ReadAsStringAsync());
+    }
+
     private static async Task<WebApplication> StartAppAsync(
         IContextService service, ILanguageWorkerService? workers = null,
         IIndexCoordinator? coordinator = null)
