@@ -10,6 +10,9 @@ public sealed record ToolchainLocations(
     IReadOnlyList<string> ReferenceAssemblyRoots,
     IReadOnlyList<string> NetFrameworkRuntimes)
 {
+    /// <summary>Every location, each one found from this machine's own settings.</summary>
+    public IEnumerable<string> All => DotnetRoots.Concat(PackageFolders).Concat(ReferenceAssemblyRoots).Concat(NetFrameworkRuntimes);
+
     public static ToolchainLocations Detect()
     {
         var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
