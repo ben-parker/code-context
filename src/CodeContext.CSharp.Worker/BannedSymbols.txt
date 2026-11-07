@@ -44,6 +44,22 @@ M:System.Xml.Linq.XDocument.Load(System.String,System.Xml.Linq.LoadOptions);Use 
 M:System.Xml.Linq.XElement.Load(System.String);Use Disk.LoadXml: this opens the path, or a URL, itself
 M:System.Xml.Linq.XElement.Load(System.String,System.Xml.Linq.LoadOptions);Use Disk.LoadXml: this opens the path, or a URL, itself
 
+# The worker writes one file, through Disk.ReplaceStateFile. File and FileStream above cover the
+# usual ways; these are the others that take a path or a handle.
+T:System.IO.RandomAccess;The worker writes only its state file, through Disk.ReplaceStateFile
+T:System.IO.IsolatedStorage.IsolatedStorageFile;The worker writes only its state file, through Disk.ReplaceStateFile
+T:System.IO.Compression.ZipFile;The worker writes only its state file, through Disk.ReplaceStateFile
+T:System.IO.Compression.ZipFileExtensions;The worker writes only its state file, through Disk.ReplaceStateFile
+T:System.Xml.XmlTextWriter;The worker writes only its state file, through Disk.ReplaceStateFile
+M:System.Xml.XmlWriter.Create(System.String);The worker writes only its state file, through Disk.ReplaceStateFile
+M:System.Xml.XmlWriter.Create(System.String,System.Xml.XmlWriterSettings);The worker writes only its state file, through Disk.ReplaceStateFile
+M:System.Xml.XmlDocument.Save(System.String);The worker writes only its state file, through Disk.ReplaceStateFile
+M:System.Xml.Linq.XDocument.Save(System.String);The worker writes only its state file, through Disk.ReplaceStateFile
+M:System.Xml.Linq.XDocument.Save(System.String,System.Xml.Linq.SaveOptions);The worker writes only its state file, through Disk.ReplaceStateFile
+M:System.Xml.Linq.XElement.Save(System.String);The worker writes only its state file, through Disk.ReplaceStateFile
+M:System.Xml.Linq.XElement.Save(System.String,System.Xml.Linq.SaveOptions);The worker writes only its state file, through Disk.ReplaceStateFile
+T:Microsoft.CodeAnalysis.FileSystemExtensions;Compiling here never emits; this writes to a path
+
 M:Microsoft.CodeAnalysis.MetadataReference.CreateFromFile(System.String,Microsoft.CodeAnalysis.MetadataReferenceProperties,Microsoft.CodeAnalysis.DocumentationProvider);Use Disk.Reference: it refuses paths that would reach the network
 M:Microsoft.CodeAnalysis.AssemblyMetadata.CreateFromFile(System.String);Use Disk.Reference: it refuses paths that would reach the network
 M:Microsoft.CodeAnalysis.ModuleMetadata.CreateFromFile(System.String);Use Disk.Reference: it refuses paths that would reach the network

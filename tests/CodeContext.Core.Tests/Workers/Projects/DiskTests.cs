@@ -286,6 +286,155 @@ public sealed class DiskTests : IDisposable
         Assert.ThrowsAny<System.Xml.XmlException>(() => On(_directory).LoadXml(path));
     }
 
+    private string WorkspaceCache()
+        => Directory.CreateDirectory(Path.Combine(_directory, ".codecontext", "cache", "default")).FullName;
+
+    private static byte Written(Stream stream)
+    {
+        stream.WriteByte(7);
+        return 7;
+    }
+
+    [Fact]
+    public void AStateFileIsReplacedWhereTheHostKeepsIt()
+    {
+        var path = Path.Combine(WorkspaceCache(), "worker-csharp.0000000001.aaaaaaaa.state");
+        File.WriteAllText(path, "older");
+
+        Assert.Equal(7, On(_directory).ReplaceStateFile(path, Written, CancellationToken.None));
+
+        Assert.Equal([7], File.ReadAllBytes(path));
+        Assert.False(File.Exists(path + ".tmp"));
+    }
+
+    [Fact]
+    public void ARootWithATrailingSeparatorHasTheSameCache()
+    {
+        var path = Path.Combine(WorkspaceCache(), "worker-csharp.0000000001.aaaaaaaa.state");
+
+        On(_directory + Path.DirectorySeparatorChar).ReplaceStateFile(path, Written, CancellationToken.None);
+
+        Assert.True(File.Exists(path));
+    }
+
+    [WindowsFact]
+    public void ARootGivenByItsShortNameHasTheCacheTheHostNames()
+    {
+        // The host expands a root's short names, so the two spellings must meet. The directory is
+        // not there, so passing the location check shows as failing to find it, and nothing is written.
+        var host = Path.Combine(Path.GetFullPath(@"C:\PROGRA~1"), "cc-absent", ".codecontext", "cache", "default", "a.state");
+
+        Assert.Throws<DirectoryNotFoundException>(
+            () => On(@"C:\PROGRA~1\cc-absent").ReplaceStateFile(host, Written, CancellationToken.None));
+    }
+
+    [Theory]
+    [InlineData("a.state")]
+    [InlineData(".codecontext/a.state")]
+    [InlineData(".codecontext/cache/a.state")]
+    [InlineData(".codecontext/cache/default/deeper/a.state")]
+    [InlineData(".codecontext/cache/default/graph.ccsnap")]
+    [InlineData(".codecontext/cache/default/writer.lock")]
+    [InlineData(".codecontext/cache/default/../../../a.state")]
+    [InlineData(".codecontext/other/default/a.state")]
+    [InlineData("src/.codecontext/cache/default/a.state")]
+    [InlineData("../a.state")]
+    public void NothingElseCanBeWritten(string relative)
+    {
+        var parent = Directory.CreateDirectory(Path.Combine(_directory, "parent")).FullName;
+        var root = Directory.CreateDirectory(Path.Combine(parent, "repo")).FullName;
+        Directory.CreateDirectory(Path.Combine(root, ".codecontext", "cache", "default", "deeper"));
+        Directory.CreateDirectory(Path.Combine(root, ".codecontext", "other", "default"));
+        Directory.CreateDirectory(Path.Combine(root, "src", ".codecontext", "cache", "default"));
+        var path = Path.Combine(root, relative);
+        var before = Directory.GetFiles(_directory, "*", SearchOption.AllDirectories);
+
+        Assert.Throws<UnauthorizedAccessException>(() => On(root).ReplaceStateFile(path, Written, CancellationToken.None));
+
+        Assert.Equal(before, Directory.GetFiles(_directory, "*", SearchOption.AllDirectories));
+    }
+
+    [Fact]
+    public void AnotherRepositorysCacheCannotBeWritten()
+    {
+        var path = Path.Combine(WorkspaceCache(), "a.state");
+        var other = Directory.CreateDirectory(Path.Combine(_directory, "other")).FullName;
+
+        Assert.Throws<UnauthorizedAccessException>(() => On(other).ReplaceStateFile(path, Written, CancellationToken.None));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("a\0b.state")]
+    public void AnUnusablePathIsNotWritten(string path)
+        => Assert.Throws<UnauthorizedAccessException>(() => On(_directory).ReplaceStateFile(path, Written, CancellationToken.None));
+
+    [Fact]
+    public void WithoutARootNothingCanBeWritten()
+    {
+        var path = Path.Combine(WorkspaceCache(), "a.state");
+
+        Assert.Throws<UnauthorizedAccessException>(() => new Disk([_directory]).ReplaceStateFile(path, Written, CancellationToken.None));
+        Assert.Throws<UnauthorizedAccessException>(() => On(null).ReplaceStateFile(path, Written, CancellationToken.None));
+    }
+
+    [Fact]
+    public void AFailedWriteLeavesNoTempFile()
+    {
+        var path = Path.Combine(WorkspaceCache(), "a.state");
+
+        Assert.Throws<InvalidOperationException>(() => On(_directory).ReplaceStateFile<int>(
+            path, _ => throw new InvalidOperationException(), CancellationToken.None));
+
+        Assert.Empty(Directory.GetFiles(Path.GetDirectoryName(path)!));
+    }
+
+    [LocalShareFact]
+    public void AStateFileIsWrittenForARepositoryOnAShare()
+    {
+        var path = ThroughLocalShare(Path.Combine(WorkspaceCache(), "a.state"));
+
+        On(ThroughLocalShare(_directory)).ReplaceStateFile(path, Written, CancellationToken.None);
+
+        Assert.True(File.Exists(path));
+    }
+
+    [LocalShareTheory]
+    [InlineData(@"\\?\UNC\localhost\c$\")]
+    [InlineData(@"\??\UNC\localhost\c$\")]
+    [InlineData(@"\\127.0.0.1\c$\")]
+    public void AnotherSpellingOfTheShareIsNotWritten(string prefix)
+    {
+        var local = Path.Combine(WorkspaceCache(), "a.state");
+        var disk = On(ThroughLocalShare(_directory));
+
+        Assert.Throws<UnauthorizedAccessException>(() => disk.ReplaceStateFile(prefix + local[3..], Written, CancellationToken.None));
+
+        Assert.False(File.Exists(local));
+    }
+
+    [Fact]
+    public void AStatAndARawReadGoThroughTheGuard()
+    {
+        var path = RealFile();
+        var disk = On(_directory);
+
+        Assert.Equal((4L, File.GetLastWriteTimeUtc(path)), disk.Stat(path));
+        Assert.Equal(File.ReadAllBytes(path), disk.ReadAllBytes(path));
+        using var stream = disk.OpenForOneScan(path);
+        Assert.Equal(4, stream.Length);
+    }
+
+    [LocalShareFact]
+    public void TheNewReadsLookMissingWhenRefused()
+    {
+        var disk = On(@"C:\repo");
+
+        Assert.Throws<FileNotFoundException>(() => disk.Stat(OnLocalShare));
+        Assert.Throws<FileNotFoundException>(() => disk.ReadAllBytes(OnLocalShare));
+        Assert.Throws<FileNotFoundException>(() => disk.OpenForOneScan(OnLocalShare));
+    }
+
     [Fact]
     public void FullPathMatchesTheRuntimeForAnOrdinaryPath()
     {
