@@ -25,7 +25,8 @@ namespace CodeContext.Core.Snapshots
         byte[]? Key = null,
         SnapshotHostMeta? Host = null,
         ulong NextSequence = 1,
-        SnapshotView? LoadedView = null);
+        SnapshotView? LoadedView = null,
+        IReadOnlyList<string>? DroppedStateFiles = null);
 
     /// <summary>
     /// The start-up step of plan 3.5, run once as the first step of <see cref="IndexCoordinator"/> before
@@ -226,9 +227,9 @@ namespace CodeContext.Core.Snapshots
             // Checked again before anything is deleted (see CacheDirectory.RecheckLevels).
             if (writer && directory.RecheckLevels() is { } chainRefusal) return Disable(chainRefusal);
 
-            var (outcome, view, nextSequence) = SelectAndLoad(directory, key, host, writer, beforePublish);
+            var (outcome, view, nextSequence, droppedStateFiles) = SelectAndLoad(directory, key, host, writer, beforePublish);
             return writer
-                ? new SnapshotStartupResult(SnapshotCacheMode.Writer, null, outcome, directory, key, host, nextSequence, view)
+                ? new SnapshotStartupResult(SnapshotCacheMode.Writer, null, outcome, directory, key, host, nextSequence, view, droppedStateFiles)
                 : new SnapshotStartupResult(SnapshotCacheMode.ReadOnly, lockReason, outcome, Host: host, Key: key);
         }
 
@@ -279,7 +280,7 @@ namespace CodeContext.Core.Snapshots
         /// one refused for I/O, may still be valid and must not outrank a new write; a proven-invalid one can
         /// never be kept.
         /// </summary>
-        private (CacheLoadOutcome Outcome, SnapshotView? View, ulong NextSequence) SelectAndLoad(
+        private (CacheLoadOutcome Outcome, SnapshotView? View, ulong NextSequence, IReadOnlyList<string>? DroppedStateFiles) SelectAndLoad(
             CacheDirectory directory, byte[] key, SnapshotHostMeta host, bool writer, Action<CacheLoadOutcome>? beforePublish)
         {
             var started = Stopwatch.GetTimestamp();
@@ -339,11 +340,11 @@ namespace CodeContext.Core.Snapshots
                         $"{refusals[0].File.Name}: {refusals[0].Rejection}: {refusals[0].Reason}");
                 if (refusals.Count > 0)
                     _logger.LogInformation("No snapshot was used ({Reason}); scanning without one.", outcome.Reason);
-                return (outcome, null, nextSequence);
+                return (outcome, null, nextSequence, null);
             }
             if (loaded is null)
             {
-                return (new CacheLoadOutcome(CacheLoadKind.Ignored, "the graph store already held facts"), null, nextSequence);
+                return (new CacheLoadOutcome(CacheLoadKind.Ignored, "the graph store already held facts"), null, nextSequence, null);
             }
 
             var (result, annotations, coverage) = loaded.Value;
@@ -374,7 +375,7 @@ namespace CodeContext.Core.Snapshots
             _logger.LogInformation(
                 "Loaded snapshot {Name} ({Bytes} bytes, {Shards} shards) in {Milliseconds} ms; answering from it while the files are checked.",
                 kept.Name, header.FileLength, result.Shards.Count, (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds);
-            return (published, view, nextSequence);
+            return (published, view, nextSequence, result.DroppedStateFiles);
         }
 
         private (CacheFile? Kept, (SnapshotLoadResult Result, List<KeyValuePair<ShardKey, ShardAnnotation>> Annotations,

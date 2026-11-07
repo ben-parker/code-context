@@ -187,6 +187,9 @@ namespace CodeContext.Core.Snapshots
         // Guarded by _gate.
         private SnapshotView _written = SnapshotView.Empty;
         private SnapshotView? _inFlight;
+        // State files named by a snapshot on disk that _written does not describe: shards dropped at load, and a
+        // failed write whose file could not be removed. The next written snapshot retires those, so it empties this.
+        private readonly HashSet<string> _otherSnapshotState = new(StringComparer.Ordinal);
         private SnapshotView _lastSeen = SnapshotView.Empty;
         private DateTimeOffset _lastChangeAt;
         private DateTimeOffset? _dirtySince;
@@ -302,6 +305,7 @@ namespace CodeContext.Core.Snapshots
                     _host = result.Host;
                     _nextSequence = result.NextSequence;
                     _written = result.LoadedView ?? SnapshotView.Empty;
+                    _otherSnapshotState.UnionWith(result.DroppedStateFiles ?? []);
                     _lastSeen = _written;
                 }
                 var timer = _time.CreateTimer(_ => OnTimer(), null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
@@ -653,6 +657,7 @@ namespace CodeContext.Core.Snapshots
         {
             var started = Stopwatch.GetTimestamp();
             string? tempPath = null;
+            string? renamedPath = null;
             try
             {
                 CacheDirectory? directory;
@@ -695,6 +700,7 @@ namespace CodeContext.Core.Snapshots
                 _settings.BeforeRename?.Invoke(tempPath);
                 File.Move(tempPath, finalPath, overwrite: false);
                 tempPath = null;
+                renamedPath = finalPath;
 
                 var opened = SnapshotFile.Open(finalPath, _key!, Expectations());
                 using (opened.File)
@@ -702,6 +708,7 @@ namespace CodeContext.Core.Snapshots
                     if (opened.File is null)
                     {
                         DeleteQuietly(finalPath);
+                        KeepStateOfLeftoverSnapshot(finalPath, capture);
                         return Failed("verify", $"the written snapshot does not open: {opened.Rejection} {opened.Reason}");
                     }
                 }
@@ -715,11 +722,22 @@ namespace CodeContext.Core.Snapshots
             catch (Exception exception)
             {
                 if (tempPath is not null) DeleteQuietly(tempPath);
+                if (renamedPath is not null) KeepStateOfLeftoverSnapshot(renamedPath, capture);
                 return Failed(exception.GetType().Name + ":" + exception.HResult, exception.Message);
             }
         }
 
         private static WriteOutcome Failed(string cause, string message) => new(WriteOutcomeKind.Failed, cause, message);
+
+        /// <summary>
+        /// A renamed snapshot that failed verification and is still there may be valid (the refusal may have been an
+        /// antivirus's sharing violation), and the next start would try it, so the state files it names stay.
+        /// </summary>
+        private void KeepStateOfLeftoverSnapshot(string path, SnapshotCapture capture)
+        {
+            if (!File.Exists(path)) return;
+            lock (_gate) _otherSnapshotState.UnionWith(BoundStateFiles(capture.View));
+        }
 
         private SnapshotWriteInput Input(SnapshotCapture capture, ulong sequence)
         {
@@ -786,6 +804,69 @@ namespace CodeContext.Core.Snapshots
             }
         }
 
+        /// <summary>
+        /// After a failed write: deletes every worker state file that nothing can use, or each retry would leave one
+        /// behind until the next success or start. Kept are the files the snapshots on disk name (the last written
+        /// view, <see cref="_otherSnapshotState"/>) and every file a binding in the store names, so nothing is left to
+        /// un-record: a file goes only when no binding holds it. The published annotations are enough, since a staged
+        /// reconciliation starts from them and can only drop a binding, and no binding can appear meanwhile: only a
+        /// capture records one, and none runs while <see cref="_writing"/> is set, which this runs under. For the
+        /// same reason no save is in progress here. Only this code's state file names are listed; temp files are left
+        /// to the retire pass and the start-up cleanup. Each delete is made under the gate with the writer lock
+        /// held, so a write that outlives a timed-out stop deletes nothing, not even a file listed before the stop.
+        /// </summary>
+        private void TryRemoveUnreferencedStateFiles()
+        {
+            try
+            {
+                CacheDirectory? directory;
+                HashSet<string> keep;
+                lock (_gate)
+                {
+                    if (!MayDeleteLocked()) return;
+                    directory = _directory;
+                    keep = BoundStateFiles(_written);
+                    keep.UnionWith(_otherSnapshotState);
+                }
+                if (directory is null || _database is null || !LevelsStillPlain(directory)) return;
+                foreach (var annotation in _database.LatchPublished().Annotations.Values)
+                    if (annotation.State is { } state) keep.Add(state.FileName);
+
+                var busy = 0;
+                foreach (var file in directory.EnumerateOwnFiles())
+                {
+                    if (file.Kind != CacheFileKind.WorkerState || keep.Contains(file.Name)) continue;
+                    lock (_gate)
+                    {
+                        if (!MayDeleteLocked()) return;
+                        if (!CacheDirectory.TryDelete(file)) busy++;
+                    }
+                }
+                if (busy > 0) _logger.LogDebug("{Count} unused worker state file(s) are in use and will be deleted later.", busy);
+            }
+            catch (Exception exception)
+            {
+                // Costs only disk space; the next failed write, the next retire or the next start tries again.
+                _logger.LogDebug(exception, "Removing unused worker state files failed.");
+            }
+        }
+
+        /// <summary>This instance is the writer and still holds the lock. Dispose releases it without changing the mode.</summary>
+        private bool MayDeleteLocked() => _status.Mode == SnapshotCacheMode.Writer && _lock is not null;
+
+        /// <summary>
+        /// The state files <paramref name="view"/>'s annotations hold, anchored or not. What a snapshot on disk names
+        /// does not change when a legacy in-place write later moves its shard off the anchor, which empties
+        /// <see cref="SnapshotShardView.State"/>.
+        /// </summary>
+        private static HashSet<string> BoundStateFiles(SnapshotView view)
+        {
+            var names = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var shard in view.Shards)
+                if (shard.Annotation?.State is { } state) names.Add(state.FileName);
+            return names;
+        }
+
         private static HashSet<string> ReferencedStateFiles(SnapshotView view)
         {
             var names = new HashSet<string>(StringComparer.Ordinal);
@@ -806,6 +887,8 @@ namespace CodeContext.Core.Snapshots
         private void FinishWrite(SnapshotCapture capture, WriteOutcome outcome)
         {
             var firstOfItsCause = false;
+            // Before the flag below clears: from then on a capture may be saving a file no binding names yet.
+            if (outcome.Kind == WriteOutcomeKind.Failed) TryRemoveUnreferencedStateFiles();
             try
             {
                 lock (_gate)
@@ -817,6 +900,7 @@ namespace CodeContext.Core.Snapshots
                     {
                         case WriteOutcomeKind.Written:
                             _written = capture.View;
+                            _otherSnapshotState.Clear();
                             _lastLoggedFailure = null;
                             _status = _status with
                             {

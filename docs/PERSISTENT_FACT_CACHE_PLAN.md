@@ -655,7 +655,7 @@ file.
 | Crash or kill | The last completed snapshot remains. The next start verifies against the files and re-walks what moved. |
 | Crash mid-write | Only a `.tmp` exists; it is deleted at the next start. |
 | Crash after rename, before retire | Two valid snapshots; the newest wins and the older is deleted. |
-| Worker state saved, host write failed | The older pair stays valid; the newer state file is deleted at cleanup. |
+| Worker state saved, host write failed | The older pair stays valid; the state files that neither a snapshot on disk nor a binding in the store names are deleted at once, while the writer lock is held; what remains is deleted at the next written snapshot or at the next start. |
 | Write error (disk full, read-only root) | Logged, exposed as `indexing.cache.lastWriteError`, retried after the next commit. Serving is unaffected. |
 | Second instance on the root | No lock: it loads, never writes or deletes. A snapshot it has mapped cannot be deleted by the writer on Windows; the delete is retried later. If a file vanishes between selection and open, it retries selection, then scans. |
 
@@ -2456,6 +2456,14 @@ protocol.
 
 ### Closing steps
 
+Status 2026-11-06: step 1 done by a fresh Opus agent at `b34b2f9`: 1 blocker, 1 should-fix,
+6 nits; 25 stopped-worker restore scenarios matched a fresh scan field by field. The blocker
+was the known `appsettings.json` hole, closed by the content-root fix on `main` (`647ce36`).
+The should-fix (failed writes left state files) and nit 6 are fixed; nits 1 to 5 are in
+section 9. Not checked by the audit: Linux and macOS, a cached start through the real CLI, a
+real kill mid-write, a line-by-line read of the two file readers, new fuzzing, a byte-level
+wire comparison. Step 2 done: the skill grew by about 25 words, kept for the label guidance.
+
 1. Final adversarial audit by a fresh agent context: bugs and invariant breaks in the
    delivered code first, plan adherence second. Findings are fixed, reviewed and re-gated.
 2. Dedicated pass over `skill/SKILL.md`, its frontmatter description and
@@ -2586,7 +2594,12 @@ into the release.
 - `indexing.cache` now reports `verification: baseline` and `workerStateBytes` for the C#
   worker. A rebuilt worker refuses state saved by an earlier build and re-walks everything.
   (Phase 6)
-- Not run: Linux and macOS. (Phase 6)
+- Measured against v0.10.7, median of 5, cached start to first answer: jellyfin 18.2 s to
+  1.14 s, d2-roguelike 3.50 s to 0.62 s, code-context 4.86 s to 0.65 s; to `ready`: 17.7 s to
+  5.04 s, 3.33 s to 2.20 s, 4.77 s to 2.50 s. Warm edits are unchanged. (Phase 11)
+- The first edit after a cached start costs +0.33 to +0.50 s against v0.10.7. (Phase 11)
+- Not run: Linux and macOS, a cold OS file cache, and hibernation, which moved to 0.12.
+  (Phases 6 and 11)
 
 ## 9. Known items
 
@@ -2598,7 +2611,14 @@ into the release.
 | `JsonRpcConnectionTests.Notification_DispatchesToHandler` 30 s wait | Left as is; the cause of slow tests under suite load is unknown and out of scope. Phase 5 must not shorten it. |
 | Test worker starts needing `TestWorkerOptions.Patient()` | Rule for all phases; new real-worker tests use it |
 | `ParserProcessSupervisorTests` `CrashingRepeatedly...` and `MalformedOutput...` failed in 1 of 8 full-suite runs on `main` ("The pipe is being closed", state `Failed` where `Unavailable` is expected) | Predates this work: a race in how the supervisor classifies a dying worker. Phase 9 changes that code. If the hibernation work explains it, fix it with a test; if not, record what was seen. The assertion is not loosened. A failure of these two tests in a gate run before phase 9 is re-run once and recorded, not treated as a regression of the phase |
-| Dedicated skill pass | Closing step 2 |
+| Dedicated skill pass | Done, closing step 2 |
+| First edit after a cached start, +0.33 to +0.50 s | Accepted for 0.11; tracing it moves to 0.12 with phase 10 |
+| `codecontext stop` kills the process tree after 5 s, while the final capture may take 10 s | Closing audit nit 1, by reading only. Crash-safe: the older pair stays valid. Open for 0.12 |
+| A write that outlives a timed-out stop runs `TryRetireOlderThan` without the lock and could delete a newer instance's state file | Closing audit nit 2, by reading only. The result is a full walk. Open for 0.12 |
+| The supervisor does not check that a `workspace/index` without a baseline replaces the workspace | Closing audit nit 3, by reading only. A breach by a third-party worker, not by a bundled one. Open for 0.12 |
+| A watcher batch dequeued before a refresh-started full scan can replace a loaded shard and use up the baseline | Closing audit nit 4, by reading only. It stays labelled `verifying` and the scan repairs it. Open for 0.12 |
+| No directory fsync after a rename | Closing audit nit 5, not run. A power loss on Unix gives an older pair or no baseline. Open for 0.12 |
+| `dotnet test` leaves two empty random-named directories in `%TEMP%` per invocation | The tool's, not a test's; `dotnet vstest` leaves none. Left alone |
 | Legacy in-place store writes (`UpsertNode`, `RemoveNode`, `UpsertEdge`, `RemoveEdgesTouchingNode`) during a staged reconciliation reach the live map at once and survive the reconciliation's commit only where the staged map still shares the shard object; a write to a shard the reconciliation already rebuilt, or to a new shard key, is dropped by that commit | Predates this work and is kept; pinned by `LegacyUpsertIntoANewShard_DuringAReconciliation_IsLiveUntilItsCommit` and the phase 1 legacy-mutation tests. No production path writes this way during a reconciliation. Phase 8 must keep a mapped shard behaving as a heap shard here, which those tests check |
 | A shard key whose facts were all removed stays in the shard map; `RemoveNode(null)` throws when any shard exists and returns false on an empty store | Found in phase 1; not changed. Phase 2's writer must skip a shard with no facts; phase 3's capture must not treat an empty key as a change |
 | Status `languageBreakdown` order follows scan history (file-metadata repository) | Out of scope unless a later phase needs byte-identical status |

@@ -475,6 +475,7 @@ public partial class SnapshotServiceTests
         Assert.Equal(SnapshotCacheMode.Stopped, harness.Service.Status.Mode);
 
         release.SetResult();
+        await SnapshotServiceHarness.WaitUntilAsync(() => saver.FilesWritten == 1, "the abandoned save to write its file");
         // The flag clears before the files are dropped, so the file's going is what says the capture was handled. The
         // binding must be gone by then: it is un-recorded first.
         await SnapshotServiceHarness.WaitUntilAsync(() => !harness.StateFiles().Any(), "the state file to be deleted");
@@ -513,6 +514,269 @@ public partial class SnapshotServiceTests
         hold.Set();
         await mutation;
         harness.ScanState.CompleteScan();
+    }
+
+    private static async Task CommitAndWriteAsync(SnapshotServiceHarness harness, int request)
+    {
+        await harness.CommitAsync(() => harness.CommitFacts(request, annotation: Produced(request)));
+        await harness.AdvanceAsync(Quiet);
+    }
+
+    [Fact]
+    public async Task FailedWrites_DoNotPileUpStateFiles()
+    {
+        var database = new InMemoryDatabase();
+        var saver = new StubStateSaver(database);
+        await using var harness = new SnapshotServiceHarness(database: database, workers: saver,
+            configure: settings => settings with { WrapStream = _ => new FailingStream() });
+        await harness.StartAsync();
+
+        for (var round = 1; round <= 5; round++) await CommitAndWriteAsync(harness, round);
+
+        Assert.Equal(5, harness.Service.Status.WritesFailed);
+        Assert.Equal(5, saver.Calls.Count);
+        Assert.Empty(harness.Snapshots());
+        // Only the newest save stays: the store's binding still names it.
+        Assert.Equal([Path.GetFileName(saver.Calls[^1].Parameters.StatePath)], harness.StateFiles());
+    }
+
+    [Fact]
+    public async Task AfterFailedWrites_ASuccessfulWriteAndARestartStillAcceptTheBaseline()
+    {
+        var basePath = NewBase();
+        try
+        {
+            var failing = true;
+            string stateName;
+            var database = new InMemoryDatabase();
+            var saver = new StubStateSaver(database);
+            await using (var harness = new SnapshotServiceHarness(basePath, database: database, workers: saver,
+                configure: settings => settings with { WrapStream = stream => System.Threading.Volatile.Read(ref failing) ? new FailingStream() : stream }))
+            {
+                await harness.StartAsync();
+                for (var round = 1; round <= 5; round++) await CommitAndWriteAsync(harness, round);
+                stateName = Path.GetFileName(saver.Calls[^1].Parameters.StatePath);
+
+                // Another shard changes: the binding still describes the fake shard, so its file is written, not saved again.
+                System.Threading.Volatile.Write(ref failing, false);
+                await harness.CommitAsync(() => Assert.True(harness.Database.TryCommitGeneration(harness.Database.LastCommittedGeneration + 1,
+                    [SnapshotServiceHarness.Node("O", key: Other)], [], new CommitScope(Other.ParserId, Other.WorkspaceId, null))));
+                await harness.AdvanceAsync(Quiet);
+
+                Assert.Equal(1, harness.Service.Status.WritesCompleted);
+                Assert.Equal(5, saver.Calls.Count);
+                Assert.Equal(stateName, FakeShardInfo(harness).StateFileName);
+                Assert.Equal([stateName], harness.StateFiles());
+            }
+            Assert.Equal(stateName, Path.GetFileName((await NextStartBaselineAsync(basePath))!.StatePath));
+        }
+        finally
+        {
+            Directory.Delete(basePath, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task FailedWrites_KeepTheStateFileOfTheSnapshotOnDisk()
+    {
+        var basePath = NewBase();
+        try
+        {
+            var failing = false;
+            string stateName;
+            var database = new InMemoryDatabase();
+            var saver = new StubStateSaver(database);
+            await using (var harness = new SnapshotServiceHarness(basePath, database: database, workers: saver,
+                configure: settings => settings with { WrapStream = stream => System.Threading.Volatile.Read(ref failing) ? new FailingStream() : stream }))
+            {
+                await harness.StartAsync();
+                await CommitAndWriteAsync(harness, 1);
+                stateName = FakeShardInfo(harness).StateFileName!;
+
+                System.Threading.Volatile.Write(ref failing, true);
+                for (var round = 2; round <= 5; round++) await CommitAndWriteAsync(harness, round);
+
+                Assert.Equal(4, harness.Service.Status.WritesFailed);
+                Assert.Equal(stateName, FakeShardInfo(harness).StateFileName);
+                // The snapshot's file and the newest save, which the store's binding names.
+                Assert.Equal(new[] { stateName, Path.GetFileName(saver.Calls[^1].Parameters.StatePath) }.Order(StringComparer.Ordinal), harness.StateFiles());
+            }
+            Assert.Equal(stateName, Path.GetFileName((await NextStartBaselineAsync(basePath))!.StatePath));
+        }
+        finally
+        {
+            Directory.Delete(basePath, recursive: true);
+        }
+    }
+
+    /// <summary>A legacy in-place write moves the written shard off its anchor; the snapshot on disk still names the file.</summary>
+    [Fact]
+    public async Task FailedWrites_KeepTheSnapshotsStateFile_AfterAnInPlaceWriteMovedItsShardOffTheAnchor()
+    {
+        var basePath = NewBase();
+        try
+        {
+            var failing = false;
+            string stateName;
+            var database = new InMemoryDatabase();
+            await using (var harness = new SnapshotServiceHarness(basePath, database: database, workers: new StubStateSaver(database),
+                configure: settings => settings with { WrapStream = stream => System.Threading.Volatile.Read(ref failing) ? new FailingStream() : stream }))
+            {
+                await harness.StartAsync();
+                await CommitAndWriteAsync(harness, 1);
+                stateName = FakeShardInfo(harness).StateFileName!;
+
+                System.Threading.Volatile.Write(ref failing, true);
+                harness.Database.UpsertNode(SnapshotServiceHarness.Node("Legacy"));
+                for (var round = 2; round <= 3; round++) await CommitAndWriteAsync(harness, round);
+
+                Assert.Equal(2, harness.Service.Status.WritesFailed);
+                Assert.Contains(stateName, harness.StateFiles());
+            }
+            Assert.Equal(stateName, Path.GetFileName((await NextStartBaselineAsync(basePath))!.StatePath));
+        }
+        finally
+        {
+            Directory.Delete(basePath, recursive: true);
+        }
+    }
+
+    /// <summary>The loaded view lacks a dropped shard, but the snapshot on disk names its state file, as the start-up cleanup knows.</summary>
+    [Fact]
+    public async Task FailedWrite_KeepsTheStateFileOfAShardDroppedAtLoad()
+    {
+        var basePath = NewBase();
+        try
+        {
+            string stateName;
+            var database = new InMemoryDatabase();
+            await using (var first = new SnapshotServiceHarness(basePath, database: database, workers: new StubStateSaver(database)))
+            {
+                await first.StartAsync();
+                await first.CommitAsync(() =>
+                {
+                    first.CommitFacts(1, annotation: Produced(1));
+                    Assert.True(first.Database.TryCommitGeneration(first.Database.LastCommittedGeneration + 1,
+                        [SnapshotServiceHarness.Node("O", key: Other)], [], new CommitScope(Other.ParserId, Other.WorkspaceId, null)));
+                });
+                await first.AdvanceAsync(Quiet);
+                stateName = FakeShardInfo(first).StateFileName!;
+            }
+
+            await using (var second = new SnapshotServiceHarness(basePath, isIndexedParser: parser => parser == Other.ParserId,
+                configure: settings => settings with { WrapStream = _ => new FailingStream() }))
+            {
+                await second.StartAsync();
+                await second.CommitAsync(() => Assert.True(second.Database.TryCommitGeneration(second.Database.LastCommittedGeneration + 1,
+                    [SnapshotServiceHarness.Node("O2", key: Other)], [], new CommitScope(Other.ParserId, Other.WorkspaceId, null))));
+                await second.AdvanceAsync(Quiet);
+
+                Assert.Equal(1, second.Service.Status.WritesFailed);
+                Assert.Equal([stateName], second.StateFiles());
+            }
+            Assert.Equal(stateName, Path.GetFileName((await NextStartBaselineAsync(basePath))!.StatePath));
+        }
+        finally
+        {
+            Directory.Delete(basePath, recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// A write that failed verification and whose file could not be removed: the next start would try that file, so
+    /// its state file outlives the binding, until a written snapshot retires both. Read-only stops a delete only on Windows.
+    /// </summary>
+    [Fact]
+    public async Task FailedWrite_KeepsTheStateFileOfASnapshotItCouldNotRemove()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var mode = "leave a damaged file";
+        var database = new InMemoryDatabase();
+        var saver = new StubStateSaver(database);
+        await using var harness = new SnapshotServiceHarness(database: database, workers: saver, configure: settings => settings with
+        {
+            WrapStream = stream => System.Threading.Volatile.Read(ref mode) == "full disk" ? new FailingStream() : stream,
+            BeforeRename = temp =>
+            {
+                if (System.Threading.Volatile.Read(ref mode) != "leave a damaged file") return;
+                var bytes = File.ReadAllBytes(temp);
+                bytes[bytes.Length / 2] ^= 0xff;
+                File.WriteAllBytes(temp, bytes);
+                File.SetAttributes(temp, FileAttributes.ReadOnly);
+            },
+        });
+        await harness.StartAsync();
+        try
+        {
+            await CommitAndWriteAsync(harness, 1);
+            Assert.Contains("does not open", harness.Service.Status.LastWriteError);
+            var leftover = Assert.Single(harness.Snapshots());
+            var named = Assert.Single(harness.StateFiles());
+
+            // The store's binding moves on, and a failure's cleanup finds only that snapshot still naming the file.
+            System.Threading.Volatile.Write(ref mode, "full disk");
+            await CommitAndWriteAsync(harness, 2);
+            Assert.Equal(2, harness.Service.Status.WritesFailed);
+            Assert.Contains(named, harness.StateFiles());
+
+            System.Threading.Volatile.Write(ref mode, "working");
+            await CommitAndWriteAsync(harness, 3);
+            Assert.NotEqual(leftover, Assert.Single(harness.Snapshots()));
+            Assert.Equal(FakeShardInfo(harness).StateFileName, Assert.Single(harness.StateFiles()));
+        }
+        finally
+        {
+            // A failed assertion must not leave a read-only file that stops the harness deleting its directory.
+            System.Threading.Volatile.Write(ref mode, "working");
+            foreach (var snapshot in harness.Snapshots()) File.SetAttributes(Path.Combine(harness.WorkspacePath, snapshot), FileAttributes.Normal);
+        }
+    }
+
+    [Fact]
+    public async Task FailedWrite_DeletesOnlyThisCodesStateFileNames()
+    {
+        await using var harness = new SnapshotServiceHarness(configure: settings => settings with { WrapStream = _ => new FailingStream() });
+        await harness.StartAsync();
+        string[] foreign = ["worker-notes.txt", "worker-fake.0000000001.abcdefgh.state", "worker-fake.1.abcdef01.state", "worker-.0000000001.abcdef01.state"];
+        foreach (var name in foreign) File.WriteAllText(Path.Combine(harness.WorkspacePath, name), "not ours");
+        var orphan = WorkerStateFile.FormatName("fake", 99, new string('a', WorkerStateFile.StateIdLength))!;
+        File.WriteAllText(Path.Combine(harness.WorkspacePath, orphan), "ours");
+
+        await harness.CommitAsync();
+        await harness.AdvanceAsync(Quiet);
+
+        Assert.Equal(1, harness.Service.Status.WritesFailed);
+        Assert.Equal(foreign.Order(StringComparer.Ordinal), harness.StateFiles());
+    }
+
+    /// <summary>A write that outlives a timed-out stop may no longer hold the lock, so its failure deletes nothing: the file may be a newer instance's.</summary>
+    [Fact]
+    public async Task FailedWrite_AfterAStopThatTimedOut_DeletesNoStateFile()
+    {
+        using var release = new System.Threading.ManualResetEventSlim();
+        await using var harness = new SnapshotServiceHarness(configure: settings => settings with
+        {
+            BeforeRename = _ =>
+            {
+                release.Wait(TimeSpan.FromSeconds(20));
+                throw new IOException("the rename failed");
+            },
+        });
+        await harness.StartAsync();
+        var orphan = WorkerStateFile.FormatName("fake", 99, new string('a', WorkerStateFile.StateIdLength))!;
+        File.WriteAllText(Path.Combine(harness.WorkspacePath, orphan), "a newer instance");
+        await harness.CommitAsync();
+
+        var stop = harness.Service.StopAsync(default);
+        await SnapshotServiceHarness.WaitUntilAsync(() => harness.TempFiles().Count == 1, "the final write to start");
+        harness.Time.Advance(harness.Settings.ShutdownFlushTimeout);
+        await stop.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal(SnapshotCacheMode.Stopped, harness.Service.Status.Mode);
+
+        release.Set();
+        await harness.Service.CurrentWrite;
+        Assert.Equal(1, harness.Service.Status.WritesFailed);
+        Assert.Equal([orphan], harness.StateFiles());
     }
 
     private static string NewBase() => Path.Combine(Path.GetTempPath(), "ccsnap-" + Guid.NewGuid().ToString("N"));

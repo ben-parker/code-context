@@ -349,6 +349,11 @@ internal sealed class StubStateSaver(InMemoryDatabase database) : IWorkerStateSa
     /// <summary>Awaited after a call is recorded and before the worker acts on it (a slow save, or a change meanwhile).</summary>
     public Func<string, Task>? BeforeSave { get; set; }
 
+    /// <summary>Saves that have written their file, so a test can tell a file not yet written from one deleted.</summary>
+    public int FilesWritten => Volatile.Read(ref _filesWritten);
+
+    private int _filesWritten;
+
     public async Task<SaveStateResult?> SaveStateAsync(string parserId, ShardLineage lineage, SaveStateParams parameters, CancellationToken ct)
     {
         Calls.Add((parserId, lineage, parameters,
@@ -372,6 +377,7 @@ internal sealed class StubStateSaver(InMemoryDatabase database) : IWorkerStateSa
         var bytes = System.Text.Encoding.UTF8.GetBytes("state " + parameters.StateId);
         File.WriteAllBytes(parameters.StatePath + ".tmp", bytes);
         File.Move(parameters.StatePath + ".tmp", parameters.StatePath, overwrite: true);
+        Interlocked.Increment(ref _filesWritten);
         return new SaveStateResult(parameters.WorkspaceId,
             Behaviour == Mode.WrongId ? new string('0', 32) : parameters.StateId, Saved: true,
             Behaviour == Mode.WrongLength ? bytes.Length + 1 : bytes.Length,

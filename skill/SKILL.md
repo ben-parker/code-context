@@ -1,6 +1,6 @@
 ---
 name: code-context
-description: Use BEFORE grep/Read whenever the question is about a symbol's relationships in C# or TypeScript/JavaScript code — who calls, implements, or depends on it, the blast radius of changing or deleting it, which tests cover it — or exact syntax structure. Grep finds text matches; this answers dependency questions from a live index in one query. ONLY worker-supported source files are indexed — for shell scripts, SQL, Python, YAML/config, docs, or any literal-string search, use grep instead.
+description: Use BEFORE grep/Read for C# and TypeScript/JavaScript questions about a symbol's relationships - who calls, implements, or depends on it, the impact of changing or deleting it, which tests cover it - or exact syntax structure. One query on a live index replaces many greps. Not for literal strings, comments, config values, filenames, docs, or non-indexed files (shell, SQL, Python, YAML/JSON, markdown, csproj): use grep/rg.
 ---
 
 # CodeContext
@@ -17,7 +17,7 @@ tool for literal strings, comments, configuration values, filenames, and docs.
 ```bash
 codecontext query ContextService            # relationships, depth 1
 codecontext query ContextService --tests    # add static test evidence (off by default)
-codecontext query multi Foo Bar             # several identifiers, one round trip
+codecontext query multi Foo Bar             # several identifiers, one round trip, in order
 ```
 
 `query` auto-discovers (or starts) the repo's instance, waits for indexing, and
@@ -32,22 +32,26 @@ Reading results:
   unambiguous follow-up. Without `--exact`, simple names match exact-first with
   substring fallback; check `matchMode` and ambiguity hints. `Type.Member` and
   longer dotted suffixes of a qualified name also match.
-- Every emitted section shows returned/total counts and marks truncation — check
-  them before treating an omission as absence, and raise `--limit` for the rest of
-  a truncated list. `usedBy` is always printed; other zero-count sections are
-  omitted.
-- A `cache verifying` or `cache unverified` line before a result (first, or after each
-  `query` line in `query multi`) means it comes from the index saved by an earlier run,
-  before the files were re-checked: it may be stale, and a `missing` or empty `usedBy` is
-  not conclusive. Query again once `codecontext status --path .` shows `indexing.status`
-  `ready` (for `unverified`, after `POST /api/index/refresh` or a restart), or cross-check
-  with `rg`.
+- Sections show returned/total counts and mark truncation: check them before treating
+  an omission as absence, and raise `--limit`. `usedBy` is always printed; other
+  zero-count sections are omitted.
+- A `cache verifying` or `cache unverified` line (first, or after each `query` line in
+  `query multi`; REST/MCP: a `cache` object with `state` and `snapshotAt`) means the
+  answer comes from the index saved by an earlier run, not yet checked against the
+  files. A file changed while the instance was stopped can make it wrong until
+  verification finishes, and a `missing` or empty `usedBy` is not conclusive. No label
+  means this caveat does not apply.
+  - `verifying`: the re-check is running. Hits are fine for orientation; before editing
+    or concluding absence, wait until `codecontext status --path .` shows
+    `indexing.status` `ready`, then query again.
+  - `unverified`: the re-check failed (`indexing.status` `error`) and the answers stay
+    saved ones. Do not wait: confirm with `rg -w <Name>` or by reading the file, or run
+    `POST /api/index/refresh` (or restart) and query again once `ready`.
 - `relationships not loaded` means nothing was fetched: the name was ambiguous
   (re-query with a target's identifier) or the depth was 0. It says nothing about
   whether the symbol has users.
-- Empty relationships and truncated results are still successful queries; an
-  unmatched identifier exits 2. `query multi` reduces round trips, not response
-  size, and preserves identifier order.
+- An unmatched identifier exits 2, labelled or not; empty or truncated results are
+  otherwise successful.
 
 ## Interpret relationships
 
@@ -56,14 +60,13 @@ Reading results:
 - Method `usedBy` unifies statically known interface, implementation, and override
   callers; `bindings` identifies the called family role. This is potential
   dispatch, not runtime certainty.
-- `transitiveUses` / `transitiveUsedBy` are nodes beyond distance one.
 - `fileDependencies` / `fileDependents` aggregate resolved semantic edges crossing
   the selected file, excluding unresolved, same-file, and proximity-only links.
   They describe the whole file named after `of`, not the queried member: a file
   listed there is not evidence that it uses that member.
-- `relatedItems` is proximity, not dependency evidence. Test evidence is static
-  graph evidence, not runtime coverage; `directlyTested` means a static call to
-  the symbol or, for a type, one of its members.
+- `relatedItems` is proximity, not dependency evidence. Test evidence is static, not
+  runtime coverage; `directlyTested` means a static call to the symbol or, for a
+  type, one of its members.
 
 ## What is recorded
 
