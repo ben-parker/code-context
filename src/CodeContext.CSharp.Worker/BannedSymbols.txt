@@ -1,0 +1,71 @@
+# Every route to the file system a repository's text could steer, so that the worker reaches
+# the disk only through Projects/Disk.cs. RS0030 is an error in this project. Only Disk.cs
+# suppresses it. BannedApiGuardTests fails if an entry goes missing or the suppression spreads.
+T:System.IO.File;Use Disk: it refuses paths that would reach the network
+T:System.IO.Directory;Use Disk: it refuses paths that would reach the network
+T:System.IO.FileInfo;Use Disk: it refuses paths that would reach the network
+T:System.IO.DirectoryInfo;Use Disk: it refuses paths that would reach the network
+T:System.IO.FileSystemInfo;Use Disk: it refuses paths that would reach the network
+T:System.IO.FileStream;Use Disk.OpenRead: it refuses paths that would reach the network
+T:System.IO.FileSystemWatcher;Use Disk: it refuses paths that would reach the network
+T:System.IO.DriveInfo;Use Disk: it refuses paths that would reach the network
+T:System.IO.MemoryMappedFiles.MemoryMappedFile;Use Disk: it refuses paths that would reach the network
+T:System.IO.Enumeration.FileSystemEnumerable`1;Use Disk: it refuses paths that would reach the network
+T:System.IO.Enumeration.FileSystemEnumerator`1;Use Disk: it refuses paths that would reach the network
+
+# Normalizing a path asks the file system for the long form of anything holding a tilde.
+M:System.IO.Path.GetFullPath(System.String);Use Disk.FullPath: this contacts the host of a path holding a tilde
+M:System.IO.Path.GetFullPath(System.String,System.String);Use Disk.FullPath: this contacts the host of a path holding a tilde
+M:System.IO.Path.GetRelativePath(System.String,System.String);Use Disk.RelativePath: this contacts the host of a path holding a tilde
+M:System.IO.Path.Exists(System.String);Use Disk: it refuses paths that would reach the network
+M:System.IO.Path.GetTempFileName;Use Disk: it refuses paths that would reach the network
+
+M:System.IO.StreamReader.#ctor(System.String);Use Disk.OpenRead: it refuses paths that would reach the network
+M:System.IO.StreamReader.#ctor(System.String,System.Boolean);Use Disk.OpenRead: it refuses paths that would reach the network
+M:System.IO.StreamReader.#ctor(System.String,System.IO.FileStreamOptions);Use Disk.OpenRead: it refuses paths that would reach the network
+M:System.IO.StreamReader.#ctor(System.String,System.Text.Encoding);Use Disk.OpenRead: it refuses paths that would reach the network
+M:System.IO.StreamReader.#ctor(System.String,System.Text.Encoding,System.Boolean);Use Disk.OpenRead: it refuses paths that would reach the network
+M:System.IO.StreamReader.#ctor(System.String,System.Text.Encoding,System.Boolean,System.Int32);Use Disk.OpenRead: it refuses paths that would reach the network
+M:System.IO.StreamReader.#ctor(System.String,System.Text.Encoding,System.Boolean,System.IO.FileStreamOptions);Use Disk.OpenRead: it refuses paths that would reach the network
+M:System.IO.StreamWriter.#ctor(System.String);The worker writes nothing to disk
+M:System.IO.StreamWriter.#ctor(System.String,System.Boolean);The worker writes nothing to disk
+M:System.IO.StreamWriter.#ctor(System.String,System.IO.FileStreamOptions);The worker writes nothing to disk
+M:System.IO.StreamWriter.#ctor(System.String,System.Boolean,System.Text.Encoding);The worker writes nothing to disk
+M:System.IO.StreamWriter.#ctor(System.String,System.Boolean,System.Text.Encoding,System.Int32);The worker writes nothing to disk
+M:System.IO.StreamWriter.#ctor(System.String,System.Text.Encoding,System.IO.FileStreamOptions);The worker writes nothing to disk
+
+M:System.Xml.XmlReader.Create(System.String);Use Disk.LoadXml: this opens the path, or a URL, itself
+M:System.Xml.XmlReader.Create(System.String,System.Xml.XmlReaderSettings);Use Disk.LoadXml: this opens the path, or a URL, itself
+M:System.Xml.XmlReader.Create(System.String,System.Xml.XmlReaderSettings,System.Xml.XmlParserContext);Use Disk.LoadXml: this opens the path, or a URL, itself
+T:System.Xml.XmlTextReader;Use Disk.LoadXml: this opens the path, or a URL, itself
+M:System.Xml.XmlDocument.Load(System.String);Use Disk.LoadXml: this opens the path, or a URL, itself
+M:System.Xml.Linq.XDocument.Load(System.String);Use Disk.LoadXml: this opens the path, or a URL, itself
+M:System.Xml.Linq.XDocument.Load(System.String,System.Xml.Linq.LoadOptions);Use Disk.LoadXml: this opens the path, or a URL, itself
+M:System.Xml.Linq.XElement.Load(System.String);Use Disk.LoadXml: this opens the path, or a URL, itself
+M:System.Xml.Linq.XElement.Load(System.String,System.Xml.Linq.LoadOptions);Use Disk.LoadXml: this opens the path, or a URL, itself
+
+M:Microsoft.CodeAnalysis.MetadataReference.CreateFromFile(System.String,Microsoft.CodeAnalysis.MetadataReferenceProperties,Microsoft.CodeAnalysis.DocumentationProvider);Use Disk.Reference: it refuses paths that would reach the network
+M:Microsoft.CodeAnalysis.AssemblyMetadata.CreateFromFile(System.String);Use Disk.Reference: it refuses paths that would reach the network
+M:Microsoft.CodeAnalysis.ModuleMetadata.CreateFromFile(System.String);Use Disk.Reference: it refuses paths that would reach the network
+
+# Left unset, Roslyn opens nothing a source file names: <include file="..."/>, #load, #r.
+T:Microsoft.CodeAnalysis.XmlFileResolver;Roslyn would open what a doc comment's include names
+T:Microsoft.CodeAnalysis.SourceFileResolver;Roslyn would open what a source file names
+T:Microsoft.CodeAnalysis.MetadataReferenceResolver;Roslyn would open what a source file names
+M:Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions.WithXmlReferenceResolver(Microsoft.CodeAnalysis.XmlReferenceResolver);Roslyn would open what a doc comment's include names
+M:Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions.WithSourceReferenceResolver(Microsoft.CodeAnalysis.SourceReferenceResolver);Roslyn would open what a source file names
+M:Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions.WithMetadataReferenceResolver(Microsoft.CodeAnalysis.MetadataReferenceResolver);Roslyn would open what a source file names
+
+M:System.Reflection.Assembly.Load(System.String);Nothing from a repository is loaded
+M:System.Reflection.Assembly.Load(System.Reflection.AssemblyName);Nothing from a repository is loaded
+M:System.Reflection.Assembly.Load(System.Byte[]);Nothing from a repository is loaded
+M:System.Reflection.Assembly.Load(System.Byte[],System.Byte[]);Nothing from a repository is loaded
+M:System.Reflection.Assembly.LoadFile(System.String);Nothing from a repository is loaded
+M:System.Reflection.Assembly.LoadFrom(System.String);Nothing from a repository is loaded
+M:System.Reflection.Assembly.LoadFrom(System.String,System.Byte[],System.Configuration.Assemblies.AssemblyHashAlgorithm);Nothing from a repository is loaded
+M:System.Reflection.Assembly.UnsafeLoadFrom(System.String);Nothing from a repository is loaded
+M:System.Reflection.AssemblyName.GetAssemblyName(System.String);Nothing from a repository is loaded
+M:System.Runtime.Loader.AssemblyLoadContext.LoadFromAssemblyPath(System.String);Nothing from a repository is loaded
+M:System.Runtime.Loader.AssemblyLoadContext.LoadFromNativeImagePath(System.String,System.String);Nothing from a repository is loaded
+T:System.Runtime.InteropServices.NativeLibrary;Nothing from a repository is loaded
+T:System.Diagnostics.Process;Nothing from a repository is executed

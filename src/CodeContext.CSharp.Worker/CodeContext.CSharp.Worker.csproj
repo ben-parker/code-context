@@ -27,10 +27,13 @@
          set +35% (over the 20% ceiling), so workstation GC stays. -->
     <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
     <ServerGarbageCollection>false</ServerGarbageCollection>
+    <!-- The worker reaches the file system only through Projects/Disk.cs: see BannedSymbols.txt. -->
+    <WarningsAsErrors>$(WarningsAsErrors);RS0030</WarningsAsErrors>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="5.0.0" />
+    <PackageReference Include="Microsoft.CodeAnalysis.BannedApiAnalyzers" Version="5.6.0" PrivateAssets="all" />
   </ItemGroup>
 
   <ItemGroup>
@@ -41,6 +44,10 @@
     <!-- The manifest travels with the executable so hosts can discover the worker by
          scanning workers/<name>/worker-manifest.json directories. -->
     <None Include="worker-manifest.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <AdditionalFiles Include="BannedSymbols.txt" />
   </ItemGroup>
 
 </Project>
