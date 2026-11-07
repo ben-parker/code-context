@@ -10,7 +10,8 @@ same graph as the bundled C# and TypeScript workers. The host stays compiler-agn
 Place one worker in its own directory with `worker-manifest.json` at the directory
 root. The host searches these roots in order:
 
-1. paths in `CODECONTEXT_WORKERS_DIR`, in declared order (use the OS path separator);
+1. absolute paths in `CODECONTEXT_WORKERS_DIR`, in declared order (use the OS path
+   separator; relative entries are ignored);
 2. `~/.codecontext/workers`;
 3. the release's bundled `workers` directory.
 
@@ -37,7 +38,10 @@ manifests are never auto-executed.
 
 A command found beside the manifest is preferred; otherwise a bare command uses
 absolute `PATH` entries, and never the current directory, which is usually the
-repository being indexed. Explicit relative commands resolve from the manifest directory. Releases
+repository being indexed. An absolute entry is trusted as the machine owner's choice,
+even inside a repository: an activated `.venv/bin` or `node_modules/.bin` on `PATH` is
+searched, so a worker with a bare command can resolve there. Explicit relative commands
+resolve from the manifest directory. Releases
 should carry their runtime or a self-contained executable so installing CodeContext
 once is sufficient.
 

@@ -86,12 +86,14 @@ public sealed record WorkerManifest(
     /// </summary>
     public string ResolveCommand(string manifestDirectory)
     {
-        if (Path.IsPathRooted(Command))
+        if (Path.IsPathFullyQualified(Command))
         {
             return Command;
         }
 
-        var candidate = Path.GetFullPath(Path.Combine(manifestDirectory, Command));
+        // Join, not Combine: C:worker is rooted, and Combine would drop the manifest directory
+        // for the current directory on C:.
+        var candidate = Path.GetFullPath(Path.Join(manifestDirectory, Command));
         if (File.Exists(candidate))
         {
             return candidate;

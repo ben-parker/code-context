@@ -1,5 +1,7 @@
 using CodeContext.Core.Tests.Services;
+using CodeContext.Core.Workers;
 using CodeContext.Parser.Protocol;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace CodeContext.Core.Tests.Workers;
 
@@ -17,6 +19,7 @@ public sealed class WorkerCommandLookupTests : IDisposable
 
     private readonly string _originalDirectory = Directory.GetCurrentDirectory();
     private readonly string? _originalPath = Environment.GetEnvironmentVariable("PATH");
+    private readonly string? _originalWorkersDirectory = Environment.GetEnvironmentVariable(WorkerCatalog.WorkersDirEnvVar);
     private readonly string _scratch = Directory.CreateTempSubdirectory("cc-worker-lookup-").FullName;
     private readonly string _repository;
     private readonly string _manifestDirectory;
@@ -34,6 +37,7 @@ public sealed class WorkerCommandLookupTests : IDisposable
     {
         Directory.SetCurrentDirectory(_originalDirectory);
         Environment.SetEnvironmentVariable("PATH", _originalPath);
+        Environment.SetEnvironmentVariable(WorkerCatalog.WorkersDirEnvVar, _originalWorkersDirectory);
         try { Directory.Delete(_scratch, recursive: true); }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
@@ -132,6 +136,41 @@ public sealed class WorkerCommandLookupTests : IDisposable
         Assert.Equal(
             Path.Combine(_manifestDirectory, "sub", Command),
             manifest.ResolveCommand(_manifestDirectory));
+    }
+
+    [Theory]
+    [InlineData("C:cc-probe-worker.exe")]
+    [InlineData(@"\cc-probe\cc-probe-worker.exe")]
+    public void OnWindows_ACommandRelativeToTheCurrentDrive_StaysUnderTheManifest(string command)
+    {
+        // Rooted but not fully qualified: left alone, the first form would resolve against
+        // the current directory on C:, which is the repository.
+        if (!OperatingSystem.IsWindows()) return;
+        StartInsideRepository(_bin);
+
+        var resolved = (_manifest with { Command = command }).ResolveCommand(_manifestDirectory);
+
+        Assert.StartsWith(_manifestDirectory + Path.DirectorySeparatorChar, resolved, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ARelativeWorkersDirectory_IsNotSearched()
+    {
+        var worker = Directory.CreateDirectory(Path.Combine(_repository, "workers", "planted")).FullName;
+        File.WriteAllText(Path.Combine(worker, "worker-manifest.json"), $$"""
+            {"manifestVersion": 1, "parserId": "planted", "displayName": "Planted", "version": "1",
+             "command": "{{Command}}", "minProtocolVersion": {{ParserProtocol.Version}},
+             "maxProtocolVersion": {{ParserProtocol.Version}}}
+            """);
+        StartInsideRepository(_bin);
+
+        Environment.SetEnvironmentVariable(WorkerCatalog.WorkersDirEnvVar, "workers");
+        var fromRelative = new WorkerCatalog(NullLogger<WorkerCatalog>.Instance).Workers;
+        Environment.SetEnvironmentVariable(WorkerCatalog.WorkersDirEnvVar, Path.Combine(_repository, "workers"));
+        var fromAbsolute = new WorkerCatalog(NullLogger<WorkerCatalog>.Instance).Workers;
+
+        Assert.DoesNotContain(fromRelative, entry => entry.Manifest.ParserId == "planted");
+        Assert.Contains(fromAbsolute, entry => entry.Manifest.ParserId == "planted");
     }
 
     [Fact]

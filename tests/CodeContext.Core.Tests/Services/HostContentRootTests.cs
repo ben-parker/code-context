@@ -108,6 +108,23 @@ public sealed class HostContentRootTests : IDisposable
     }
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task TheStartCommand_BuildsItsHostFromThePinnedContentRoot(bool mcp)
+    {
+        // Through the real entry point: the builders above prove nothing if a host stops
+        // using them. A malformed file stops a host that reads it, before cancellation does.
+        StartInsideRepositoryWith("{ \"Path\": \"C:\\does-not-parse\" ");
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+        var settings = new StartSettings(_repository, null, mcp, Detach: false, IdleTimeoutMinutes: 0, LogFile: null);
+
+        var failure = await Record.ExceptionAsync(() => StartCommandHandler.ExecuteAsync(settings, cancelled.Token));
+
+        Assert.True(failure is null or OperationCanceledException, failure?.ToString());
+    }
+
+    [Theory]
     [MemberData(nameof(Hosts))]
     public void TheContentRoot_IsTheInstallDirectory_NotTheCurrentDirectory(string host)
     {
