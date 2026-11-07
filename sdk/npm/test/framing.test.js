@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { METHODS, MessageDecoder, encodeMessage } = require('..');
+const { METHODS, CAPABILITIES, BASELINE, MessageDecoder, encodeMessage } = require('..');
 
 test('decodes fragmented and adjacent frames', () => {
     const first = encodeMessage({ jsonrpc: '2.0', id: 1, result: 'héllo' });
@@ -19,4 +19,10 @@ test('decodes fragmented and adjacent frames', () => {
 
 test('exports analysis progress notification method', () => {
     assert.equal(METHODS.analysisProgress, 'analysis/progress');
+});
+
+test('exports the persistent state method, capability and baseline answers', () => {
+    assert.equal(METHODS.saveState, 'workspace/saveState');
+    assert.equal(CAPABILITIES.persistentState, 'persistentState');
+    assert.deepEqual({ ...BASELINE }, { accepted: 'accepted', rejected: 'rejected' });
 });

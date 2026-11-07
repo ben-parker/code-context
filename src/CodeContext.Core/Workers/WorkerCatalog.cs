@@ -50,8 +50,11 @@ public sealed class WorkerCatalog : IWorkerCatalog
         var roots = new List<string>();
         if (Environment.GetEnvironmentVariable(WorkersDirEnvVar) is { Length: > 0 } overridden)
         {
-            roots.AddRange(overridden.Split(Path.PathSeparator,
-                StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+            // A relative root would mean the current directory, usually the repository, whose
+            // manifests must never be run.
+            roots.AddRange(overridden
+                .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Where(Path.IsPathFullyQualified));
         }
 
         var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);

@@ -31,6 +31,9 @@ public sealed class AnalysisDeltaApplier : IAnalysisDeltaSink
         public List<ProtocolEdge> Edges { get; } = [];
         public IReadOnlyList<ProjectCoverage>? Coverage { get; private set; }
 
+        /// <summary>The first chunk's fingerprints, which is where a worker sends them; later chunks' are ignored.</summary>
+        public IReadOnlyList<UnitFingerprint>? Fingerprints { get; } = first.Fingerprints;
+
         public void Append(AnalysisDelta delta)
         {
             if (!string.Equals(ParserVersion, delta.ParserVersion, StringComparison.Ordinal))
@@ -70,7 +73,16 @@ public sealed class AnalysisDeltaApplier : IAnalysisDeltaSink
     /// request that reused the same workspace generation. A true result means the chunk
     /// was buffered, or (for the final chunk) that the complete generation committed.
     /// </summary>
-    public async Task<bool> ApplyAsync(AnalysisDelta delta, CancellationToken ct = default)
+    public Task<bool> ApplyAsync(AnalysisDelta delta, CancellationToken ct = default) => ApplyAsync(delta, null, ct);
+
+    Task<bool> IAnalysisDeltaSink.ApplyAsync(AnalysisDelta delta, DeltaOrigin? origin, CancellationToken ct) => ApplyAsync(delta, origin, ct);
+
+    /// <summary>
+    /// <see cref="ApplyAsync(AnalysisDelta, CancellationToken)"/>, recording <paramref name="origin"/> (the final
+    /// chunk's) as the commit's lineage: an establishing one when the request replaced the workspace or carried
+    /// a baseline, otherwise one that only extends the shard's recorded lineage (see the store's rules).
+    /// </summary>
+    internal async Task<bool> ApplyAsync(AnalysisDelta delta, DeltaOrigin? origin, CancellationToken ct)
     {
         await _commitLock.WaitAsync(ct).ConfigureAwait(false);
         try
@@ -130,10 +142,23 @@ public sealed class AnalysisDeltaApplier : IAnalysisDeltaSink
             // The scope names the (parser, workspace) shard this delta replaces (optionally narrowed
             // to the listed files). The store routes and partitions by the ownership metadata that
             // BuildOwnedMetadata stamped onto every node/edge — no scope predicate needed.
+            // The scope also carries what produced the shard (parser version, coverage, fingerprints, the
+            // worker process and request), which the store records in the same commit, staged and rolled back
+            // with it.
             var scope = new CommitScope(
                 pending.ParserId,
                 pending.WorkspaceId,
-                pending.ReplacesWorkspace ? null : pending.ReplacesFiles.ToList());
+                pending.ReplacesWorkspace ? null : pending.ReplacesFiles.ToList())
+            {
+                Annotation = new ShardAnnotation(pending.ParserVersion, pending.Coverage)
+                {
+                    Fingerprints = pending.Fingerprints,
+                    Lineage = origin is null
+                        ? null
+                        : new ShardLineage(origin.Incarnation, origin.Request,
+                            Establishes: pending.ReplacesWorkspace || origin.BaselineOffered, BaselineStateId: origin.OfferedStateId),
+                },
+            };
 
             var committed = false;
             for (var attempt = 0; attempt < 5 && !committed; attempt++)

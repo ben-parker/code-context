@@ -21,6 +21,7 @@ public class StatusService : IStatusService
     private readonly IApiMetrics _apiMetrics;
     private readonly IRepositoryFileSelector? _fileSelector;
     private readonly IAnalysisCoverageRegistry? _coverage;
+    private readonly ICacheStateProvider? _cacheState;
     private readonly DateTimeOffset _startTime;
 
     public StatusService(
@@ -34,7 +35,8 @@ public class StatusService : IStatusService
         IApiMetrics apiMetrics,
         IRepositoryFileSelector? fileSelector = null,
         ApplicationStartTime? applicationStartTime = null,
-        IAnalysisCoverageRegistry? coverage = null)
+        IAnalysisCoverageRegistry? coverage = null,
+        ICacheStateProvider? cacheState = null)
     {
         _nodeRepository = nodeRepository;
         _edgeRepository = edgeRepository;
@@ -46,6 +48,7 @@ public class StatusService : IStatusService
         _apiMetrics = apiMetrics;
         _fileSelector = fileSelector;
         _coverage = coverage;
+        _cacheState = cacheState;
         _startTime = (applicationStartTime ?? new ApplicationStartTime(DateTimeOffset.UtcNow)).Value;
     }
 
@@ -56,13 +59,19 @@ public class StatusService : IStatusService
         // store's maintained statistics when available so status polling never
         // materializes nodes/edges (the agent skill polls this every 1-2s during
         // indexing).
+        var cacheBefore = _cacheState?.GetStatus();
         var fileAggregates = await AggregateFileMetadataAsync();
         var graphStatistics = await GetGraphStatisticsAsync();
+        // Coverage comes from the store too, so it is read before the last cache reading: coverage loaded from a
+        // snapshot is then always labelled by that reading or the one before.
+        var projects = _coverage?.GetProjects() ?? [];
 
-        var indexed = _scanState.Phase == ScanPhase.Ready;
+        var phase = _scanState.Phase;
+        var indexed = phase == ScanPhase.Ready;
+        var cache = ComposeCache(cacheBefore, _cacheState?.GetStatus(), phase);
 
         var systemStatus = GetSystemStatus();
-        var indexingStatus = GetIndexingStatus(fileAggregates, indexed);
+        var indexingStatus = GetIndexingStatus(fileAggregates, phase) with { Cache = cache };
         var databaseStatus = GetDatabaseStatus(fileAggregates, graphStatistics);
         var watcherStatus = GetWatcherStatus();
         var parserStatus = GetParserStatus();
@@ -78,14 +87,31 @@ public class StatusService : IStatusService
             Indexed: indexed,
             FileCount: fileAggregates.FileCount,
             NodeCount: graphStatistics.NodeCount,
-            Coverage: GetCoverage()
+            Coverage: GetCoverage(projects, cache?.ServingCached == true)
         );
     }
 
-    private CoverageStatusDto? GetCoverage()
+    /// <summary>
+    /// The cache object for one status response, consistent with the one scan phase it reports (plan 3.10).
+    /// Ready is set only after the scan's commit has left <c>verifying</c>, so with <c>ready</c> the reading
+    /// taken after it is never serving. Otherwise a reading that served cached answers before or after the
+    /// store reads wins (over-labelling at a transition is harmless), and its state follows the phase:
+    /// <c>unverified</c> with <c>error</c>, <c>verifying</c> while a scan runs.
+    /// </summary>
+    internal static CacheStatusDto? ComposeCache(CacheStatusDto? before, CacheStatusDto? after, ScanPhase phase)
     {
-        var projects = _coverage?.GetProjects() ?? [];
-        return projects.Count == 0 ? null : new CoverageStatusDto(ContextService.OverallState(projects), projects);
+        if (phase == ScanPhase.Ready) return after;
+        var cache = before is { ServingCached: true } ? before : after;
+        if (cache is not { ServingCached: true }) return cache;
+        var state = phase == ScanPhase.Error ? CacheState.Unverified : CacheState.Verifying;
+        return cache.State == state ? cache : cache with { State = state };
+    }
+
+    private static CoverageStatusDto? GetCoverage(IReadOnlyList<ProjectCoverage> projects, bool cached)
+    {
+        return projects.Count == 0
+            ? null
+            : new CoverageStatusDto(ContextService.OverallState(projects), projects, Cached: cached ? true : null);
     }
 
     private sealed record FileMetadataAggregates(
@@ -192,9 +218,9 @@ public class StatusService : IStatusService
         );
     }
 
-    private IndexingStatusDto GetIndexingStatus(FileMetadataAggregates files, bool indexed)
+    private IndexingStatusDto GetIndexingStatus(FileMetadataAggregates files, ScanPhase phase)
     {
-        var indexingStatus = _scanState.Phase switch
+        var indexingStatus = phase switch
         {
             ScanPhase.Ready => "ready",
             ScanPhase.Error => "error",
@@ -202,7 +228,7 @@ public class StatusService : IStatusService
         };
 
         return new IndexingStatusDto(
-            Indexed: indexed,
+            Indexed: phase == ScanPhase.Ready,
             Status: indexingStatus,
             LastScanAt: files.LastScanAt?.ToString("O"),
             ScanDuration: _scanState.LastScanDuration is { } duration ? FormatTimeSpan(duration) : null,
@@ -210,7 +236,7 @@ public class StatusService : IStatusService
             FilesByStatus: files.FilesByStatus,
             FilesProcessed: _scanState.FilesProcessed,
             FilesTotal: _scanState.FilesTotal,
-            LastError: _scanState.Phase == ScanPhase.Error ? _scanState.LastError : null,
+            LastError: phase == ScanPhase.Error ? _scanState.LastError : null,
             OperationId: _scanState.OperationId
         );
     }

@@ -79,7 +79,8 @@ internal sealed class DetachedStartOrchestrator
         int? explicitPort,
         int idleTimeoutMinutes,
         string? requestedLogFile,
-        CancellationToken ct)
+        CancellationToken ct,
+        bool noCache = false)
     {
         await using var startLock = await _runtime.AcquireStartLockAsync(rootPath, ct);
 
@@ -110,7 +111,7 @@ internal sealed class DetachedStartOrchestrator
         var logFile = requestedLogFile ?? DefaultLogFile(rootPath);
         var instanceId = Guid.NewGuid().ToString("N");
         var startInfo = CreateStartInfo(
-            exePath, rootPath, port, idleTimeoutMinutes, logFile, instanceId);
+            exePath, rootPath, port, idleTimeoutMinutes, logFile, instanceId, noCache);
 
         using var child = _runtime.StartProcess(startInfo);
         if (child is null)
@@ -189,7 +190,8 @@ internal sealed class DetachedStartOrchestrator
         int port,
         int idleTimeoutMinutes,
         string logFile,
-        string instanceId)
+        string instanceId,
+        bool noCache)
     {
         ProcessStartInfo startInfo;
         if (OperatingSystem.IsWindows())
@@ -225,6 +227,7 @@ internal sealed class DetachedStartOrchestrator
         startInfo.ArgumentList.Add(logFile);
         startInfo.ArgumentList.Add("--instance-id");
         startInfo.ArgumentList.Add(instanceId);
+        if (noCache) startInfo.ArgumentList.Add("--no-cache");
         return startInfo;
     }
 

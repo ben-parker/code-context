@@ -1,0 +1,30 @@
+{
+  "name": "code-context",
+  "queries": "queries-code-context.txt",
+  "coldSymbol": "ContextService",
+  "edits": {
+    "body": {
+      "kind": "body",
+      "file": "src/CodeContext.Core/Services/ContextService.cs",
+      "statement": "_ = NormalizePath(string.Empty);",
+      "method": "ContextService.GetMultipleContextAsync",
+      "project": "CodeContext.Core",
+      "role": "root: Api, Mcp and the tests depend on it (3 transitive)"
+    },
+    "top": {
+      "kind": "top",
+      "file": "src/CodeContext.CSharp.Worker/CSharpWorkspaceAnalyzer.cs",
+      "symbol": "CSharpWorkspaceAnalyzer",
+      "project": "CodeContext.CSharp.Worker",
+      "role": "middle: Api and the tests depend on it (2 transitive)"
+    },
+    "leafBody": {
+      "kind": "body",
+      "file": "src/CodeContext.Api/Commands/QueryCommandHandler.cs",
+      "statement": "_ = Clean(null);",
+      "method": "QueryCommandHandler.ExecuteAsync",
+      "project": "CodeContext.Api",
+      "role": "leaf side: only the test project references it"
+    }
+  }
+}

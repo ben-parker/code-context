@@ -20,11 +20,18 @@ public sealed record SpanSemantics(
     [property: JsonPropertyName("columnBase")] int ColumnBase,
     [property: JsonPropertyName("endIsInclusive")] bool EndIsInclusive);
 
+/// <summary>
+/// What a worker supports. <see cref="PersistentState"/> is optional on the wire: absent reads as false,
+/// and false is not written, so a worker that never declares it sends what it always sent. Only a worker
+/// that declares it is sent <c>baseline</c> or <c>workspace/saveState</c>.
+/// </summary>
 public sealed record WorkerCapabilities(
     [property: JsonPropertyName("workspaceAnalysis")] bool WorkspaceAnalysis,
     [property: JsonPropertyName("incrementalUpdates")] bool IncrementalUpdates,
     [property: JsonPropertyName("semanticAnalysis")] bool SemanticAnalysis,
-    [property: JsonPropertyName("nativeSyntaxTree")] bool NativeSyntaxTree);
+    [property: JsonPropertyName("nativeSyntaxTree")] bool NativeSyntaxTree,
+    [property: JsonPropertyName("persistentState"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    bool PersistentState = false);
 
 /// <summary>Result of the <c>initialize</c> handshake (worker → host).</summary>
 public sealed record InitializeResult(
@@ -58,13 +65,74 @@ public sealed record OpenWorkspaceResult(
 public sealed record IndexWorkspaceParams(
     [property: JsonPropertyName("workspaceId")] string WorkspaceId,
     [property: JsonPropertyName("generation")] long Generation,
-    [property: JsonPropertyName("files")] IReadOnlyList<string> Files);
+    [property: JsonPropertyName("files")] IReadOnlyList<string> Files,
+    [property: JsonPropertyName("baseline")] IndexBaseline? Baseline = null);
 
+/// <summary>
+/// The facts the host already holds for this worker's workspace, offered at most once per worker process that
+/// declared <see cref="WorkerCapabilities.PersistentState"/>: with its first mutating request, when that request
+/// is a <c>workspace/index</c>. <paramref name="StateId"/> is opaque to the worker.
+/// <paramref name="StatePath"/> is an absolute path the host computed, to a file this worker wrote on an
+/// earlier <c>workspace/saveState</c>; the host recorded its id and SHA-256 (lowercase hex) beside the facts
+/// and hands back the fingerprints the worker last sent. The file lives in the repository and must be
+/// treated as untrusted bytes until its hash matches.
+/// </summary>
+public sealed record IndexBaseline(
+    [property: JsonPropertyName("statePath")] string StatePath,
+    [property: JsonPropertyName("stateId")] string StateId,
+    [property: JsonPropertyName("stateSha256")] string StateSha256,
+    [property: JsonPropertyName("fingerprints")] IReadOnlyList<UnitFingerprint> Fingerprints);
+
+/// <summary>One unit's fingerprint, computed by the worker and opaque to the host, which stores it and hands it back.</summary>
+public sealed record UnitFingerprint(
+    [property: JsonPropertyName("unit")] string Unit,
+    [property: JsonPropertyName("value")] string Value);
+
+/// <summary>
+/// <paramref name="Baseline"/> answers a request that carried one, and only such a request: one of
+/// <see cref="BaselineOutcomes"/>. Accepted means the deltas were file-scoped against the baseline;
+/// rejected means they replaced the workspace, as for a request without one.
+/// </summary>
 public sealed record IndexWorkspaceResult(
     [property: JsonPropertyName("workspaceId")] string WorkspaceId,
     [property: JsonPropertyName("generation")] long Generation,
     [property: JsonPropertyName("deltasEmitted")] int DeltasEmitted,
-    [property: JsonPropertyName("complete")] bool Complete);
+    [property: JsonPropertyName("complete")] bool Complete,
+    [property: JsonPropertyName("baseline")] string? Baseline = null,
+    [property: JsonPropertyName("baselineReason")] string? BaselineReason = null);
+
+public static class BaselineOutcomes
+{
+    /// <summary>The worker restored its state; the request's deltas are file-scoped (<c>replacesWorkspace:false</c>).</summary>
+    public const string Accepted = "accepted";
+
+    /// <summary>The worker could not use the baseline; the request's deltas replace the workspace.</summary>
+    public const string Rejected = "rejected";
+}
+
+/// <summary>
+/// Asks a worker that declared <see cref="WorkerCapabilities.PersistentState"/> to save what it needs to
+/// restore the facts it has emitted to <paramref name="StatePath"/>, an absolute path the host chose, under
+/// <paramref name="StateId"/>. Sent only between mutations, so the state describes exactly the facts the host
+/// holds. The worker writes <c>&lt;statePath&gt;.tmp</c>, flushes it to disk, renames it over the path and
+/// answers when the file is durable.
+/// </summary>
+public sealed record SaveStateParams(
+    [property: JsonPropertyName("workspaceId")] string WorkspaceId,
+    [property: JsonPropertyName("statePath")] string StatePath,
+    [property: JsonPropertyName("stateId")] string StateId);
+
+/// <summary>
+/// <paramref name="Saved"/> false, or an error, means no state for this capture. When saved,
+/// <paramref name="Bytes"/> is the file's length and <paramref name="Sha256"/> the lowercase hex SHA-256 of its
+/// bytes; the host records both and checks the length.
+/// </summary>
+public sealed record SaveStateResult(
+    [property: JsonPropertyName("workspaceId")] string WorkspaceId,
+    [property: JsonPropertyName("stateId")] string StateId,
+    [property: JsonPropertyName("saved")] bool Saved,
+    [property: JsonPropertyName("bytes")] long? Bytes = null,
+    [property: JsonPropertyName("sha256")] string? Sha256 = null);
 
 public static class FileChangeKinds
 {
@@ -227,7 +295,9 @@ public sealed record AnalysisProgress(
 /// <c>filePath</c> (the host matches them raw, with no normalization). A file listed
 /// with no facts is deleted. Every chunk of one request must agree on
 /// <c>replacesWorkspace</c> (the host ORs it) and should repeat the full
-/// <c>replacesFiles</c> list (the host unions it).
+/// <c>replacesFiles</c> list (the host unions it). A worker that declared
+/// <see cref="WorkerCapabilities.PersistentState"/> sends <c>fingerprints</c> on the first chunk of every
+/// request; the host keeps the last set per shard and a request that carries none clears it.
 /// </summary>
 public sealed record AnalysisDelta(
     [property: JsonPropertyName("parserId")] string ParserId,
@@ -242,4 +312,5 @@ public sealed record AnalysisDelta(
     [property: JsonPropertyName("isLastForRequest")] bool IsLastForRequest,
     [property: JsonPropertyName("unresolvedReferences")] IReadOnlyList<UnresolvedReference>? UnresolvedReferences = null,
     [property: JsonPropertyName("diagnostics")] IReadOnlyList<ProtocolDiagnostic>? Diagnostics = null,
-    [property: JsonPropertyName("coverage")] IReadOnlyList<ProjectCoverage>? Coverage = null);
+    [property: JsonPropertyName("coverage")] IReadOnlyList<ProjectCoverage>? Coverage = null,
+    [property: JsonPropertyName("fingerprints")] IReadOnlyList<UnitFingerprint>? Fingerprints = null);

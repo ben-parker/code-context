@@ -7,10 +7,20 @@ const METHODS = Object.freeze({
     indexWorkspace: 'workspace/index',
     applyChanges: 'workspace/applyChanges',
     getNativeSyntaxTree: 'syntaxTree/get',
+    saveState: 'workspace/saveState',
     cancel: '$/cancel',
     analysisDelta: 'analysis/delta',
     analysisProgress: 'analysis/progress',
     shutdown: 'shutdown',
+});
+/** Optional capability names, as declared in `initialize`'s `capabilities`. */
+const CAPABILITIES = Object.freeze({
+    persistentState: 'persistentState',
+});
+/** Values of `baseline` in a `workspace/index` result. */
+const BASELINE = Object.freeze({
+    accepted: 'accepted',
+    rejected: 'rejected',
 });
 
 function encodeMessage(message) {
@@ -55,4 +65,4 @@ function writeMessage(stream, message) {
     });
 }
 
-module.exports = { PROTOCOL_VERSION, METHODS, MessageDecoder, encodeMessage, writeMessage };
+module.exports = { PROTOCOL_VERSION, METHODS, CAPABILITIES, BASELINE, MessageDecoder, encodeMessage, writeMessage };

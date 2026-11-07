@@ -25,6 +25,9 @@ namespace CodeContext.CSharp.Worker.Projects;
 /// the file system for the long form of any path holding a <c>~</c>, and so opens a connection
 /// to whatever host the path names. <see cref="FullPath"/> and <see cref="RelativePath"/> are
 /// the guarded forms.
+///
+/// The worker writes one thing: its own saved state, inside the repository's cache directory
+/// (see <see cref="ReplaceStateFile"/>). Nothing else here writes.
 /// </summary>
 public sealed class Disk
 {
@@ -37,13 +40,21 @@ public sealed class Disk
         XmlResolver = null,
     };
 
+    private static readonly StringComparison PathComparison =
+        OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+
     private readonly HashSet<string> _shares = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary><c>&lt;root&gt;/.codecontext/cache</c>, or null with no root, when nothing may be written.</summary>
+    private readonly string? _cacheDirectory;
 
     /// <param name="root">The repository, whose own share it may read.</param>
     /// <param name="toolchain">Where this machine's owner keeps toolchains.</param>
     public Disk(string? root, ToolchainLocations toolchain)
         : this(toolchain.All.Prepend(root))
     {
+        // In full form, as the host's own path is: short names in a root must not fail the comparison.
+        if (!string.IsNullOrEmpty(root)) _cacheDirectory = Path.Combine(FullPath(root), ".codecontext", "cache");
     }
 
     /// <param name="locations">
@@ -91,6 +102,25 @@ public sealed class Disk
     /// <exception cref="FileNotFoundException">The file is missing or refused.</exception>
     public string ReadAllText(string path) => Refused(path) ? throw Absent(path) : File.ReadAllText(path);
 
+    /// <summary>A file read once from start to end, whose whole length is wanted up front.</summary>
+    /// <exception cref="FileNotFoundException">The file is missing or refused.</exception>
+    public Stream OpenForOneScan(string path)
+        => Refused(path)
+            ? throw Absent(path)
+            : new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 1, FileOptions.SequentialScan);
+
+    /// <exception cref="FileNotFoundException">The file is missing or refused.</exception>
+    public byte[] ReadAllBytes(string path) => Refused(path) ? throw Absent(path) : File.ReadAllBytes(path);
+
+    /// <summary>A file's size and last-write time, both from one look at it.</summary>
+    /// <exception cref="FileNotFoundException">The file is missing or refused.</exception>
+    public (long Length, DateTime LastWriteUtc) Stat(string path)
+    {
+        if (Refused(path)) throw Absent(path);
+        var info = new FileInfo(path);
+        return (info.Length, info.LastWriteTimeUtc);
+    }
+
     /// <summary>Reads a project file. A document type is refused, so nothing it names is fetched.</summary>
     /// <exception cref="FileNotFoundException">The file is missing or refused.</exception>
     public XDocument LoadXml(string path)
@@ -107,6 +137,56 @@ public sealed class Disk
     /// <exception cref="FileNotFoundException">The file is missing or refused.</exception>
     public MetadataReference Reference(string path)
         => Refused(path) ? throw Absent(path) : MetadataReference.CreateFromFile(path);
+
+    /// <summary>
+    /// Replaces a worker state file: written to <c>&lt;statePath&gt;.tmp</c> (created afresh, user-only
+    /// on Unix; whatever was at that name is removed first, never written through), flushed to disk,
+    /// then renamed over the path. On any failure the temp file is gone and the exception propagates.
+    /// The only write the worker makes, and only to a <c>.state</c> file directly inside a workspace
+    /// directory of this repository's cache, <c>&lt;root&gt;/.codecontext/cache/&lt;workspace&gt;/</c>.
+    /// No directory is created.
+    /// </summary>
+    /// <exception cref="UnauthorizedAccessException">The path is anywhere else. Nothing was touched.</exception>
+    public T ReplaceStateFile<T>(string statePath, Func<Stream, T> write, CancellationToken ct)
+    {
+        if (!IsStateFile(statePath)) throw new UnauthorizedAccessException($"The worker does not write to '{statePath}'.");
+
+        var temp = statePath + ".tmp";
+        try
+        {
+            File.Delete(temp);
+            var options = new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write, Share = FileShare.None, BufferSize = 0 };
+            if (!OperatingSystem.IsWindows()) options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+            T written;
+            using (var stream = new FileStream(temp, options))
+            {
+                written = write(stream);
+                stream.Flush(flushToDisk: true);
+            }
+            ct.ThrowIfCancellationRequested();
+            File.Move(temp, statePath, overwrite: true);
+            return written;
+        }
+        catch
+        {
+            try
+            {
+                File.Delete(temp);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // Nothing more can be done; the host deletes temp files it finds.
+            }
+            throw;
+        }
+    }
+
+    private bool IsStateFile(string path)
+    {
+        if (_cacheDirectory is null || Refused(path) || !path.EndsWith(".state", PathComparison)) return false;
+        var workspace = Path.GetDirectoryName(FullPath(path));
+        return workspace is not null && string.Equals(Path.GetDirectoryName(workspace), _cacheDirectory, PathComparison);
+    }
 
     /// <summary>
     /// <see cref="Path.GetFullPath(string, string)"/> for a path nothing has vetted. Short names

@@ -1,0 +1,30 @@
+{
+  "name": "d2-roguelike",
+  "queries": "queries-d2-roguelike.txt",
+  "coldSymbol": "RunState",
+  "edits": {
+    "body": {
+      "kind": "body",
+      "file": "game/rules/D2Roguelike.Rules/RunState.cs",
+      "statement": "_ = RankTargets();",
+      "method": "RunState.Advance",
+      "project": "D2Roguelike.Rules",
+      "role": "root: referenced by the game, its tests, the wiki and HdConvert"
+    },
+    "top": {
+      "kind": "top",
+      "file": "game/rules/D2Roguelike.Rules/Targeting.cs",
+      "symbol": "Targeting",
+      "project": "D2Roguelike.Rules",
+      "role": "root, as above; the repository has no middle layer"
+    },
+    "leafBody": {
+      "kind": "body",
+      "file": "game/scripts/Unit3D.cs",
+      "statement": "AddStrikeTrack(null!, 0f);",
+      "method": "Unit3D.HasClip",
+      "project": "D2Roguelike (Godot game)",
+      "role": "leaf: no project references it"
+    }
+  }
+}

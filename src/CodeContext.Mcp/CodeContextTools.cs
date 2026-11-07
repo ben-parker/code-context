@@ -10,7 +10,7 @@ namespace CodeContext.Mcp;
 // living documentation of each parameter's contract (they no longer drive schema generation).
 public sealed class CodeContextTools
 {
-    [Description("Get comprehensive context for a code identifier. Returns relationships, dependencies, tests, and metrics.")]
+    [Description("Get comprehensive context for a code identifier. Returns relationships, dependencies, tests, and metrics. A cache object means the answer comes from a saved index not yet re-checked; a miss is then not conclusive.")]
     public static async Task<string> GetContext(
         IContextService contextService,
         [Description("Canonical returned identifier, symbol name, or file path")] string identifier,
@@ -71,7 +71,7 @@ public sealed class CodeContextTools
         }
     }
 
-    [Description("Get context for multiple identifiers in a single request. Useful for batch operations.")]
+    [Description("Get context for multiple identifiers in a single request. Useful for batch operations. A cache object means the answer comes from a saved index not yet re-checked; a miss is then not conclusive.")]
     public static async Task<string> GetMultiContext(
         IContextService contextService,
         [Description("List of identifiers to get context for")] string[] identifiers,

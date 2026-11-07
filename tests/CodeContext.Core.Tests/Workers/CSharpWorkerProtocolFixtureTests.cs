@@ -1,6 +1,7 @@
 using CodeContext.Core.Repositories;
 using CodeContext.Core.Repositories.InMemory;
 using CodeContext.Core.Services;
+using CodeContext.Core.Tests.Snapshots;
 using CodeContext.Core.Workers;
 using CodeContext.Parser.Protocol;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -275,4 +276,90 @@ namespace Fixture { public class DerivedThing : BaseThing { public void Extra() 
         nodes = await _pipeline.RepositoryFactory.CreateNodeRepository().GetAllAsync();
         Assert.DoesNotContain(nodes, node => node.Name == "WatcherGenerated");
     }
+
+    /// <summary>
+    /// A real worker process declares <c>persistentState</c>, saves its state on <c>workspace/saveState</c>, and a
+    /// new process accepts the baseline with one empty file-scoped delta carrying the same fingerprints, then
+    /// sends only what changed while it was down. Each restored index writes one <c>verify:</c> line to stderr.
+    /// </summary>
+    [Fact]
+    public async Task BaselineIndexAndSaveState_ThroughTheRealProcess()
+    {
+        var code = await WriteFileAsync("Code.cs", "namespace Fixture { public class Kept { public void M() { } } }");
+        await WriteFileAsync("Other.cs", "namespace Fixture { public class Other { } }");
+        var stateDirectory = Directory.CreateDirectory(Path.Combine(_tempDir, ".codecontext", "cache", "default")).FullName;
+        try
+        {
+            string[] files = [Path.Combine(_tempDir, "Code.cs"), Path.Combine(_tempDir, "Other.cs")];
+            var path = Path.Combine(stateDirectory, "worker-csharp.0000000001.55555555.state");
+            var stateId = new string('5', 32);
+            IReadOnlyList<UnitFingerprint>? fingerprints = null;
+            IndexBaseline baseline;
+            await using (var first = Supervisor(new ListLogger<ParserProcessSupervisor>()))
+            {
+                first.DeltaHandler = (delta, _) =>
+                {
+                    fingerprints ??= delta.Fingerprints;
+                    return Task.FromResult(true);
+                };
+                Assert.True((await first.EnsureInitializedAsync()).Capabilities.PersistentState);
+                await first.OpenWorkspaceAsync(new OpenWorkspaceParams("default", _tempDir, [".csproj"], files));
+                await first.IndexWorkspaceAsync(new IndexWorkspaceParams("default", 1, files));
+                var saved = await first.SaveStateAsync(new SaveStateParams("default", path, stateId));
+                Assert.True(saved.Saved);
+                Assert.Equal(new FileInfo(path).Length, saved.Bytes);
+                Assert.Equal(Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(path))), saved.Sha256);
+                Assert.False(File.Exists(path + ".tmp"));
+                Assert.NotNull(fingerprints);
+                baseline = new IndexBaseline(path, stateId, saved.Sha256!, fingerprints!);
+                await first.ShutdownAsync();
+            }
+
+            var log = new ListLogger<ParserProcessSupervisor>();
+            await using (var second = Supervisor(log))
+            {
+                var deltas = new List<AnalysisDelta>();
+                second.DeltaHandler = (delta, _) =>
+                {
+                    lock (deltas) deltas.Add(delta);
+                    return Task.FromResult(true);
+                };
+                await second.OpenWorkspaceAsync(new OpenWorkspaceParams("default", _tempDir, [".csproj"], files));
+                var result = await second.IndexWorkspaceAsync(new IndexWorkspaceParams("default", 1, files, baseline));
+                Assert.Equal(BaselineOutcomes.Accepted, result.Baseline);
+                var delta = Assert.Single(deltas);
+                Assert.False(delta.ReplacesWorkspace);
+                Assert.Empty(delta.Nodes);
+                Assert.Equal(fingerprints, delta.Fingerprints);
+                await second.ShutdownAsync();
+            }
+            Assert.Contains(log.Entries, entry => entry.Message.Contains("verify: restored=2 walked=0 parsed=2 compilations=1", StringComparison.Ordinal));
+
+            // Changed while down: a third process sends that file only.
+            await File.WriteAllTextAsync(code, "namespace Fixture { public class Kept { public void N() { } } }");
+            await using (var third = Supervisor(new ListLogger<ParserProcessSupervisor>()))
+            {
+                var deltas = new List<AnalysisDelta>();
+                third.DeltaHandler = (delta, _) =>
+                {
+                    lock (deltas) deltas.Add(delta);
+                    return Task.FromResult(true);
+                };
+                await third.OpenWorkspaceAsync(new OpenWorkspaceParams("default", _tempDir, [".csproj"], files));
+                var result = await third.IndexWorkspaceAsync(new IndexWorkspaceParams("default", 1, files, baseline));
+                Assert.Equal(BaselineOutcomes.Accepted, result.Baseline);
+                Assert.Equal([code], deltas[0].ReplacesFiles);
+                Assert.Contains(deltas.SelectMany(d => d.Nodes), node => node.Name == "N");
+                await third.ShutdownAsync();
+            }
+        }
+        finally
+        {
+            Directory.Delete(stateDirectory, recursive: true);
+        }
+    }
+
+    private static ParserProcessSupervisor Supervisor(ListLogger<ParserProcessSupervisor> log)
+        => new(CSharpWorkerPipeline.CSharpWorkerLaunchSpec(), TestWorkerOptions.Patient(), log, null,
+            new CodeContextOptions { RootPath = Path.GetTempPath() });
 }

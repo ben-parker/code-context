@@ -110,7 +110,7 @@ jobs:
       - name: Run tests
         run: >
           dotnet test tests/CodeContext.Core.Tests/CodeContext.Core.Tests.csproj
-          --filter "Category!=ExternalTooling"
+          --filter "Category!=ExternalTooling&Category!=Benchmark"
       - name: Run TypeScript worker protocol tests
         run: >
           dotnet test tests/CodeContext.Core.Tests/CodeContext.Core.Tests.csproj

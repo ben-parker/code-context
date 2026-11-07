@@ -41,6 +41,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="CodeContext.Core.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- The manifest travels with the executable so hosts can discover the worker by
          scanning workers/<name>/worker-manifest.json directories. -->
     <None Include="worker-manifest.json" CopyToOutputDirectory="PreserveNewest" />

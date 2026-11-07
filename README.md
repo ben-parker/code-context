@@ -7,8 +7,11 @@ can answer questions such as what a method calls, who calls it, which types impl
 an interface, which files depend on another file, and where static test evidence
 exists.
 
-The index stays on the local machine. The current host uses an in-memory store, so a
-new process performs a fresh scan and leaves no repository database behind.
+The index stays on the local machine. The host keeps it in memory and saves a snapshot
+under `<root>/.codecontext/cache/`, authenticated with a per-user key
+(`~/.codecontext/cache.key`). A new process answers from that snapshot at once, with
+answers labelled `cache` until its startup scan has re-checked the files.
+`codecontext start --no-cache` restores the old behaviour: a fresh scan, nothing written.
 
 ## Languages and platforms
 

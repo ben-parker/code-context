@@ -30,6 +30,8 @@ namespace CodeContext.Core.Repositories.InMemory
             return Task.FromResult<CodeNode?>(null);
         }
 
+        // Every shard answers in id order and shards are concatenated in ShardKey order, so the
+        // result is canonical whatever order the facts were committed in.
         public Task<IReadOnlyList<CodeNode>> FindByNameAsync(string name, string? type = null, bool exact = false)
         {
             if (name == null)
@@ -37,23 +39,24 @@ namespace CodeContext.Core.Repositories.InMemory
                 return Task.FromResult<IReadOnlyList<CodeNode>>(new List<CodeNode>());
             }
 
-            var query = _database.EnumerateNodes().Where(n =>
-                exact
-                    ? string.Equals(n.Name, name, StringComparison.OrdinalIgnoreCase)
-                    : n.Name?.Contains(name, StringComparison.OrdinalIgnoreCase) ?? false);
+            // A fresh list per call (never a shared backing store), so it is returned as is.
+            var nodes = _database.GetAdjacency().FindNodesByName(name, exact);
 
-            if (type != null)
+            if (type == null)
             {
-                query = query.Where(n => string.Equals(n.Type, type, StringComparison.OrdinalIgnoreCase));
+                return Task.FromResult(nodes);
             }
 
-            return Task.FromResult<IReadOnlyList<CodeNode>>(query.ToList());
+            return Task.FromResult<IReadOnlyList<CodeNode>>(nodes
+                .Where(n => string.Equals(n.Type, type, StringComparison.OrdinalIgnoreCase))
+                .ToList());
         }
 
         // Resolves through the version-stamped adjacency path index (O(matches)) instead of a full
-        // O(N) scan + FilePathMatcher.Matches filter. FindNodesByPath builds a fresh list, so the
-        // no-type result is returned directly; the type filter runs the SAME case-insensitive (ordinal)
-        // comparison ContextService.FindNodesByFilePathAsync used, over that already-narrowed set.
+        // O(N) scan + FilePathMatcher.Matches filter; the result is in canonical order.
+        // FindNodesByPath builds a fresh list, so the no-type result is returned directly; the type
+        // filter runs the SAME case-insensitive (ordinal) comparison ContextService.FindNodesByFilePathAsync
+        // used, over that already-narrowed set.
         public Task<IReadOnlyList<CodeNode>> FindByFilePathAsync(string filePath, string? type = null)
         {
             var nodes = _database.GetAdjacency().FindNodesByPath(filePath);
@@ -70,12 +73,16 @@ namespace CodeContext.Core.Repositories.InMemory
 
         // Resolves through the version-stamped adjacency snapshot (built once per mutation version)
         // and returns its cached, downcast-proof read-only view — zero per-call copy, and the result
-        // cannot be cast back to the shared List/array backing store. Order is ordinal-shard-then-
-        // per-shard-dictionary order (identical to the former single-dictionary enumeration in the
-        // common single-shard case).
+        // cannot be cast back to the shared List/array backing store. Canonical order: shards in
+        // ShardKey order, id order inside each shard.
         public Task<IReadOnlyList<CodeNode>> GetAllAsync()
         {
             return Task.FromResult(_database.GetAdjacency().NodesView);
+        }
+
+        public Task<IReadOnlyList<string>> GetFilePathsAsync()
+        {
+            return Task.FromResult(_database.GetAdjacency().FilePaths);
         }
 
         public Task UpsertAsync(CodeNode node)

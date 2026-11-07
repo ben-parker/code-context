@@ -1,0 +1,116 @@
+using CodeContext.CSharp.Worker;
+using CodeContext.Parser.Protocol;
+
+namespace CodeContext.Core.Tests.Workers;
+
+/// <summary>Plan phase 6: save, restore into a new worker, and settle everything: the same buckets and hashes as the worker that saved.</summary>
+public sealed class CSharpWorkerStateRoundTripTests : IDisposable
+{
+    private readonly string _base = Directory.CreateTempSubdirectory("cc-csharp-roundtrip-").FullName;
+    private string Root => Path.Combine(_base, "repo");
+    private string StateDirectory => Path.Combine(Root, ".codecontext", "cache", "default");
+
+    public CSharpWorkerStateRoundTripTests()
+    {
+        Directory.CreateDirectory(StateDirectory);
+        Write("Lib/Lib.csproj", CSharpWorkerBaselineTests.Project());
+        Write("Lib/p1.cs", "namespace Lib; public partial class Shape { public int Area() => System.Math.Abs(1); }");
+        Write("Lib/p2.cs", "namespace Lib; public partial class Shape { public void Grow() { Missing.Call(); } }");
+        Write("loose.cs", "public class Loose { public void Go() => new Lib.Shape().Area(); }");
+    }
+
+    public void Dispose() => Directory.Delete(_base, recursive: true);
+
+    private void Write(string relative, string text)
+    {
+        var path = Path.Combine(Root, relative.Replace('/', Path.DirectorySeparatorChar));
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(path, text);
+    }
+
+    [Fact]
+    public async Task RestoredWorkerSettlesToTheSameBucketsAndHashes()
+    {
+        var host = new InProcessCSharpHost(Root);
+        await host.IndexAsync();
+        var baseline = await host.SaveAsync(StateDirectory);
+        var original = host.Analyzer.CaptureState("x")!;
+        var originalBuckets = Buckets(host.Analyzer.Analyze(CancellationToken.None));
+
+        host.Restart();
+        await host.IndexAsync(baseline);
+        Assert.Equal(0, VerifyLine.Parse(host.LastVerify).Walked);
+        var restored = host.Analyzer.CaptureState("x")!;
+
+        Assert.Equal(original.FactHashes.Select(hash => (hash.Path, Convert.ToHexString(hash.Hash))),
+            restored.FactHashes.Select(hash => (hash.Path, Convert.ToHexString(hash.Hash))));
+        Assert.Equal(original.Fingerprints, restored.Fingerprints);
+        Assert.Equal(originalBuckets, Buckets(host.Analyzer.Analyze(CancellationToken.None)));
+    }
+
+    [Fact]
+    public async Task ASaveOutsideTheCacheIsNotWritten()
+    {
+        var host = new InProcessCSharpHost(Root);
+        await host.IndexAsync();
+        var outside = Path.Combine(_base, "worker-csharp.0000000001.aaaaaaaa.state");
+
+        var result = await host.Session.SaveStateAsync(new SaveStateParams("default", outside, "id"), CancellationToken.None);
+
+        Assert.False(result.Saved);
+        Assert.False(File.Exists(outside));
+        Assert.False(File.Exists(outside + ".tmp"));
+        Assert.Contains(host.Diagnostics, line => line.StartsWith("save: state not written", StringComparison.Ordinal));
+    }
+
+    [LocalShareFact]
+    public async Task AStateFileOnARefusedPathIsMissing()
+    {
+        var host = new InProcessCSharpHost(Root);
+        await host.IndexAsync();
+        var baseline = await host.SaveAsync(StateDirectory);
+        host.Restart();
+
+        var result = await host.IndexAsync(baseline with { StatePath = Share(baseline.StatePath) });
+
+        Assert.NotEqual(BaselineOutcomes.Accepted, result.Baseline);
+        Assert.Equal("state file is missing", result.BaselineReason);
+    }
+
+    /// <summary>A profile on a share reaches the worker only as the root of a repository kept there.</summary>
+    [LocalShareFact]
+    public async Task ARepositoryOnAShareSavesAndRestores()
+    {
+        var root = Share(Root);
+        var host = new InProcessCSharpHost(root);
+        await host.IndexAsync();
+        var baseline = await host.SaveAsync(Path.Combine(root, ".codecontext", "cache", "default"));
+
+        host.Restart();
+        var result = await host.IndexAsync(baseline);
+
+        Assert.Equal(BaselineOutcomes.Accepted, result.Baseline);
+        Assert.Equal(0, VerifyLine.Parse(host.LastVerify).Walked);
+    }
+
+    private static string Share(string path) => $@"\\localhost\c$\{path[3..]}";
+
+    private sealed class LocalShareFactAttribute : FactAttribute
+    {
+        public LocalShareFactAttribute()
+        {
+            if (!File.Exists(@"\\localhost\c$\Windows\notepad.exe")
+                || !Path.GetTempPath().StartsWith(@"C:\", StringComparison.OrdinalIgnoreCase))
+            {
+                Skip = "This machine does not serve its administrative share of the temp drive.";
+            }
+        }
+    }
+
+    private static List<string> Buckets(CSharpWorkspaceAnalyzer.AnalysisResult analysis)
+        => analysis.Buckets.Select(bucket => bucket.FilePath + "\n"
+                + string.Join('\n', bucket.Nodes.Select(node => System.Text.Json.JsonSerializer.Serialize(node, ParserProtocolJsonContext.Default.ProtocolNode)).Order(StringComparer.Ordinal))
+                + "\n" + string.Join('\n', bucket.Edges.Select(edge => edge.ToString()).Order(StringComparer.Ordinal)))
+            .Order(StringComparer.Ordinal)
+            .ToList();
+}

@@ -3,6 +3,10 @@ using System.Threading.Tasks;
 
 namespace CodeContext.Core.Repositories
 {
+    /// <summary>
+    /// Node reads. Every list is in canonical order: ordinal by node id within a shard, shards in
+    /// (parserId, workspaceId) ordinal order, unless a member documents another order.
+    /// </summary>
     public interface ICodeNodeRepository
     {
         Task<CodeNode?> GetByIdAsync(string id);
@@ -20,6 +24,11 @@ namespace CodeContext.Core.Repositories
         /// </summary>
         Task<IReadOnlyList<CodeNode>> FindByFilePathAsync(string filePath, string? type = null);
         Task<IReadOnlyList<CodeNode>> GetAllAsync();
+        /// <summary>
+        /// The distinct (ordinal) non-empty file paths of all nodes, ordered
+        /// <see cref="System.StringComparer.OrdinalIgnoreCase"/> then <see cref="System.StringComparer.Ordinal"/>.
+        /// </summary>
+        Task<IReadOnlyList<string>> GetFilePathsAsync();
         Task UpsertAsync(CodeNode node);
         Task DeleteAsync(string id, CancellationToken cancellationToken);
     }

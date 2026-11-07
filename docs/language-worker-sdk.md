@@ -10,7 +10,8 @@ same graph as the bundled C# and TypeScript workers. The host stays compiler-agn
 Place one worker in its own directory with `worker-manifest.json` at the directory
 root. The host searches these roots in order:
 
-1. paths in `CODECONTEXT_WORKERS_DIR`, in declared order (use the OS path separator);
+1. absolute paths in `CODECONTEXT_WORKERS_DIR`, in declared order (use the OS path
+   separator; relative entries are ignored);
 2. `~/.codecontext/workers`;
 3. the release's bundled `workers` directory.
 
@@ -37,7 +38,10 @@ manifests are never auto-executed.
 
 A command found beside the manifest is preferred; otherwise a bare command uses
 absolute `PATH` entries, and never the current directory, which is usually the
-repository being indexed. Explicit relative commands resolve from the manifest directory. Releases
+repository being indexed. An absolute entry is trusted as the machine owner's choice,
+even inside a repository: an activated `.venv/bin` or `node_modules/.bin` on `PATH` is
+searched, so a worker with a bare command can resolve there. Explicit relative commands
+resolve from the manifest directory. Releases
 should carry their runtime or a self-contained executable so installing CodeContext
 once is sufficient.
 
@@ -59,6 +63,8 @@ Implement this sequence:
    changed — see "Emit file-scoped deltas" below.
 5. `$/cancel`: cooperatively stop work for the named request.
 6. `shutdown`: answer, then exit when the host closes stdin.
+7. Optional: `workspace/saveState` and the `baseline` of `workspace/index`, only after
+   declaring `persistentState` — see "Persist state across restarts" below.
 
 The [canonical schema](../src/CodeContext.Parser.Protocol/protocol/parser-protocol.schema.json)
 ships in releases as `protocol/parser-protocol.schema.json`. Helper packages are
@@ -102,7 +108,9 @@ coordinates.
 ## Emit file-scoped deltas
 
 `workspace/index` replaces the whole workspace: every delta carries
-`replacesWorkspace:true` and an empty `replacesFiles`. `workspace/applyChanges` is
+`replacesWorkspace:true` and an empty `replacesFiles`. The one exception is a
+`workspace/index` whose `baseline` the worker accepted, which is file-scoped (see
+"Persist state across restarts" below). `workspace/applyChanges` is
 file-scoped: every delta carries `replacesWorkspace:false` and only the changed
 files' facts. The contract:
 
@@ -148,6 +156,71 @@ files' facts. The contract:
 - **Commit your diff baseline only after the final chunk is sent.** If emission fails
   mid-stream the host commits nothing; keeping the previous baseline means the next
   batch re-emits the same difference and converges.
+
+## Persist state across restarts (optional)
+
+The host saves its graph under `<root>/.codecontext/cache/` and, on the next start, answers
+from it while every worker re-checks the files. By default a worker re-walks everything on
+that start and replaces its facts. A worker that can save what it needs to reproduce its
+facts can instead confirm or patch them, which is much cheaper on a large repository. This
+is optional: a worker that does not declare the capability is never sent any of it and
+behaves exactly as above. A worker cannot tell from `initialize` whether the host
+supports it: a host that does not simply never sends a baseline or `workspace/saveState`
+and ignores `fingerprints`.
+
+What the worker does:
+
+1. Declare `capabilities.persistentState: true` in the `initialize` result.
+2. Send `fingerprints` on the first `analysis/delta` chunk of every request: a list of
+   `{ "unit", "value" }` pairs you compute, for example one per project, covering everything
+   the unit's facts depend on (its files' contents, its settings, the fingerprints of the
+   units it references, and your own build, so a changed worker never trusts an old state).
+   The host reads them from the first chunk of a request only, stores the last set per
+   workspace and hands it back unread; a request without them clears them, and no baseline
+   is offered from those facts. Order is not significant: the host compares two sets by
+   unit, and a set that names a unit twice equals no other; a stable order still keeps the
+   wire output reproducible. An entry with a null `unit` or `value` is a protocol
+   violation.
+3. Answer `workspace/saveState { workspaceId, statePath, stateId }`: write your state to
+   `<statePath>.tmp`, flush it to disk, rename it to `statePath`, and answer
+   `{ workspaceId, stateId, saved: true, bytes, sha256 }` (the file's length, and the
+   lowercase hex SHA-256 of its bytes) only once the file is durable. Write nowhere else.
+   `stateId` is opaque: record it in the state and echo it; do not parse it. `saved: false`
+   or an error just means no state this time. The host asks between mutations only: after
+   a quiet period, at the maximum delay after a change, and at shutdown. It waits at most
+   5 s, then sends `$/cancel`, ignores a late result and deletes `statePath` and its temp
+   file. A worker that finishes writing after that leaves a file the host removes at its
+   next successful write or start, so stop writing (and remove your temp file) when
+   `$/cancel` arrives. It discards a result whose `workspaceId` or
+   `stateId` differs from the request's, whose `sha256` is not 64 lowercase hex digits, or
+   whose `bytes` differs from the file's length.
+4. The host offers a baseline at most once per worker process: with the first mutating
+   request it sends that process (`workspace/index` or `workspace/applyChanges`), so only
+   when that request is a `workspace/index`, which then carries
+   `baseline { statePath, stateId, stateSha256, fingerprints }`. `workspace/open` is not a
+   mutating request, and must not change what the worker believes it has emitted.
+   Accept the baseline only when the
+   file exists, its SHA-256 equals `stateSha256`, it records `stateId`, your worker version
+   and the host's root, and its fingerprints equal `fingerprints`. Then answer
+   `baseline: "accepted"` and send file-scoped deltas (`replacesWorkspace: false`) with only
+   the files whose facts differ from what the state describes, plus removed files: an empty
+   delta when nothing changed. Otherwise answer `baseline: "rejected"` (optionally with
+   `baselineReason`) and replace the workspace as for a request without a baseline. Report
+   progress over the approved file list either way, ending at `filesTotal`.
+
+What the host guarantees: it sends `baseline` and `workspace/saveState` only to a worker
+that declared the capability; a baseline at most once per process, on its first mutating request;
+a state file is recorded with the facts only when every request that process completed has
+been committed in order and nothing else changed its facts, so the state you saved
+describes exactly the facts the host holds; the path is one it computed, inside its cache
+directory. An answer that does not match the request (`accepted` with a workspace
+replacement, `rejected` with a file-scoped delta, a `baseline` answer to a request without
+one) fails the request like any other protocol violation.
+
+The state file lives in a directory of the repository being indexed, so anyone who can
+write the repository can replace it. Treat its bytes as untrusted until their SHA-256
+matches `stateSha256`, parse it with bounds checks, and never execute it or deserialize it
+with a type-driven deserializer (one that picks the types to create from the data).
 
 ## Normalized graph and native trees
 

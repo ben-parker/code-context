@@ -30,6 +30,36 @@ internal sealed class ExternalSymbols(
     private readonly Dictionary<string, ProtocolNode> _nodes = new(StringComparer.Ordinal);
     private readonly List<EdgeFact> _edges = [];
 
+    /// <summary>The stubs this file used, for saving its walk.</summary>
+    public IEnumerable<ProtocolNode> Nodes => _nodes.Values;
+
+    /// <summary>The containment edges between them.</summary>
+    public IReadOnlyList<EdgeFact> Edges => _edges;
+
+    /// <summary>
+    /// The stubs of a walk saved earlier, exactly as that walk recorded them. They stay out of the shared
+    /// cache, so what a later walk records does not depend on what was restored before it.
+    /// </summary>
+    public static ExternalSymbols Restore(
+        string workspacePrefix,
+        ConcurrentDictionary<(string Id, string Assembly), ProtocolNode> stubs,
+        Func<string, string> share,
+        IEnumerable<ProtocolNode> nodes,
+        IEnumerable<EdgeFact> edges)
+    {
+        var symbols = new ExternalSymbols(workspacePrefix, stubs, share);
+        foreach (var node in nodes) symbols._nodes[node.Id] = node;
+        symbols._edges.AddRange(edges);
+        return symbols;
+    }
+
+    /// <summary>Whether a stored node has the shape <see cref="ToNode"/> gives every stub.</summary>
+    public static bool IsStub(ProtocolNode node, string workspacePrefix)
+        => node.Id.StartsWith(workspacePrefix + IdInfix, StringComparison.Ordinal)
+            && node.FilePath is { } path && path.StartsWith(FilePrefix, StringComparison.Ordinal)
+            && node.Identifier.StartsWith(IdPrefix, StringComparison.Ordinal)
+            && node.Metadata is { } metadata && metadata.ContainsKey(AssemblyKey);
+
     /// <summary>True for a symbol that comes from a referenced assembly rather than source.</summary>
     public static bool IsExternal(ISymbol symbol)
         => symbol is not IErrorTypeSymbol

@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using CodeContext.Parser.Protocol;
 
@@ -19,9 +21,34 @@ using CodeContext.Parser.Protocol;
 //   invalid-progress-file reports a current file outside the approved set
 //   invalid-progress-request reports progress for an unknown request id
 //   native-advertised-missing advertises native trees but omits the handler
+//
+// Persistent state (plan phase 5). Every behaviour that does not declare persistentState fails a request
+// that carries a baseline, and workspace/saveState, with InvalidRequest: the host must never send them.
+//
+//   strict            normal, named for the tests of that rule
+//   persistent-state  declares persistentState; saves its file list and fingerprints on workspace/saveState
+//                     (temp file, flush, rename); accepts a baseline whose state file it wrote and answers with
+//                     a file-scoped delta of the files added and removed since (empty when nothing changed)
+//   baseline-reject   persistent-state that rejects every baseline and replaces the workspace
+//   save-state-fails  persistent-state whose workspace/saveState answers an error
+//   save-state-false  persistent-state whose workspace/saveState answers saved:false
+//   save-state-hangs  persistent-state whose workspace/saveState never answers unless cancelled
+//   save-state-wrong-id persistent-state whose workspace/saveState echoes another state id
+//   save-state-slow   persistent-state whose workspace/saveState takes 1.5 s
+//   content-fingerprints persistent-state whose fingerprint also covers each file's content, and whose
+//                     workspace/applyChanges for a file it already holds sends no fact for it (its facts do not
+//                     depend on content): a content edit moves the fingerprints and changes no fact
+//   fingerprints-without-capability normal, but sends fingerprints on every delta anyway
+//   accept-with-replacement persistent-state that answers accepted with a workspace replacement
+//   reject-with-file-scope  persistent-state that answers rejected with a file-scoped delta
+//   unsolicited-baseline normal, but answers baseline "accepted" to every workspace/index
+//
+// --fail-marker <path>: while that file exists, workspace/index and workspace/applyChanges emit their delta
+// and then answer complete:false (a request that fails after its delta committed).
 
 var behavior = GetOption(args, "--behavior") ?? "normal";
 var markerPath = GetOption(args, "--marker");
+var failMarker = GetOption(args, "--fail-marker");
 
 var stdin = Console.OpenStandardInput();
 var stdout = Console.OpenStandardOutput();
@@ -45,7 +72,7 @@ if (behavior == "stderr-flood")
     Console.Error.Flush();
 }
 
-var state = new WorkerState(behavior, markerPath);
+var state = new WorkerState(behavior, markerPath, failMarker);
 var connection = new JsonRpcConnection(stdin, stdout);
 
 connection.AddRequestHandler(ParserProtocolMethods.Initialize, (p, ct) => state.HandleInitializeAsync(p, ct));
@@ -54,6 +81,7 @@ connection.AddRequestHandlerWithId(ParserProtocolMethods.IndexWorkspace,
     (requestId, p, ct) => state.HandleIndexAsync(requestId, p, ct, connection));
 connection.AddRequestHandlerWithId(ParserProtocolMethods.ApplyChanges,
     (requestId, p, ct) => state.HandleApplyChangesAsync(requestId, p, ct, connection));
+connection.AddRequestHandler(ParserProtocolMethods.SaveState, (p, ct) => state.HandleSaveStateAsync(p, ct));
 connection.AddRequestHandler(ParserProtocolMethods.Shutdown, (_, _) =>
 {
     state.ShutdownRequested = true;
@@ -81,12 +109,24 @@ static string? GetOption(string[] args, string name)
     return null;
 }
 
-internal sealed class WorkerState(string behavior, string? markerPath)
+internal sealed class WorkerState(string behavior, string? markerPath, string? failMarker)
 {
     private const string ParserId = "fake";
     private const string ParserVersion = "1.0.0-test";
 
+    // The files whose facts this process has emitted, which is all its "state" holds.
+    private readonly SortedSet<string> _files = new(StringComparer.Ordinal);
+
     public bool ShutdownRequested { get; set; }
+
+    private bool Persistent => behavior is "persistent-state" or "baseline-reject" or "save-state-fails" or "save-state-false"
+        or "save-state-hangs" or "save-state-wrong-id" or "accept-with-replacement" or "reject-with-file-scope"
+        or "save-state-slow" or "content-fingerprints";
+
+    // Fingerprints are sent by every persistent behaviour, and by one that sends them without the capability.
+    private bool SendsFingerprints => Persistent || behavior == "fingerprints-without-capability";
+
+    private bool Fails => failMarker is not null && File.Exists(failMarker);
 
     public async Task<JsonElement?> HandleInitializeAsync(JsonElement? paramsElement, CancellationToken ct)
     {
@@ -109,7 +149,8 @@ internal sealed class WorkerState(string behavior, string? markerPath)
             Capabilities: new WorkerCapabilities(
                 WorkspaceAnalysis: true, IncrementalUpdates: true,
                 SemanticAnalysis: false,
-                NativeSyntaxTree: behavior == "native-advertised-missing"),
+                NativeSyntaxTree: behavior == "native-advertised-missing",
+                PersistentState: Persistent),
             SpanSemantics: new SpanSemantics(LineBase: 1, ColumnBase: 1, EndIsInclusive: true));
 
         return JsonSerializer.SerializeToElement(result, ParserProtocolJsonContext.Default.InitializeResult);
@@ -129,6 +170,11 @@ internal sealed class WorkerState(string behavior, string? markerPath)
         MaybeCrash();
 
         var index = Deserialize(paramsElement, ParserProtocolJsonContext.Default.IndexWorkspaceParams);
+        if (index.Baseline is not null && !Persistent)
+        {
+            throw new JsonRpcRemoteException(ParserProtocolErrorCodes.InvalidRequest,
+                "workspace/index carried a baseline, but this worker did not declare persistentState.");
+        }
 
         if (behavior == "slow-index")
         {
@@ -156,13 +202,43 @@ internal sealed class WorkerState(string behavior, string? markerPath)
             }
         }
 
-        var delta = BuildDelta(index.WorkspaceId, index.Generation, requestId,
-            replacesWorkspace: true, index.Files);
+        string? outcome = behavior == "unsolicited-baseline" ? BaselineOutcomes.Accepted : null;
+        string? reason = null;
+        AnalysisDelta delta;
+        if (index.Baseline is { } baseline)
+        {
+            var restored = behavior is "baseline-reject" or "reject-with-file-scope" ? null : Restore(baseline, out reason);
+            var accepted = restored is not null || behavior == "accept-with-replacement";
+            outcome = accepted ? BaselineOutcomes.Accepted : BaselineOutcomes.Rejected;
+            reason = accepted ? null : reason ?? "this worker rejects every baseline";
+            if (restored is not null && behavior != "accept-with-replacement")
+            {
+                // Only what differs from the restored state: files added since, and files removed since.
+                var current = new SortedSet<string>(index.Files, StringComparer.Ordinal);
+                var added = current.Where(file => !restored.Contains(file)).ToList();
+                var removed = restored.Where(file => !current.Contains(file)).ToList();
+                delta = BuildDelta(index.WorkspaceId, index.Generation, requestId, replacesWorkspace: false,
+                    added, [.. added, .. removed]);
+            }
+            else
+            {
+                delta = BuildDelta(index.WorkspaceId, index.Generation, requestId,
+                    replacesWorkspace: behavior != "reject-with-file-scope", index.Files);
+            }
+        }
+        else
+        {
+            delta = BuildDelta(index.WorkspaceId, index.Generation, requestId, replacesWorkspace: true, index.Files);
+        }
+        _files.Clear();
+        _files.UnionWith(index.Files);
+        if (SendsFingerprints) delta = delta with { Fingerprints = Fingerprints(index.WorkspaceId) };
         await connection.NotifyAsync(
             ParserProtocolMethods.AnalysisDeltaNotification, delta,
             ParserProtocolJsonContext.Default.AnalysisDelta, ct);
 
-        var result = new IndexWorkspaceResult(index.WorkspaceId, index.Generation, DeltasEmitted: 1, Complete: true);
+        var result = new IndexWorkspaceResult(index.WorkspaceId, index.Generation, DeltasEmitted: 1, Complete: !Fails,
+            Baseline: outcome, BaselineReason: reason);
         return JsonSerializer.SerializeToElement(result, ParserProtocolJsonContext.Default.IndexWorkspaceResult);
 
         Task SendProgressAsync(int processed, int total, string? currentFile)
@@ -186,7 +262,11 @@ internal sealed class WorkerState(string behavior, string? markerPath)
         MaybeCrash();
 
         var apply = Deserialize(paramsElement, ParserProtocolJsonContext.Default.ApplyChangesParams);
-        var survivingFiles = apply.Changes
+        // content-fingerprints: a file it already holds has the same facts whatever its content, so it is not resent.
+        var changes = behavior == "content-fingerprints"
+            ? apply.Changes.Where(c => !(c.ChangeType == FileChangeKinds.Changed && _files.Contains(c.Path))).ToList()
+            : apply.Changes.ToList();
+        var survivingFiles = changes
             .Where(c => c.ChangeType != FileChangeKinds.Deleted)
             .Select(c => c.Path)
             .ToList();
@@ -196,14 +276,121 @@ internal sealed class WorkerState(string behavior, string? markerPath)
         var delta = BuildDelta(apply.WorkspaceId, apply.Generation, requestId,
             replacesWorkspace: false,
             files: survivingFiles,
-            replacesFiles: apply.Changes.Select(c => c.Path).ToList());
+            replacesFiles: changes.Select(c => c.Path).ToList());
+        foreach (var change in apply.Changes)
+        {
+            if (change.ChangeType == FileChangeKinds.Deleted) _files.Remove(change.Path);
+            else _files.Add(change.Path);
+        }
+        if (SendsFingerprints) delta = delta with { Fingerprints = Fingerprints(apply.WorkspaceId) };
         await connection.NotifyAsync(
             ParserProtocolMethods.AnalysisDeltaNotification, delta,
             ParserProtocolJsonContext.Default.AnalysisDelta, ct);
 
-        var result = new ApplyChangesResult(apply.WorkspaceId, apply.Generation, DeltasEmitted: 1, Complete: true);
+        var result = new ApplyChangesResult(apply.WorkspaceId, apply.Generation, DeltasEmitted: 1, Complete: !Fails);
         return JsonSerializer.SerializeToElement(result, ParserProtocolJsonContext.Default.ApplyChangesResult);
     }
+
+    public async Task<JsonElement?> HandleSaveStateAsync(JsonElement? paramsElement, CancellationToken ct)
+    {
+        var save = Deserialize(paramsElement, ParserProtocolJsonContext.Default.SaveStateParams);
+        if (!Persistent)
+        {
+            throw new JsonRpcRemoteException(ParserProtocolErrorCodes.InvalidRequest,
+                "workspace/saveState sent to a worker that did not declare persistentState.");
+        }
+        switch (behavior)
+        {
+            case "save-state-fails":
+                throw new JsonRpcRemoteException(ParserProtocolErrorCodes.InternalError, "the disk is full (fake)");
+            case "save-state-hangs":
+                await Task.Delay(Timeout.Infinite, ct);
+                break;
+            case "save-state-false":
+                return Serialize(new SaveStateResult(save.WorkspaceId, save.StateId, Saved: false));
+            case "save-state-slow":
+                await Task.Delay(TimeSpan.FromSeconds(1.5), ct);
+                break;
+        }
+
+        // The state: its id, the files emitted and their fingerprints, written beside the path, flushed, renamed.
+        using var buffer = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(buffer))
+        {
+            writer.WriteStartObject();
+            writer.WriteString("stateId", save.StateId);
+            writer.WriteString("workspaceId", save.WorkspaceId);
+            writer.WriteString("fingerprint", Fingerprints(save.WorkspaceId)[0].Value);
+            writer.WriteStartArray("files");
+            foreach (var file in _files) writer.WriteStringValue(file);
+            writer.WriteEndArray();
+            writer.WriteEndObject();
+        }
+        var bytes = buffer.ToArray();
+        var temp = save.StatePath + ".tmp";
+        using (var stream = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None))
+        {
+            stream.Write(bytes);
+            stream.Flush();
+        }
+        File.Move(temp, save.StatePath, overwrite: true);
+        var id = behavior == "save-state-wrong-id" ? new string('0', save.StateId.Length) : save.StateId;
+        return Serialize(new SaveStateResult(save.WorkspaceId, id, Saved: true, bytes.Length,
+            Convert.ToHexStringLower(SHA256.HashData(bytes))));
+    }
+
+    /// <summary>The files a state file this worker wrote holds, when it is the one the baseline names; else null and why.</summary>
+    private static SortedSet<string>? Restore(IndexBaseline baseline, out string? reason)
+    {
+        reason = null;
+        byte[] bytes;
+        try
+        {
+            bytes = File.ReadAllBytes(baseline.StatePath);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            reason = "state file is missing";
+            return null;
+        }
+        // Untrusted until the hash matches.
+        if (Convert.ToHexStringLower(SHA256.HashData(bytes)) != baseline.StateSha256)
+        {
+            reason = "state file hash does not match";
+            return null;
+        }
+        using var document = JsonDocument.Parse(bytes);
+        var root = document.RootElement;
+        if (root.GetProperty("stateId").GetString() != baseline.StateId)
+        {
+            reason = "state id does not match";
+            return null;
+        }
+        var fingerprint = baseline.Fingerprints.Count == 1 ? baseline.Fingerprints[0].Value : null;
+        if (root.GetProperty("fingerprint").GetString() != fingerprint)
+        {
+            reason = "fingerprints do not match";
+            return null;
+        }
+        var files = new SortedSet<string>(StringComparer.Ordinal);
+        foreach (var file in root.GetProperty("files").EnumerateArray()) files.Add(file.GetString()!);
+        return files;
+    }
+
+    /// <summary>
+    /// One unit, the workspace, whose fingerprint is the SHA-256 of the sorted file list (content-fingerprints: each
+    /// file followed by its content).
+    /// </summary>
+    private List<UnitFingerprint> Fingerprints(string workspaceId)
+    {
+        var text = behavior == "content-fingerprints"
+            ? string.Join("\n", _files.Select(file => file + "\n" + (File.Exists(file) ? File.ReadAllText(file) : "")))
+            : string.Join("\n", _files);
+        return [new UnitFingerprint(workspaceId, Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(text))))];
+    }
+
+    private static JsonElement? Serialize(SaveStateResult result)
+        => JsonSerializer.SerializeToElement(result, ParserProtocolJsonContext.Default.SaveStateResult);
 
     private void MaybeCrash()
     {
@@ -218,7 +405,7 @@ internal sealed class WorkerState(string behavior, string? markerPath)
         }
     }
 
-    private static AnalysisDelta BuildDelta(
+    private AnalysisDelta BuildDelta(
         string workspaceId, long generation, long requestId,
         bool replacesWorkspace, IReadOnlyList<string> files, IReadOnlyList<string>? replacesFiles = null)
     {
@@ -232,7 +419,9 @@ internal sealed class WorkerState(string behavior, string? markerPath)
             var methodId = $"{ParserId}:{workspaceId}:{stem}.Class.Method";
             nodes.Add(new ProtocolNode(classId, $"fake:{stem}.Class", $"{stem}Class", "class", "fake", file,
                 StartLine: 1, EndLine: 10, StartColumn: 1, EndColumn: 1,
-                Metadata: new Dictionary<string, string> { ["gen"] = generation.ToString() }));
+                // The persistent family's facts do not depend on the generation, so facts restored from a baseline
+                // equal those of a fresh scan.
+                Metadata: Persistent ? null : new Dictionary<string, string> { ["gen"] = generation.ToString() }));
             nodes.Add(new ProtocolNode(methodId, $"fake:{stem}.Class.Method", $"{stem}Method", "method", "fake", file,
                 StartLine: 2, EndLine: 5, StartColumn: 1, EndColumn: 1));
             edges.Add(new ProtocolEdge($"{classId}->contains->{methodId}", classId, methodId, "contains"));

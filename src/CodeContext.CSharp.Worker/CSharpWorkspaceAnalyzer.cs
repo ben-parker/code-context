@@ -1,4 +1,5 @@
 using CodeContext.CSharp.Worker.Projects;
+using CodeContext.CSharp.Worker.State;
 using CodeContext.Parser.Protocol;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
@@ -64,6 +65,7 @@ public sealed class CSharpWorkspaceAnalyzer
     private readonly Disk _disk;
     private readonly string? _rootPath;
     private readonly List<ProtocolDiagnostic> _pendingDiagnostics = [];
+    private readonly string _workspaceId;
     private readonly string _workspaceIdPrefix;
 
     /// <summary>The projects as last read, or null when this workspace has no known root.</summary>
@@ -116,6 +118,21 @@ public sealed class CSharpWorkspaceAnalyzer
     /// </summary>
     private readonly Dictionary<string, byte[]> _factHashes = new(PathComparer);
 
+    /// <summary>What each file's bytes were when last read, which is what its trees were parsed from.</summary>
+    private readonly Dictionary<string, FileStamp> _stamps = new(PathComparer);
+
+    /// <summary>The fingerprints sent with the facts <see cref="_factHashes"/> describes.</summary>
+    private List<UnitFingerprint>? _emittedFingerprints;
+
+    /// <summary>
+    /// True once an emission has been committed and nothing has walked since: only then do the walks,
+    /// the fact hashes and the fingerprints describe the same facts, which is what a saved state must.
+    /// </summary>
+    private bool _describesEmission;
+
+    /// <summary>Set by a restore: the next settlement rebuilds every bucket, as after a first walk.</summary>
+    private bool _settleEverything;
+
     /// <param name="workspaceId">Identity of the workspace, part of every fact id.</param>
     /// <param name="rootPath">
     /// The workspace root, where projects are looked for. Without one, every file goes in
@@ -124,6 +141,7 @@ public sealed class CSharpWorkspaceAnalyzer
     public CSharpWorkspaceAnalyzer(string workspaceId, string? rootPath = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(workspaceId);
+        _workspaceId = workspaceId;
         _workspaceIdPrefix = IdPrefix + Uri.EscapeDataString(workspaceId) + ":";
         var root = string.IsNullOrWhiteSpace(rootPath) ? null : rootPath;
         _disk = new Disk(root, Toolchain.Value);
@@ -139,12 +157,14 @@ public sealed class CSharpWorkspaceAnalyzer
     /// </summary>
     private ProjectCompilation CreateFallback(IReadOnlyList<ProjectInfo> projects)
     {
-        var usings = projects.SelectMany(project => project.GlobalUsings.Split('\n', StringSplitOptions.TrimEntries))
+        var usings = string.Join('\n', projects.SelectMany(project => project.GlobalUsings.Split('\n', StringSplitOptions.TrimEntries))
             .Where(line => line.StartsWith("global using", StringComparison.Ordinal))
-            .Distinct(StringComparer.Ordinal);
+            .Distinct(StringComparer.Ordinal));
         return new ProjectCompilation(
-            null, _workspaceIdPrefix, ProjectCompilation.ParseOptionsFor(null), SharedReferences.Value,
-            string.Join('\n', usings));
+            null, _workspaceIdPrefix, ProjectCompilation.ParseOptionsFor(null), SharedReferences.Value, usings)
+        {
+            Signature = usings,
+        };
     }
 
     private static ImmutableArray<MetadataReference> ResolveReferences()
@@ -251,6 +271,24 @@ public sealed class CSharpWorkspaceAnalyzer
     /// <summary>How many times the projects were read and the files parsed.</summary>
     public int BuildCount { get; private set; }
 
+    /// <summary>Which build of the worker this is, part of every fingerprint and saved state. Tests set another.</summary>
+    public string Identity { get; init; } = WorkerIdentity.Current;
+
+    /// <summary>
+    /// Changes a state after it is read and before it is used, so tests can show that each restored item
+    /// is needed. Only tests set this: no option or setting leads here.
+    /// </summary>
+    internal Action<WorkerState>? RestoreFault { get; init; }
+
+    /// <summary>How many times a file was parsed into a unit, by this analyzer.</summary>
+    public int ParseCount { get; private set; }
+
+    /// <summary>How many compilations this analyzer created for projects and files in no project.</summary>
+    public int CompilationCount { get; private set; }
+
+    /// <summary>How many files the last analysis walked.</summary>
+    public int LastWalkCount { get; private set; }
+
     /// <summary>Replaces the workspace file set entirely and reparses everything.</summary>
     public void ReplaceFiles(IReadOnlyList<string> files, CancellationToken ct)
     {
@@ -284,6 +322,7 @@ public sealed class CSharpWorkspaceAnalyzer
             _walked.Clear();
             _buckets.Clear();
             _idStrings.Clear();
+            _describesEmission = false;
         }
 
         var previousOwners = new Dictionary<string, ProjectCompilation>(_owners, PathComparer);
@@ -324,6 +363,7 @@ public sealed class CSharpWorkspaceAnalyzer
                     ProjectCompilation.ParseOptionsFor(project),
                     ReferencesFor(project)) { Signature = signature };
                 _changedUnits.Add(unit);
+                CompilationCount++;
             }
             unit.References.Clear();
             unit.References.AddRange(references);
@@ -343,6 +383,7 @@ public sealed class CSharpWorkspaceAnalyzer
         else
         {
             _changedUnits.Add(fallback);
+            CompilationCount++;
         }
         _fallback = fallback;
         units.Add(fallback);
@@ -354,6 +395,7 @@ public sealed class CSharpWorkspaceAnalyzer
             ct.ThrowIfCancellationRequested();
             var compiling = UnitsCompiling(path);
             SourceText? text = null;
+            var read = false;
             foreach (var unit in compiling)
             {
                 if (unit.Trees.ContainsKey(path)) continue;
@@ -362,14 +404,20 @@ public sealed class CSharpWorkspaceAnalyzer
                 if (reusable is not null)
                 {
                     unit.Adopt(path, reusable.Trees[path]);
+                    continue;
                 }
-                else if ((text ??= TryRead(path)) is not null)
-                {
-                    unit.SetText(path, text);
 
-                    // New to this unit, so what binds to it there has changed.
-                    _changedUnits.Add(unit);
+                // Read once for every unit that needs it, and not again after a failure.
+                if (!read)
+                {
+                    text = TryRead(path);
+                    read = true;
                 }
+                if (text is null) continue;
+                Parse(unit, path, text);
+
+                // New to this unit, so what binds to it there has changed.
+                _changedUnits.Add(unit);
             }
             if (!compiling[0].Trees.ContainsKey(path)) continue;
 
@@ -476,6 +524,7 @@ public sealed class CSharpWorkspaceAnalyzer
     {
         _owners.Remove(path);
         _files.Remove(path);
+        _stamps.Remove(path);
         foreach (var unit in _units)
         {
             if (unit.Remove(path)) _changedUnits.Add(unit);
@@ -495,7 +544,7 @@ public sealed class CSharpWorkspaceAnalyzer
         var visibleElsewhere = false;
         foreach (var unit in compiling)
         {
-            visibleElsewhere |= unit.SetText(path, text);
+            visibleElsewhere |= Parse(unit, path, text);
         }
         _owners[path] = compiling[0];
         _files.Add(path);
@@ -504,12 +553,28 @@ public sealed class CSharpWorkspaceAnalyzer
         else _changedFiles.Add(path);
     }
 
-    /// <summary>The file's text, or null with a diagnostic telling the host why not.</summary>
+    private bool Parse(ProjectCompilation unit, string path, SourceText text)
+    {
+        ParseCount++;
+        return unit.SetText(path, text);
+    }
+
+    /// <summary>
+    /// The file's text, or null with a diagnostic telling the host why not. Its size and time are read
+    /// before its bytes, and the bytes are hashed as read and decoded exactly as
+    /// <see cref="File.ReadAllText(string)"/> decodes them (UTF-8 unless a byte order mark says otherwise),
+    /// so the stamp describes no newer bytes than the tree holds.
+    /// </summary>
     private SourceText? TryRead(string path)
     {
         try
         {
-            return SourceText.From(_disk.ReadAllText(path));
+            var (size, written) = _disk.Stat(path);
+            var bytes = _disk.ReadAllBytes(path);
+            var racy = DateTime.UtcNow - written < WorkerStateFile.RacyWindow;
+            _stamps[path] = new FileStamp(size, written.Ticks, racy, SHA256.HashData(bytes));
+            using var reader = new StreamReader(new MemoryStream(bytes, writable: false), Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+            return SourceText.From(reader.ReadToEnd());
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -531,6 +596,8 @@ public sealed class CSharpWorkspaceAnalyzer
         CancellationToken ct,
         IReadOnlyList<string>? progressFiles = null)
     {
+        // The walks are about to move ahead of what was last emitted.
+        _describesEmission = false;
         foreach (var unit in _units)
         {
             unit.RefreshFriends();
@@ -623,11 +690,16 @@ public sealed class CSharpWorkspaceAnalyzer
         foreach (var path in removed) _walked.Remove(path);
         _changedFiles.Clear();
         _changedUnits.Clear();
+        LastWalkCount = indexes.Count;
+
+        // After a restore nothing has been settled yet: every file counts as just walked.
+        if (_settleEverything) walkedNow.UnionWith(_walked.Keys);
+        _settleEverything = false;
 
         var buckets = SettleOwnership(walkedNow, removed);
         var diagnostics = _pendingDiagnostics.ToList();
         _pendingDiagnostics.Clear();
-        return new AnalysisResult(diagnostics, buckets) { Coverage = BuildCoverage() };
+        return new AnalysisResult(diagnostics, buckets) { Coverage = BuildCoverage(), Fingerprints = Fingerprints() };
     }
 
     private static bool ShouldReportProgress(int processed, int total)
@@ -668,10 +740,15 @@ public sealed class CSharpWorkspaceAnalyzer
         var externals = new ExternalSymbols(_workspaceIdPrefix, _stubs, Share);
         var walker = new GraphWalker(
             unit.Compilation.GetSemanticModel(tree), tree.FilePath, unit.IdPrefix, _owners, externals, Share, nodes, edges, AskEveryInvokedName);
-        walker.Visit(tree.GetRoot(ct));
+        var root = tree.GetRoot(ct);
+        walker.Visit(root);
         nodes.TrimExcess();
         edges.TrimExcess();
-        return new WalkedFile(unit, nodes, edges, externals, walker.UnresolvedNames);
+        return new WalkedFile(unit, nodes, edges, externals, walker.UnresolvedNames)
+        {
+            Stamp = _stamps.GetValueOrDefault(path),
+            ContainsDirectives = root.ContainsDirectives,
+        };
     }
 
     private string Share(string id) => _idStrings.GetOrAdd(id, id);
@@ -871,13 +948,14 @@ public sealed class CSharpWorkspaceAnalyzer
 
     /// <summary>
     /// A file two projects compile is walked once. Where they differ on constants, code only
-    /// the other project compiles has no nodes, which a reader of status should be told.
+    /// the other project compiles has no nodes, which a reader of status should be told. Whether
+    /// the text has directives at all is recorded by the owner's walk, so a restored walk answers it.
     /// </summary>
     private int FilesSeenDifferentlyByOwner(ProjectCompilation unit)
         => unit.Trees.Count(entry => _owners.TryGetValue(entry.Key, out var owner)
             && owner != unit
             && !owner.ParseOptions.Equals(unit.ParseOptions)
-            && entry.Value.GetRoot().ContainsDirectives);
+            && (_walked.TryGetValue(entry.Key, out var walked) ? walked.ContainsDirectives : entry.Value.GetRoot().ContainsDirectives));
 
     private static IReadOnlyList<string>? NullIfEmpty(IReadOnlyList<string> items) => items.Count == 0 ? null : items;
 
@@ -935,7 +1013,13 @@ public sealed class CSharpWorkspaceAnalyzer
         List<ProtocolNode> Nodes,
         List<EdgeFact> Edges,
         ExternalSymbols Externals,
-        Dictionary<string, int>? UnresolvedNames);
+        Dictionary<string, int>? UnresolvedNames)
+    {
+        /// <summary>The bytes the walk read, as their stamp: what a saved state says the facts came from.</summary>
+        public FileStamp Stamp { get; init; }
+
+        public bool ContainsDirectives { get; init; }
+    }
 
     /// <summary>The facts the host holds under one file: the nodes it owns and the edges
     /// sourced at those nodes, wherever they were found. <see cref="FilePath"/> is the
@@ -961,6 +1045,9 @@ public sealed class CSharpWorkspaceAnalyzer
 
         /// <summary>What each project could and could not see.</summary>
         public IReadOnlyList<ProjectCoverage> Coverage { get; init; } = [];
+
+        /// <summary>Each unit's fingerprint over the inputs these facts were walked from, in unit key order.</summary>
+        public List<UnitFingerprint> Fingerprints { get; init; } = [];
 
         public List<ProtocolNode> Nodes => _nodes ??= Buckets.SelectMany(bucket => bucket.Nodes).ToList();
 
@@ -1006,6 +1093,9 @@ public sealed class CSharpWorkspaceAnalyzer
         internal Dictionary<string, byte[]> PendingHashes => _pendingHashes;
         internal List<string> RemovedPaths => _removedPaths;
 
+        /// <summary>The fingerprints of the analysis this emission came from, recorded with it on commit.</summary>
+        internal List<UnitFingerprint> Fingerprints { get; init; } = [];
+
         private readonly Dictionary<string, byte[]> _pendingHashes;
         private readonly List<string> _removedPaths;
     }
@@ -1029,6 +1119,13 @@ public sealed class CSharpWorkspaceAnalyzer
         {
             _factHashes[bucket.FilePath] = ComputeBucketHash(bucket, analysis.NodeIds);
         }
+        RecordEmission(analysis.Fingerprints);
+    }
+
+    private void RecordEmission(List<UnitFingerprint> fingerprints)
+    {
+        _emittedFingerprints = fingerprints;
+        _describesEmission = true;
     }
 
     /// <summary>
@@ -1067,7 +1164,7 @@ public sealed class CSharpWorkspaceAnalyzer
         var removedPaths = _factHashes.Keys.Where(path => !currentPaths.Contains(path)).ToList();
         replacesFiles.AddRange(removedPaths);
 
-        return new IncrementalEmission(nodes, edges, replacesFiles, pendingHashes, removedPaths);
+        return new IncrementalEmission(nodes, edges, replacesFiles, pendingHashes, removedPaths) { Fingerprints = analysis.Fingerprints };
     }
 
     /// <summary>
@@ -1085,7 +1182,182 @@ public sealed class CSharpWorkspaceAnalyzer
         {
             _factHashes.Remove(path);
         }
+        RecordEmission(emission.Fingerprints);
     }
+
+    private static string KeyOf(ProjectCompilation unit) => unit.Project?.Key ?? ProjectCompilation.FallbackQualifier;
+
+    /// <summary>
+    /// Each unit's fingerprint over what its files were last read as. The trees are parsed from exactly
+    /// those bytes, so after an analysis the walks of a unit came from the inputs its fingerprint names.
+    /// </summary>
+    private List<UnitFingerprint> Fingerprints()
+        => UnitFingerprints.Compute(Identity, _units.ConvertAll(unit => new UnitFingerprints.UnitInput(
+            KeyOf(unit),
+            unit.Signature ?? string.Empty,
+            unit.Project is not { } project || project.State == ProjectCoverageState.Fallback,
+            unit.Trees.Keys.Select(path => new UnitFingerprints.FileInput(
+                path,
+                _stamps.TryGetValue(path, out var stamp) ? stamp.ContentHash : [],
+                _owners.TryGetValue(path, out var owner) ? KeyOf(owner) : string.Empty)).ToList(),
+            unit.References.ConvertAll(KeyOf))));
+
+    /// <summary>
+    /// What a new process needs to emit what this one would emit next: the walks, the hashes of the facts
+    /// last emitted and the fingerprints sent with them. Null when there is nothing to describe, or when an
+    /// analysis has walked past the last emission that completed, since the host holds that emission.
+    /// </summary>
+    internal WorkerState? CaptureState(string stateId)
+    {
+        if (!_describesEmission || _emittedFingerprints is null || _rootPath is null) return null;
+        return new WorkerState
+        {
+            WorkerIdentity = Identity,
+            StateId = stateId,
+            WorkspaceId = _workspaceId,
+            RootPath = _rootPath,
+            Fingerprints = _emittedFingerprints,
+            Files = _walked.OrderBy(entry => entry.Key, StringComparer.Ordinal).Select(entry => new WalkedFileState
+            {
+                Path = entry.Key,
+                Stamp = entry.Value.Stamp,
+                ContainsDirectives = entry.Value.ContainsDirectives,
+                UnitKey = KeyOf(entry.Value.Unit),
+                Nodes = entry.Value.Nodes,
+                Edges = entry.Value.Edges,
+                StubNodes = entry.Value.Externals.Nodes.ToList(),
+                StubEdges = entry.Value.Externals.Edges.ToList(),
+                UnresolvedNames = entry.Value.UnresolvedNames,
+            }).ToList(),
+            FactHashes = _factHashes.OrderBy(entry => entry.Key, StringComparer.Ordinal)
+                .Select(entry => new FactHashState(entry.Key, entry.Value))
+                .ToList(),
+        };
+    }
+
+    /// <summary>How many files the last restore kept the stored walk of.</summary>
+    public int RestoredCount { get; private set; }
+
+    /// <summary>
+    /// Takes the facts a baseline's state describes as what the host holds, and keeps the stored walk of
+    /// every file whose unit's fingerprint has not moved, so the next analysis walks only the units that
+    /// moved (closed under "depends on", since fingerprints include those of what they reference) and
+    /// then settles every file once. Call after the files are loaded, before analyzing. Null when
+    /// restored; otherwise why not, and nothing has changed.
+    /// </summary>
+    public string? TryRestore(IndexBaseline baseline)
+    {
+        if (_rootPath is null) return "the workspace has no root";
+        if (_walked.Count > 0 || _factHashes.Count > 0 || _emittedFingerprints is not null) return "this worker has already emitted facts";
+
+        WorkerState state;
+        try
+        {
+            var bytes = WorkerStateFile.Open(_disk, baseline.StatePath, baseline.StateSha256, out var reason);
+            if (bytes is null) return reason;
+            state = WorkerStateFile.Read(bytes);
+            RestoreFault?.Invoke(state);
+        }
+        catch (WorkerStateFormatException ex)
+        {
+            return $"state file is malformed: {ex.Message}";
+        }
+        catch (OutOfMemoryException)
+        {
+            // Reading takes a few times the file's length, which a file under the cap can still make too much.
+            return "state file needs more memory than is available";
+        }
+
+        if (!string.Equals(state.WorkerIdentity, Identity, StringComparison.Ordinal)) return "state was saved by another build of the worker";
+        if (!string.Equals(state.StateId, baseline.StateId, StringComparison.Ordinal)) return "state id does not match";
+        if (!string.Equals(state.WorkspaceId, _workspaceId, StringComparison.Ordinal)) return "state is for another workspace";
+        if (!PathComparer.Equals(state.RootPath, _rootPath)) return "state is for another root";
+        if (!SameFingerprints(state.Fingerprints, baseline.Fingerprints)) return "fingerprints do not match";
+
+        var walks = new Dictionary<string, WalkedFileState>(PathComparer);
+        foreach (var file in state.Files)
+        {
+            if (!IsWellFormed(file) || !walks.TryAdd(file.Path, file)) return "state file holds a walk this worker would not record";
+        }
+        var hashes = new Dictionary<string, byte[]>(PathComparer);
+        foreach (var hash in state.FactHashes)
+        {
+            if (!hashes.TryAdd(hash.Path, hash.Hash)) return "state file lists a path twice";
+        }
+
+        var saved = state.Fingerprints.ToDictionary(fingerprint => fingerprint.Unit, fingerprint => fingerprint.Value, StringComparer.Ordinal);
+        var moved = Fingerprints()
+            .Where(fingerprint => !saved.TryGetValue(fingerprint.Unit, out var value) || value != fingerprint.Value)
+            .Select(fingerprint => fingerprint.Unit)
+            .ToHashSet(StringComparer.Ordinal);
+
+        // From here on nothing can fail: the restore happens whole or not at all.
+        foreach (var (path, hash) in hashes) _factHashes[path] = hash;
+        var restored = 0;
+        foreach (var (path, owner) in _owners)
+        {
+            if (moved.Contains(KeyOf(owner))
+                || !walks.TryGetValue(path, out var file)
+                || !string.Equals(file.Path, path, StringComparison.Ordinal)
+                || file.UnitKey != KeyOf(owner)
+                || !_stamps.TryGetValue(path, out var stamp)
+                || !stamp.ContentHash.AsSpan().SequenceEqual(file.Stamp.ContentHash))
+            {
+                continue;
+            }
+            _walked[path] = new WalkedFile(
+                owner, file.Nodes, file.Edges,
+                ExternalSymbols.Restore(_workspaceIdPrefix, _stubs, Share, file.StubNodes, file.StubEdges),
+                file.UnresolvedNames)
+            {
+                Stamp = stamp,
+                ContainsDirectives = file.ContainsDirectives,
+            };
+            restored++;
+        }
+
+        _changedFiles.Clear();
+        _changedUnits.Clear();
+        _changedUnits.UnionWith(_units.Where(unit => moved.Contains(KeyOf(unit))));
+        _buckets.Clear();
+        _sharedIds = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        _contestedIdentifiers = new HashSet<string>(StringComparer.Ordinal);
+        _settleEverything = true;
+        _emittedFingerprints = state.Fingerprints;
+        RestoredCount = restored;
+        return null;
+    }
+
+    private static bool SameFingerprints(List<UnitFingerprint> saved, IReadOnlyList<UnitFingerprint>? offered)
+    {
+        if (offered is null || offered.Count != saved.Count) return false;
+        var values = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var fingerprint in offered)
+        {
+            if (fingerprint?.Unit is null || fingerprint.Value is null || !values.TryAdd(fingerprint.Unit, fingerprint.Value)) return false;
+        }
+        return saved.TrueForAll(fingerprint => values.TryGetValue(fingerprint.Unit, out var value) && value == fingerprint.Value);
+    }
+
+    /// <summary>
+    /// Whether a stored walk has the shape every walk this worker records has, so nothing built from it
+    /// later can fail: owned ids, identifiers in the public form, nodes in the file that walked them, and
+    /// library stubs with the assembly they came from.
+    /// </summary>
+    private bool IsWellFormed(WalkedFileState file)
+    {
+        var stubs = new HashSet<string>(StringComparer.Ordinal);
+        return file.Nodes.TrueForAll(node => node.Id.StartsWith(_workspaceIdPrefix, StringComparison.Ordinal)
+                && node.Identifier.StartsWith(IdPrefix, StringComparison.Ordinal)
+                && string.Equals(node.FilePath, file.Path, StringComparison.Ordinal))
+            && file.Edges.TrueForAll(IsInThisWorkspace)
+            && file.StubNodes.TrueForAll(node => ExternalSymbols.IsStub(node, _workspaceIdPrefix) && stubs.Add(node.Id))
+            && file.StubEdges.TrueForAll(IsInThisWorkspace);
+    }
+
+    private bool IsInThisWorkspace(EdgeFact edge)
+        => edge.SourceId.StartsWith(_workspaceIdPrefix, StringComparison.Ordinal)
+            && edge.TargetId.StartsWith(_workspaceIdPrefix, StringComparison.Ordinal);
 
     /// <summary>
     /// Deterministic content hash of one file's facts, stable across processes. Nodes are
@@ -1147,7 +1419,7 @@ public sealed class CSharpWorkspaceAnalyzer
     /// every collection) makes the byte stream unambiguous, so two different fact sets can
     /// never hash to the same digest by concatenation coincidence.
     /// </summary>
-    private sealed class FactHasher : IDisposable
+    internal sealed class FactHasher : IDisposable
     {
         private static readonly byte[] NullMarker = [0];
         private static readonly byte[] PresentMarker = [1];
@@ -1159,6 +1431,13 @@ public sealed class CSharpWorkspaceAnalyzer
         {
             BinaryPrimitives.WriteInt32LittleEndian(_scratch, value);
             _hash.AppendData(_scratch);
+        }
+
+        /// <summary>Length-prefixed raw bytes.</summary>
+        public void Bytes(ReadOnlySpan<byte> value)
+        {
+            Int(value.Length);
+            _hash.AppendData(value);
         }
 
         public void Str(string? value)
@@ -1205,6 +1484,9 @@ public sealed class CSharpWorkspaceAnalyzer
     }
 
     public sealed record NativeTreeResult(JsonElement Tree, bool Truncated);
+
+    /// <summary>This workspace's way to the file system.</summary>
+    internal Disk Disk => _disk;
 
     /// <summary>A path the host sent, normalized the way this workspace reads it.</summary>
     public string FullPath(string path) => _disk.FullPath(path);
@@ -1390,15 +1672,25 @@ public sealed class CSharpWorkspaceAnalyzer
         /// compilation bound it, so a file compiled into two projects stays one node. A
         /// library symbol gets a stub, recorded because this file used it. One that failed
         /// to bind stays in this project: it names nothing elsewhere.
+        ///
+        /// A symbol declared in several files (a partial type, or a type declared twice) is named
+        /// for the ordinally first of them, as settlement picks a node's owner. Roslyn lists the
+        /// locations in the compilation's tree order, which depends on the order files were added
+        /// and replaced, so taking the first one listed made the id depend on edit history.
         /// </summary>
         private string NodeId(ISymbol symbol)
         {
+            string? declaring = null;
             foreach (var location in symbol.Locations)
             {
-                if (location.SourceTree is { } tree)
+                if (location.SourceTree is { } tree && (declaring is null || string.CompareOrdinal(tree.FilePath, declaring) < 0))
                 {
-                    return _share((_owners.TryGetValue(tree.FilePath, out var owner) ? owner.IdPrefix : _idPrefix) + DisplayName(symbol));
+                    declaring = tree.FilePath;
                 }
+            }
+            if (declaring is not null)
+            {
+                return _share((_owners.TryGetValue(declaring, out var owner) ? owner.IdPrefix : _idPrefix) + DisplayName(symbol));
             }
             return ExternalSymbols.IsExternal(symbol) ? _externals.Add(symbol) : _share(_idPrefix + DisplayName(symbol));
         }

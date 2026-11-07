@@ -50,6 +50,9 @@ public static class ParserProtocolMethods
 
     /// <summary>Optional capability: language-native syntax tree for one file.</summary>
     public const string GetNativeSyntaxTree = "syntaxTree/get";
+
+    /// <summary>Optional capability (<c>persistentState</c>): save the worker's state to a host-named file.</summary>
+    public const string SaveState = "workspace/saveState";
 }
 
 /// <summary>JSON-RPC 2.0 error codes used by the protocol.</summary>

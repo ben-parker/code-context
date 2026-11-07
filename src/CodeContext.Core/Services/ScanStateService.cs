@@ -112,13 +112,18 @@ public class ScanStateService : IScanStateService, IScanProgressReporter
         }
     }
 
+    /// <summary>
+    /// The workers are done; the counters and the duration are final. The phase stays
+    /// <see cref="ScanPhase.Scanning"/>: the scan's reconciliation has not committed yet, and
+    /// <c>ready</c> means scanned and committed. The coordinator calls <see cref="CompleteScan"/>
+    /// after the commit (and after the cache state has left <c>verifying</c>).
+    /// </summary>
     public void ReportComplete(int totalProcessed, TimeSpan elapsed)
     {
         lock (_lock)
         {
             _filesProcessed = totalProcessed;
             _lastScanDuration = elapsed;
-            if (_phase == ScanPhase.Scanning) _phase = ScanPhase.Ready;
         }
     }
 

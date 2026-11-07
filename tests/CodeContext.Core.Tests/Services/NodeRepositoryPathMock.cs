@@ -9,7 +9,8 @@ using NSubstitute;
 namespace CodeContext.Core.Tests.Services
 {
     /// <summary>
-    /// Test wiring for the node repository's <see cref="ICodeNodeRepository.FindByFilePathAsync"/>.
+    /// Test wiring for the node repository's <see cref="ICodeNodeRepository.FindByFilePathAsync"/>
+    /// and <see cref="ICodeNodeRepository.GetFilePathsAsync"/>.
     /// Production resolves it through the in-memory adjacency path index, which is set-equivalent to a
     /// brute-force <see cref="FilePathMatcher.Matches"/> scan of every node. For mocked repositories we
     /// reproduce exactly that: filter the substitute's own <see cref="ICodeNodeRepository.GetAllAsync"/>
@@ -36,6 +37,22 @@ namespace CodeContext.Core.Tests.Services
                 }
 
                 return (IReadOnlyList<CodeNode>)matches.ToList();
+            });
+
+            // GetFilePathsAsync is defined over the same node set: distinct (ordinal) non-empty
+            // paths, ordered OrdinalIgnoreCase then Ordinal.
+            repo.GetFilePathsAsync().Returns(_ =>
+            {
+                var all = repo.GetAllAsync().GetAwaiter().GetResult()
+                    ?? (IReadOnlyList<CodeNode>)Array.Empty<CodeNode>();
+                return (IReadOnlyList<string>)all
+                    .Select(n => n.FilePath)
+                    .Where(path => !string.IsNullOrEmpty(path))
+                    .Select(path => path!)
+                    .Distinct(StringComparer.Ordinal)
+                    .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+                    .ThenBy(path => path, StringComparer.Ordinal)
+                    .ToList();
             });
         }
     }
