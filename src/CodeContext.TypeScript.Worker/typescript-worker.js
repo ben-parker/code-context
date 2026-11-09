@@ -449,8 +449,10 @@ const embeddedLanguageAdapters = new Map([
             // One written in another language (pug) or kept in another file has no AST here.
             let templateReferences = [];
             let templateHidden = [];
+            let templateRange;
             const template = parsed.descriptor.template;
             if (template?.ast) {
+                templateRange = { start: template.loc.start.offset, end: template.loc.end.offset };
                 const usage = collectVueTemplateUsage(template.ast);
                 templateReferences = scripted
                     ? usage.references
@@ -462,7 +464,7 @@ const embeddedLanguageAdapters = new Map([
                 }
             }
 
-            return { text, scriptKind, diagnostics, templateReferences, templateHidden };
+            return { text, scriptKind, diagnostics, templateReferences, templateHidden, templateRange };
         },
     }],
 ]);
@@ -730,6 +732,12 @@ class Workspace {
             }
         }
         return candidates;
+    }
+
+    /** Where the markup of an embedded file stands in it, as `{ start, end }` offsets. */
+    templateRange(fileName) {
+        if (!embeddedLanguageAdapters.has(path.extname(fileName).toLowerCase())) return undefined;
+        return this.getScriptSource(fileName)?.templateRange;
     }
 
     /** True when the markup of an embedded file has declared `name` itself (a `v-for`
@@ -1556,8 +1564,78 @@ function analyzeFile(workspace, workspaceId, program, checker, fileName, diagnos
         });
     };
 
+    // Options API: what a component declares under `methods` and `computed` is in scope
+    // in its template and on `this` in every other member, which the compiler cannot
+    // see. Only a member written as a method has a node to bind to.
+    const optionsMembers = new Map();
+    const templateRange = workspace.templateRange(fileName);
+    if (templateRange) {
+        for (const statement of sourceFile.statements) {
+            if (!ts.isExportAssignment(statement) || statement.isExportEquals) continue;
+            let options = statement.expression;
+            if (ts.isCallExpression(options)) options = options.arguments[0];
+            if (!options || !ts.isObjectLiteralExpression(options)) continue;
+            for (const option of options.properties) {
+                if (!ts.isPropertyAssignment(option) || !ts.isIdentifier(option.name)
+                    || (option.name.text !== 'methods' && option.name.text !== 'computed')
+                    || !ts.isObjectLiteralExpression(option.initializer)) {
+                    continue;
+                }
+                for (const member of option.initializer.properties) {
+                    if (ts.isMethodDeclaration(member) && ts.isIdentifier(member.name)
+                        && !optionsMembers.has(member.name.text)) {
+                        optionsMembers.set(member.name.text, member);
+                    }
+                }
+            }
+        }
+    }
+    const inTemplate = tsNode => {
+        const start = tsNode.getStart(sourceFile);
+        return start >= templateRange.start && start < templateRange.end;
+    };
+    /** The member a name the compiler could not bind names: a bare name in the template,
+     * or `this.name` in the script. */
+    const optionsMemberOf = expression => {
+        if (optionsMembers.size === 0) return undefined;
+        if (ts.isIdentifier(expression)) {
+            return inTemplate(expression)
+                && !workspace.isHiddenInTemplate(fileName, expression.getStart(sourceFile), expression.text)
+                ? optionsMembers.get(expression.text) : undefined;
+        }
+        return ts.isPropertyAccessExpression(expression)
+            && expression.expression.kind === ts.SyntaxKind.ThisKeyword && !inTemplate(expression)
+            ? optionsMembers.get(expression.name.text) : undefined;
+    };
+
     const visit = tsNode => {
         switch (tsNode.kind) {
+            case ts.SyntaxKind.Identifier: {
+                // `{{ total }}`, `:items="visible"`: the template reads a member without
+                // calling it. A call's own name is the call's to record.
+                if (optionsMembers.size === 0 || !optionsMembers.has(tsNode.text) || !inTemplate(tsNode)) break;
+                const parent = tsNode.parent;
+                if ((ts.isPropertyAccessExpression(parent) && parent.name === tsNode)
+                    || ((ts.isCallExpression(parent) || ts.isNewExpression(parent)) && parent.expression === tsNode)
+                    || (ts.isPropertyAssignment(parent) && parent.name === tsNode)) {
+                    break;
+                }
+                let bound;
+                try {
+                    bound = checker.getSymbolAtLocation(tsNode);
+                } catch {
+                    bound = undefined;
+                }
+                const member = bound ? undefined : optionsMemberOf(tsNode);
+                if (member) {
+                    const position = sourceFile.getLineAndCharacterOfPosition(tsNode.getStart(sourceFile));
+                    addEdge(enclosingDeclarationId(tsNode), idOfDeclaration(member), 'REFERENCES', {
+                        line: String(position.line + 1),
+                        column: String(position.character + 1),
+                    });
+                }
+                break;
+            }
             case ts.SyntaxKind.ModuleDeclaration: {
                 if (tsNode.name) {
                     const moduleName = tsNode.name.getText(sourceFile);
@@ -1700,7 +1778,8 @@ function analyzeFile(workspace, workspaceId, program, checker, fileName, diagnos
                     const callTarget = nameNode.getText(sourceFile);
                     if (callTarget) {
                         const position = sourceFile.getLineAndCharacterOfPosition(tsNode.getStart(sourceFile));
-                        const targetDecl = resolveToProjectDeclaration(nameNode, tsNode);
+                        const targetDecl = resolveToProjectDeclaration(nameNode, tsNode)
+                            ?? optionsMemberOf(expression);
                         const targetId = targetDecl ? idOfDeclaration(targetDecl) : callTarget;
                         const metadata = {
                             callTarget,
@@ -1793,6 +1872,10 @@ function analyzeFile(workspace, workspaceId, program, checker, fileName, diagnos
         for (const reference of templateReferences) {
             const symbol = reference.names.map(lookup).find(Boolean);
             let targetId = symbol ? templateTargetId(symbol, reference.component) : null;
+            // `@click="save"` where `save` is one of the component's `methods`.
+            if (!symbol && !reference.component && optionsMembers.has(reference.names[0])) {
+                targetId = idOfDeclaration(optionsMembers.get(reference.names[0]));
+            }
             const position = sourceFile.getLineAndCharacterOfPosition(reference.offset);
             const metadata = {
                 callTarget: reference.display,

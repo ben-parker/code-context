@@ -135,11 +135,15 @@ anything else, cross-check with `rg -w <Name>`.
   (`{{ format(x) }}`) are each a `CALLS` from the rendering file's module to whatever the
   script binds that name to. A component tag no script imports binds to what the project
   declares for every template: the `components.d.ts` that Nuxt (under `.nuxt/`) or
-  `unplugin-vue-components` generates, or `app.component('Name', X)`.
+  `unplugin-vue-components` generates, or `app.component('Name', X)`. In an Options API
+  component, a method under `methods` or `computed` is bound from the template (a call
+  or handler as `CALLS`, a read such as `{{ total }}` as `REFERENCES`) and from
+  `this.name()` in its other members.
 - **Vue templates are blind to these; run `rg -w <Name>`:** an auto-imported component
   before its declaration file exists (run `nuxi prepare`; status then carries a
   diagnostic) or whose file is generated somewhere other than the project's directory;
-  Options API members (`methods`, `computed`, `data`) used from the template; a handler
+  Options API `data` and `props`, and a member not written as a method (`save: function
+  () {}`, a `get`/`set` computed); a handler
   reached through an object (`@click="store.save"`); a `pug` template; a dotted tag
   (`<Icons.Close>`).
 - **Import aliases** (`@/`, `~/`) resolve from the `tsconfig.json` or `jsconfig.json`

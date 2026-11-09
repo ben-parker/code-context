@@ -351,6 +351,52 @@ public class TypeScriptWorkerProtocolTests : IAsyncLifetime
             diagnostic => diagnostic.Message.Contains(".nuxt/components.d.ts", StringComparison.Ordinal));
     }
 
+    [Theory]
+    [InlineData("export default {", "};")]
+    [InlineData("export default defineComponent({", "});")]
+    public async Task VueOptionsApiMembers_AreBoundFromTheTemplateAndAcrossThis(string open, string close)
+    {
+        await WriteFileAsync("helper.js", "export function helper(n) { return n; }\n");
+        await WriteFileAsync("Legacy.vue", $$$"""
+            <template>
+              <div @click="save">
+                {{ total }} <b @click="reset(2)" :title="describe(total)" />
+                <i v-for="total in rows" :key="total">{{ total }}</i>
+              </div>
+            </template>
+            <script>
+            import { helper } from './helper';
+            {{{open}}}
+              data() { return { count: 0, rows: [] }; },
+              computed: {
+                total() { this.reset(0); return helper(this.count); },
+              },
+              methods: {
+                save() { this.reset(1); },
+                reset(n) { this.count = n; },
+                describe(n) { return String(n); },
+              },
+            {{{close}}}
+            </script>
+            """);
+
+        var edges = await ScanEdgesAsync();
+
+        string[] Uses(string source, string type) => [.. edges
+            .Where(edge => edge.Type == type && edge.SourceId == $"typescript:default:Legacy.vue{source}"
+                && edge.Metadata?.ContainsKey("unresolved") != true)
+            .Select(edge => edge.TargetId!.Replace("typescript:default:", ""))
+            .Order(StringComparer.Ordinal)];
+
+        // The template: a handler by name and two calls, and two reads of a computed
+        // member. The loop's own `total` is not the component's.
+        Assert.Equal(["Legacy.vue#describe(n)", "Legacy.vue#reset(n)", "Legacy.vue#save()"], Uses("", "CALLS"));
+        Assert.Equal(["Legacy.vue#total()", "Legacy.vue#total()"], Uses("", "REFERENCES"));
+        // `this` reaches a member of another group, which the compiler does not see.
+        Assert.Equal(["Legacy.vue#reset(n)", "helper.js#helper(n)"], Uses("#total()", "CALLS"));
+        Assert.Equal(["Legacy.vue#reset(n)"], Uses("#save()", "CALLS"));
+    }
+
     [Fact]
     public async Task VueTemplateComponentTag_ResolvesAComponentDeclaredInTypeScript()
     {
