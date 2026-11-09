@@ -13,9 +13,10 @@
 // Project ownership / module resolution: the host approves the file set (one
 // workspace per watched root for now). If <root>/tsconfig.json (or, without one,
 // jsconfig.json) exists its compilerOptions drive module resolution; otherwise
-// permissive defaults (allowJs, esnext) are used. Import aliases the root config
-// does not resolve are then tried against the `paths` of the configs it references
-// and of a generated .nuxt/tsconfig.json. Approved files are the program roots —
+// permissive defaults (allowJs, esnext) are used. An import alias is tried first
+// against the `paths` of the tsconfig.json or jsconfig.json nearest the importing
+// file, then the root config, then the configs the root one references and a
+// generated .nuxt/tsconfig.json. Approved files are the program roots —
 // tsconfig include/exclude does not override the host's approved set.
 
 const fs = require('fs');
@@ -519,9 +520,78 @@ class Workspace {
         this.compilerOptions = loaded.options;
         this.configDiagnostic = loaded.diagnostic;
         // Each scope resolves with its own config's `paths`, relative to that config.
-        this.aliasScopes = loaded.aliasScopes.map(scope => ({
-            ...scope, options: { ...loaded.options, ...scope },
-        }));
+        this.aliasScopes = loaded.aliasScopes.map(scope => this.withOptions(scope));
+        this.nestedScopes = new Map();
+        this.directoryScopes = new Map();
+    }
+
+    withOptions(scope) {
+        const { paths, baseUrl, pathsBasePath } = scope;
+        return { ...scope, options: { ...this.compilerOptions, paths, baseUrl, pathsBasePath } };
+    }
+
+    /** The alias scope of the tsconfig.json or jsconfig.json in `directory`, a directory
+     * below the root; undefined when it has none or the config declares no aliases. */
+    nestedScope(directory) {
+        const key = canonicalKey(directory);
+        if (this.nestedScopes.has(key)) return this.nestedScopes.get(key);
+        let scope;
+        for (const name of ['tsconfig.json', 'jsconfig.json']) {
+            const configPath = path.join(directory, name);
+            if (!fs.existsSync(configPath)) continue;
+            const known = this.aliasScopes.find(
+                candidate => canonicalKey(candidate.configPath) === canonicalKey(configPath));
+            try {
+                scope = known ?? readAliasConfig(configPath).scope;
+            } catch {
+                scope = undefined;
+            }
+            if (scope && !known) scope = this.withOptions(scope);
+            break;
+        }
+        this.nestedScopes.set(key, scope);
+        return scope;
+    }
+
+    /**
+     * The alias scopes to try for an import written in `containingFile`, as an editor
+     * would choose them: `inner`, those of the configs in the directories that hold the
+     * file below the root, nearest first, are tried before the root config; `outer`,
+     * every other referenced config, only after it. So an alias two projects each
+     * declare means, in each, the directory that project maps it to.
+     */
+    aliasScopesFor(containingFile) {
+        if (!this.files.has(canonicalKey(containingFile))) return { inner: [], outer: this.aliasScopes };
+        const directoryKey = canonicalKey(path.dirname(path.resolve(containingFile)));
+        let scopes = this.directoryScopes.get(directoryKey);
+        if (!scopes) {
+            scopes = this.aliasScopesIn(path.dirname(path.resolve(containingFile)));
+            this.directoryScopes.set(directoryKey, scopes);
+        }
+        return scopes;
+    }
+
+    aliasScopesIn(fileDirectory) {
+        const inner = [];
+        {
+            const rootKey = canonicalKey(this.rootPath);
+            const isBelowRoot = directory => {
+                const relative = path.relative(rootKey, canonicalKey(directory));
+                return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative);
+            };
+            let directory = fileDirectory;
+            for (let depth = 0; depth < MAX_NESTED_CONFIG_DEPTH && isBelowRoot(directory); depth++) {
+                // A config a referenced project keeps beside the nearest one (a
+                // tsconfig.app.json) belongs to the same directory.
+                const beside = this.aliasScopes.filter(
+                    candidate => canonicalKey(candidate.directory) === canonicalKey(directory));
+                for (const scope of [this.nestedScope(directory), ...beside]) {
+                    if (scope && !inner.includes(scope)) inner.push(scope);
+                }
+                directory = path.dirname(directory);
+            }
+        }
+        return { inner, outer: this.aliasScopes.filter(scope => !inner.includes(scope)) };
     }
 
     /** Drops everything remembered about a file that left the workspace. */
@@ -591,25 +661,31 @@ class Workspace {
     }
 
     resolveModule(moduleName, containingFile) {
-        const resolved = ts.resolveModuleName(
-            moduleName, containingFile, this.compilerOptions, this.serviceHost).resolvedModule;
-        if (resolved) return resolved;
+        const { inner, outer } = this.aliasScopesFor(containingFile);
+        const resolveIn = scopes => {
+            for (const scope of scopes) {
+                // A catch-all `*` names no alias, and would send every package import here.
+                if (!Object.keys(scope.paths).some(
+                    pattern => pattern !== '*' && matchPathPattern(pattern, moduleName) !== undefined)) {
+                    continue;
+                }
+                const scoped = ts.resolveModuleName(
+                    moduleName, containingFile, scope.options, this.serviceHost).resolvedModule;
+                if (scoped) return scoped;
+            }
+            return undefined;
+        };
 
         // An alias the root config does not declare may be declared by a config it
-        // references. Which project a file belongs to is not modelled, so such an alias
-        // is honoured for any file, and only once the root config has failed to resolve it.
-        for (const scope of this.aliasScopes) {
-            // A catch-all `*` names no alias, and would send every package import here.
-            if (!Object.keys(scope.paths).some(
-                pattern => pattern !== '*' && matchPathPattern(pattern, moduleName) !== undefined)) {
-                continue;
-            }
-            const scoped = ts.resolveModuleName(
-                moduleName, containingFile, scope.options, this.serviceHost).resolvedModule;
-            if (scoped) return scoped;
-        }
+        // references. One outside the directories that hold the importing file is
+        // honoured only once the root config has failed to resolve the import.
+        const resolved = resolveIn(inner)
+            ?? ts.resolveModuleName(moduleName, containingFile, this.compilerOptions, this.serviceHost).resolvedModule
+            ?? resolveIn(outer);
+        if (resolved) return resolved;
 
-        for (const candidate of this.embeddedModuleCandidates(moduleName, containingFile)) {
+        const scopes = [...inner, this.compilerOptions, ...outer];
+        for (const candidate of this.embeddedModuleCandidates(moduleName, containingFile, scopes)) {
             if (!this.hasFile(candidate)) continue;
             const scriptKind = this.getScriptSource(candidate)?.scriptKind ?? ts.ScriptKind.TS;
             const extension = scriptKind === ts.ScriptKind.JS ? ts.Extension.Js
@@ -621,7 +697,7 @@ class Workspace {
         return undefined;
     }
 
-    embeddedModuleCandidates(moduleName, containingFile) {
+    embeddedModuleCandidates(moduleName, containingFile, scopes) {
         const candidates = [];
         const addCandidate = candidate => {
             candidates.push(candidate);
@@ -632,7 +708,7 @@ class Workspace {
             return candidates;
         }
 
-        for (const scope of [this.compilerOptions, ...this.aliasScopes]) {
+        for (const scope of scopes) {
             // `paths` are relative to baseUrl, or else to the config that declares them,
             // which for an inherited table is the extended config, not the root one.
             const base = scope.baseUrl
@@ -807,6 +883,7 @@ function matchPathPattern(pattern, moduleName) {
     return moduleName.substring(prefix.length, moduleName.length - suffix.length);
 }
 
+const MAX_NESTED_CONFIG_DEPTH = 64;
 const MAX_REFERENCED_CONFIGS = 32;
 
 // Reads a config for its compilerOptions alone. The host approves the file set, so a
@@ -833,23 +910,33 @@ function loadAliasScopes(configPaths) {
             if (fs.statSync(configPath).isDirectory()) configPath = path.join(configPath, 'tsconfig.json');
             if (visited.has(canonicalKey(configPath))) continue;
             visited.add(canonicalKey(configPath));
-            const read = ts.readConfigFile(configPath, ts.sys.readFile);
-            if (read.error) continue;
-            const directory = path.dirname(configPath);
-            const parsed = ts.parseJsonConfigFileContent(read.config, OPTIONS_ONLY_CONFIG_HOST, directory);
-            if (parsed.options.paths) {
-                scopes.push({
-                    paths: parsed.options.paths,
-                    baseUrl: parsed.options.baseUrl,
-                    pathsBasePath: parsed.options.pathsBasePath ?? directory,
-                });
-            }
-            pending.push(...(parsed.projectReferences ?? []).map(reference => reference.path));
+            const read = readAliasConfig(configPath);
+            if (read.scope) scopes.push(read.scope);
+            pending.push(...read.references);
         } catch {
             // A reference to a missing or unreadable config declares no aliases.
         }
     }
     return scopes;
+}
+
+/** The alias scope one config declares (undefined when it has no `paths`, its own or
+ * inherited) and the configs it references. Throws when the file cannot be read. */
+function readAliasConfig(configPath) {
+    const read = ts.readConfigFile(configPath, ts.sys.readFile);
+    if (read.error) return { scope: undefined, references: [] };
+    const directory = path.dirname(configPath);
+    const parsed = ts.parseJsonConfigFileContent(read.config, OPTIONS_ONLY_CONFIG_HOST, directory);
+    const scope = parsed.options.paths
+        ? {
+            configPath,
+            directory,
+            paths: parsed.options.paths,
+            baseUrl: parsed.options.baseUrl,
+            pathsBasePath: parsed.options.pathsBasePath ?? directory,
+        }
+        : undefined;
+    return { scope, references: (parsed.projectReferences ?? []).map(reference => reference.path) };
 }
 
 function loadCompilerOptions(rootPath) {

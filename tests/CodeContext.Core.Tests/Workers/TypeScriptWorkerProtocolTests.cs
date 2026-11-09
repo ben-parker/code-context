@@ -703,6 +703,48 @@ public class TypeScriptWorkerProtocolTests : IAsyncLifetime
             && edge.TargetId == "typescript:default:tools/emit.ts#emit()");
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task AliasTwoProjectsDeclare_ResolvesInTheProjectOfTheImportingFile(bool rootReferencesThem)
+    {
+        if (rootReferencesThem)
+        {
+            await WriteFileAsync("tsconfig.json", """
+                { "files": [], "references": [{ "path": "./apps/web" }, { "path": "./apps/admin" }] }
+                """);
+        }
+
+        foreach (var app in new[] { "web", "admin" })
+        {
+            // One of the two declares its aliases in jsconfig.json, as a JavaScript project does.
+            await WriteFileAsync($"apps/{app}/{(app == "web" ? "tsconfig" : "jsconfig")}.json", """
+                { "compilerOptions": { "paths": { "@/*": ["./src/*"] } } }
+                """);
+            await WriteFileAsync($"apps/{app}/src/util.ts", "export function helper(): number { return 1; }\n");
+            await WriteFileAsync($"apps/{app}/src/Panel.vue", "<template><p /></template>\n");
+            await WriteFileAsync($"apps/{app}/src/deep/main.ts", """
+                import { helper } from '@/util';
+                import Panel from '@/Panel.vue';
+                export function main(): number { return helper(); }
+                """);
+        }
+
+        var edges = await ScanEdgesAsync();
+
+        foreach (var app in new[] { "web", "admin" })
+        {
+            Assert.Single(edges, edge =>
+                edge.Type == "CALLS"
+                && edge.SourceId == $"typescript:default:apps/{app}/src/deep/main.ts#main()"
+                && edge.TargetId == $"typescript:default:apps/{app}/src/util.ts#helper()");
+            Assert.Single(edges, edge =>
+                edge.Type == "IMPORTS"
+                && edge.SourceId == $"typescript:default:apps/{app}/src/deep/main.ts"
+                && edge.TargetId == $"typescript:default:apps/{app}/src/Panel.vue");
+        }
+    }
+
     [Fact]
     public async Task Jsconfig_SuppliesAliasesWhenThereIsNoTsconfig()
     {

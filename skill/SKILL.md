@@ -139,9 +139,10 @@ anything else, cross-check with `rg -w <Name>`.
   Options API members (`methods`, `computed`, `data`) used from the template; a handler
   reached through an object (`@click="store.save"`); a `pug` template; a dotted tag
   (`<Icons.Close>`).
-- **Import aliases** (`@/`, `~/`) resolve from the root `tsconfig.json` or
-  `jsconfig.json`, the configs it extends or references, and the `.nuxt/tsconfig.json`
-  Nuxt generates. An alias declared only in a bundler config (`vite.config`, webpack)
+- **Import aliases** (`@/`, `~/`) resolve from the `tsconfig.json` or `jsconfig.json`
+  nearest the importing file, then the root one, the configs it extends or references,
+  and the `.nuxt/tsconfig.json` Nuxt generates. So `@/` in each package of a monorepo
+  means that package. An alias declared only in a bundler config (`vite.config`, webpack)
   does not resolve, and an import through it is missing from `usedBy` and
   `fileDependents`.
 
