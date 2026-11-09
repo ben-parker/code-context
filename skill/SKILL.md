@@ -149,8 +149,11 @@ anything else, cross-check with `rg -w <Name>`.
 - **Import aliases** (`@/`, `~/`) resolve from the `tsconfig.json` or `jsconfig.json`
   nearest the importing file, then the root one, the configs it extends or references,
   and the `.nuxt/tsconfig.json` Nuxt generates. So `@/` in each package of a monorepo
-  means that package. An alias declared only in a bundler config (`vite.config`, webpack)
-  does not resolve, and an import through it is missing from `usedBy` and
+  means that package. An alias declared only under `resolve.alias` in `vite.config` or
+  `webpack.config` resolves when its target is written out (a string,
+  `path.resolve(__dirname, 'src')`, `fileURLToPath(new URL('./src', import.meta.url))`).
+  The config is never run, so an alias whose target it computes does not resolve: status
+  names it in a diagnostic, and an import through it is missing from `usedBy` and
   `fileDependents`.
 
 ## Going deeper

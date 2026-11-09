@@ -16,7 +16,8 @@
 // permissive defaults (allowJs, esnext) are used. An import alias is tried first
 // against the `paths` of the tsconfig.json or jsconfig.json nearest the importing
 // file, then the root config, then the configs the root one references and a
-// generated .nuxt/tsconfig.json. Approved files are the program roots —
+// generated .nuxt/tsconfig.json, and last the `resolve.alias` a Vite or webpack
+// config writes out, which is parsed and never run. Approved files are the program roots —
 // tsconfig include/exclude does not override the host's approved set.
 
 const fs = require('fs');
@@ -532,6 +533,8 @@ class Workspace {
         this.directoryScopes = new Map();
         this.directoryComponents = new Map();
         this.componentDeclarations = new Map();
+        this.bundlerScopes = new Map();
+        this.bundlerDiagnostics = new Map();
     }
 
     withOptions(scope) {
@@ -562,6 +565,39 @@ class Workspace {
         return scope;
     }
 
+    /** The alias scope of the Vite or webpack config in `directory`, if it has one that
+     * declares aliases. An alias whose target the config computes is reported instead. */
+    bundlerScope(directory) {
+        const key = canonicalKey(directory);
+        if (this.bundlerScopes.has(key)) return this.bundlerScopes.get(key);
+        let scope;
+        for (const name of BUNDLER_CONFIGS) {
+            const configPath = path.join(directory, name);
+            if (!fs.existsSync(configPath)) continue;
+            try {
+                const { paths, skipped } = readBundlerAliases(configPath);
+                if (Object.keys(paths).length > 0) {
+                    scope = this.withOptions({ configPath, directory, paths, baseUrl: undefined, pathsBasePath: directory });
+                }
+                if (skipped.length > 0) {
+                    this.bundlerDiagnostics.set(canonicalKey(configPath), {
+                        filePath: configPath,
+                        severity: 'warning',
+                        message: `Import ${skipped.length === 1 ? 'alias' : 'aliases'} ${skipped.map(alias => `'${alias}'`).join(', ')} `
+                            + `in ${name} ${skipped.length === 1 ? 'has a target' : 'have targets'} that the config computes, `
+                            + 'so imports through '
+                            + `${skipped.length === 1 ? 'it' : 'them'} are not resolved. Declare the alias under \`paths\` in tsconfig.json or jsconfig.json.`,
+                    });
+                }
+            } catch {
+                scope = undefined; // an unreadable config declares no aliases
+            }
+            break;
+        }
+        this.bundlerScopes.set(key, scope);
+        return scope;
+    }
+
     /**
      * The alias scopes to try for an import written in `containingFile`, as an editor
      * would choose them: `inner`, those of the configs in the directories that hold the
@@ -570,6 +606,7 @@ class Workspace {
      * declare means, in each, the directory that project maps it to.
      */
     aliasScopesFor(containingFile) {
+        // A library file resolves by the root config and what it references alone.
         if (!this.files.has(canonicalKey(containingFile))) return { inner: [], outer: this.aliasScopes };
         const directoryKey = canonicalKey(path.dirname(path.resolve(containingFile)));
         let scopes = this.directoryScopes.get(directoryKey);
@@ -594,13 +631,18 @@ class Workspace {
                 // tsconfig.app.json) belongs to the same directory.
                 const beside = this.aliasScopes.filter(
                     candidate => canonicalKey(candidate.directory) === canonicalKey(directory));
-                for (const scope of [this.nestedScope(directory), ...beside]) {
+                for (const scope of [this.nestedScope(directory), ...beside, this.bundlerScope(directory)]) {
                     if (scope && !inner.includes(scope)) inner.push(scope);
                 }
                 directory = path.dirname(directory);
             }
         }
-        return { inner, outer: this.aliasScopes.filter(scope => !inner.includes(scope)) };
+        // What only the bundler knows is asked last: a project that also declares its
+        // aliases for the compiler has said the same thing there.
+        const outer = this.aliasScopes.filter(scope => !inner.includes(scope));
+        const bundler = this.bundlerScope(this.rootPath);
+        if (bundler) outer.push(bundler);
+        return { inner, outer };
     }
 
     /** Drops everything remembered about a file that left the workspace. */
@@ -971,6 +1013,97 @@ const OPTIONS_ONLY_CONFIG_HOST = {
     readFile: ts.sys.readFile,
     readDirectory: () => [],
 };
+
+// The bundler configs whose `resolve.alias` is read, in the order a directory is asked.
+const BUNDLER_CONFIGS = [
+    'vite.config.ts', 'vite.config.mts', 'vite.config.js', 'vite.config.mjs', 'vite.config.cjs',
+    'webpack.config.js', 'webpack.config.ts', 'webpack.config.mjs', 'webpack.config.cjs',
+];
+
+/**
+ * Reads the aliases a Vite or webpack config declares under `resolve.alias`, without
+ * running it: the config is parsed, and a target is taken only when it is written out,
+ * as a string, as `path.resolve(__dirname, 'src')` (or `join`, with `import.meta.dirname`
+ * or `process.cwd()`), or as `fileURLToPath(new URL('./src', import.meta.url))`. Returns
+ * the aliases as a `paths` table of absolute targets, and the names of those whose
+ * target is computed some other way.
+ */
+function readBundlerAliases(configPath) {
+    const paths = {};
+    const skipped = [];
+    const directory = path.dirname(configPath);
+    const source = ts.createSourceFile(
+        configPath, fs.readFileSync(configPath, 'utf8'), ts.ScriptTarget.Latest, true);
+
+    const text = node => (ts.isStringLiteralLike(node) ? node.text : undefined);
+    const isDirectory = node => {
+        const written = node.getText(source).replace(/\s+/g, '');
+        return written === '__dirname' || written === 'import.meta.dirname' || written === 'process.cwd()';
+    };
+    const target = node => {
+        if (text(node) !== undefined) return path.resolve(directory, text(node));
+        if (!ts.isCallExpression(node)) return undefined;
+        const callee = ts.isPropertyAccessExpression(node.expression) ? node.expression.name : node.expression;
+        if (!ts.isIdentifier(callee)) return undefined;
+        if (callee.text === 'resolve' || callee.text === 'join') {
+            const segments = node.arguments.map(argument => (isDirectory(argument) ? directory : text(argument)));
+            return segments.length > 0 && segments.every(segment => segment !== undefined)
+                ? path.resolve(directory, ...segments) : undefined;
+        }
+        const url = node.arguments[0];
+        if (callee.text === 'fileURLToPath' && url && ts.isNewExpression(url) && url.arguments?.length === 2
+            && text(url.arguments[0]) !== undefined
+            && url.arguments[1].getText(source).replace(/\s+/g, '') === 'import.meta.url') {
+            return path.resolve(directory, text(url.arguments[0]));
+        }
+        return undefined;
+    };
+    const declare = (name, value) => {
+        const resolved = value && target(value);
+        if (!resolved) {
+            skipped.push(name);
+            return;
+        }
+        // webpack's `name$` is the import `name` and nothing below it; any other alias
+        // is that import and everything below it.
+        const exact = name.endsWith('$');
+        const alias = exact ? name.slice(0, -1) : name.replace(/\/$/, '');
+        if (!alias || alias === '*') return;
+        paths[alias] ??= [resolved];
+        if (!exact) paths[`${alias}/*`] ??= [path.join(resolved, '*')];
+    };
+    const propertyName = property =>
+        (property.name && (ts.isIdentifier(property.name) || ts.isStringLiteralLike(property.name))
+            ? property.name.text : undefined);
+    const readAliases = aliases => {
+        if (ts.isObjectLiteralExpression(aliases)) {
+            for (const property of aliases.properties) {
+                const name = propertyName(property);
+                if (name !== undefined) declare(name, ts.isPropertyAssignment(property) ? property.initializer : undefined);
+            }
+        } else if (ts.isArrayLiteralExpression(aliases)) {
+            // Vite's other form: `[{ find: '@', replacement: ... }]`. A pattern for
+            // `find` names no alias that can be written down.
+            for (const entry of aliases.elements) {
+                if (!ts.isObjectLiteralExpression(entry)) continue;
+                const field = name => entry.properties.find(
+                    property => ts.isPropertyAssignment(property) && propertyName(property) === name)?.initializer;
+                const find = field('find');
+                if (find && text(find) !== undefined) declare(text(find), field('replacement'));
+            }
+        }
+    };
+    const visit = node => {
+        if (ts.isPropertyAssignment(node) && propertyName(node) === 'alias'
+            && ts.isObjectLiteralExpression(node.parent) && ts.isPropertyAssignment(node.parent.parent)
+            && propertyName(node.parent.parent) === 'resolve') {
+            readAliases(node.initializer);
+        }
+        ts.forEachChild(node, visit);
+    };
+    visit(source);
+    return { paths, skipped };
+}
 
 // Where a project declares the components every template may render without importing
 // them, relative to the project's directory: Nuxt writes the first two (which of them
@@ -2063,6 +2196,8 @@ async function analyzeWorkspace(workspace, workspaceId, token, progressContext =
             if (name) tag.edges.push(makeEdge(tag.moduleId, registered.get(name), 'CALLS', tag.metadata));
         }
     }
+
+    diagnostics.push(...workspace.bundlerDiagnostics.values());
 
     const nodeOwner = computeOwners(rawBuckets, b => b.nodes, n => n.id);
     const edgeOwner = computeOwners(rawBuckets, b => b.edges, e => e.id);

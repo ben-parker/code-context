@@ -890,6 +890,84 @@ public class TypeScriptWorkerProtocolTests : IAsyncLifetime
         }
     }
 
+    [Theory]
+    [InlineData("vite.config.js", """
+        import { defineConfig } from 'vite';
+        import { fileURLToPath, URL } from 'node:url';
+        import path from 'node:path';
+        export default defineConfig({
+          resolve: {
+            alias: {
+              '@': fileURLToPath(new URL('./src', import.meta.url)),
+              '~lib': path.resolve(__dirname, 'lib'),
+              computed: aliasFor('lib'),
+            },
+          },
+        });
+        """)]
+    [InlineData("vite.config.ts", """
+        import { resolve } from 'node:path';
+        export default {
+          resolve: {
+            alias: [
+              { find: '@', replacement: resolve(import.meta.dirname, 'src') },
+              { find: '~lib', replacement: './lib' },
+              { find: /^computed/, replacement: './lib' },
+              { find: 'computed', replacement: aliasFor('lib') },
+            ],
+          },
+        };
+        """)]
+    [InlineData("webpack.config.js", """
+        const path = require('path');
+        module.exports = {
+          resolve: {
+            alias: {
+              '@': path.join(__dirname, 'src'),
+              '~lib': path.resolve(__dirname, 'lib'),
+              computed: aliasFor('lib'),
+            },
+          },
+        };
+        """)]
+    public async Task BundlerConfig_SuppliesAliasesItWritesOutAndReportsThoseItComputes(
+        string configName, string config)
+    {
+        await using var pipeline = RecordingPipeline(out var recorder);
+        await WriteFileAsync(configName, config);
+        await WriteFileAsync("src/util.js", "export function helper() { return 1; }\n");
+        await WriteFileAsync("src/Panel.vue", "<template><p /></template>\n");
+        await WriteFileAsync("lib/tool.js", "export function tool() { return 1; }\n");
+        await WriteFileAsync("src/main.js", """
+            import { helper } from '@/util';
+            import { tool } from '~lib/tool';
+            import Panel from '@/Panel.vue';
+            import { other } from 'computed/tool';
+            export function main() { other(); return helper() + tool(); }
+            """);
+
+        await pipeline.GraphUpdateService.PerformInitialScanAsync(
+            _tempDir, null, CancellationToken.None);
+
+        var edges = recorder.Deltas.SelectMany(delta => delta.Edges ?? []).ToList();
+        string[] targets = [.. edges
+            .Where(edge => edge.SourceId is "typescript:default:src/main.js" or "typescript:default:src/main.js#main()"
+                && edge.Metadata?.ContainsKey("unresolved") != true)
+            .Select(edge => $"{edge.Kind} {edge.TargetId.Replace("typescript:default:", "")}")
+            .Order(StringComparer.Ordinal)];
+        Assert.Equal(
+            [
+                "CALLS lib/tool.js#tool()", "CALLS src/util.js#helper()",
+                "IMPORTS lib/tool.js", "IMPORTS src/Panel.vue", "IMPORTS src/util.js",
+            ],
+            targets);
+        // Nothing in the config was run, so the alias it computes is named, not guessed.
+        Assert.Contains(
+            recorder.Deltas.SelectMany(delta => delta.Diagnostics ?? []),
+            diagnostic => diagnostic.Message.Contains("'computed'", StringComparison.Ordinal)
+                && diagnostic.Message.Contains(configName, StringComparison.Ordinal));
+    }
+
     [Fact]
     public async Task Jsconfig_SuppliesAliasesWhenThereIsNoTsconfig()
     {
