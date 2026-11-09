@@ -123,9 +123,11 @@ anything else, cross-check with `rg -w <Name>`.
   - **Files in no project.** They bind against the workspace's projects together, so a
     name two projects declare is ambiguous there and is not guessed.
 - **TypeScript/JavaScript** records calls, construction, imports, inheritance, and a JSX
-  render of a component (`<Button />`, as `CALLS`). It **does not record** property reads
-  and writes, type references, or a function passed as a value (`items.map(format)`,
-  `onClick={save}`).
+  render of a component (`<Button />`, as `CALLS`). A function handed over rather than
+  called is a `REFERENCES`: as an argument (`items.map(format)`), a JSX attribute
+  (`onClick={save}`), an object property (`{ run: save }`, `{ save }`) or an array
+  element. It **does not record** property reads and writes, type references, a function
+  assigned to a variable or returned, or a class passed as a value.
 - **Vue** files are indexed through their `<script>` blocks, and a component is its file:
   `query DownloadQueue` matches `components/DownloadQueue.vue`. From the template, a
   component tag (`<DownloadQueue>`, `<download-queue>`, `<component :is="X">`), an event

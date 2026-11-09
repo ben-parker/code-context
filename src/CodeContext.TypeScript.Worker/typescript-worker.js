@@ -446,15 +446,17 @@ const embeddedLanguageAdapters = new Map([
             // A template can only use what a script declares or imports. One written in
             // another language (pug) or kept in another file has no AST here.
             let templateReferences = [];
+            let templateHidden = [];
             const template = parsed.descriptor.template;
             if (scripted && template?.ast) {
                 const usage = collectVueTemplateUsage(template.ast);
                 templateReferences = usage.references;
+                templateHidden = usage.expressions.filter(expression => expression.hidden.size > 0);
                 text = overlayTemplateExpressions(text, source, usage.expressions,
                     template.loc.start.offset, template.loc.end.offset, scriptKind);
             }
 
-            return { text, scriptKind, diagnostics, templateReferences };
+            return { text, scriptKind, diagnostics, templateReferences, templateHidden };
         },
     }],
 ]);
@@ -645,6 +647,14 @@ class Workspace {
             }
         }
         return candidates;
+    }
+
+    /** True when the markup of an embedded file has declared `name` itself (a `v-for`
+     * or `v-slot` name) at `offset`, so that it is not the script's there. */
+    isHiddenInTemplate(fileName, offset, name) {
+        if (!embeddedLanguageAdapters.has(path.extname(fileName).toLowerCase())) return false;
+        return (this.getScriptSource(fileName)?.templateHidden || []).some(expression =>
+            offset >= expression.start && offset < expression.end && expression.hidden.has(name));
     }
 
     /** Re-roots the workspace (and reloads tsconfig options) if the host opens it
@@ -1135,6 +1145,23 @@ function analyzeFile(workspace, workspaceId, program, checker, fileName, diagnos
         return file ? moduleIdOf(file) : null;
     };
 
+    /**
+     * The node of the function a name used as a value names: a function, a method of a
+     * class, or a variable or field holding an arrow function. Null for any other value,
+     * and for a function this project does not declare.
+     */
+    const functionValueTargetId = symbol => {
+        if (!symbol) return null;
+        const target = symbol.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol;
+        const decl = target.declarations && target.declarations[0];
+        if (!decl || ts.isClassDeclaration(decl) || !workspace.hasFile(decl.getSourceFile().fileName)) return null;
+        const emitted = emittedDeclaration(decl);
+        if (emitted) return idOfDeclaration(emitted);
+        const isMember = (ts.isMethodDeclaration(decl) && ts.isClassLike(decl.parent))
+            || (ts.isPropertyDeclaration(decl) && arrowFunctionInitializer(decl.initializer));
+        return isMember ? idOfDeclaration(decl) : null;
+    };
+
     const namespaceStack = [];
     const currentNamespace = () => namespaceStack.join('.');
 
@@ -1265,6 +1292,35 @@ function analyzeFile(workspace, workspaceId, program, checker, fileName, diagnos
                 }
             }
         }
+    };
+
+    /**
+     * `items.map(format)`, `onClick={save}`, `{ run: save }`: a function handed over
+     * rather than called is a REFERENCES edge from where it is handed over. `symbol` is
+     * given for a shorthand property, whose name is not itself an expression.
+     */
+    const addValueReference = (expression, symbol) => {
+        if (!expression) return;
+        const nameNode = ts.isPropertyAccessExpression(expression) ? expression.name : expression;
+        if (!ts.isIdentifier(nameNode)) return;
+        let base = expression;
+        while (ts.isPropertyAccessExpression(base)) base = base.expression;
+        if (ts.isIdentifier(base)
+            && workspace.isHiddenInTemplate(fileName, base.getStart(sourceFile), base.text)) {
+            return;
+        }
+        let targetId;
+        try {
+            targetId = functionValueTargetId(symbol ?? checker.getSymbolAtLocation(nameNode));
+        } catch {
+            return;
+        }
+        if (!targetId) return;
+        const position = sourceFile.getLineAndCharacterOfPosition(expression.getStart(sourceFile));
+        addEdge(enclosingDeclarationId(expression), targetId, 'REFERENCES', {
+            line: String(position.line + 1),
+            column: String(position.character + 1),
+        });
     };
 
     const visit = tsNode => {
@@ -1422,8 +1478,23 @@ function analyzeFile(workspace, workspaceId, program, checker, fileName, diagnos
                         addEdge(enclosingDeclarationId(tsNode), targetId, 'CALLS', metadata);
                     }
                 }
+                for (const argument of tsNode.arguments ?? []) addValueReference(argument);
                 break;
             }
+            case ts.SyntaxKind.JsxAttribute:
+                if (tsNode.initializer && ts.isJsxExpression(tsNode.initializer)) {
+                    addValueReference(tsNode.initializer.expression);
+                }
+                break;
+            case ts.SyntaxKind.PropertyAssignment:
+                addValueReference(tsNode.initializer);
+                break;
+            case ts.SyntaxKind.ShorthandPropertyAssignment:
+                addValueReference(tsNode.name, checker.getShorthandAssignmentValueSymbol(tsNode));
+                break;
+            case ts.SyntaxKind.ArrayLiteralExpression:
+                for (const element of tsNode.elements) addValueReference(element);
+                break;
             case ts.SyntaxKind.JsxOpeningElement:
             case ts.SyntaxKind.JsxSelfClosingElement: {
                 // `<Foo />` renders the component Foo: a CALLS edge, as for `new Foo()`.

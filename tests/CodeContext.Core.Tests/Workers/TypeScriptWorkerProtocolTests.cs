@@ -459,7 +459,7 @@ public class TypeScriptWorkerProtocolTests : IAsyncLifetime
             <template>
               <ul>
                 <li v-for="(save, format) in rows()" :key="format" @click="save" :title="save(format)">
-                  {{ format() }}
+                  {{ format() }}<i :title="keep(format)" :class="[save]" />
                 </li>
               </ul>
               <Slotted v-slot="{ remove }"><b @click="remove(1)">{{ keep() }}</b></Slotted>
@@ -482,7 +482,9 @@ public class TypeScriptWorkerProtocolTests : IAsyncLifetime
             .Order(StringComparer.Ordinal)];
         // The loop's source is read before its names exist; a name it or the slot
         // declares is the loop's or the slot's, whatever the script calls its own.
-        Assert.Equal(["List.vue#keep", "List.vue#rows", "Slotted.vue"], Targets());
+        Assert.Equal(["List.vue#keep", "List.vue#keep", "List.vue#rows", "Slotted.vue"], Targets());
+        // Nor is such a name the script's function when it is passed along.
+        Assert.DoesNotContain(edges, edge => edge.Type == "REFERENCES");
     }
 
     [Fact]
@@ -764,6 +766,60 @@ public class TypeScriptWorkerProtocolTests : IAsyncLifetime
         // Intrinsic elements are not project symbols and claim nothing.
         Assert.DoesNotContain(edges, edge =>
             edge.Metadata?.GetValueOrDefault("callTarget") is "main" or "button" or "i");
+    }
+
+    [Fact]
+    public async Task FunctionPassedAsAValue_IsAReferenceFromWhereItIsPassed()
+    {
+        await WriteFileAsync("helpers.ts", """
+            export function format(x: number) { return String(x); }
+            export const save = () => {};
+            export function first() {}
+            export function second() {}
+            export function shorthand() {}
+            export function onlyCalled() {}
+            export class Store {
+              static load() {}
+              flush() {}
+            }
+            """);
+        await WriteFileAsync("App.tsx", """
+            import { format, save, first, second, shorthand, onlyCalled, Store } from './helpers';
+            export function list(items: number[]) {
+              onlyCalled();
+              return items.map(format);
+            }
+            export function View() {
+              return <button onClick={save} onFocus={Store.load} />;
+            }
+            export function table(store: Store) {
+              return { run: first, shorthand, all: [second, store.flush] };
+            }
+            export function shadowed(format: (x: number) => string, items: number[]) {
+              return items.map(format);
+            }
+            """);
+
+        var edges = await ScanEdgesAsync();
+
+        void Referenced(string source, string target) => Assert.Single(edges, edge =>
+            edge.Type == "REFERENCES"
+            && edge.SourceId == $"typescript:default:App.tsx#{source}"
+            && edge.TargetId == $"typescript:default:helpers.ts#{target}");
+
+        Referenced("list(number[])", "format(number)");
+        Referenced("View()", "save");
+        Referenced("View()", "Store.load()");
+        Referenced("table(Store)", "first()");
+        Referenced("table(Store)", "shorthand()");
+        Referenced("table(Store)", "second()");
+        Referenced("table(Store)", "Store.flush()");
+
+        // A call is a call and nothing more; a parameter that hides the import is not it.
+        Assert.DoesNotContain(edges, edge =>
+            edge.Type == "REFERENCES" && edge.TargetId!.EndsWith("#onlyCalled()", StringComparison.Ordinal));
+        Assert.DoesNotContain(edges, edge =>
+            edge.Type == "REFERENCES" && edge.SourceId!.Contains("#shadowed(", StringComparison.Ordinal));
     }
 
     [Fact]
