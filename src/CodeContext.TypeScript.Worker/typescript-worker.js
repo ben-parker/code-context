@@ -11,10 +11,12 @@
 // snapshot instead of respawning Node and re-reading the world.
 //
 // Project ownership / module resolution: the host approves the file set (one
-// workspace per watched root for now). If <root>/tsconfig.json exists its
-// compilerOptions drive module resolution; otherwise permissive defaults
-// (allowJs, esnext) are used. Approved files are the program roots — tsconfig
-// include/exclude does not override the host's approved set.
+// workspace per watched root for now). If <root>/tsconfig.json (or, without one,
+// jsconfig.json) exists its compilerOptions drive module resolution; otherwise
+// permissive defaults (allowJs, esnext) are used. Import aliases the root config
+// does not resolve are then tried against the `paths` of the configs it references
+// and of a generated .nuxt/tsconfig.json. Approved files are the program roots —
+// tsconfig include/exclude does not override the host's approved set.
 
 const fs = require('fs');
 const path = require('path');
@@ -225,6 +227,169 @@ function vueErrorMessage(error) {
     return error?.message || String(error);
 }
 
+// The @vue/compiler-core node kinds and element tag type a template walk reads.
+const VUE_ELEMENT = 1;
+const VUE_INTERPOLATION = 5;
+const VUE_DIRECTIVE = 7;
+const VUE_COMPONENT_TAG = 1;
+
+const BARE_IDENTIFIER = /^[A-Za-z_$][\w$]*$/;
+const IDENTIFIERS = /[A-Za-z_$][\w$]*/g;
+
+/** The script bindings a component tag can name, in the order Vue tries them:
+ * `<download-queue>` renders `downloadQueue` or `DownloadQueue` as readily as itself. */
+function componentBindingNames(tag) {
+    const camel = tag.replace(/-(\w)/g, (_, letter) => letter.toUpperCase());
+    return [...new Set([tag, camel, camel.charAt(0).toUpperCase() + camel.slice(1)])];
+}
+
+/**
+ * Reads what a Vue template uses from its script. A component tag and an event handler
+ * given by name are returned as references for the analysis to bind by name; every other
+ * expression is returned by its source range, to be parsed where it stands. A name that
+ * a `v-for` or `v-slot` declares hides the script's on that element and below it: no
+ * reference is made to it, and each expression carries the names hidden where it stands.
+ */
+function collectVueTemplateUsage(root) {
+    const references = []; // { names, display, offset, component }
+    const expressions = []; // { start, end, statements, hidden }
+    const addExpression = (expression, statements, hidden) => {
+        if (!expression?.loc || !expression.content?.trim()) return;
+        expressions.push({
+            start: expression.loc.start.offset, end: expression.loc.end.offset, statements, hidden,
+        });
+    };
+    const walk = (node, outer) => {
+        let hidden = outer;
+        if (node.type === VUE_ELEMENT) {
+            const directives = (node.props ?? []).filter(prop => prop.type === VUE_DIRECTIVE);
+            const declared = directives
+                .flatMap(prop => {
+                    if (prop.name === 'slot') return [prop.exp];
+                    if (prop.name !== 'for') return [];
+                    const parsed = prop.forParseResult;
+                    return parsed ? [parsed.value, parsed.key, parsed.index] : [prop.exp];
+                })
+                .flatMap(expression => expression?.content?.match(IDENTIFIERS) ?? []);
+            if (declared.length > 0) hidden = new Set([...outer, ...declared]);
+            const addReference = (names, display, offset, component) => {
+                if (!names.some(name => hidden.has(name))) references.push({ names, display, offset, component });
+            };
+
+            if (node.tagType === VUE_COMPONENT_TAG && node.tag !== 'component' && !node.tag.includes('.')) {
+                addReference(componentBindingNames(node.tag), node.tag, node.loc.start.offset + 1, true);
+            }
+            for (const prop of directives) {
+                if (prop.name === 'slot') continue;
+                const name = prop.exp?.content?.trim();
+                const named = name && BARE_IDENTIFIER.test(name);
+                if (named && prop.name === 'on' && prop.arg) {
+                    // `@click="save"` hands Vue the function to call on the event.
+                    addReference([name], name, prop.exp.loc.start.offset, false);
+                } else if (named && prop.name === 'bind' && node.tag === 'component'
+                    && prop.arg?.isStatic && prop.arg.content === 'is') {
+                    addReference([name], name, prop.exp.loc.start.offset, true);
+                } else if (prop.name === 'for') {
+                    // Only the iterated source is an expression, read before the loop's
+                    // own names exist; the rest declares them.
+                    addExpression(prop.forParseResult?.source, false, outer);
+                } else {
+                    // An event handler that is not a name is a statement list.
+                    addExpression(prop.exp, prop.name === 'on' && !!prop.arg, hidden);
+                }
+            }
+        } else if (node.type === VUE_INTERPOLATION) {
+            addExpression(node.content, false, hidden);
+        }
+        for (const child of node.children ?? []) {
+            if (child && typeof child === 'object') walk(child, hidden);
+        }
+    };
+    walk(root, new Set());
+    return { references, expressions };
+}
+
+// Syntax the analysis emits a node for. A template expression holding any of it would
+// add nodes the script never declared, so such an expression is not copied.
+const DECLARING_KINDS = new Set([
+    ts.SyntaxKind.FunctionDeclaration, ts.SyntaxKind.ClassDeclaration, ts.SyntaxKind.ClassExpression,
+    ts.SyntaxKind.InterfaceDeclaration, ts.SyntaxKind.TypeAliasDeclaration, ts.SyntaxKind.EnumDeclaration,
+    ts.SyntaxKind.ModuleDeclaration, ts.SyntaxKind.VariableStatement, ts.SyntaxKind.MethodDeclaration,
+    ts.SyntaxKind.GetAccessor, ts.SyntaxKind.SetAccessor, ts.SyntaxKind.ImportDeclaration,
+    ts.SyntaxKind.ExportDeclaration, ts.SyntaxKind.ExportAssignment,
+]);
+
+/**
+ * True when `code`, a wrapped template expression, can stand in the script's text: it
+ * parses (an unterminated string or bracket would swallow the script), declares
+ * nothing, keeps its line breaks where the file has them, and calls nothing through a
+ * name the template has hidden, which would bind to the script's declaration instead.
+ */
+function isSafeTemplateStatement(code, scriptKind, hidden) {
+    if (/[\u2028\u2029]/.test(code)) return false;
+    const parsed = ts.createSourceFile('template-expression', code, ts.ScriptTarget.Latest, false, scriptKind);
+    if (!Array.isArray(parsed.parseDiagnostics) || parsed.parseDiagnostics.length > 0) return false;
+    const safe = node => {
+        if (DECLARING_KINDS.has(node.kind)) return false;
+        if (hidden.size > 0 && (ts.isCallExpression(node) || ts.isNewExpression(node))) {
+            let callee = node.expression;
+            while (callee && !ts.isIdentifier(callee)) callee = callee.expression;
+            if (callee && hidden.has(callee.text)) return false;
+        }
+        return !ts.forEachChild(node, child => !safe(child));
+    };
+    return safe(parsed);
+}
+
+/** The two nearest offsets from `from` towards `bound` (exclusive) that hold no line
+ * break, or undefined. Overwriting one keeps every line where the physical file has it. */
+function spareOffsets(source, from, bound, step) {
+    const found = [];
+    for (let offset = from; step > 0 ? offset < bound : offset > bound; offset += step) {
+        const ch = source.charCodeAt(offset);
+        if (ch === 10 || ch === 13) continue;
+        found.push(offset);
+        if (found.length === 2) return found;
+    }
+    return undefined;
+}
+
+/**
+ * Copies each template expression into the whitespace-shaped text at its own offsets, as
+ * a statement of its own: `;(expr);`, or `;{statements};` for an inline event handler.
+ * The delimiters overwrite markup next to the expression, so a call inside it is parsed,
+ * bound against the script's module scope, and reported at its line in the template. An
+ * expression that is not safe to copy (see isSafeTemplateStatement), or has no markup to
+ * spare for its delimiters, is left out.
+ */
+function overlayTemplateExpressions(text, source, expressions, contentStart, contentEnd, scriptKind) {
+    const ordered = [...expressions].sort((a, b) => a.start - b.start);
+    const pieces = [];
+    let position = 0;
+    let floor = contentStart;
+    ordered.forEach((expression, index) => {
+        const body = source.substring(expression.start, expression.end);
+        const [open, close] = expression.statements ? ['{', '}'] : ['(', ')'];
+        if (expression.start < floor
+            || !isSafeTemplateStatement(`;${open}${body}${close};`, scriptKind, expression.hidden)) {
+            return;
+        }
+        const ceiling = Math.min(contentEnd, ordered[index + 1]?.start ?? contentEnd);
+        const before = spareOffsets(source, expression.start - 1, floor - 1, -1);
+        const after = spareOffsets(source, expression.end, ceiling, 1);
+        if (!before || !after) return;
+        pieces.push(
+            text.substring(position, before[1]), ';',
+            text.substring(before[1] + 1, before[0]), open,
+            text.substring(before[0] + 1, expression.start), body,
+            text.substring(expression.end, after[0]), close,
+            text.substring(after[0] + 1, after[1]), ';');
+        position = after[1] + 1;
+        floor = position;
+    });
+    return pieces.join('') + text.substring(position);
+}
+
 const embeddedLanguageAdapters = new Map([
     ['.vue', {
         transform(fileName, source) {
@@ -232,6 +397,8 @@ const embeddedLanguageAdapters = new Map([
             const blocks = [parsed.descriptor.script, parsed.descriptor.scriptSetup].filter(Boolean);
             let text = sourceShapedWhitespace(source);
             let scriptKind = ts.ScriptKind.JS;
+            let scripted = false;
+            let isModule = false;
             const diagnostics = parsed.errors.map(error => ({
                 filePath: fileName,
                 severity: 'warning',
@@ -255,9 +422,39 @@ const embeddedLanguageAdapters = new Map([
                 }
                 const start = block.loc.start.offset;
                 text = text.substring(0, start) + block.content + text.substring(start + block.content.length);
+                if (block.src) continue; // its code is in another file
+                scripted = true;
+
+                // Vue compiles every SFC script as an ES module. One with no import or
+                // export is a global script to TypeScript, where its names would merge
+                // with other components' and with the DOM's. `export{}` written over
+                // the opening `<script` tag says what Vue does, unless the script is
+                // CommonJS, which TypeScript already scopes to its file.
+                let tagStart = -1;
+                for (const tag of source.matchAll(/<script\b/gi)) {
+                    if (tag.index >= start) break;
+                    tagStart = tag.index;
+                }
+                if (!isModule && tagStart >= 0 && start - tagStart >= 8
+                    && !/\bmodule\s*\.\s*exports\b|\bexports\s*\./.test(block.content)) {
+                    text = text.substring(0, tagStart) + 'export{'
+                        + text.substring(tagStart + 7, start - 1) + '}' + text.substring(start);
+                    isModule = true;
+                }
             }
 
-            return { text, scriptKind, diagnostics };
+            // A template can only use what a script declares or imports. One written in
+            // another language (pug) or kept in another file has no AST here.
+            let templateReferences = [];
+            const template = parsed.descriptor.template;
+            if (scripted && template?.ast) {
+                const usage = collectVueTemplateUsage(template.ast);
+                templateReferences = usage.references;
+                text = overlayTemplateExpressions(text, source, usage.expressions,
+                    template.loc.start.offset, template.loc.end.offset, scriptKind);
+            }
+
+            return { text, scriptKind, diagnostics, templateReferences };
         },
     }],
 ]);
@@ -266,7 +463,10 @@ class Workspace {
     constructor(rootPath) {
         this.rootPath = rootPath;
         this.files = new Map(); // canonicalKey -> { path, version }
-        this.embeddedSources = new Map(); // canonicalKey -> { version, text, scriptKind, diagnostics }
+        this.embeddedSources = new Map(); // canonicalKey -> { version, text, scriptKind, diagnostics, ... }
+        // What each file's imports resolved to when the program was last built, so the
+        // analysis can name an import's target file without resolving it a second time.
+        this.moduleTargets = new Map(); // canonicalKey -> Map(moduleName -> resolvedFileName)
         // Per-file content hash of the facts last emitted for that file, keyed by
         // canonicalKey (so lookups survive Windows casing) with the verbatim bucket path
         // stored alongside. This is the sole record of "what the host currently holds per
@@ -276,9 +476,7 @@ class Workspace {
         // present here with no current bucket is a removal — no separate drop-tracking is
         // needed (mirrors the C# analyzer's _factHashes / PathComparer semantics).
         this.factHashes = new Map(); // canonicalKey -> { hash: string, path: string }
-        const loaded = loadCompilerOptions(rootPath);
-        this.compilerOptions = loaded.options;
-        this.configDiagnostic = loaded.diagnostic;
+        this.applyConfiguration(loadCompilerOptions(rootPath));
         const self = this;
         this.serviceHost = {
             getScriptFileNames: () => [...self.files.values()].map(f => f.path),
@@ -297,10 +495,38 @@ class Workspace {
             readDirectory: ts.sys.readDirectory,
             directoryExists: ts.sys.directoryExists,
             getDirectories: ts.sys.getDirectories,
-            resolveModuleNames: (moduleNames, containingFile) => moduleNames.map(
-                moduleName => self.resolveModule(moduleName, containingFile)),
+            resolveModuleNames: (moduleNames, containingFile) => {
+                // Library files resolve imports too; only the workspace's are asked about.
+                const key = canonicalKey(containingFile);
+                let targets = self.moduleTargets.get(key);
+                if (!targets && self.files.has(key)) {
+                    targets = new Map();
+                    self.moduleTargets.set(key, targets);
+                }
+                return moduleNames.map(moduleName => {
+                    const resolved = self.resolveModule(moduleName, containingFile);
+                    targets?.set(moduleName, resolved?.resolvedFileName);
+                    return resolved;
+                });
+            },
         };
         this.service = ts.createLanguageService(this.serviceHost, ts.createDocumentRegistry());
+    }
+
+    applyConfiguration(loaded) {
+        this.compilerOptions = loaded.options;
+        this.configDiagnostic = loaded.diagnostic;
+        // Each scope resolves with its own config's `paths`, relative to that config.
+        this.aliasScopes = loaded.aliasScopes.map(scope => ({
+            ...scope, options: { ...loaded.options, ...scope },
+        }));
+    }
+
+    /** Drops everything remembered about a file that left the workspace. */
+    forget(key) {
+        this.files.delete(key);
+        this.embeddedSources.delete(key);
+        this.moduleTargets.delete(key);
     }
 
     hasFile(p) {
@@ -349,10 +575,37 @@ class Workspace {
         return this.getScriptSource(fileName)?.diagnostics || [];
     }
 
+    /** The names an embedded file's markup uses from its script (see collectVueTemplateUsage). */
+    templateReferences(fileName) {
+        if (!embeddedLanguageAdapters.has(path.extname(fileName).toLowerCase())) return [];
+        return this.getScriptSource(fileName)?.templateReferences || [];
+    }
+
+    /** The workspace file an import in `containingFile` resolved to, as the workspace
+     * spells its path, or undefined for a package or an unresolvable name. */
+    importedProjectFile(containingFile, moduleName) {
+        const target = this.moduleTargets.get(canonicalKey(containingFile))?.get(moduleName);
+        return target ? this.files.get(canonicalKey(target))?.path : undefined;
+    }
+
     resolveModule(moduleName, containingFile) {
         const resolved = ts.resolveModuleName(
             moduleName, containingFile, this.compilerOptions, this.serviceHost).resolvedModule;
         if (resolved) return resolved;
+
+        // An alias the root config does not declare may be declared by a config it
+        // references. Which project a file belongs to is not modelled, so such an alias
+        // is honoured for any file, and only once the root config has failed to resolve it.
+        for (const scope of this.aliasScopes) {
+            // A catch-all `*` names no alias, and would send every package import here.
+            if (!Object.keys(scope.paths).some(
+                pattern => pattern !== '*' && matchPathPattern(pattern, moduleName) !== undefined)) {
+                continue;
+            }
+            const scoped = ts.resolveModuleName(
+                moduleName, containingFile, scope.options, this.serviceHost).resolvedModule;
+            if (scoped) return scoped;
+        }
 
         for (const candidate of this.embeddedModuleCandidates(moduleName, containingFile)) {
             if (!this.hasFile(candidate)) continue;
@@ -377,18 +630,18 @@ class Workspace {
             return candidates;
         }
 
-        const baseUrl = this.compilerOptions.baseUrl
-            ? path.resolve(this.rootPath, this.compilerOptions.baseUrl)
-            : this.rootPath;
-        for (const [pattern, replacements] of Object.entries(this.compilerOptions.paths || {})) {
-            const star = pattern.indexOf('*');
-            const prefix = star < 0 ? pattern : pattern.substring(0, star);
-            const suffix = star < 0 ? '' : pattern.substring(star + 1);
-            if (!moduleName.startsWith(prefix) || !moduleName.endsWith(suffix)) continue;
-            if (star < 0 && moduleName !== pattern) continue;
-            const matched = moduleName.substring(prefix.length, moduleName.length - suffix.length);
-            for (const replacement of replacements) {
-                addCandidate(path.resolve(baseUrl, replacement.replace('*', matched)));
+        for (const scope of [this.compilerOptions, ...this.aliasScopes]) {
+            // `paths` are relative to baseUrl, or else to the config that declares them,
+            // which for an inherited table is the extended config, not the root one.
+            const base = scope.baseUrl
+                ? path.resolve(this.rootPath, scope.baseUrl)
+                : scope.pathsBasePath ?? this.rootPath;
+            for (const [pattern, replacements] of Object.entries(scope.paths || {})) {
+                const matched = matchPathPattern(pattern, moduleName);
+                if (matched === undefined) continue;
+                for (const replacement of replacements) {
+                    addCandidate(path.resolve(base, replacement.replace('*', matched)));
+                }
             }
         }
         return candidates;
@@ -400,9 +653,7 @@ class Workspace {
         const resolved = path.resolve(rootPath);
         if (canonicalKey(resolved) === canonicalKey(this.rootPath)) return;
         this.rootPath = resolved;
-        const loaded = loadCompilerOptions(resolved);
-        this.compilerOptions = loaded.options;
-        this.configDiagnostic = loaded.diagnostic;
+        this.applyConfiguration(loadCompilerOptions(resolved));
     }
 
     filePaths() {
@@ -419,10 +670,7 @@ class Workspace {
     syncApproved(approvedFiles) {
         const approved = new Set(approvedFiles.map(canonicalKey));
         for (const known of [...this.files.keys()]) {
-            if (!approved.has(known)) {
-                this.files.delete(known);
-                this.embeddedSources.delete(known);
-            }
+            if (!approved.has(known)) this.forget(known);
         }
         for (const file of approvedFiles) {
             if (!this.files.has(canonicalKey(file))) this.bump(file);
@@ -437,8 +685,8 @@ class Workspace {
             const existing = previous.get(key);
             this.files.set(key, { path: path.resolve(file), version: (existing?.version ?? 0) + 1 });
         }
-        for (const key of this.embeddedSources.keys()) {
-            if (!this.files.has(key)) this.embeddedSources.delete(key);
+        for (const key of previous.keys()) {
+            if (!this.files.has(key)) this.forget(key);
         }
     }
 
@@ -447,12 +695,10 @@ class Workspace {
         for (const change of changes) {
             touched.push(path.resolve(change.path));
             if (change.changeType === 'deleted') {
-                this.files.delete(canonicalKey(change.path));
-                this.embeddedSources.delete(canonicalKey(change.path));
+                this.forget(canonicalKey(change.path));
             } else {
                 if (change.changeType === 'renamed' && change.oldPath) {
-                    this.files.delete(canonicalKey(change.oldPath));
-                    this.embeddedSources.delete(canonicalKey(change.oldPath));
+                    this.forget(canonicalKey(change.oldPath));
                     // The old path must be inside the delta's replacement scope or
                     // the renamed file's previous facts would linger in the graph.
                     touched.push(path.resolve(change.oldPath));
@@ -537,6 +783,65 @@ class Workspace {
     }
 }
 
+/** The text `*` stands for when `moduleName` matches a tsconfig `paths` pattern ('' for
+ * a pattern without one), or undefined when it does not match. */
+function matchPathPattern(pattern, moduleName) {
+    const star = pattern.indexOf('*');
+    if (star < 0) return moduleName === pattern ? '' : undefined;
+    const prefix = pattern.substring(0, star);
+    const suffix = pattern.substring(star + 1);
+    if (moduleName.length < prefix.length + suffix.length
+        || !moduleName.startsWith(prefix) || !moduleName.endsWith(suffix)) {
+        return undefined;
+    }
+    return moduleName.substring(prefix.length, moduleName.length - suffix.length);
+}
+
+const MAX_REFERENCED_CONFIGS = 32;
+
+// Reads a config for its compilerOptions alone. The host approves the file set, so a
+// config's `include` is never expanded and reading one never walks a directory.
+const OPTIONS_ONLY_CONFIG_HOST = {
+    useCaseSensitiveFileNames: ts.sys.useCaseSensitiveFileNames,
+    fileExists: ts.sys.fileExists,
+    readFile: ts.sys.readFile,
+    readDirectory: () => [],
+};
+
+/**
+ * Collects the `paths` tables of the given configs and of every config they reference.
+ * A solution-style root config (`"files": []` plus `references`) declares no aliases of
+ * its own; the projects it references do.
+ */
+function loadAliasScopes(configPaths) {
+    const scopes = [];
+    const visited = new Set();
+    const pending = [...configPaths];
+    while (pending.length > 0 && visited.size < MAX_REFERENCED_CONFIGS) {
+        let configPath = pending.shift();
+        try {
+            if (fs.statSync(configPath).isDirectory()) configPath = path.join(configPath, 'tsconfig.json');
+            if (visited.has(canonicalKey(configPath))) continue;
+            visited.add(canonicalKey(configPath));
+            const read = ts.readConfigFile(configPath, ts.sys.readFile);
+            if (read.error) continue;
+            const directory = path.dirname(configPath);
+            const parsed = ts.parseJsonConfigFileContent(read.config, OPTIONS_ONLY_CONFIG_HOST, directory);
+            if (parsed.options.paths) {
+                scopes.push({
+                    paths: parsed.options.paths,
+                    baseUrl: parsed.options.baseUrl,
+                    pathsBasePath: parsed.options.pathsBasePath ?? directory,
+                });
+            }
+            pending.push(...(parsed.projectReferences ?? []).map(reference => reference.path));
+        } catch {
+            // A reference to a missing or unreadable config declares no aliases.
+        }
+    }
+    return scopes;
+}
+
 function loadCompilerOptions(rootPath) {
     const defaults = {
         allowJs: true,
@@ -550,28 +855,37 @@ function loadCompilerOptions(rootPath) {
         skipLibCheck: true,
         noEmit: true,
     };
-    const configPath = path.join(rootPath, 'tsconfig.json');
+    let configPath = path.join(rootPath, 'tsconfig.json');
     const fallbackDiagnostic = message => ({
         options: defaults,
+        aliasScopes: [],
         diagnostic: {
             filePath: configPath,
             severity: 'warning',
-            message: `tsconfig.json could not be used (${message}); indexing with permissive defaults.`,
+            message: `${path.basename(configPath)} could not be used (${message}); indexing with permissive defaults.`,
         },
     });
     try {
+        // A JavaScript project declares its options and aliases in jsconfig.json.
+        const jsConfigPath = path.join(rootPath, 'jsconfig.json');
+        if (!fs.existsSync(configPath) && fs.existsSync(jsConfigPath)) configPath = jsConfigPath;
+        let options = defaults;
+        // Nuxt builds with aliases (`~`, `@`) that only the config it generates declares,
+        // and a project need not extend or reference that config, or have one at all.
+        const aliasConfigs = [path.join(rootPath, '.nuxt', 'tsconfig.json')];
         if (fs.existsSync(configPath)) {
             const read = ts.readConfigFile(configPath, ts.sys.readFile);
             if (read.error) {
                 return fallbackDiagnostic(ts.flattenDiagnosticMessageText(read.error.messageText, ' '));
             }
-            const parsed = ts.parseJsonConfigFileContent(read.config, ts.sys, rootPath);
-            return { options: { ...defaults, ...parsed.options, noEmit: true }, diagnostic: undefined };
+            const parsed = ts.parseJsonConfigFileContent(read.config, OPTIONS_ONLY_CONFIG_HOST, rootPath);
+            options = { ...defaults, ...parsed.options, noEmit: true };
+            aliasConfigs.unshift(...(parsed.projectReferences ?? []).map(reference => reference.path));
         }
+        return { options, aliasScopes: loadAliasScopes(aliasConfigs), diagnostic: undefined };
     } catch (error) {
         return fallbackDiagnostic(error.message);
     }
-    return { options: defaults, diagnostic: undefined };
 }
 
 // ---------------------------------------------------------------------------
@@ -769,6 +1083,56 @@ function analyzeFile(workspace, workspaceId, program, checker, fileName, diagnos
         } catch {
             return null;
         }
+    };
+
+    const moduleIdOf = file => `${graphPrefix}${relPath(root, file)}`;
+
+    /** The declaration `addNode` emits a node for when `decl` declares a function,
+     * class, or arrow-function variable; null for anything else. */
+    const emittedDeclaration = decl => {
+        if (ts.isExportAssignment(decl) && isDefaultExportedArrow(decl.expression)) return decl.expression;
+        if ((ts.isFunctionDeclaration(decl) || ts.isClassDeclaration(decl))
+            && (decl.name || hasDefaultModifier(decl))) {
+            return decl;
+        }
+        if (ts.isVariableDeclaration(decl) && arrowFunctionInitializer(decl.initializer)
+            && decl.parent?.parent && ts.isVariableStatement(decl.parent.parent)) {
+            return decl;
+        }
+        return null;
+    };
+
+    /** The node a rendered component is: its declaration when one is emitted, else the
+     * other module that declares it (`export default {...}`, `const X =
+     * defineComponent(...)`). A name this file binds to anything else (a parameter, a
+     * ref, a value picked at run time) names no component here, so null. */
+    const componentTargetId = decl => {
+        const emitted = emittedDeclaration(decl);
+        if (emitted) return idOfDeclaration(emitted);
+        const declFile = decl.getSourceFile();
+        return declFile === sourceFile ? null : moduleIdOf(declFile.fileName);
+    };
+
+    /**
+     * Binds a name used by the markup of an embedded file to a project node. A component
+     * imported from a file with no default export the compiler can see (a Vue SFC
+     * without `export default`) is that file's module.
+     */
+    const templateTargetId = (symbol, isComponent) => {
+        const target = symbol.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol;
+        const decl = target.declarations && target.declarations[0];
+        if (decl) {
+            if (!workspace.hasFile(decl.getSourceFile().fileName)) return null;
+            if (isComponent) return componentTargetId(decl);
+            const emitted = emittedDeclaration(decl);
+            return emitted ? idOfDeclaration(emitted) : null;
+        }
+        if (!isComponent) return null;
+        let importNode = symbol.declarations && symbol.declarations[0];
+        while (importNode && !ts.isImportDeclaration(importNode)) importNode = importNode.parent;
+        if (!importNode || !ts.isStringLiteralLike(importNode.moduleSpecifier)) return null;
+        const file = workspace.importedProjectFile(fileName, importNode.moduleSpecifier.text);
+        return file ? moduleIdOf(file) : null;
     };
 
     const namespaceStack = [];
@@ -1023,10 +1387,12 @@ function analyzeFile(workspace, workspaceId, program, checker, fileName, diagnos
                 // only re-export look dependency-free.
                 if (tsNode.moduleSpecifier) {
                     const moduleName = tsNode.moduleSpecifier.getText(sourceFile).replace(/['"]/g, '');
-                    const resolved = resolveToProjectDeclaration(tsNode.moduleSpecifier);
-                    const targetId = resolved
-                        ? `${graphPrefix}${relPath(root, resolved.getSourceFile().fileName)}`
-                        : moduleName;
+                    // A file with no import or export of its own (a template-only Vue
+                    // component, a side-effect script) has no module symbol to bind,
+                    // but the import still resolved to it.
+                    const resolved = resolveToProjectDeclaration(tsNode.moduleSpecifier)?.getSourceFile().fileName
+                        ?? workspace.importedProjectFile(fileName, moduleName);
+                    const targetId = resolved ? moduleIdOf(resolved) : moduleName;
                     const metadata = { moduleSpecifier: moduleName, isFileImport: 'true' };
                     if (tsNode.kind === ts.SyntaxKind.ExportDeclaration) metadata.isReExport = 'true';
                     if (!resolved) metadata.unresolved = 'true'; // external package or unresolvable path
@@ -1058,11 +1424,67 @@ function analyzeFile(workspace, workspaceId, program, checker, fileName, diagnos
                 }
                 break;
             }
+            case ts.SyntaxKind.JsxOpeningElement:
+            case ts.SyntaxKind.JsxSelfClosingElement: {
+                // `<Foo />` renders the component Foo: a CALLS edge, as for `new Foo()`.
+                // A lower-case tag is an intrinsic element, not a symbol.
+                const tagName = tsNode.tagName;
+                const nameNode = ts.isPropertyAccessExpression(tagName) ? tagName.name : tagName;
+                if (!ts.isIdentifier(nameNode)
+                    || (nameNode === tagName && !/^[A-Z_$]/.test(nameNode.text))) {
+                    break;
+                }
+                const targetDecl = resolveToProjectDeclaration(nameNode);
+                const targetId = targetDecl && componentTargetId(targetDecl);
+                if (targetId) {
+                    const position = sourceFile.getLineAndCharacterOfPosition(tsNode.getStart(sourceFile));
+                    addEdge(enclosingDeclarationId(tsNode), targetId, 'CALLS', {
+                        callTarget: tagName.getText(sourceFile),
+                        line: String(position.line + 1),
+                        column: String(position.character + 1),
+                    });
+                }
+                break;
+            }
         }
         ts.forEachChild(tsNode, visit);
     };
 
     visit(sourceFile);
+
+    // Component tags and named event handlers in an embedded file's markup: each is a
+    // use, by the file's module, of whatever that name is bound to in its script.
+    const templateReferences = workspace.templateReferences(fileName);
+    if (templateReferences.length > 0) {
+        const meaning = ts.SymbolFlags.Value | ts.SymbolFlags.Alias;
+        let scope;
+        const lookup = name => {
+            // One lookup per name, where the compiler offers it, instead of a table of
+            // every global for every file.
+            if (typeof checker.resolveName === 'function') {
+                return checker.resolveName(name, sourceFile.endOfFileToken, meaning, false);
+            }
+            if (!scope) {
+                scope = new Map();
+                for (const symbol of checker.getSymbolsInScope(sourceFile.endOfFileToken, meaning)) {
+                    if (!scope.has(symbol.name)) scope.set(symbol.name, symbol);
+                }
+            }
+            return scope.get(name);
+        };
+        for (const reference of templateReferences) {
+            const symbol = reference.names.map(lookup).find(Boolean);
+            const targetId = symbol ? templateTargetId(symbol, reference.component) : null;
+            if (!targetId) continue;
+            const position = sourceFile.getLineAndCharacterOfPosition(reference.offset);
+            addEdge(`${graphPrefix}${fileRel}`, targetId, 'CALLS', {
+                callTarget: reference.display,
+                line: String(position.line + 1),
+                column: String(position.character + 1),
+            });
+        }
+    }
+
     return { nodes, edges };
 }
 

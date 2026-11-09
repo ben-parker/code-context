@@ -1,16 +1,29 @@
 ---
 name: code-context
-description: Use BEFORE grep/Read for C# and TypeScript/JavaScript questions about a symbol's relationships - who calls, implements, or depends on it, the impact of changing or deleting it, which tests cover it - or exact syntax structure. One query on a live index replaces many greps. Not for literal strings, comments, config values, filenames, docs, or non-indexed files (shell, SQL, Python, YAML/JSON, markdown, csproj): use grep/rg.
+description: Use for C#, TypeScript/JavaScript and Vue questions about how symbols relate - who calls, renders, implements, or depends on something, the impact of changing or deleting it, which tests cover it - or exact syntax structure. One query on a live index replaces many greps, so ask it BEFORE grep/Read when those relationships are unknown; skip it for an edit confined to a file you already know. Not for literal strings, comments, config values, filenames, docs, or non-indexed files (shell, SQL, Python, YAML/JSON, markdown, csproj): use grep/rg.
 ---
 
 # CodeContext
 
 **Scope:** the bundled index contains C# (`.cs`) and TypeScript/JavaScript (`.ts`,
-`.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`, `.cjs`) plus JavaScript/TypeScript
-embedded in Vue SFCs (`.vue`). Symbols defined anywhere else — shell scripts, SQL, Python,
-YAML/JSON config, markdown, csproj/MSBuild — are absent by design, so a query for
-them proves nothing; use `rg`. Even in supported languages, `rg` remains the primary
-tool for literal strings, comments, configuration values, filenames, and docs.
+`.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`, `.cjs`) plus Vue SFCs (`.vue`): their
+script blocks and what their templates use from them. Symbols defined anywhere else —
+shell scripts, SQL, Python, YAML/JSON config, markdown, csproj/MSBuild — are absent by
+design, so a query for them proves nothing; use `rg`. Even in supported languages, `rg`
+remains the primary tool for literal strings, comments, configuration values, filenames,
+and docs.
+
+## Choose the tool
+
+- **Query the index** when the answer depends on how symbols relate and you do not know
+  yet: the callers of a helper, the views that render a component, what a signature
+  change or a deletion reaches, which tests touch a symbol.
+- **Read the file** when the edit is local and its scope is clear. A query adds nothing
+  to "put active items first in this handler".
+- **Use `rg`** for filenames, route strings, comments, config values and other literal
+  text, and to cross-check an empty result before a decision rests on it.
+- **Use the [native syntax tree](references/native-syntax.md)** when exact structure
+  matters: overloads, modifiers, spans.
 
 ## Query
 
@@ -109,8 +122,26 @@ anything else, cross-check with `rg -w <Name>`.
     counts names that failed to bind and lists the commonest.
   - **Files in no project.** They bind against the workspace's projects together, so a
     name two projects declare is ambiguous there and is not guessed.
-- **TypeScript/JavaScript** records calls, construction, imports and inheritance. It
-  **does not record** property reads and writes or type references.
+- **TypeScript/JavaScript** records calls, construction, imports, inheritance, and a JSX
+  render of a component (`<Button />`, as `CALLS`). It **does not record** property reads
+  and writes, type references, or a function passed as a value (`items.map(format)`,
+  `onClick={save}`).
+- **Vue** files are indexed through their `<script>` blocks, and a component is its file:
+  `query DownloadQueue` matches `components/DownloadQueue.vue`. From the template, a
+  component tag (`<DownloadQueue>`, `<download-queue>`, `<component :is="X">`), an event
+  handler given by name (`@click="save"`) and a call in an expression
+  (`{{ format(x) }}`) are each a `CALLS` from the rendering file's module to whatever the
+  script binds that name to.
+- **Vue templates are blind to these; run `rg -w <Name>`:** a component the script never
+  imports (globally registered, or auto-imported by Nuxt or `unplugin-vue-components`);
+  Options API members (`methods`, `computed`, `data`) used from the template; a handler
+  reached through an object (`@click="store.save"`); a `pug` template; a dotted tag
+  (`<Icons.Close>`).
+- **Import aliases** (`@/`, `~/`) resolve from the root `tsconfig.json` or
+  `jsconfig.json`, the configs it extends or references, and the `.nuxt/tsconfig.json`
+  Nuxt generates. An alias declared only in a bundler config (`vite.config`, webpack)
+  does not resolve, and an import through it is missing from `usedBy` and
+  `fileDependents`.
 
 ## Going deeper
 

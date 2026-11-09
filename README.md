@@ -22,8 +22,10 @@ Bundled language workers provide semantic analysis for:
   TypeScript language-service worker.
 
 For Vue SFCs, CodeContext semantically indexes JavaScript and TypeScript in both
-`<script>` and `<script setup>` blocks. Templates and styles remain outside the
-normalized code graph. Source spans and file paths refer to the original `.vue` file.
+`<script>` and `<script setup>` blocks, and records what the template uses from them:
+the components it renders, the event handlers it names, and the calls in its
+expressions. Styles remain outside the normalized code graph. Source spans and file
+paths refer to the original `.vue` file.
 
 Release archives are published for Windows x64, Linux x64, macOS x64, and macOS
 Arm64. The archives are self-contained: they include the .NET host, the C# worker,

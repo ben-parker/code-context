@@ -60,6 +60,7 @@ public class TypeScriptWorkerProtocolTests : IAsyncLifetime
     private async Task<string> WriteFileAsync(string name, string content)
     {
         var path = Path.Combine(_tempDir, name);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         await File.WriteAllTextAsync(path, content);
         return path;
     }
@@ -179,6 +180,590 @@ public class TypeScriptWorkerProtocolTests : IAsyncLifetime
         Assert.Contains(
             recorder.Deltas.SelectMany(delta => delta.Diagnostics ?? []),
             diagnostic => diagnostic.Message.Contains("Vue SFC parse error", StringComparison.Ordinal));
+    }
+
+    private async Task<IReadOnlyList<CodeEdge>> ScanEdgesAsync()
+    {
+        await _pipeline.GraphUpdateService.PerformInitialScanAsync(
+            _tempDir, null, CancellationToken.None);
+        return [.. await _pipeline.RepositoryFactory.CreateEdgeRepository().GetAllAsync()];
+    }
+
+    [Fact]
+    public async Task VueTemplateComponentTag_RecordsARenderOfTheImportedComponent()
+    {
+        // The child has no <script> at all: it is still a component, and the file is
+        // still the import's target.
+        await WriteFileAsync("Child.vue", """
+            <template><p>child</p></template>
+            """);
+        await WriteFileAsync("Parent.vue", """
+            <template>
+              <div>
+                <Child v-if="visible" />
+              </div>
+            </template>
+            <script setup>
+            import Child from './Child.vue';
+            const visible = true;
+            </script>
+            """);
+
+        var edges = await ScanEdgesAsync();
+
+        Assert.Contains(edges, edge =>
+            edge.Type == "IMPORTS"
+            && edge.SourceId == "typescript:default:Parent.vue"
+            && edge.TargetId == "typescript:default:Child.vue");
+        var render = Assert.Single(edges, edge =>
+            edge.Type == "CALLS"
+            && edge.SourceId == "typescript:default:Parent.vue"
+            && edge.TargetId == "typescript:default:Child.vue");
+        // Edge lines are normalized to the host's zero-based representation, like spans.
+        Assert.Equal("2", render.Metadata!["line"]);
+        Assert.Equal("Child", render.Metadata["callTarget"]);
+    }
+
+    [Fact]
+    public async Task VueTemplateComponentTag_ResolvesKebabCaseAndOptionsApiRegistration()
+    {
+        await WriteFileAsync("ChildCard.vue", """
+            <template><p>child</p></template>
+            <script>
+            export default { name: 'ChildCard' };
+            </script>
+            """);
+        await WriteFileAsync("Parent.vue", """
+            <template>
+              <child-card />
+            </template>
+            <script>
+            import ChildCard from './ChildCard.vue';
+            export default { components: { ChildCard } };
+            </script>
+            """);
+
+        var edges = await ScanEdgesAsync();
+
+        Assert.Contains(edges, edge =>
+            edge.Type == "CALLS"
+            && edge.SourceId == "typescript:default:Parent.vue"
+            && edge.TargetId == "typescript:default:ChildCard.vue"
+            && edge.Metadata?["callTarget"] == "child-card");
+    }
+
+    [Fact]
+    public async Task VueTemplateComponentTag_ResolvesAComponentDeclaredInTypeScript()
+    {
+        await WriteFileAsync("widgets.ts", """
+            export function Badge() { return null; }
+            """);
+        await WriteFileAsync("Parent.vue", """
+            <template>
+              <Badge />
+              <div />
+              <Unknown />
+            </template>
+            <script setup lang="ts">
+            import { Badge } from './widgets';
+            </script>
+            """);
+
+        var edges = await ScanEdgesAsync();
+
+        Assert.Contains(edges, edge =>
+            edge.Type == "CALLS"
+            && edge.SourceId == "typescript:default:Parent.vue"
+            && edge.TargetId == "typescript:default:widgets.ts#Badge()");
+        // A tag that binds to nothing in the script (a native element, or a globally
+        // registered component) claims no target.
+        Assert.DoesNotContain(edges, edge =>
+            edge.SourceId == "typescript:default:Parent.vue"
+            && edge.Metadata?.GetValueOrDefault("callTarget") is "div" or "Unknown");
+    }
+
+    [Fact]
+    public async Task VueTemplateExpressions_RecordCallsToScriptFunctionsAtTheirTemplateLines()
+    {
+        await WriteFileAsync("Panel.vue", """
+            <template>
+              <ul :class="{ wide: isWide(), tall }" @click="select(1); announce()">
+                <li v-for="item in visibleItems()" :key="item.id">{{ format(item) }}</li>
+              </ul>
+            </template>
+            <script setup>
+            const tall = true;
+            const isWide = () => true;
+            const select = (id) => id;
+            const announce = () => {};
+            const visibleItems = () => [];
+            function format(item) { return String(item); }
+            </script>
+            """);
+
+        var edges = await ScanEdgesAsync();
+
+        (string Target, string Line)[] expected =
+        [
+            ("isWide", "1"), ("select", "1"), ("announce", "1"), ("visibleItems", "2"), ("format(item)", "2"),
+        ];
+        foreach (var (target, line) in expected)
+        {
+            var call = Assert.Single(edges, edge =>
+                edge.Type == "CALLS"
+                && edge.SourceId == "typescript:default:Panel.vue"
+                && edge.TargetId == $"typescript:default:Panel.vue#{target}");
+            Assert.Equal(line, call.Metadata!["line"]);
+        }
+    }
+
+    [Fact]
+    public async Task VueTemplateNames_RecordANamedEventHandlerAndADynamicComponent()
+    {
+        await WriteFileAsync("Panel.vue", """
+            <template><p>panel</p></template>
+            """);
+        await WriteFileAsync("Host.vue", """
+            <template>
+              <button @click="save">Save</button>
+              <component :is="Panel" />
+            </template>
+            <script setup>
+            import Panel from './Panel.vue';
+            const count = 0;
+            const save = () => count;
+            </script>
+            """);
+
+        var edges = await ScanEdgesAsync();
+
+        // `@click="save"` names the function Vue calls; no call expression is written.
+        Assert.Contains(edges, edge =>
+            edge.Type == "CALLS"
+            && edge.SourceId == "typescript:default:Host.vue"
+            && edge.TargetId == "typescript:default:Host.vue#save"
+            && edge.Metadata?["line"] == "1");
+        Assert.Contains(edges, edge =>
+            edge.Type == "CALLS"
+            && edge.SourceId == "typescript:default:Host.vue"
+            && edge.TargetId == "typescript:default:Panel.vue");
+    }
+
+    [Fact]
+    public async Task VueTemplateExpressionThatDoesNotParse_IsLeftOutWithoutLosingTheScript()
+    {
+        // An unterminated template literal copied beside the script would swallow it.
+        await WriteFileAsync("Broken.vue", """
+            <template>
+              <p :title="`unterminated" :class="label(">{{ fine() }}</p>
+            </template>
+            <script setup>
+            const fine = () => 1;
+            function label() { return ''; }
+            </script>
+            """);
+
+        await _pipeline.GraphUpdateService.PerformInitialScanAsync(
+            _tempDir, null, CancellationToken.None);
+
+        var nodes = await _pipeline.RepositoryFactory.CreateNodeRepository().GetAllAsync();
+        Assert.Contains(nodes, node => node.Id == "typescript:default:Broken.vue#fine");
+        Assert.Contains(nodes, node => node.Id == "typescript:default:Broken.vue#label()");
+        var edges = await _pipeline.RepositoryFactory.CreateEdgeRepository().GetAllAsync();
+        Assert.Contains(edges, edge =>
+            edge.Type == "CALLS"
+            && edge.SourceId == "typescript:default:Broken.vue"
+            && edge.TargetId == "typescript:default:Broken.vue#fine");
+        Assert.DoesNotContain(edges, edge => edge.TargetId == "typescript:default:Broken.vue#label()");
+    }
+
+    [Fact]
+    public async Task VueTemplateEdit_ReplacesTemplateUsageIncrementally()
+    {
+        await WriteFileAsync("Child.vue", """
+            <template><p>child</p></template>
+            """);
+        var parent = await WriteFileAsync("Parent.vue", """
+            <template><Child /></template>
+            <script setup>
+            import Child from './Child.vue';
+            const refresh = () => 1;
+            </script>
+            """);
+        await _pipeline.GraphUpdateService.PerformInitialScanAsync(
+            _tempDir, null, CancellationToken.None);
+
+        await File.WriteAllTextAsync(parent, """
+            <template><p>{{ refresh() }}</p></template>
+            <script setup>
+            import Child from './Child.vue';
+            const refresh = () => 1;
+            </script>
+            """);
+        await _pipeline.GraphUpdateService.ProcessFileChangeAsync(
+            parent, FileChangeType.Changed, CancellationToken.None);
+
+        var edges = await _pipeline.RepositoryFactory.CreateEdgeRepository().GetAllAsync();
+        Assert.DoesNotContain(edges, edge =>
+            edge.Type == "CALLS" && edge.TargetId == "typescript:default:Child.vue");
+        Assert.Contains(edges, edge =>
+            edge.Type == "CALLS"
+            && edge.SourceId == "typescript:default:Parent.vue"
+            && edge.TargetId == "typescript:default:Parent.vue#refresh");
+    }
+
+    [Fact]
+    public async Task VueScriptsWithoutImports_DoNotShareTheirNamesAcrossComponents()
+    {
+        // A script with no import or export is a global script to the compiler, where
+        // same-named declarations in two files merge. A Vue script is always a module.
+        foreach (var name in new[] { "First", "Second" })
+        {
+            await WriteFileAsync($"{name}.vue", """
+                <template>
+                  <button @click="close">{{ label() }}</button>
+                </template>
+                <script setup>
+                function close() { return label(); }
+                function label() { return ''; }
+                </script>
+                """);
+        }
+
+        var edges = await ScanEdgesAsync();
+
+        var calls = edges.Where(edge => edge.Type == "CALLS" && edge.Metadata?.ContainsKey("unresolved") != true);
+        Assert.All(calls, edge => Assert.Equal(
+            edge.SourceId!.Split('#')[0], edge.TargetId!.Split('#')[0]));
+        foreach (var name in new[] { "First", "Second" })
+        {
+            Assert.Contains(calls, edge =>
+                edge.SourceId == $"typescript:default:{name}.vue"
+                && edge.TargetId == $"typescript:default:{name}.vue#close()");
+            Assert.Contains(calls, edge =>
+                edge.SourceId == $"typescript:default:{name}.vue"
+                && edge.TargetId == $"typescript:default:{name}.vue#label()");
+            Assert.Contains(calls, edge =>
+                edge.SourceId == $"typescript:default:{name}.vue#close()"
+                && edge.TargetId == $"typescript:default:{name}.vue#label()");
+        }
+    }
+
+    [Fact]
+    public async Task VueTemplateNamesDeclaredByVForOrVSlot_DoNotBindToTheScript()
+    {
+        await WriteFileAsync("Slotted.vue", """
+            <template><slot :remove="() => 1" /></template>
+            """);
+        await WriteFileAsync("List.vue", """
+            <template>
+              <ul>
+                <li v-for="(save, format) in rows()" :key="format" @click="save" :title="save(format)">
+                  {{ format() }}
+                </li>
+              </ul>
+              <Slotted v-slot="{ remove }"><b @click="remove(1)">{{ keep() }}</b></Slotted>
+            </template>
+            <script setup>
+            import Slotted from './Slotted.vue';
+            const rows = () => [];
+            const save = () => 1;
+            const format = () => '';
+            const remove = () => 1;
+            const keep = () => 1;
+            </script>
+            """);
+
+        var edges = await ScanEdgesAsync();
+
+        string[] Targets() => [.. edges
+            .Where(edge => edge.Type == "CALLS" && edge.SourceId == "typescript:default:List.vue")
+            .Select(edge => edge.TargetId!.Replace("typescript:default:", ""))
+            .Order(StringComparer.Ordinal)];
+        // The loop's source is read before its names exist; a name it or the slot
+        // declares is the loop's or the slot's, whatever the script calls its own.
+        Assert.Equal(["List.vue#keep", "List.vue#rows", "Slotted.vue"], Targets());
+    }
+
+    [Fact]
+    public async Task VueTemplateExpressionThatDeclares_IsLeftOutRatherThanMintingNodes()
+    {
+        await WriteFileAsync("Declares.vue", """
+            <template>
+              <b :options="{ save() { return go() } }" @click="() => { const helper = () => go(); helper() }">
+                {{ go() }}
+              </b>
+            </template>
+            <script setup>
+            const go = () => 1;
+            const helper = () => 2;
+            </script>
+            """);
+
+        await _pipeline.GraphUpdateService.PerformInitialScanAsync(
+            _tempDir, null, CancellationToken.None);
+
+        var nodes = await _pipeline.RepositoryFactory.CreateNodeRepository().GetAllAsync();
+        Assert.Equal(
+            ["Declares.vue", "go", "helper"],
+            nodes.Select(node => node.Name).Order(StringComparer.Ordinal));
+        // Zero-based: the script's `helper`, not the template's, on physical line 8.
+        Assert.Equal(7, Assert.Single(nodes, node => node.Name == "helper").StartLine);
+        var edges = await _pipeline.RepositoryFactory.CreateEdgeRepository().GetAllAsync();
+        Assert.Single(edges, edge =>
+            edge.Type == "CALLS" && edge.TargetId == "typescript:default:Declares.vue#go");
+    }
+
+    [Fact]
+    public async Task ANameBoundToALocalValue_IsNotARenderOfItsOwnModule()
+    {
+        await WriteFileAsync("Dynamic.vue", """
+            <template><component :is="current" /></template>
+            <script setup>
+            import { ref } from 'vue';
+            const current = ref(null);
+            </script>
+            """);
+        await WriteFileAsync("Layout.tsx", """
+            export function Layout({ Header, as }: { Header: () => null; as?: string }) {
+              const Tag = as || 'div';
+              return <Tag><Header /></Tag>;
+            }
+            """);
+
+        var edges = await ScanEdgesAsync();
+
+        Assert.DoesNotContain(edges, edge =>
+            edge.Type == "CALLS" && edge.Metadata?.ContainsKey("unresolved") != true);
+    }
+
+    [Fact]
+    public async Task VueTemplateAfterTheScript_WithWindowsLineEndings_KeepsEveryLine()
+    {
+        await WriteFileAsync("Tail.vue", string.Join("\r\n",
+            "<script setup lang=\"ts\">",
+            "const first = (): number => 1;",
+            "function second(): number { return first(); }",
+            "</script>",
+            "<template>",
+            "  <p :title=\"String(second())\">{{ first() }}{{ second() }}</p>",
+            "</template>",
+            ""));
+
+        await _pipeline.GraphUpdateService.PerformInitialScanAsync(
+            _tempDir, null, CancellationToken.None);
+
+        var nodes = await _pipeline.RepositoryFactory.CreateNodeRepository().GetAllAsync();
+        Assert.Equal(1, Assert.Single(nodes, node => node.Name == "first").StartLine);
+        Assert.Equal(2, Assert.Single(nodes, node => node.Name == "second").StartLine);
+        var edges = await _pipeline.RepositoryFactory.CreateEdgeRepository().GetAllAsync();
+        var fromTemplate = edges
+            .Where(edge => edge.Type == "CALLS" && edge.SourceId == "typescript:default:Tail.vue"
+                && edge.Metadata?.ContainsKey("unresolved") != true)
+            .Select(edge => (edge.TargetId, Line: edge.Metadata!["line"]))
+            .Order();
+        Assert.Equal(
+            [
+                ("typescript:default:Tail.vue#first", "5"),
+                ("typescript:default:Tail.vue#second()", "5"),
+                ("typescript:default:Tail.vue#second()", "5"),
+            ],
+            fromTemplate);
+    }
+
+    [Fact]
+    public async Task VueTemplate_DoesNotDisturbScriptFactsOrMintNodes()
+    {
+        await WriteFileAsync("Quiet.vue", """
+            <template>
+              <button :style="{ color }" @click="() => bump()">{{ label }}</button>
+              <p v-for="(row, index) in rows" :key="index">{{ row }}</p>
+            </template>
+            <script setup lang="ts">
+            const color = 'red';
+            const label = 'go';
+            const rows: string[] = [];
+            function bump(): void {}
+            </script>
+            """);
+
+        await _pipeline.GraphUpdateService.PerformInitialScanAsync(
+            _tempDir, null, CancellationToken.None);
+
+        var nodes = await _pipeline.RepositoryFactory.CreateNodeRepository().GetAllAsync();
+        var names = nodes
+            .Where(node => node.FilePath?.EndsWith("Quiet.vue", StringComparison.OrdinalIgnoreCase) == true)
+            .Select(node => node.Name)
+            .Order(StringComparer.Ordinal);
+        Assert.Equal(["Quiet.vue", "bump"], names);
+        var bump = Assert.Single(nodes, node => node.Name == "bump");
+        Assert.Equal(8, bump.StartLine);
+    }
+
+    [Fact]
+    public async Task VueAliasImport_ResolvesThroughTheTsconfigNuxtGenerates()
+    {
+        // A JavaScript Nuxt project need not have a root tsconfig.json; the aliases it
+        // builds with are declared in the one Nuxt writes under .nuxt/.
+        await WriteFileAsync(".nuxt/tsconfig.json", """
+            { "compilerOptions": { "paths": { "~/*": ["../*"], "~": [".."] } } }
+            """);
+        await WriteFileAsync("components/DownloadQueue.vue", """
+            <template><p>queue</p></template>
+            """);
+        await WriteFileAsync("server/queue.js", """
+            export function getQueue() { return []; }
+            """);
+        await WriteFileAsync("pages/index.vue", """
+            <template>
+              <DownloadQueue :queue="getQueue()" />
+            </template>
+            <script setup>
+            import DownloadQueue from '~/components/DownloadQueue.vue';
+            import { getQueue } from '~/server/queue';
+            </script>
+            """);
+
+        var edges = await ScanEdgesAsync();
+
+        Assert.Contains(edges, edge =>
+            edge.Type == "IMPORTS"
+            && edge.SourceId == "typescript:default:pages/index.vue"
+            && edge.TargetId == "typescript:default:components/DownloadQueue.vue");
+        Assert.Contains(edges, edge =>
+            edge.Type == "CALLS"
+            && edge.SourceId == "typescript:default:pages/index.vue"
+            && edge.TargetId == "typescript:default:components/DownloadQueue.vue");
+        Assert.Contains(edges, edge =>
+            edge.Type == "CALLS"
+            && edge.SourceId == "typescript:default:pages/index.vue"
+            && edge.TargetId == "typescript:default:server/queue.js#getQueue()");
+    }
+
+    [Fact]
+    public async Task VueAliasImport_ResolvesPathsInheritedFromAnExtendedConfig()
+    {
+        // Paths declared without baseUrl are relative to the config that declares them,
+        // not to the root config that extends it.
+        await WriteFileAsync("config/base.json", """
+            { "compilerOptions": { "paths": { "#ui/*": ["../ui/*"] } } }
+            """);
+        await WriteFileAsync("tsconfig.json", """
+            { "extends": "./config/base.json" }
+            """);
+        await WriteFileAsync("ui/Chip.vue", """
+            <template><i /></template>
+            """);
+        await WriteFileAsync("App.vue", """
+            <template><Chip /></template>
+            <script setup lang="ts">
+            import Chip from '#ui/Chip.vue';
+            </script>
+            """);
+
+        var edges = await ScanEdgesAsync();
+
+        Assert.Contains(edges, edge =>
+            edge.Type == "CALLS"
+            && edge.SourceId == "typescript:default:App.vue"
+            && edge.TargetId == "typescript:default:ui/Chip.vue");
+    }
+
+    [Fact]
+    public async Task SolutionStyleTsconfig_ResolvesAnAliasDeclaredByAReferencedProject()
+    {
+        await WriteFileAsync("tsconfig.json", """
+            { "files": [], "references": [{ "path": "./tsconfig.app.json" }, { "path": "./tools" }] }
+            """);
+        await WriteFileAsync("tsconfig.app.json", """
+            { "compilerOptions": { "paths": { "@/*": ["./src/*"] } }, "include": ["src"] }
+            """);
+        await WriteFileAsync("tools/tsconfig.json", """
+            { "compilerOptions": { "paths": { "@tools/*": ["./*"] } } }
+            """);
+        await WriteFileAsync("tools/emit.ts", "export function emit(): void {}\n");
+        await WriteFileAsync("src/util.ts", "export function helper(): number { return 1; }\n");
+        await WriteFileAsync("src/main.ts", """
+            import { helper } from '@/util';
+            import { emit } from '@tools/emit';
+            export function main(): number { emit(); return helper(); }
+            """);
+
+        var edges = await ScanEdgesAsync();
+
+        Assert.Contains(edges, edge =>
+            edge.Type == "CALLS"
+            && edge.SourceId == "typescript:default:src/main.ts#main()"
+            && edge.TargetId == "typescript:default:src/util.ts#helper()");
+        Assert.Contains(edges, edge =>
+            edge.Type == "CALLS"
+            && edge.SourceId == "typescript:default:src/main.ts#main()"
+            && edge.TargetId == "typescript:default:tools/emit.ts#emit()");
+    }
+
+    [Fact]
+    public async Task Jsconfig_SuppliesAliasesWhenThereIsNoTsconfig()
+    {
+        await WriteFileAsync("jsconfig.json", """
+            { "compilerOptions": { "paths": { "@/*": ["./src/*"] } } }
+            """);
+        await WriteFileAsync("src/util.js", "export function helper() { return 1; }\n");
+        await WriteFileAsync("src/main.js", """
+            import { helper } from '@/util';
+            export function main() { return helper(); }
+            """);
+
+        var edges = await ScanEdgesAsync();
+
+        Assert.Contains(edges, edge =>
+            edge.Type == "CALLS"
+            && edge.SourceId == "typescript:default:src/main.js#main()"
+            && edge.TargetId == "typescript:default:src/util.js#helper()");
+    }
+
+    [Fact]
+    public async Task SideEffectImportOfAScriptFile_ResolvesToItsModule()
+    {
+        // A file with no import or export is a script to the compiler, so the import
+        // has no module symbol to bind; the file it names is still its target.
+        await WriteFileAsync("polyfill.js", "globalThis.ready = true;\n");
+        await WriteFileAsync("entry.js", "import './polyfill.js';\n");
+
+        var edges = await ScanEdgesAsync();
+
+        Assert.Contains(edges, edge =>
+            edge.Type == "IMPORTS"
+            && edge.SourceId == "typescript:default:entry.js"
+            && edge.TargetId == "typescript:default:polyfill.js");
+    }
+
+    [Fact]
+    public async Task JsxElement_RecordsARenderOfTheComponent()
+    {
+        await WriteFileAsync("Button.tsx", """
+            export function Button() { return <button />; }
+            export const Icon = () => <i />;
+            """);
+        await WriteFileAsync("App.tsx", """
+            import { Button, Icon } from './Button';
+            export function App() {
+              return <main><Button><Icon /></Button></main>;
+            }
+            """);
+
+        var edges = await ScanEdgesAsync();
+
+        Assert.Single(edges, edge =>
+            edge.Type == "CALLS"
+            && edge.SourceId == "typescript:default:App.tsx#App()"
+            && edge.TargetId == "typescript:default:Button.tsx#Button()");
+        Assert.Single(edges, edge =>
+            edge.Type == "CALLS"
+            && edge.SourceId == "typescript:default:App.tsx#App()"
+            && edge.TargetId == "typescript:default:Button.tsx#Icon");
+        // Intrinsic elements are not project symbols and claim nothing.
+        Assert.DoesNotContain(edges, edge =>
+            edge.Metadata?.GetValueOrDefault("callTarget") is "main" or "button" or "i");
     }
 
     [Fact]
