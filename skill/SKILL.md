@@ -133,9 +133,12 @@ anything else, cross-check with `rg -w <Name>`.
   component tag (`<DownloadQueue>`, `<download-queue>`, `<component :is="X">`), an event
   handler given by name (`@click="save"`) and a call in an expression
   (`{{ format(x) }}`) are each a `CALLS` from the rendering file's module to whatever the
-  script binds that name to.
-- **Vue templates are blind to these; run `rg -w <Name>`:** a component the script never
-  imports (globally registered, or auto-imported by Nuxt or `unplugin-vue-components`);
+  script binds that name to. A component tag no script imports binds to what the project
+  declares for every template: the `components.d.ts` that Nuxt (under `.nuxt/`) or
+  `unplugin-vue-components` generates, or `app.component('Name', X)`.
+- **Vue templates are blind to these; run `rg -w <Name>`:** an auto-imported component
+  before its declaration file exists (run `nuxi prepare`; status then carries a
+  diagnostic) or whose file is generated somewhere other than the project's directory;
   Options API members (`methods`, `computed`, `data`) used from the template; a handler
   reached through an object (`@click="store.save"`); a `pug` template; a dotted tag
   (`<Icons.Close>`).

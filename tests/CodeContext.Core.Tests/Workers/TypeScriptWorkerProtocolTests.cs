@@ -252,6 +252,105 @@ public class TypeScriptWorkerProtocolTests : IAsyncLifetime
             && edge.Metadata?["callTarget"] == "child-card");
     }
 
+    [Theory]
+    [InlineData(".nuxt/components.d.ts", "../")]
+    [InlineData(".nuxt/types/components.d.ts", "../../")]
+    [InlineData("components.d.ts", "./")]
+    public async Task VueTemplateComponentTag_ResolvesAComponentTheProjectDeclaresGlobally(
+        string declarations, string toRoot)
+    {
+        // What Nuxt and unplugin-vue-components generate for components no script imports.
+        await WriteFileAsync(declarations, $$"""
+            type LazyComponent<T> = T
+            interface _GlobalComponents {
+              'BaseButton': typeof import("{{toRoot}}components/base/Button.vue")['default']
+              'LazyBaseButton': LazyComponent<typeof import("{{toRoot}}components/base/Button.vue")['default']>
+              'Shadowed': typeof import("{{toRoot}}components/base/Button.vue")['default']
+              'NuxtLink': typeof import("{{toRoot}}node_modules/nuxt/dist/app/components/nuxt-link")['default']
+            }
+            declare module 'vue' {
+              export interface GlobalComponents extends _GlobalComponents { }
+            }
+            export {}
+            """);
+        await WriteFileAsync("components/base/Button.vue", "<template><button /></template>\n");
+        await WriteFileAsync("components/Local.vue", "<template><i /></template>\n");
+        await WriteFileAsync("pages/index.vue", """
+            <template>
+              <NuxtLink><BaseButton /></NuxtLink>
+            </template>
+            """);
+        await WriteFileAsync("pages/deep/about.vue", """
+            <template>
+              <lazy-base-button />
+              <Shadowed />
+            </template>
+            <script setup>
+            import Shadowed from '../../components/Local.vue';
+            </script>
+            """);
+
+        var edges = await ScanEdgesAsync();
+
+        string[] Rendered(string file) => [.. edges
+            .Where(edge => edge.Type == "CALLS" && edge.SourceId == $"typescript:default:{file}")
+            .Select(edge => $"{edge.Metadata!["callTarget"]} -> {edge.TargetId!.Replace("typescript:default:", "")}")
+            .Order(StringComparer.Ordinal)];
+        // A component outside the project claims nothing, and a name the script binds is
+        // the script's.
+        Assert.Equal(["BaseButton -> components/base/Button.vue"], Rendered("pages/index.vue"));
+        Assert.Equal(
+            ["Shadowed -> components/Local.vue", "lazy-base-button -> components/base/Button.vue"],
+            Rendered("pages/deep/about.vue"));
+    }
+
+    [Fact]
+    public async Task VueTemplateComponentTag_ResolvesAComponentRegisteredOnTheApplication()
+    {
+        await WriteFileAsync("src/Card.vue", "<template><p /></template>\n");
+        await WriteFileAsync("src/Badge.vue", "<template><b /></template>\n");
+        await WriteFileAsync("src/main.ts", """
+            import { createApp } from 'vue';
+            import Card from './Card.vue';
+            import Badge from './Badge.vue';
+            import App from './App.vue';
+            const app = createApp(App);
+            app.component('AppCard', Card);
+            app.component('status-badge', Badge);
+            app.mount('#app');
+            """);
+        await WriteFileAsync("src/App.vue", """
+            <template>
+              <app-card><StatusBadge /><Unknown /></app-card>
+            </template>
+            """);
+
+        var edges = await ScanEdgesAsync();
+
+        string[] rendered = [.. edges
+            .Where(edge => edge.Type == "CALLS" && edge.SourceId == "typescript:default:src/App.vue")
+            .Select(edge => $"{edge.Metadata!["callTarget"]} -> {edge.TargetId!.Replace("typescript:default:", "")}")
+            .Order(StringComparer.Ordinal)];
+        // Vue finds a tag under its own, camel-case and Pascal-case spellings, so a
+        // Pascal-case tag does not find a kebab-case registration.
+        Assert.Equal(["app-card -> src/Card.vue"], rendered);
+    }
+
+    [Fact]
+    public async Task NuxtProjectWithoutGeneratedDeclarations_SaysWhatTemplatesWillMiss()
+    {
+        await using var pipeline = RecordingPipeline(out var recorder);
+        await WriteFileAsync("nuxt.config.ts", "export default {};\n");
+        await WriteFileAsync("pages/index.vue", "<template><BaseButton /></template>\n");
+
+        await pipeline.GraphUpdateService.PerformInitialScanAsync(
+            _tempDir, null, CancellationToken.None);
+
+        Assert.Contains(
+            recorder.Deltas.SelectMany(delta => delta.Diagnostics ?? []),
+            diagnostic => diagnostic.Message.Contains(".nuxt/components.d.ts", StringComparison.Ordinal));
+    }
+
     [Fact]
     public async Task VueTemplateComponentTag_ResolvesAComponentDeclaredInTypeScript()
     {

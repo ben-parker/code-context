@@ -444,17 +444,22 @@ const embeddedLanguageAdapters = new Map([
                 }
             }
 
-            // A template can only use what a script declares or imports. One written in
-            // another language (pug) or kept in another file has no AST here.
+            // A template uses what a script declares or imports, and the components the
+            // project declares for every template; without a script it has only those.
+            // One written in another language (pug) or kept in another file has no AST here.
             let templateReferences = [];
             let templateHidden = [];
             const template = parsed.descriptor.template;
-            if (scripted && template?.ast) {
+            if (template?.ast) {
                 const usage = collectVueTemplateUsage(template.ast);
-                templateReferences = usage.references;
-                templateHidden = usage.expressions.filter(expression => expression.hidden.size > 0);
-                text = overlayTemplateExpressions(text, source, usage.expressions,
-                    template.loc.start.offset, template.loc.end.offset, scriptKind);
+                templateReferences = scripted
+                    ? usage.references
+                    : usage.references.filter(reference => reference.component);
+                if (scripted) {
+                    templateHidden = usage.expressions.filter(expression => expression.hidden.size > 0);
+                    text = overlayTemplateExpressions(text, source, usage.expressions,
+                        template.loc.start.offset, template.loc.end.offset, scriptKind);
+                }
             }
 
             return { text, scriptKind, diagnostics, templateReferences, templateHidden };
@@ -523,6 +528,8 @@ class Workspace {
         this.aliasScopes = loaded.aliasScopes.map(scope => this.withOptions(scope));
         this.nestedScopes = new Map();
         this.directoryScopes = new Map();
+        this.directoryComponents = new Map();
+        this.componentDeclarations = new Map();
     }
 
     withOptions(scope) {
@@ -733,6 +740,68 @@ class Workspace {
             offset >= expression.start && offset < expression.end && expression.hidden.has(name));
     }
 
+    /** Forgets what the last analysis read from disk about the project, so that a
+     * declaration file generated since (one the host does not watch) is read again. */
+    beginAnalysis() {
+        this.directoryComponents = new Map();
+    }
+
+    /** The components declared by the generated files of one directory: name to the
+     * module specifier's absolute path, which may lack its extension. */
+    componentsDeclaredIn(directory) {
+        const key = canonicalKey(directory);
+        let components = this.directoryComponents.get(key);
+        if (components) return components;
+        components = new Map();
+        for (const relative of GLOBAL_COMPONENT_DECLARATIONS) {
+            const declarationPath = path.join(directory, relative);
+            let stamp;
+            try {
+                stamp = fs.statSync(declarationPath).mtimeMs;
+            } catch {
+                continue;
+            }
+            const cacheKey = canonicalKey(declarationPath);
+            let read = this.componentDeclarations.get(cacheKey);
+            if (read?.stamp !== stamp) {
+                read = { stamp, components: readGlobalComponents(declarationPath) };
+                this.componentDeclarations.set(cacheKey, read);
+            }
+            for (const [name, target] of read.components) {
+                if (!components.has(name)) components.set(name, target);
+            }
+        }
+        this.directoryComponents.set(key, components);
+        return components;
+    }
+
+    /**
+     * The project file of a component that no script imports but the project declares
+     * for every template: the first of `names` found in a declaration file that Nuxt or
+     * unplugin-vue-components generated, nearest the rendering file first.
+     */
+    globalComponentFile(containingFile, names) {
+        const rootKey = canonicalKey(this.rootPath);
+        let directory = path.dirname(path.resolve(containingFile));
+        for (let depth = 0; depth < MAX_NESTED_CONFIG_DEPTH; depth++) {
+            const components = this.componentsDeclaredIn(directory);
+            for (const name of names) {
+                const target = components.get(name);
+                if (!target) continue;
+                for (const candidate of [target, ...SOURCE_EXTENSIONS.flatMap(
+                    extension => [target + extension, path.join(target, 'index' + extension)])]) {
+                    const entry = this.files.get(canonicalKey(candidate));
+                    if (entry) return entry.path;
+                }
+                return undefined; // declared, but outside the project
+            }
+            const parent = path.dirname(directory);
+            if (canonicalKey(directory) === rootKey || parent === directory) break;
+            directory = parent;
+        }
+        return undefined;
+    }
+
     /** Re-roots the workspace (and reloads tsconfig options) if the host opens it
      * with a different root than the one initialize carried. */
     setRootPath(rootPath) {
@@ -894,6 +963,73 @@ const OPTIONS_ONLY_CONFIG_HOST = {
     readFile: ts.sys.readFile,
     readDirectory: () => [],
 };
+
+// Where a project declares the components every template may render without importing
+// them, relative to the project's directory: Nuxt writes the first two (which of them
+// holds the interface depends on its version), unplugin-vue-components the third.
+const NUXT_COMPONENT_DECLARATIONS = [
+    path.join('.nuxt', 'types', 'components.d.ts'), path.join('.nuxt', 'components.d.ts'),
+];
+const GLOBAL_COMPONENT_DECLARATIONS = [...NUXT_COMPONENT_DECLARATIONS, 'components.d.ts'];
+
+/**
+ * Reads a generated declaration file of global components: every member of an interface
+ * named `GlobalComponents` (or `_GlobalComponents`) whose type imports a module by a
+ * relative path, as `'BaseButton': typeof import("../components/base/Button.vue")['default']`,
+ * and every exported constant so typed, which is how some Nuxt versions write the same.
+ * Returns name to that module's absolute path. Nothing in the file is executed.
+ */
+function readGlobalComponents(declarationPath) {
+    const components = new Map();
+    let text;
+    try {
+        text = fs.readFileSync(declarationPath, 'utf8');
+    } catch {
+        return components;
+    }
+    const directory = path.dirname(declarationPath);
+    const source = ts.createSourceFile(declarationPath, text, ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);
+    const importedModule = type => {
+        let found;
+        const find = node => {
+            if (found !== undefined) return;
+            if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument)
+                && ts.isStringLiteralLike(node.argument.literal)) {
+                found = node.argument.literal.text;
+                return;
+            }
+            ts.forEachChild(node, find);
+        };
+        find(type);
+        return found;
+    };
+    const declare = (name, type) => {
+        if (!type || !name || !(ts.isIdentifier(name) || ts.isStringLiteralLike(name))) return;
+        const moduleName = importedModule(type);
+        if (moduleName && (moduleName.startsWith('.') || path.isAbsolute(moduleName))
+            && !components.has(name.text)) {
+            components.set(name.text, path.resolve(directory, moduleName));
+        }
+    };
+    const visit = node => {
+        if (ts.isInterfaceDeclaration(node) && /^_?GlobalComponents$/.test(node.name.text)) {
+            for (const member of node.members) {
+                if (ts.isPropertySignature(member)) declare(member.name, member.type);
+            }
+        }
+        ts.forEachChild(node, visit);
+    };
+    visit(source);
+    for (const statement of source.statements) {
+        if (ts.isVariableStatement(statement)
+            && statement.modifiers?.some(modifier => modifier.kind === ts.SyntaxKind.ExportKeyword)) {
+            for (const declaration of statement.declarationList.declarations) {
+                declare(declaration.name, declaration.type);
+            }
+        }
+    }
+    return components;
+}
 
 /**
  * Collects the `paths` tables of the given configs and of every config they reference.
@@ -1118,6 +1254,21 @@ function parameterKey(node, sourceFile) {
     }).join(',')})`;
 }
 
+function makeEdge(sourceId, targetId, kind, metadata) {
+    // Line AND column in the ID: two same-target calls on one line must not
+    // silently collapse into a single edge.
+    const suffix = metadata && metadata.line
+        ? `@${metadata.line}:${metadata.column ?? '0'}`
+        : '';
+    return {
+        id: `${sourceId}=[${kind}]=>${targetId}${suffix}`,
+        sourceId,
+        targetId,
+        kind,
+        metadata: metadata && Object.keys(metadata).length > 0 ? metadata : undefined,
+    };
+}
+
 function analyzeFile(workspace, workspaceId, program, checker, fileName, diagnostics) {
     const sourceFile = program.getSourceFile(fileName);
     const nodes = [];
@@ -1296,19 +1447,14 @@ function analyzeFile(workspace, workspaceId, program, checker, fileName, diagnos
     });
 
     const addEdge = (sourceId, targetId, kind, metadata) => {
-        // Line AND column in the ID: two same-target calls on one line must not
-        // silently collapse into a single edge.
-        const suffix = metadata && metadata.line
-            ? `@${metadata.line}:${metadata.column ?? '0'}`
-            : '';
-        edges.push({
-            id: `${sourceId}=[${kind}]=>${targetId}${suffix}`,
-            sourceId,
-            targetId,
-            kind,
-            metadata: metadata && Object.keys(metadata).length > 0 ? metadata : undefined,
-        });
+        edges.push(makeEdge(sourceId, targetId, kind, metadata));
     };
+
+    // Components this file registers for every template (`app.component('Name', X)`),
+    // and component tags of its own markup that nothing it can see declares: the
+    // workspace matches one against the other once every file has been read.
+    const componentRegistrations = [];
+    const unboundComponentTags = [];
 
     /** Nearest enclosing emitted declaration to use as a CALLS source. */
     const enclosingDeclarationId = tsNode => {
@@ -1566,6 +1712,20 @@ function analyzeFile(workspace, workspaceId, program, checker, fileName, diagnos
                     }
                 }
                 for (const argument of tsNode.arguments ?? []) addValueReference(argument);
+                // `app.component('BaseButton', BaseButton)` declares the component for
+                // every template of the application.
+                if (expression && ts.isPropertyAccessExpression(expression)
+                    && expression.name.text === 'component' && tsNode.arguments?.length === 2
+                    && ts.isStringLiteralLike(tsNode.arguments[0]) && ts.isIdentifier(tsNode.arguments[1])) {
+                    let registered;
+                    try {
+                        registered = checker.getSymbolAtLocation(tsNode.arguments[1]);
+                    } catch {
+                        registered = undefined;
+                    }
+                    const targetId = registered ? templateTargetId(registered, true) : null;
+                    if (targetId) componentRegistrations.push({ name: tsNode.arguments[0].text, targetId });
+                }
                 break;
             }
             case ts.SyntaxKind.JsxAttribute:
@@ -1632,18 +1792,29 @@ function analyzeFile(workspace, workspaceId, program, checker, fileName, diagnos
         };
         for (const reference of templateReferences) {
             const symbol = reference.names.map(lookup).find(Boolean);
-            const targetId = symbol ? templateTargetId(symbol, reference.component) : null;
-            if (!targetId) continue;
+            let targetId = symbol ? templateTargetId(symbol, reference.component) : null;
             const position = sourceFile.getLineAndCharacterOfPosition(reference.offset);
-            addEdge(`${graphPrefix}${fileRel}`, targetId, 'CALLS', {
+            const metadata = {
                 callTarget: reference.display,
                 line: String(position.line + 1),
                 column: String(position.character + 1),
-            });
+            };
+            // A name the script binds is the script's, whatever it is bound to. Any other
+            // component is one the project declares for every template, if it does.
+            const boundByScript = symbol?.declarations?.some(decl => decl.getSourceFile() === sourceFile);
+            if (!targetId && reference.component && !boundByScript) {
+                const declared = workspace.globalComponentFile(fileName, reference.names);
+                if (declared) {
+                    targetId = moduleIdOf(declared);
+                } else {
+                    unboundComponentTags.push({ names: reference.names, metadata });
+                }
+            }
+            if (targetId) addEdge(`${graphPrefix}${fileRel}`, targetId, 'CALLS', metadata);
         }
     }
 
-    return { nodes, edges };
+    return { nodes, edges, componentRegistrations, unboundComponentTags };
 }
 
 // ---------------------------------------------------------------------------
@@ -1745,7 +1916,22 @@ async function analyzeWorkspace(workspace, workspaceId, token, progressContext =
         diagnostics.push(workspace.configDiagnostic);
     }
 
+    workspace.beginAnalysis();
+    const nuxtConfig = ['nuxt.config.ts', 'nuxt.config.js', 'nuxt.config.mjs']
+        .map(name => path.join(workspace.rootPath, name)).find(candidate => fs.existsSync(candidate));
+    if (nuxtConfig && !NUXT_COMPONENT_DECLARATIONS.some(
+        relative => fs.existsSync(path.join(workspace.rootPath, relative)))) {
+        diagnostics.push({
+            filePath: nuxtConfig,
+            severity: 'warning',
+            message: 'Nuxt has not generated .nuxt/components.d.ts (run `nuxi prepare`), so a component '
+                + 'a template renders without importing it is not bound.',
+        });
+    }
+
     const rawBuckets = [];
+    const pendingTags = [];
+    const registrations = [];
     const files = workspace.filePaths();
     const total = files.length;
     const progressInterval = Math.max(1, Math.ceil(total / 100));
@@ -1771,12 +1957,28 @@ async function analyzeWorkspace(workspace, workspaceId, token, progressContext =
         // bucket.path is the verbatim filePaths() entry — the same string analyzeFile
         // stamped on each node's filePath and the same string ReplacesFiles must carry.
         rawBuckets.push({ path: file, nodes: result.nodes, edges: result.edges });
+        const moduleId = result.nodes[0]?.id;
+        for (const tag of result.unboundComponentTags ?? []) pendingTags.push({ ...tag, moduleId, edges: result.edges });
+        for (const registration of result.componentRegistrations ?? []) registrations.push({ ...registration, path: file });
         processed++;
         if (progressContext && (processed === total || processed % progressInterval === 0)) {
             await emitAnalysisProgress(progressContext.requestId, workspaceId,
                 progressContext.generation, processed, total, file, token);
         }
         await breathe(); // let $/cancel land between files
+    }
+
+    // A component registered on the application is every template's. Of two
+    // registrations of one name, the file that sorts first wins, whatever was edited last.
+    if (pendingTags.length > 0 && registrations.length > 0) {
+        const registered = new Map();
+        for (const registration of [...registrations].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))) {
+            if (!registered.has(registration.name)) registered.set(registration.name, registration.targetId);
+        }
+        for (const tag of pendingTags) {
+            const name = tag.names.find(candidate => registered.has(candidate));
+            if (name) tag.edges.push(makeEdge(tag.moduleId, registered.get(name), 'CALLS', tag.metadata));
+        }
     }
 
     const nodeOwner = computeOwners(rawBuckets, b => b.nodes, n => n.id);
