@@ -130,14 +130,14 @@ anything else, cross-check with `rg -w <Name>`.
   assigned to a variable or returned, or a class passed as a value.
 - **Vue** files are indexed through their `<script>` blocks, and a component is its file:
   `query DownloadQueue` matches `components/DownloadQueue.vue`. From the template, a
-  component tag (`<DownloadQueue>`, `<download-queue>`, `<component :is="X">`), an event
-  handler given by name (`@click="save"`) and a call in an expression
-  (`{{ format(x) }}`) are each a `CALLS` from the rendering file's module to whatever the
-  script binds that name to. A component tag no script imports binds to what the project
+  component tag (`<DownloadQueue>`, `<download-queue>`, `<component :is="X">`) and a call
+  in an expression (`{{ format(x) }}`, `@click="save()"`) are each a `CALLS` from the
+  rendering file's module to whatever the script binds that name to. An event handler
+  given by name (`@click="save"`) is a `REFERENCES`, as `onClick={save}` is in JSX. A component tag no script imports binds to what the project
   declares for every template: the `components.d.ts` that Nuxt (under `.nuxt/`) or
   `unplugin-vue-components` generates, or `app.component('Name', X)`. In an Options API
   component, a method under `methods` or `computed` is bound from the template (a call
-  or handler as `CALLS`, a read such as `{{ total }}` as `REFERENCES`) and from
+  as `CALLS`, a handler by name or a read such as `{{ total }}` as `REFERENCES`) and from
   `this.name()` in its other members.
 - **Vue templates are blind to these; run `rg -w <Name>`:** an auto-imported component
   before its declaration file exists (run `nuxi prepare`; status then carries a

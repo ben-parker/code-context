@@ -2026,7 +2026,11 @@ function analyzeFile(workspace, workspaceId, program, checker, fileName, diagnos
                     unboundComponentTags.push({ names: reference.names, metadata });
                 }
             }
-            if (targetId) addEdge(`${graphPrefix}${fileRel}`, targetId, 'CALLS', metadata);
+            // A tag renders its component. A handler given by name is handed to Vue and
+            // called by nothing written here, as `onClick={save}` is in JSX.
+            if (targetId) {
+                addEdge(`${graphPrefix}${fileRel}`, targetId, reference.component ? 'CALLS' : 'REFERENCES', metadata);
+            }
         }
     }
 
