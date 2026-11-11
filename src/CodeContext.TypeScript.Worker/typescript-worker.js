@@ -20,6 +20,12 @@
 // config writes out, which is parsed and never run. Approved files are the program roots —
 // tsconfig include/exclude does not override the host's approved set.
 
+// First, before anything that reads a file is loaded: from here on `fs` refuses what a
+// repository must not make this process open. See disk-guard.js.
+const disk = require('./disk-guard').install();
+disk.allow(__dirname);
+disk.allow(process.execPath);
+
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -2026,7 +2032,11 @@ function analyzeFile(workspace, workspaceId, program, checker, fileName, diagnos
                     unboundComponentTags.push({ names: reference.names, metadata });
                 }
             }
-            if (targetId) addEdge(`${graphPrefix}${fileRel}`, targetId, 'CALLS', metadata);
+            // A tag renders its component. A handler given by name is handed to Vue and
+            // called by nothing written here, as `onClick={save}` is in JSX.
+            if (targetId) {
+                addEdge(`${graphPrefix}${fileRel}`, targetId, reference.component ? 'CALLS' : 'REFERENCES', metadata);
+            }
         }
     }
 
@@ -2289,6 +2299,8 @@ function getWorkspace(workspaceId) {
 handlers.set('initialize', async (_id, params) => {
     const initialize = requireParams(params);
     hostRootPath = initialize.rootPath || process.cwd();
+    // The host names the repository; nothing inside the repository can.
+    disk.addRoot(hostRootPath);
     return {
         parserId: PARSER_ID,
         parserVersion: PARSER_VERSION,
@@ -2311,6 +2323,8 @@ handlers.set('initialize', async (_id, params) => {
 
 handlers.set('workspace/open', async (_id, params) => {
     const open = requireParams(params);
+    if (open.rootPath) disk.addRoot(open.rootPath);
+    disk.forget();
     const workspace = getWorkspace(open.workspaceId);
     if (open.rootPath) workspace.setRootPath(open.rootPath);
     workspace.syncApproved(open.approvedFiles || []);
@@ -2319,6 +2333,7 @@ handlers.set('workspace/open', async (_id, params) => {
 
 handlers.set('workspace/index', async (id, params, token) => {
     const index = requireParams(params);
+    disk.forget();
     const workspace = getWorkspace(index.workspaceId);
     workspace.replaceFiles(index.files || []);
     // Whole-workspace (index/reset) path: walk everything, seed the per-file hash
@@ -2348,6 +2363,7 @@ handlers.set('workspace/index', async (id, params, token) => {
 
 handlers.set('workspace/applyChanges', async (id, params, token) => {
     const apply = requireParams(params);
+    disk.forget();
     const workspace = getWorkspace(apply.workspaceId);
     workspace.applyChanges(apply.changes || []);
     // Incremental path: re-walk the whole workspace for cross-file binding correctness

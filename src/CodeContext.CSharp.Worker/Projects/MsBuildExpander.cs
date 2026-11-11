@@ -10,7 +10,7 @@ namespace CodeContext.CSharp.Worker.Projects;
 /// result empty and sets <see cref="Uncertain"/>, because this reads a project and must
 /// never run anything a project names.
 /// </summary>
-public sealed class MsBuildExpander(Func<string, string?> property, string directory, string? boundary = null)
+public sealed class MsBuildExpander(Disk disk, Func<string, string?> property, string directory, string? boundary = null)
 {
     private static readonly StringComparison PathComparison =
         OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
@@ -216,8 +216,8 @@ public sealed class MsBuildExpander(Func<string, string?> property, string direc
             "msbuild" => CallMsBuild(name, a),
             "system.io.path" => CallPath(name, a),
             "system.string" or "string" => CallString(name, a),
-            "system.io.file" when name == "exists" && a.Count == 1 => Bool(!IsForeign(FullPath(a[0])) && File.Exists(FullPath(a[0]))),
-            "system.io.directory" when name == "exists" && a.Count == 1 => Bool(!IsForeign(FullPath(a[0])) && System.IO.Directory.Exists(FullPath(a[0]))),
+            "system.io.file" when name == "exists" && a.Count == 1 => Bool(disk.FileExists(FullPath(a[0]))),
+            "system.io.directory" when name == "exists" && a.Count == 1 => Bool(disk.DirectoryExists(FullPath(a[0]))),
             "system.environment" => CallEnvironment(name, a),
             "system.operatingsystem" => name switch
             {
@@ -247,7 +247,7 @@ public sealed class MsBuildExpander(Func<string, string?> property, string direc
             case "getpathoffileabove" when count >= 1: return FileAbove(a[0], count > 1 ? a[1] : null) ?? string.Empty;
             case "getdirectorynameoffileabove" when count == 2:
                 return FileAbove(a[1], a[0]) is { } found ? Path.GetDirectoryName(found)! : string.Empty;
-            case "makerelative" when count == 2: return Path.GetRelativePath(FullPath(a[0]), FullPath(a[1]));
+            case "makerelative" when count == 2: return disk.RelativePath(FullPath(a[0]), FullPath(a[1]));
             case "valueordefault" when count == 2: return a[0].Length > 0 ? a[0] : a[1];
             case "converttobase64" when count == 1: return Convert.ToBase64String(Encoding.UTF8.GetBytes(a[0]));
             case "add" or "subtract" or "multiply" or "divide" or "modulo" when count == 2: return Arithmetic(name, a);
@@ -365,37 +365,14 @@ public sealed class MsBuildExpander(Func<string, string?> property, string direc
     private string? FileAbove(string file, string? from)
     {
         var start = string.IsNullOrEmpty(from) ? Directory : FullPath(from);
-        if (IsForeign(start) || (boundary is not null && !IsWithin(start, boundary))) return null;
+        if (boundary is not null && !IsWithin(start, boundary)) return null;
         for (var current = start; current is not null; current = Path.GetDirectoryName(current))
         {
             var candidate = Path.Combine(current, file);
-            if (File.Exists(candidate)) return candidate;
+            if (disk.FileExists(candidate)) return candidate;
             if (boundary is not null && SamePath(current, boundary)) break;
         }
         return null;
-    }
-
-    internal bool IsForeign(string path) => IsForeignPath(path, boundary);
-
-    /// <summary>
-    /// True for a network path outside the repository's own share. Reading a project must
-    /// not reach out: opening <c>\\host\share</c> makes Windows authenticate to that host,
-    /// so a repository could learn who indexed it, and a property in the path could carry an
-    /// environment variable with it. A repository on a share may read the rest of that share.
-    /// </summary>
-    public static bool IsForeignPath(string path, string? root)
-    {
-        if (!OperatingSystem.IsWindows() || !IsNetworkPath(path)) return false;
-        return root is null || !IsNetworkPath(root) || !ShareOf(path).Equals(ShareOf(root), StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static bool IsNetworkPath(string path)
-        => path.StartsWith(@"\\", StringComparison.Ordinal) || path.StartsWith("//", StringComparison.Ordinal);
-
-    private static string ShareOf(string path)
-    {
-        var parts = path.Replace('/', '\\').Split('\\', StringSplitOptions.RemoveEmptyEntries);
-        return parts.Length >= 2 ? parts[0] + '\\' + parts[1] : path;
     }
 
     private static bool IsWithin(string path, string directory)
@@ -412,7 +389,10 @@ public sealed class MsBuildExpander(Func<string, string?> property, string direc
         return path.Length == 0 || Path.EndsInDirectorySeparator(path) ? path : path + Path.DirectorySeparatorChar;
     }
 
-    internal string FullPath(string path) => Path.GetFullPath(ToNative(path), Directory);
+    internal string FullPath(string path) => disk.FullPath(ToNative(path), Directory);
+
+    /// <summary>What MSBuild's <c>Exists</c> condition asks: a file or a directory.</summary>
+    internal bool Exists(string path) => disk.FileExists(path) || disk.DirectoryExists(path);
 
     /// <summary>Project files write backslashes on every platform.</summary>
     internal static string ToNative(string path)

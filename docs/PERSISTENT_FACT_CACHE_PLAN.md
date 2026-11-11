@@ -1,7 +1,8 @@
 # Persistent fact cache and worker hibernation: design and phase plan
 
-Status: design complete, no phase started. Targets 0.11. The coordinating session updates the
-`Status:` line of each phase.
+Status: phases 0 to 6 and 11 shipped in 0.11 (merge `d42ec29`); phase 0A was dropped and
+built as a 0.10.x patch. Phases 7 to 10 and 12, including worker hibernation (phase 9), are
+not started. Each phase's own `Status:` line has the details.
 
 Brief: [proposals/persistent-fact-cache.md](proposals/persistent-fact-cache.md), direction and
 eight decisions agreed 2026-11-04. Builds on

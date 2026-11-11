@@ -8,7 +8,7 @@ public sealed class CSharpWorkerStateRoundTripTests : IDisposable
 {
     private readonly string _base = Directory.CreateTempSubdirectory("cc-csharp-roundtrip-").FullName;
     private string Root => Path.Combine(_base, "repo");
-    private string StateDirectory => Path.Combine(_base, "state");
+    private string StateDirectory => Path.Combine(Root, ".codecontext", "cache", "default");
 
     public CSharpWorkerStateRoundTripTests()
     {
@@ -46,6 +46,65 @@ public sealed class CSharpWorkerStateRoundTripTests : IDisposable
             restored.FactHashes.Select(hash => (hash.Path, Convert.ToHexString(hash.Hash))));
         Assert.Equal(original.Fingerprints, restored.Fingerprints);
         Assert.Equal(originalBuckets, Buckets(host.Analyzer.Analyze(CancellationToken.None)));
+    }
+
+    [Fact]
+    public async Task ASaveOutsideTheCacheIsNotWritten()
+    {
+        var host = new InProcessCSharpHost(Root);
+        await host.IndexAsync();
+        var outside = Path.Combine(_base, "worker-csharp.0000000001.aaaaaaaa.state");
+
+        var result = await host.Session.SaveStateAsync(new SaveStateParams("default", outside, "id"), CancellationToken.None);
+
+        Assert.False(result.Saved);
+        Assert.False(File.Exists(outside));
+        Assert.False(File.Exists(outside + ".tmp"));
+        Assert.Contains(host.Diagnostics, line => line.StartsWith("save: state not written", StringComparison.Ordinal));
+    }
+
+    [LocalShareFact]
+    public async Task AStateFileOnARefusedPathIsMissing()
+    {
+        var host = new InProcessCSharpHost(Root);
+        await host.IndexAsync();
+        var baseline = await host.SaveAsync(StateDirectory);
+        host.Restart();
+
+        var result = await host.IndexAsync(baseline with { StatePath = Share(baseline.StatePath) });
+
+        Assert.NotEqual(BaselineOutcomes.Accepted, result.Baseline);
+        Assert.Equal("state file is missing", result.BaselineReason);
+    }
+
+    /// <summary>A profile on a share reaches the worker only as the root of a repository kept there.</summary>
+    [LocalShareFact]
+    public async Task ARepositoryOnAShareSavesAndRestores()
+    {
+        var root = Share(Root);
+        var host = new InProcessCSharpHost(root);
+        await host.IndexAsync();
+        var baseline = await host.SaveAsync(Path.Combine(root, ".codecontext", "cache", "default"));
+
+        host.Restart();
+        var result = await host.IndexAsync(baseline);
+
+        Assert.Equal(BaselineOutcomes.Accepted, result.Baseline);
+        Assert.Equal(0, VerifyLine.Parse(host.LastVerify).Walked);
+    }
+
+    private static string Share(string path) => $@"\\localhost\c$\{path[3..]}";
+
+    private sealed class LocalShareFactAttribute : FactAttribute
+    {
+        public LocalShareFactAttribute()
+        {
+            if (!File.Exists(@"\\localhost\c$\Windows\notepad.exe")
+                || !Path.GetTempPath().StartsWith(@"C:\", StringComparison.OrdinalIgnoreCase))
+            {
+                Skip = "This machine does not serve its administrative share of the temp drive.";
+            }
+        }
     }
 
     private static List<string> Buckets(CSharpWorkspaceAnalyzer.AnalysisResult analysis)

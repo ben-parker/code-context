@@ -135,7 +135,7 @@ public sealed class MsBuildCondition
             case "exists":
                 if (argument.Trim().Length == 0) return false;
                 var path = _expander.FullPath(argument.Trim());
-                return !_expander.IsForeign(path) && (File.Exists(path) || Directory.Exists(path));
+                return _expander.Exists(path);
             case "hastrailingslash":
                 return argument.EndsWith('/') || argument.EndsWith('\\');
             default:

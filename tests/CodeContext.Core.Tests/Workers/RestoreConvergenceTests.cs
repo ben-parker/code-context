@@ -17,7 +17,7 @@ public sealed class RestoreConvergenceTests : IDisposable
 
     private readonly string _base = Directory.CreateTempSubdirectory("cc-csharp-restore-walk-").FullName;
     private string Root => Path.Combine(_base, "repo");
-    private string StateDirectory => Path.Combine(_base, "state");
+    private string StateDirectory => Path.Combine(Root, ".codecontext", "cache", "default");
 
     public RestoreConvergenceTests()
     {

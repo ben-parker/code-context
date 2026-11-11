@@ -14,7 +14,7 @@ public sealed class CSharpWorkerBaselineTests : IDisposable
 {
     private readonly string _base = Directory.CreateTempSubdirectory("cc-csharp-baseline-").FullName;
     private string Root => Path.Combine(_base, "repo");
-    private string StateDirectory => Path.Combine(_base, "state");
+    private string StateDirectory => Path.Combine(Root, ".codecontext", "cache", "default");
 
     public CSharpWorkerBaselineTests()
     {

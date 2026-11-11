@@ -19,7 +19,7 @@ public sealed class CSharpWorkerRestoredFactsTests(ITestOutputHelper output) : I
 {
     private readonly string _base = Directory.CreateTempSubdirectory("cc-csharp-restored-").FullName;
     private string Root => Path.Combine(_base, "repo");
-    private string StateDirectory => Path.Combine(_base, "state");
+    private string StateDirectory => Path.Combine(Root, ".codecontext", "cache", "default");
 
     /// <summary>A fault must be caught: returns the divergence it caused, written to the test output.</summary>
     private string Caught(string? divergence)

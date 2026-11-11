@@ -87,6 +87,34 @@ the worker records their diagnostic. The final notification must report
 buffering graph deltas and does not expose the new generation until its terminal delta
 commits.
 
+## Open only what the owner would
+
+The host approves source files, but a language's own inputs name more paths: a project
+file's imports and references, a config's `extends`, an import in any source file. A
+repository writes all of them. On Windows a path such as `\\host\share\x` makes the
+system authenticate to `host` the moment it is opened, or even normalized, which tells
+that host who indexed the repository. A worker must therefore decide before it touches
+a path, in one place every read goes through:
+
+- Read a path only on a drive letter, or on the share of a location the machine's
+  owner supplied: the root the host sent, the worker's own install, a toolchain
+  directory from the machine's settings. Refuse every other spelling, including
+  `//host/share`, `\\?\UNC\...` and `file://host/...`, and treat a refused path as
+  missing.
+- Inside the repository, follow no link, or follow one only when what it says leads
+  to such a place. Read the link itself to find out; do not open it, and refuse text
+  you cannot judge, such as a target in the system's own `\??\` form.
+- A link answers to more than its name. Windows also reaches it by its short name
+  (`LONGLI~1`), by a name with a trailing dot or space, by a stream
+  (`link::$INDEX_ALLOCATION`), and through a short name of a directory above the
+  repository. Ask the system about any name that could be a second name instead of
+  looking it up in a listing, and refuse a `:` below the repository.
+- Never load or run code a repository names, and open no network connection.
+
+`tests/Shared/disk-guard-vectors.json` holds the cases the bundled workers are tested
+against, and is a ready list for your own. The bundled workers refuse nothing off
+Windows, where a path does not make the system sign in to another host.
+
 ## Preserve graph ownership
 
 Every emitted node ID, edge ID, and edge source ID must begin with:
@@ -237,5 +265,6 @@ facts.
 
 Test fragmented/adjacent frames, EOF exit, cancellation, crashes/restarts, invalid
 requests, workspace replacement, one-file semantic changes, and protocol range
-fallback. Start CodeContext from a directory unrelated to the install and confirm the
+fallback. Index a repository whose project files and sources name a network share and
+confirm the worker opens nothing there. Start CodeContext from a directory unrelated to the install and confirm the
 worker reaches `ready` in `/api/status`.

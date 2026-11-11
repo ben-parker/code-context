@@ -1,6 +1,8 @@
 using System.Text.Json;
+using CodeContext.Core.Services;
 using CodeContext.CSharp.Worker;
 using CodeContext.Parser.Protocol;
+using Microsoft.Extensions.Options;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -277,9 +279,14 @@ public sealed class CSharpWorkerInvokedNameTests : IDisposable
     public void ThisRepositoryKeepsItsFacts()
     {
         var root = RepositoryRoot();
-        var files = Directory.EnumerateFiles(Path.Combine(root, "src"), "*.cs", SearchOption.AllDirectories)
-            .Where(file => !file.Split(Path.DirectorySeparatorChar).Any(part => part is "bin" or "obj" or "node_modules"))
+        // The files the host would approve, so the walk skips what the host skips: a
+        // `.venv` holding a link this platform cannot open, for one.
+        var src = Path.Combine(root, "src") + Path.DirectorySeparatorChar;
+        var files = new RepositoryFileSelector(Options.Create(new CodeContextOptions { RootPath = root }))
+            .EnumerateIncludedFiles([".cs"])
+            .Where(file => file.StartsWith(src, StringComparison.OrdinalIgnoreCase))
             .ToList();
+        Assert.NotEmpty(files);
 
         AssertSameFacts(root, files);
     }

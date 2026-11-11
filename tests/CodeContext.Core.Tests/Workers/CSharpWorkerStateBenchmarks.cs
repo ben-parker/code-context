@@ -84,7 +84,7 @@ public sealed class CSharpWorkerStateBenchmarks(ITestOutputHelper output)
         if (Environment.GetEnvironmentVariable("CODECONTEXT_BENCH_ROOT") is not { Length: > 0 } root) return;
         var files = ApprovedFiles(root);
         output.WriteLine($"{root}: {files.Count} files");
-        var directory = Directory.CreateTempSubdirectory("cc-bench-state-").FullName;
+        var directory = Directory.CreateDirectory(Path.Combine(root, ".codecontext", "cache", "cc-bench-state")).FullName;
         try
         {
             var (full, saves, restores, sizes) = (new List<Run>(), new List<double>(), new List<Run>(), new List<long>());
@@ -125,7 +125,7 @@ public sealed class CSharpWorkerStateBenchmarks(ITestOutputHelper output)
         var leaf = Environment.GetEnvironmentVariable("CODECONTEXT_BENCH_LEAF")!;
         var rootFile = Environment.GetEnvironmentVariable("CODECONTEXT_BENCH_ROOT_FILE")!;
         var copy = Directory.CreateTempSubdirectory("cc-bench-copy-").FullName;
-        var directory = Directory.CreateTempSubdirectory("cc-bench-state-").FullName;
+        var directory = Directory.CreateDirectory(Path.Combine(copy, ".codecontext", "cache", "cc-bench-state")).FullName;
         try
         {
             CopyTree(source, Path.Combine(copy, "src"));

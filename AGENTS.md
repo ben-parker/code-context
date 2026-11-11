@@ -11,9 +11,9 @@ codecontext query ContextService --tests  # when test evidence matters
 ```
 
 `query` selects the closest registered ancestor, starts a detached instance when none
-exists, waits for indexing (a restarted instance answers at once from its saved index,
-labelled `cache`, while it re-checks the files), and verifies contract, root, and
-instance identity. Tests are omitted by default; add `--tests` whenever test evidence
+exists, waits up to 30 seconds for indexing (a restarted instance answers at once from
+its saved index, labelled `cache`, while it re-checks the files; on timeout it exits
+with code 3), and verifies contract, root, and instance identity. Tests are omitted by default; add `--tests` whenever test evidence
 matters.
 
 Use the normalized graph for semantic questions:
@@ -50,8 +50,8 @@ rg --files -g '*.cs' -g '*.ts'
 ## Solution and runtime architecture
 
 - `src/CodeContext.Api` is the composition root and CLI. `Program.cs` defines
-  `start`, `stop`, `list`, `status`, and `query`; `CodeContextEndpoints.cs` owns REST routes.
-- `src/CodeContext.Mcp` exposes `GetContext`, `GetMultiContext`, and `GetStatus` over
+  `start`, `init`, `stop`, `list`, `status`, and `query`; `CodeContextEndpoints.cs` owns REST routes.
+- `src/CodeContext.Mcp` exposes `get_context`, `get_multi_context`, and `get_status` over
   MCP stdio using the same Core services as REST.
 - `src/CodeContext.Core` owns graph models, in-memory repositories, context assembly,
   indexing, file selection/watching, worker discovery/supervision, and delta commits.
@@ -98,10 +98,21 @@ workers to save their state when it captures.
 
 - Keep language toolchains out of the host. Core, API, and MCP must not gain Roslyn,
   TypeScript compiler, or other language-parser dependencies. Production parsing is
-  out of process; `ILanguageParser` remains only a test/future-adapter seam.
+  out of process.
 - Worker stdout is protocol-only JSON-RPC with Content-Length framing. Diagnostics go
   to stderr. Workers must exit on stdin EOF and must not register an independent
   CodeContext instance or open a service port.
+- Nothing a repository writes makes a worker reach the network. On Windows, opening
+  `\\host\share` authenticates to that host, so each bundled worker reaches the disk
+  through one guard that reads a path only on a drive or on a share the machine's
+  owner chose: `Projects/Disk.cs` in the C# worker, which asks `PathGuard` and where
+  `BannedSymbols.txt` makes every other route a compile error, and `disk-guard.js` in
+  the TypeScript worker, installed under `fs` before a compiler is loaded. A link the
+  repository holds can lead a drive path to a share: the C# worker follows none, as
+  the host follows none when it walks the root, and the TypeScript worker follows one
+  only to a place it would read, since package managers link packages. Both are tested
+  against `tests/Shared/disk-guard-vectors.json`; a new rule goes there first. New
+  worker code that reads a file goes through the guard.
 - Every worker-owned node ID, edge ID, and edge source ID starts with
   `<parserId>:<workspaceId>:`. IDs are stable semantic identities, not source offsets.
   A worker must replace all facts whose meaning may change and reanalyze semantic
@@ -130,8 +141,9 @@ workers implement the schema; they do not depend on the host assembly.
 `codecontext.openapi.json` is the checked-in public REST contract. Endpoint, query
 parameter, or public DTO changes must update the endpoint metadata/source-generated
 JSON registrations and then refresh this file from the running
-`/openapi/v1.json` endpoint. Review the resulting contract diff; do not hand-edit only
-one side.
+`/openapi/v1.json` endpoint, which only a Debug build run in the Development
+environment (`ASPNETCORE_ENVIRONMENT=Development`) serves. Review the resulting
+contract diff; do not hand-edit only one side.
 
 `skill/SKILL.md` is the canonical packaged agent skill. Its relative references must
 remain valid, and `scripts/verify-publish.ps1` requires the packaged copy to match it

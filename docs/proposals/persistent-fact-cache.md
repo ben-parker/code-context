@@ -1,7 +1,8 @@
 # Persistent fact cache and worker hibernation
 
-Status: direction agreed by Ben on 2026-11-04. Detailed design and phase plan to be
-produced by the implementing session before any code changes. Builds on the project
+Status: shipped in 0.11 (merge `d42ec29`) without worker hibernation and the later
+phases; [PERSISTENT_FACT_CACHE_PLAN.md](../PERSISTENT_FACT_CACHE_PLAN.md) records what
+shipped and what remains. Direction agreed by Ben on 2026-11-04. Builds on the project
 awareness work (`docs/proposals/csharp-project-awareness.md`), which must be on `main`
 first: it supplies compact facts, per-project fingerprints, the edit classifier and the
 `coverage` reporting channel this design relies on.

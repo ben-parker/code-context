@@ -14,7 +14,8 @@ public class MsBuildExpressionTests
         ["Empty"] = "",
     };
 
-    private static MsBuildExpander Expander() => new(name => Values.GetValueOrDefault(name), Path.GetTempPath());
+    private static MsBuildExpander Expander()
+        => new(new Disk(null, new ToolchainLocations([], [], [], [])), name => Values.GetValueOrDefault(name), Path.GetTempPath());
 
     [Theory]
     [InlineData("'$(Configuration)' == 'Debug'", true)]

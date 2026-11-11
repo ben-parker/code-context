@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Text;
+using CodeContext.CSharp.Worker.Projects;
 using CodeContext.Parser.Protocol;
 using EdgeFact = CodeContext.CSharp.Worker.CSharpWorkspaceAnalyzer.EdgeFact;
 
@@ -97,7 +98,7 @@ internal static class WorkerStateFile
     /// and with the SHA-256 <paramref name="expectedSha256"/> (64 lowercase hex). Null with the reason otherwise.
     /// Nothing is interpreted before the hash matches.
     /// </summary>
-    public static byte[]? Open(string path, string expectedSha256, out string? reason, long maxLength = MaxFileLength)
+    public static byte[]? Open(Disk disk, string path, string expectedSha256, out string? reason, long maxLength = MaxFileLength)
     {
         if (!TryParseSha256(expectedSha256, out var expected))
         {
@@ -108,7 +109,7 @@ internal static class WorkerStateFile
         byte[] bytes;
         try
         {
-            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 1, FileOptions.SequentialScan);
+            using var stream = disk.OpenForOneScan(path);
             if (stream.Length > maxLength)
             {
                 reason = "state file is too large";
@@ -160,37 +161,8 @@ internal static class WorkerStateFile
     /// length and the SHA-256 of exactly the bytes written. No directory is created. On any failure the
     /// temp file is gone and the exception propagates.
     /// </summary>
-    public static (long Length, byte[] Sha256) Save(string statePath, WorkerState state, CancellationToken ct)
-    {
-        var temp = statePath + ".tmp";
-        try
-        {
-            File.Delete(temp);
-            var options = new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write, Share = FileShare.None, BufferSize = 0 };
-            if (!OperatingSystem.IsWindows()) options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
-            (long Length, byte[] Sha256) written;
-            using (var stream = new FileStream(temp, options))
-            {
-                written = Write(stream, state, ct);
-                stream.Flush(flushToDisk: true);
-            }
-            ct.ThrowIfCancellationRequested();
-            File.Move(temp, statePath, overwrite: true);
-            return written;
-        }
-        catch
-        {
-            try
-            {
-                File.Delete(temp);
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-            {
-                // Nothing more can be done; the host deletes temp files it finds.
-            }
-            throw;
-        }
-    }
+    public static (long Length, byte[] Sha256) Save(Disk disk, string statePath, WorkerState state, CancellationToken ct)
+        => disk.ReplaceStateFile(statePath, stream => Write(stream, state, ct), ct);
 
     /// <summary>
     /// Writes <paramref name="state"/> to <paramref name="destination"/>; returns the length and SHA-256 of what was

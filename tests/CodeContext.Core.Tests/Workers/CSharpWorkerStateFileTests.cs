@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Security.Cryptography;
 using CodeContext.CSharp.Worker;
+using CodeContext.CSharp.Worker.Projects;
 using CodeContext.CSharp.Worker.State;
 using CodeContext.Parser.Protocol;
 using EdgeFact = CodeContext.CSharp.Worker.CSharpWorkspaceAnalyzer.EdgeFact;
@@ -18,9 +19,11 @@ namespace CodeContext.Core.Tests.Workers;
 /// </summary>
 public sealed class CSharpWorkerStateFileTests : IDisposable
 {
+    private static readonly Disk AnyDisk = new([]);
+
     private readonly string _base = Directory.CreateTempSubdirectory("cc-csharp-state-").FullName;
     private string Root => Path.Combine(_base, "repo");
-    private string StateDirectory => Path.Combine(_base, "state");
+    private string StateDirectory => Path.Combine(Root, ".codecontext", "cache", "default");
 
     public CSharpWorkerStateFileTests()
     {
@@ -151,7 +154,7 @@ public sealed class CSharpWorkerStateFileTests : IDisposable
             damaged[at] ^= 1;
             File.WriteAllBytes(baseline.StatePath, damaged);
             damaged[at] ^= 1;
-            Assert.Null(WorkerStateFile.Open(baseline.StatePath, baseline.StateSha256, out var reason));
+            Assert.Null(WorkerStateFile.Open(AnyDisk, baseline.StatePath, baseline.StateSha256, out var reason));
             Assert.Equal("state file hash does not match", reason);
 
             var host = new InProcessCSharpHost(Root);
@@ -166,9 +169,9 @@ public sealed class CSharpWorkerStateFileTests : IDisposable
     public async Task AFileOverTheCap_IsRefusedBeforeItIsRead()
     {
         var (_, baseline, bytes) = await SavedAsync();
-        Assert.NotNull(WorkerStateFile.Open(baseline.StatePath, baseline.StateSha256, out _, maxLength: bytes.Length));
+        Assert.NotNull(WorkerStateFile.Open(AnyDisk, baseline.StatePath, baseline.StateSha256, out _, maxLength: bytes.Length));
 
-        Assert.Null(WorkerStateFile.Open(baseline.StatePath, baseline.StateSha256, out var reason, maxLength: bytes.Length - 1));
+        Assert.Null(WorkerStateFile.Open(AnyDisk, baseline.StatePath, baseline.StateSha256, out var reason, maxLength: bytes.Length - 1));
         Assert.Equal("state file is too large", reason);
     }
 
@@ -181,7 +184,7 @@ public sealed class CSharpWorkerStateFileTests : IDisposable
         using (var file = new FileStream(path, FileMode.CreateNew, FileAccess.Write)) file.SetLength(WorkerStateFile.MaxFileLength + 1);
 
         var before = GC.GetAllocatedBytesForCurrentThread();
-        Assert.Null(WorkerStateFile.Open(path, new string('0', 64), out var reason));
+        Assert.Null(WorkerStateFile.Open(AnyDisk, path, new string('0', 64), out var reason));
         var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
 
         Assert.Equal("state file is too large", reason);
@@ -313,7 +316,7 @@ public sealed class CSharpWorkerStateFileTests : IDisposable
     public async Task ARecordedHashThatIsNotLowercaseSha256_IsRefused(string recorded)
     {
         var (_, baseline, _) = await SavedAsync();
-        Assert.Null(WorkerStateFile.Open(baseline.StatePath, recorded, out var reason));
+        Assert.Null(WorkerStateFile.Open(AnyDisk, baseline.StatePath, recorded, out var reason));
         Assert.Equal("the recorded hash is not a SHA-256", reason);
     }
 
@@ -435,10 +438,10 @@ public sealed class CSharpWorkerStateFileTests : IDisposable
     {
         var host = new InProcessCSharpHost(Root);
         await host.IndexAsync();
-        var missing = Path.Combine(_base, "missing", "worker.state");
+        var missing = Path.Combine(Root, ".codecontext", "cache", "missing", "worker.state");
         var result = await host.Session.SaveStateAsync(new SaveStateParams("default", missing, "id"), CancellationToken.None);
         Assert.False(result.Saved);
-        Assert.False(Directory.Exists(Path.Combine(_base, "missing")));
+        Assert.False(Directory.Exists(Path.GetDirectoryName(missing)));
     }
 
     [Fact]

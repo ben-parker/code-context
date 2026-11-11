@@ -388,10 +388,11 @@ public class TypeScriptWorkerProtocolTests : IAsyncLifetime
             .Select(edge => edge.TargetId!.Replace("typescript:default:", ""))
             .Order(StringComparer.Ordinal)];
 
-        // The template: a handler by name and two calls, and two reads of a computed
-        // member. The loop's own `total` is not the component's.
-        Assert.Equal(["Legacy.vue#describe(n)", "Legacy.vue#reset(n)", "Legacy.vue#save()"], Uses("", "CALLS"));
-        Assert.Equal(["Legacy.vue#total()", "Legacy.vue#total()"], Uses("", "REFERENCES"));
+        // The template: two calls, and a handler given by name and two reads of a
+        // computed member, none of them called there. The loop's own `total` is not
+        // the component's.
+        Assert.Equal(["Legacy.vue#describe(n)", "Legacy.vue#reset(n)"], Uses("", "CALLS"));
+        Assert.Equal(["Legacy.vue#save()", "Legacy.vue#total()", "Legacy.vue#total()"], Uses("", "REFERENCES"));
         // `this` reaches a member of another group, which the compiler does not see.
         Assert.Equal(["Legacy.vue#reset(n)", "helper.js#helper(n)"], Uses("#total()", "CALLS"));
         Assert.Equal(["Legacy.vue#reset(n)"], Uses("#save()", "CALLS"));
@@ -482,12 +483,15 @@ public class TypeScriptWorkerProtocolTests : IAsyncLifetime
 
         var edges = await ScanEdgesAsync();
 
-        // `@click="save"` names the function Vue calls; no call expression is written.
+        // `@click="save"` hands Vue the function, as `onClick={save}` does in JSX: it is
+        // named there and called by neither.
         Assert.Contains(edges, edge =>
-            edge.Type == "CALLS"
+            edge.Type == "REFERENCES"
             && edge.SourceId == "typescript:default:Host.vue"
             && edge.TargetId == "typescript:default:Host.vue#save"
             && edge.Metadata?["line"] == "1");
+        Assert.DoesNotContain(edges, edge =>
+            edge.Type == "CALLS" && edge.TargetId == "typescript:default:Host.vue#save");
         Assert.Contains(edges, edge =>
             edge.Type == "CALLS"
             && edge.SourceId == "typescript:default:Host.vue"
@@ -577,7 +581,7 @@ public class TypeScriptWorkerProtocolTests : IAsyncLifetime
 
         var edges = await ScanEdgesAsync();
 
-        var calls = edges.Where(edge => edge.Type == "CALLS" && edge.Metadata?.ContainsKey("unresolved") != true);
+        var calls = edges.Where(edge => edge.Type is "CALLS" or "REFERENCES" && edge.Metadata?.ContainsKey("unresolved") != true);
         Assert.All(calls, edge => Assert.Equal(
             edge.SourceId!.Split('#')[0], edge.TargetId!.Split('#')[0]));
         foreach (var name in new[] { "First", "Second" })

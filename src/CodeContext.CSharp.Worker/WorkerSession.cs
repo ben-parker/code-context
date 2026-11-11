@@ -178,7 +178,7 @@ internal sealed class WorkerSession(IWorkerOutput output, Func<string, string?, 
             var native = workspace.GetNativeSyntaxTree(
                 request.FilePath, request.Start, request.Length, request.MaxDepth, ct);
             return new NativeSyntaxTreeResult(
-                ParserId, ParserVersion, request.WorkspaceId, Path.GetFullPath(request.FilePath),
+                ParserId, ParserVersion, request.WorkspaceId, workspace.FullPath(request.FilePath),
                 "roslyn-csharp-syntax-v1", native.Tree, native.Truncated);
         }
         finally
@@ -204,7 +204,7 @@ internal sealed class WorkerSession(IWorkerOutput output, Func<string, string?, 
             }
             try
             {
-                var (length, sha256) = WorkerStateFile.Save(save.StatePath, state, ct);
+                var (length, sha256) = WorkerStateFile.Save(workspace.Disk, save.StatePath, state, ct);
                 return new SaveStateResult(save.WorkspaceId, save.StateId, Saved: true, length, Convert.ToHexStringLower(sha256));
             }
             catch (Exception ex) when (ex is not OperationCanceledException)

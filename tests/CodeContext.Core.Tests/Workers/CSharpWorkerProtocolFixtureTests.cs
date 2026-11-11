@@ -287,7 +287,7 @@ namespace Fixture { public class DerivedThing : BaseThing { public void Extra() 
     {
         var code = await WriteFileAsync("Code.cs", "namespace Fixture { public class Kept { public void M() { } } }");
         await WriteFileAsync("Other.cs", "namespace Fixture { public class Other { } }");
-        var stateDirectory = Directory.CreateTempSubdirectory("cc-csharp-fixture-state-").FullName;
+        var stateDirectory = Directory.CreateDirectory(Path.Combine(_tempDir, ".codecontext", "cache", "default")).FullName;
         try
         {
             string[] files = [Path.Combine(_tempDir, "Code.cs"), Path.Combine(_tempDir, "Other.cs")];
