@@ -1,0 +1,13 @@
+<Project>
+  <!-- An SDK older than 10.0.403 (runtime 10.0.14) bundles a Microsoft.DotNet.ILCompiler
+       affected by GHSA-p3jp-9v83-76w9 (CVE-2026-111497), which NuGet audit reports as
+       NU1903 wherever PublishAot is set. Raise the implicit ILCompiler reference to the
+       first patched version on such an SDK; a newer SDK (CI installs the latest 10.0.x)
+       is left alone. The NativeAOT runtime pack still follows the SDK, so publish
+       release builds with SDK 10.0.403 or later. -->
+  <ItemGroup Condition="'$(BundledNETCoreAppPackageVersion)' != '' and $([MSBuild]::VersionLessThan('$(BundledNETCoreAppPackageVersion)', '10.0.14'))">
+    <KnownILCompilerPack Update="Microsoft.DotNet.ILCompiler">
+      <ILCompilerPackVersion Condition="'%(TargetFramework)' == 'net10.0'">10.0.14</ILCompilerPackVersion>
+    </KnownILCompilerPack>
+  </ItemGroup>
+</Project>
