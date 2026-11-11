@@ -37,7 +37,7 @@ const MAX_LINK_HOPS = 40;
 /**
  * Creates a guard. `platform` and `io` exist for tests. Nothing in `io` follows a link:
  * `io.links(directory)` returns the lower-cased names in a directory that may be links
- * (null when it cannot be listed), `io.lstat(path)` the stats of a path asked for by the
+ * (null, or an error, when it cannot be listed), `io.lstat(path)` the stats of a path asked for by the
  * name given (undefined when nothing answers to it), `io.readlink(path)` the text of a
  * link, and `io.expand(path)` a path outside every repository as the disk spells it.
  */
@@ -48,7 +48,10 @@ function createGuard({ platform = process.platform, io } = {}) {
     const shares = new Set();
     // Each repository, lower-cased, as the host spelled it and as the disk does.
     const roots = [];
-    // What was learned of the disk, until forget().
+    // What was learned of the disk, until forget(), each under the spelling that was asked
+    // about: a directory can be made to tell `pkg` from `PKG`, so two spellings are two
+    // questions. Only names within one listing are matched without regard to case, which
+    // can only ask the disk about more of them.
     const listings = new Map();
     const followed = new Map();
     const expansions = new Map();
@@ -129,14 +132,14 @@ function createGuard({ platform = process.platform, io } = {}) {
     const couldBeASecondName = name => name.includes('~') || name.endsWith('.') || name.endsWith(' ') || !plainLetters(name);
 
     function expanded(spelled) {
-        let known = expansions.get(key(spelled));
+        let known = expansions.get(spelled);
         if (known === undefined) {
             try {
                 known = lexical(io.expand(spelled)) ?? spelled;
             } catch {
                 known = spelled;
             }
-            expansions.set(key(spelled), known);
+            expansions.set(spelled, known);
         }
         return known;
     }
@@ -165,7 +168,7 @@ function createGuard({ platform = process.platform, io } = {}) {
     }
 
     function linksIn(directory) {
-        let names = listings.get(key(directory));
+        let names = listings.get(directory);
         if (names === undefined) {
             try {
                 names = io.links(directory);
@@ -174,7 +177,7 @@ function createGuard({ platform = process.platform, io } = {}) {
             } catch {
                 names = null;
             }
-            listings.set(key(directory), names);
+            listings.set(directory, names);
         }
         return names;
     }
@@ -182,13 +185,13 @@ function createGuard({ platform = process.platform, io } = {}) {
     /** One name in a directory that is itself real: the entry, where its link leads, REFUSED or MISSING. */
     function step(directory, name, hops) {
         const names = linksIn(directory);
-        if (names === null) return MISSING;
         const entry = path.win32.join(directory, name);
-        if (!names.has(key(name)) && !names.anyName && !couldBeASecondName(name)) return entry;
-        let result = followed.get(key(entry));
+        // A directory that cannot be listed says nothing, so each name in it is asked about.
+        if (names !== null && !names.has(key(name)) && !names.anyName && !couldBeASecondName(name)) return entry;
+        let result = followed.get(entry);
         if (result === undefined) {
             result = follow(entry, hops);
-            followed.set(key(entry), result);
+            followed.set(entry, result);
         }
         return result;
     }
@@ -198,7 +201,8 @@ function createGuard({ platform = process.platform, io } = {}) {
         try {
             stats = io.lstat(entry);
         } catch {
-            return MISSING;
+            // It is there and will not say what it is.
+            return REFUSED;
         }
         if (!stats) return MISSING;
         // A reparse point of another kind, such as a file kept in the cloud, leads nowhere else.
@@ -220,7 +224,7 @@ function createGuard({ platform = process.platform, io } = {}) {
         const spelled = withoutShortNamesOutside(full);
         const root = rootAbove(spelled);
         if (!root) return spelled;
-        let real = spelled.slice(0, root.prefix.length);
+        let real = spelled.slice(0, root.key.length);
         const names = spelled.slice(root.prefix.length).split(B).filter(Boolean);
         for (let i = 0; i < names.length; i++) {
             const next = step(real, names[i], hops);

@@ -107,6 +107,50 @@ test('a directory is asked about once until forget', () => {
     assert.equal(asked.length - before, first * 2);
 });
 
+/** A guard over a disk that tells one case from another, as a directory can be made to. */
+function guardOverExactNames(links, { listable = true } = {}) {
+    const guard = createGuard({
+        platform: 'win32',
+        io: {
+            links: directory => {
+                if (!listable) throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+                return new Set(Object.keys(links)
+                    .filter(link => path.win32.dirname(link) === directory)
+                    .map(link => lower(path.win32.basename(link))));
+            },
+            lstat: entry => ({ isSymbolicLink: () => entry in links }),
+            readlink: entry => links[entry],
+            expand: spelled => spelled,
+        },
+    });
+    guard.addRoot(win('C:/repo'));
+    return guard;
+}
+
+test('two entries that differ only in case are two questions', () => {
+    const guard = guardOverExactNames({ [win('C:/repo/PKG')]: win('//evil/share/pkg') });
+
+    // The plain one first: what was learned of it must not answer for the link.
+    assert.equal(guard.refused(win('C:/repo/pkg/a.json')), false);
+    assert.equal(guard.refused(win('C:/repo/PKG/b.json')), true);
+    assert.equal(guard.refused(win('C:/repo/pkg/c.json')), false);
+});
+
+test('a directory that cannot be listed is asked about name by name', () => {
+    const guard = guardOverExactNames({ [win('C:/repo/vendor')]: win('//evil/share/vendor') }, { listable: false });
+
+    assert.equal(guard.refused(win('C:/repo/vendor/x.json')), true);
+    assert.equal(guard.refused(win('C:/repo/src/a.ts')), false);
+});
+
+test('an entry that will not say what it is is refused', () => {
+    const denied = () => { throw Object.assign(new Error('EACCES'), { code: 'EACCES' }); };
+    const guard = createGuard({ platform: 'win32', io: { links: denied, lstat: denied, readlink: denied, expand: spelled => spelled } });
+    guard.addRoot(win('C:/repo'));
+
+    assert.equal(guard.refused(win('C:/repo/vendor/x.json')), true);
+});
+
 test('off Windows nothing is refused', () => {
     const never = () => assert.fail('no look is needed');
     const guard = createGuard({ platform: 'linux', io: { links: never, lstat: never, readlink: never, expand: never } });

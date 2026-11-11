@@ -70,9 +70,12 @@ internal sealed class PathGuard
     /// <summary>The repository in full form with a trailing separator, or null with none.</summary>
     private readonly string? _rootPrefix;
 
-    private readonly ConcurrentDictionary<string, Entry> _directories = new(StringComparer.OrdinalIgnoreCase);
-    private readonly ConcurrentDictionary<string, Dictionary<string, bool>?> _listings = new(StringComparer.OrdinalIgnoreCase);
-    private readonly ConcurrentDictionary<string, string> _expansions = new(StringComparer.OrdinalIgnoreCase);
+    // What was learned of the disk, each under the spelling that was asked about: a directory
+    // can be made to tell pkg from PKG, so two spellings are two questions. Only names within
+    // one listing are matched without regard to case, which can only ask about more of them.
+    private readonly ConcurrentDictionary<string, Entry> _directories = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, Dictionary<string, bool>?> _listings = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, string> _expansions = new(StringComparer.Ordinal);
 
     /// <param name="root">The repository, whose own share may be read and whose links are refused.</param>
     /// <param name="locations">
@@ -228,15 +231,16 @@ internal sealed class PathGuard
     private Entry Step(string directory, string name)
     {
         var reparsePoints = _listings.GetOrAdd(directory, _probe.ReparsePointsIn);
-        if (reparsePoints is null) return Entry.Missing;
         var path = Path.Join(directory, name);
         try
         {
-            if (!reparsePoints.TryGetValue(name, out var isDirectory))
+            var isDirectory = false;
+            if (reparsePoints is null || !reparsePoints.TryGetValue(name, out isDirectory))
             {
                 // Not a reparse point by this name. A name that could be a second one is asked about.
-                // So is any name beside a link with a letter past ASCII, which may answer to plain letters.
-                if (!CouldBeASecondName(name) && reparsePoints.Keys.All(static other => Ascii.IsValid(other))) return Entry.Plain;
+                // So is any name beside a link with a letter past ASCII, which may answer to plain
+                // letters, and every name in a directory that cannot be listed, which says nothing.
+                if (reparsePoints is not null && !CouldBeASecondName(name) && reparsePoints.Keys.All(static other => Ascii.IsValid(other))) return Entry.Plain;
                 if (_probe.Entry(path) is not { } entry) return Entry.Missing;
                 if (!entry.IsReparsePoint) return Entry.Plain;
                 isDirectory = entry.IsDirectory;

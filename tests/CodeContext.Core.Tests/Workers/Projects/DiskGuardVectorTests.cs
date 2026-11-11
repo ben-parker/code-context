@@ -64,6 +64,42 @@ public sealed class DiskGuardVectorTests
         Assert.DoesNotContain(disk.Asked, asked => asked.StartsWith(@"\\evil", StringComparison.OrdinalIgnoreCase));
     }
 
+    /// <summary>A disk that tells one case from another, as a directory can be made to, with one link.</summary>
+    private sealed class ExactNames(string link, bool listable = true) : ILinkProbe
+    {
+        public Dictionary<string, bool>? ReparsePointsIn(string directory)
+            => !listable ? null
+                : string.Equals(Path.GetDirectoryName(link), directory, StringComparison.Ordinal)
+                    ? new(StringComparer.OrdinalIgnoreCase) { [Path.GetFileName(link)] = true }
+                    : new(StringComparer.OrdinalIgnoreCase);
+
+        public (bool IsReparsePoint, bool IsDirectory)? Entry(string path) => (path == link, true);
+
+        public bool IsLink(string path, bool isDirectory) => path == link;
+
+        public string Expand(string path) => path;
+    }
+
+    [WindowsFact]
+    public void TwoEntriesThatDifferOnlyInCaseAreTwoQuestions()
+    {
+        var guard = new PathGuard(@"C:\repo", [], new ExactNames(@"C:\repo\PKG"), windows: true);
+
+        // The plain one first: what was learned of it must not answer for the link.
+        Assert.False(guard.Refused(@"C:\repo\pkg\a.json"));
+        Assert.True(guard.Refused(@"C:\repo\PKG\b.json"));
+        Assert.False(guard.Refused(@"C:\repo\pkg\c.json"));
+    }
+
+    [WindowsFact]
+    public void ADirectoryThatCannotBeListedIsAskedAboutNameByName()
+    {
+        var guard = new PathGuard(@"C:\repo", [], new ExactNames(@"C:\repo\vendor", listable: false), windows: true);
+
+        Assert.True(guard.Refused(@"C:\repo\vendor\x.json"));
+        Assert.False(guard.Refused(@"C:\repo\src\A.cs"));
+    }
+
     /// <summary>The disk a scenario describes: its links, and the second names its entries answer to.</summary>
     private sealed class MadeUpDisk : ILinkProbe
     {
@@ -124,6 +160,14 @@ public sealed class DiskGuardVectorTests
         {
             Asked.Add(path);
             return Real(path);
+        }
+    }
+
+    private sealed class WindowsFactAttribute : FactAttribute
+    {
+        public WindowsFactAttribute()
+        {
+            if (!OperatingSystem.IsWindows()) Skip = "PathGuard normalizes with the system's own rules, which are Windows' only on Windows.";
         }
     }
 
