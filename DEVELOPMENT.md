@@ -2,7 +2,9 @@
 
 ## Prerequisites
 
-- .NET 9 SDK.
+- .NET 10 SDK (`global.json` pins 10.0.100 with `latestFeature` roll-forward). Use 10.0.403
+  or later to publish: older SDKs bundle a Native AOT toolchain affected by
+  GHSA-p3jp-9v83-76w9.
 - Node.js 18 or newer; Node.js 22 is the release/CI version.
 - npm (included with Node.js).
 - Git.

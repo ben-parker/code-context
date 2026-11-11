@@ -1,5 +1,7 @@
 # .NET 10 Upgrade, Native AOT Host & Performance — Task Checklist
 
+> Historical record: the upgrade shipped in v0.2.39. Kept as written; the plan file it names was local and is not in the repository.
+
 Plan of record: `C:\Users\benpa\.claude\plans\i-want-to-update-wobbly-sundae.md`
 Convention: each phase ends with a green build, full `dotnet test`, and Opus + Sonnet code review (findings fixed before next phase). Fable performs the final end-to-end check and review.
 

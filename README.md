@@ -22,8 +22,10 @@ Bundled language workers provide semantic analysis for:
   TypeScript language-service worker.
 
 For Vue SFCs, CodeContext semantically indexes JavaScript and TypeScript in both
-`<script>` and `<script setup>` blocks. Templates and styles remain outside the
-normalized code graph. Source spans and file paths refer to the original `.vue` file.
+`<script>` and `<script setup>` blocks, and records what the template uses from them:
+the components it renders, the event handlers it names, and the calls in its
+expressions. Styles remain outside the normalized code graph. Source spans and file
+paths refer to the original `.vue` file.
 
 Release archives are published for Windows x64, Linux x64, macOS x64, and macOS
 Arm64. The archives are self-contained: they include the .NET host, the C# worker,
@@ -63,8 +65,9 @@ curl -fsSL https://raw.githubusercontent.com/ben-parker/code-context/main/script
 The installer places a versioned release under `~/.codecontext` and adds a stable
 `codecontext` launcher. After extracting the release, it offers an interactive agent
 skill menu. Use the up/down arrows to move, Space to toggle a destination, and Enter
-to continue. Shared agents is selected by default; the other destinations start
-unchecked:
+to continue. On a first install Shared agents is selected and the other destinations
+start unchecked. On an upgrade every destination that already holds a `code-context`
+skill starts selected, and the others start unchecked:
 
 | Menu destination | Installed folder |
 | --- | --- |
@@ -104,6 +107,10 @@ output or `--json` for the exact API response; progress stays on stderr. Test ev
 is omitted by default, so add `--tests` whenever it matters. Other options include
 `--path DIR`, `--depth N`, `--relation CSV`, `--exact`, `--limit N`, and `--external` to
 include library symbols.
+
+`query` waits at most 30 seconds for indexing. If the index is not ready by then it
+prints "Indexing did not become ready within 30 seconds" and exits with code `3`; run
+`codecontext status --path .` for details, or `codecontext init --wait` to wait longer.
 
 Returned targets include canonical identifiers that can be passed back as
 `identifier` without modification. Name searches use exact-first matching with a
@@ -151,7 +158,6 @@ The main endpoints are:
 - `POST /api/context/multi` for several context queries in one round trip.
 - `POST /api/syntax-tree` for an optional parser-native syntax tree.
 - `POST /api/index/refresh` for a full or single-file refresh.
-- `GET /api/schema` for the generated OpenAPI document.
 - `GET /healthz` for process liveness.
 
 Compact context is the default and omits content, metrics, related items, and tests
@@ -161,7 +167,9 @@ parser/debug details and advanced filters such as `type`, `containingType`,
 marker before treating an omitted relationship as absent.
 
 The checked-in [OpenAPI specification](codecontext.openapi.json) documents request and
-response shapes. The installed service also serves its generated schema at runtime.
+response shapes and is the public contract. The installed service does not serve a
+schema. `GET /openapi/v1.json` and the `GET /api/schema` redirect to it exist only in
+a Debug build run in the Development environment (`ASPNETCORE_ENVIRONMENT=Development`).
 
 ## MCP server
 
@@ -184,7 +192,7 @@ A typical MCP client configuration is:
 }
 ```
 
-The MCP tools are `GetContext`, `GetMultiContext`, and `GetStatus`. MCP mode is owned
+The MCP tools are `get_context`, `get_multi_context`, and `get_status`. MCP mode is owned
 by the client process and does not register a REST instance.
 
 ## Architecture

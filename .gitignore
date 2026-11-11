@@ -504,3 +504,6 @@ roslyn-aot-test/output/
 src/CodeContext.TypeScript.Worker/node.exe
 src/CodeContext.TypeScript.Worker/node
 src/CodeContext.TypeScript.Worker/node-LICENSE
+
+# Agent worktrees and session state
+.claude/worktrees/

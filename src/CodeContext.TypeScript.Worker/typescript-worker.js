@@ -11,10 +11,14 @@
 // snapshot instead of respawning Node and re-reading the world.
 //
 // Project ownership / module resolution: the host approves the file set (one
-// workspace per watched root for now). If <root>/tsconfig.json exists its
-// compilerOptions drive module resolution; otherwise permissive defaults
-// (allowJs, esnext) are used. Approved files are the program roots — tsconfig
-// include/exclude does not override the host's approved set.
+// workspace per watched root for now). If <root>/tsconfig.json (or, without one,
+// jsconfig.json) exists its compilerOptions drive module resolution; otherwise
+// permissive defaults (allowJs, esnext) are used. An import alias is tried first
+// against the `paths` of the tsconfig.json or jsconfig.json nearest the importing
+// file, then the root config, then the configs the root one references and a
+// generated .nuxt/tsconfig.json, and last the `resolve.alias` a Vite or webpack
+// config writes out, which is parsed and never run. Approved files are the program roots —
+// tsconfig include/exclude does not override the host's approved set.
 
 const fs = require('fs');
 const path = require('path');
@@ -225,6 +229,169 @@ function vueErrorMessage(error) {
     return error?.message || String(error);
 }
 
+// The @vue/compiler-core node kinds and element tag type a template walk reads.
+const VUE_ELEMENT = 1;
+const VUE_INTERPOLATION = 5;
+const VUE_DIRECTIVE = 7;
+const VUE_COMPONENT_TAG = 1;
+
+const BARE_IDENTIFIER = /^[A-Za-z_$][\w$]*$/;
+const IDENTIFIERS = /[A-Za-z_$][\w$]*/g;
+
+/** The script bindings a component tag can name, in the order Vue tries them:
+ * `<download-queue>` renders `downloadQueue` or `DownloadQueue` as readily as itself. */
+function componentBindingNames(tag) {
+    const camel = tag.replace(/-(\w)/g, (_, letter) => letter.toUpperCase());
+    return [...new Set([tag, camel, camel.charAt(0).toUpperCase() + camel.slice(1)])];
+}
+
+/**
+ * Reads what a Vue template uses from its script. A component tag and an event handler
+ * given by name are returned as references for the analysis to bind by name; every other
+ * expression is returned by its source range, to be parsed where it stands. A name that
+ * a `v-for` or `v-slot` declares hides the script's on that element and below it: no
+ * reference is made to it, and each expression carries the names hidden where it stands.
+ */
+function collectVueTemplateUsage(root) {
+    const references = []; // { names, display, offset, component }
+    const expressions = []; // { start, end, statements, hidden }
+    const addExpression = (expression, statements, hidden) => {
+        if (!expression?.loc || !expression.content?.trim()) return;
+        expressions.push({
+            start: expression.loc.start.offset, end: expression.loc.end.offset, statements, hidden,
+        });
+    };
+    const walk = (node, outer) => {
+        let hidden = outer;
+        if (node.type === VUE_ELEMENT) {
+            const directives = (node.props ?? []).filter(prop => prop.type === VUE_DIRECTIVE);
+            const declared = directives
+                .flatMap(prop => {
+                    if (prop.name === 'slot') return [prop.exp];
+                    if (prop.name !== 'for') return [];
+                    const parsed = prop.forParseResult;
+                    return parsed ? [parsed.value, parsed.key, parsed.index] : [prop.exp];
+                })
+                .flatMap(expression => expression?.content?.match(IDENTIFIERS) ?? []);
+            if (declared.length > 0) hidden = new Set([...outer, ...declared]);
+            const addReference = (names, display, offset, component) => {
+                if (!names.some(name => hidden.has(name))) references.push({ names, display, offset, component });
+            };
+
+            if (node.tagType === VUE_COMPONENT_TAG && node.tag !== 'component' && !node.tag.includes('.')) {
+                addReference(componentBindingNames(node.tag), node.tag, node.loc.start.offset + 1, true);
+            }
+            for (const prop of directives) {
+                if (prop.name === 'slot') continue;
+                const name = prop.exp?.content?.trim();
+                const named = name && BARE_IDENTIFIER.test(name);
+                if (named && prop.name === 'on' && prop.arg) {
+                    // `@click="save"` hands Vue the function to call on the event.
+                    addReference([name], name, prop.exp.loc.start.offset, false);
+                } else if (named && prop.name === 'bind' && node.tag === 'component'
+                    && prop.arg?.isStatic && prop.arg.content === 'is') {
+                    addReference([name], name, prop.exp.loc.start.offset, true);
+                } else if (prop.name === 'for') {
+                    // Only the iterated source is an expression, read before the loop's
+                    // own names exist; the rest declares them.
+                    addExpression(prop.forParseResult?.source, false, outer);
+                } else {
+                    // An event handler that is not a name is a statement list.
+                    addExpression(prop.exp, prop.name === 'on' && !!prop.arg, hidden);
+                }
+            }
+        } else if (node.type === VUE_INTERPOLATION) {
+            addExpression(node.content, false, hidden);
+        }
+        for (const child of node.children ?? []) {
+            if (child && typeof child === 'object') walk(child, hidden);
+        }
+    };
+    walk(root, new Set());
+    return { references, expressions };
+}
+
+// Syntax the analysis emits a node for. A template expression holding any of it would
+// add nodes the script never declared, so such an expression is not copied.
+const DECLARING_KINDS = new Set([
+    ts.SyntaxKind.FunctionDeclaration, ts.SyntaxKind.ClassDeclaration, ts.SyntaxKind.ClassExpression,
+    ts.SyntaxKind.InterfaceDeclaration, ts.SyntaxKind.TypeAliasDeclaration, ts.SyntaxKind.EnumDeclaration,
+    ts.SyntaxKind.ModuleDeclaration, ts.SyntaxKind.VariableStatement, ts.SyntaxKind.MethodDeclaration,
+    ts.SyntaxKind.GetAccessor, ts.SyntaxKind.SetAccessor, ts.SyntaxKind.ImportDeclaration,
+    ts.SyntaxKind.ExportDeclaration, ts.SyntaxKind.ExportAssignment,
+]);
+
+/**
+ * True when `code`, a wrapped template expression, can stand in the script's text: it
+ * parses (an unterminated string or bracket would swallow the script), declares
+ * nothing, keeps its line breaks where the file has them, and calls nothing through a
+ * name the template has hidden, which would bind to the script's declaration instead.
+ */
+function isSafeTemplateStatement(code, scriptKind, hidden) {
+    if (/[\u2028\u2029]/.test(code)) return false;
+    const parsed = ts.createSourceFile('template-expression', code, ts.ScriptTarget.Latest, false, scriptKind);
+    if (!Array.isArray(parsed.parseDiagnostics) || parsed.parseDiagnostics.length > 0) return false;
+    const safe = node => {
+        if (DECLARING_KINDS.has(node.kind)) return false;
+        if (hidden.size > 0 && (ts.isCallExpression(node) || ts.isNewExpression(node))) {
+            let callee = node.expression;
+            while (callee && !ts.isIdentifier(callee)) callee = callee.expression;
+            if (callee && hidden.has(callee.text)) return false;
+        }
+        return !ts.forEachChild(node, child => !safe(child));
+    };
+    return safe(parsed);
+}
+
+/** The two nearest offsets from `from` towards `bound` (exclusive) that hold no line
+ * break, or undefined. Overwriting one keeps every line where the physical file has it. */
+function spareOffsets(source, from, bound, step) {
+    const found = [];
+    for (let offset = from; step > 0 ? offset < bound : offset > bound; offset += step) {
+        const ch = source.charCodeAt(offset);
+        if (ch === 10 || ch === 13) continue;
+        found.push(offset);
+        if (found.length === 2) return found;
+    }
+    return undefined;
+}
+
+/**
+ * Copies each template expression into the whitespace-shaped text at its own offsets, as
+ * a statement of its own: `;(expr);`, or `;{statements};` for an inline event handler.
+ * The delimiters overwrite markup next to the expression, so a call inside it is parsed,
+ * bound against the script's module scope, and reported at its line in the template. An
+ * expression that is not safe to copy (see isSafeTemplateStatement), or has no markup to
+ * spare for its delimiters, is left out.
+ */
+function overlayTemplateExpressions(text, source, expressions, contentStart, contentEnd, scriptKind) {
+    const ordered = [...expressions].sort((a, b) => a.start - b.start);
+    const pieces = [];
+    let position = 0;
+    let floor = contentStart;
+    ordered.forEach((expression, index) => {
+        const body = source.substring(expression.start, expression.end);
+        const [open, close] = expression.statements ? ['{', '}'] : ['(', ')'];
+        if (expression.start < floor
+            || !isSafeTemplateStatement(`;${open}${body}${close};`, scriptKind, expression.hidden)) {
+            return;
+        }
+        const ceiling = Math.min(contentEnd, ordered[index + 1]?.start ?? contentEnd);
+        const before = spareOffsets(source, expression.start - 1, floor - 1, -1);
+        const after = spareOffsets(source, expression.end, ceiling, 1);
+        if (!before || !after) return;
+        pieces.push(
+            text.substring(position, before[1]), ';',
+            text.substring(before[1] + 1, before[0]), open,
+            text.substring(before[0] + 1, expression.start), body,
+            text.substring(expression.end, after[0]), close,
+            text.substring(after[0] + 1, after[1]), ';');
+        position = after[1] + 1;
+        floor = position;
+    });
+    return pieces.join('') + text.substring(position);
+}
+
 const embeddedLanguageAdapters = new Map([
     ['.vue', {
         transform(fileName, source) {
@@ -232,6 +399,8 @@ const embeddedLanguageAdapters = new Map([
             const blocks = [parsed.descriptor.script, parsed.descriptor.scriptSetup].filter(Boolean);
             let text = sourceShapedWhitespace(source);
             let scriptKind = ts.ScriptKind.JS;
+            let scripted = false;
+            let isModule = false;
             const diagnostics = parsed.errors.map(error => ({
                 filePath: fileName,
                 severity: 'warning',
@@ -255,9 +424,48 @@ const embeddedLanguageAdapters = new Map([
                 }
                 const start = block.loc.start.offset;
                 text = text.substring(0, start) + block.content + text.substring(start + block.content.length);
+                if (block.src) continue; // its code is in another file
+                scripted = true;
+
+                // Vue compiles every SFC script as an ES module. One with no import or
+                // export is a global script to TypeScript, where its names would merge
+                // with other components' and with the DOM's. `export{}` written over
+                // the opening `<script` tag says what Vue does, unless the script is
+                // CommonJS, which TypeScript already scopes to its file.
+                let tagStart = -1;
+                for (const tag of source.matchAll(/<script\b/gi)) {
+                    if (tag.index >= start) break;
+                    tagStart = tag.index;
+                }
+                if (!isModule && tagStart >= 0 && start - tagStart >= 8
+                    && !/\bmodule\s*\.\s*exports\b|\bexports\s*\./.test(block.content)) {
+                    text = text.substring(0, tagStart) + 'export{'
+                        + text.substring(tagStart + 7, start - 1) + '}' + text.substring(start);
+                    isModule = true;
+                }
             }
 
-            return { text, scriptKind, diagnostics };
+            // A template uses what a script declares or imports, and the components the
+            // project declares for every template; without a script it has only those.
+            // One written in another language (pug) or kept in another file has no AST here.
+            let templateReferences = [];
+            let templateHidden = [];
+            let templateRange;
+            const template = parsed.descriptor.template;
+            if (template?.ast) {
+                templateRange = { start: template.loc.start.offset, end: template.loc.end.offset };
+                const usage = collectVueTemplateUsage(template.ast);
+                templateReferences = scripted
+                    ? usage.references
+                    : usage.references.filter(reference => reference.component);
+                if (scripted) {
+                    templateHidden = usage.expressions.filter(expression => expression.hidden.size > 0);
+                    text = overlayTemplateExpressions(text, source, usage.expressions,
+                        template.loc.start.offset, template.loc.end.offset, scriptKind);
+                }
+            }
+
+            return { text, scriptKind, diagnostics, templateReferences, templateHidden, templateRange };
         },
     }],
 ]);
@@ -266,7 +474,10 @@ class Workspace {
     constructor(rootPath) {
         this.rootPath = rootPath;
         this.files = new Map(); // canonicalKey -> { path, version }
-        this.embeddedSources = new Map(); // canonicalKey -> { version, text, scriptKind, diagnostics }
+        this.embeddedSources = new Map(); // canonicalKey -> { version, text, scriptKind, diagnostics, ... }
+        // What each file's imports resolved to when the program was last built, so the
+        // analysis can name an import's target file without resolving it a second time.
+        this.moduleTargets = new Map(); // canonicalKey -> Map(moduleName -> resolvedFileName)
         // Per-file content hash of the facts last emitted for that file, keyed by
         // canonicalKey (so lookups survive Windows casing) with the verbatim bucket path
         // stored alongside. This is the sole record of "what the host currently holds per
@@ -276,9 +487,7 @@ class Workspace {
         // present here with no current bucket is a removal — no separate drop-tracking is
         // needed (mirrors the C# analyzer's _factHashes / PathComparer semantics).
         this.factHashes = new Map(); // canonicalKey -> { hash: string, path: string }
-        const loaded = loadCompilerOptions(rootPath);
-        this.compilerOptions = loaded.options;
-        this.configDiagnostic = loaded.diagnostic;
+        this.applyConfiguration(loadCompilerOptions(rootPath));
         const self = this;
         this.serviceHost = {
             getScriptFileNames: () => [...self.files.values()].map(f => f.path),
@@ -297,10 +506,150 @@ class Workspace {
             readDirectory: ts.sys.readDirectory,
             directoryExists: ts.sys.directoryExists,
             getDirectories: ts.sys.getDirectories,
-            resolveModuleNames: (moduleNames, containingFile) => moduleNames.map(
-                moduleName => self.resolveModule(moduleName, containingFile)),
+            resolveModuleNames: (moduleNames, containingFile) => {
+                // Library files resolve imports too; only the workspace's are asked about.
+                const key = canonicalKey(containingFile);
+                let targets = self.moduleTargets.get(key);
+                if (!targets && self.files.has(key)) {
+                    targets = new Map();
+                    self.moduleTargets.set(key, targets);
+                }
+                return moduleNames.map(moduleName => {
+                    const resolved = self.resolveModule(moduleName, containingFile);
+                    targets?.set(moduleName, resolved?.resolvedFileName);
+                    return resolved;
+                });
+            },
         };
         this.service = ts.createLanguageService(this.serviceHost, ts.createDocumentRegistry());
+    }
+
+    applyConfiguration(loaded) {
+        this.compilerOptions = loaded.options;
+        this.configDiagnostic = loaded.diagnostic;
+        // Each scope resolves with its own config's `paths`, relative to that config.
+        this.aliasScopes = loaded.aliasScopes.map(scope => this.withOptions(scope));
+        this.nestedScopes = new Map();
+        this.directoryScopes = new Map();
+        this.directoryComponents = new Map();
+        this.componentDeclarations = new Map();
+        this.bundlerScopes = new Map();
+        this.bundlerDiagnostics = new Map();
+    }
+
+    withOptions(scope) {
+        const { paths, baseUrl, pathsBasePath } = scope;
+        return { ...scope, options: { ...this.compilerOptions, paths, baseUrl, pathsBasePath } };
+    }
+
+    /** The alias scope of the tsconfig.json or jsconfig.json in `directory`, a directory
+     * below the root; undefined when it has none or the config declares no aliases. */
+    nestedScope(directory) {
+        const key = canonicalKey(directory);
+        if (this.nestedScopes.has(key)) return this.nestedScopes.get(key);
+        let scope;
+        for (const name of ['tsconfig.json', 'jsconfig.json']) {
+            const configPath = path.join(directory, name);
+            if (!fs.existsSync(configPath)) continue;
+            const known = this.aliasScopes.find(
+                candidate => canonicalKey(candidate.configPath) === canonicalKey(configPath));
+            try {
+                scope = known ?? readAliasConfig(configPath).scope;
+            } catch {
+                scope = undefined;
+            }
+            if (scope && !known) scope = this.withOptions(scope);
+            break;
+        }
+        this.nestedScopes.set(key, scope);
+        return scope;
+    }
+
+    /** The alias scope of the Vite or webpack config in `directory`, if it has one that
+     * declares aliases. An alias whose target the config computes is reported instead. */
+    bundlerScope(directory) {
+        const key = canonicalKey(directory);
+        if (this.bundlerScopes.has(key)) return this.bundlerScopes.get(key);
+        let scope;
+        for (const name of BUNDLER_CONFIGS) {
+            const configPath = path.join(directory, name);
+            if (!fs.existsSync(configPath)) continue;
+            try {
+                const { paths, skipped } = readBundlerAliases(configPath);
+                if (Object.keys(paths).length > 0) {
+                    scope = this.withOptions({ configPath, directory, paths, baseUrl: undefined, pathsBasePath: directory });
+                }
+                if (skipped.length > 0) {
+                    this.bundlerDiagnostics.set(canonicalKey(configPath), {
+                        filePath: configPath,
+                        severity: 'warning',
+                        message: `Import ${skipped.length === 1 ? 'alias' : 'aliases'} ${skipped.map(alias => `'${alias}'`).join(', ')} `
+                            + `in ${name} ${skipped.length === 1 ? 'has a target' : 'have targets'} that the config computes, `
+                            + 'so imports through '
+                            + `${skipped.length === 1 ? 'it' : 'them'} are not resolved. Declare the alias under \`paths\` in tsconfig.json or jsconfig.json.`,
+                    });
+                }
+            } catch {
+                scope = undefined; // an unreadable config declares no aliases
+            }
+            break;
+        }
+        this.bundlerScopes.set(key, scope);
+        return scope;
+    }
+
+    /**
+     * The alias scopes to try for an import written in `containingFile`, as an editor
+     * would choose them: `inner`, those of the configs in the directories that hold the
+     * file below the root, nearest first, are tried before the root config; `outer`,
+     * every other referenced config, only after it. So an alias two projects each
+     * declare means, in each, the directory that project maps it to.
+     */
+    aliasScopesFor(containingFile) {
+        // A library file resolves by the root config and what it references alone.
+        if (!this.files.has(canonicalKey(containingFile))) return { inner: [], outer: this.aliasScopes };
+        const directoryKey = canonicalKey(path.dirname(path.resolve(containingFile)));
+        let scopes = this.directoryScopes.get(directoryKey);
+        if (!scopes) {
+            scopes = this.aliasScopesIn(path.dirname(path.resolve(containingFile)));
+            this.directoryScopes.set(directoryKey, scopes);
+        }
+        return scopes;
+    }
+
+    aliasScopesIn(fileDirectory) {
+        const inner = [];
+        {
+            const rootKey = canonicalKey(this.rootPath);
+            const isBelowRoot = directory => {
+                const relative = path.relative(rootKey, canonicalKey(directory));
+                return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative);
+            };
+            let directory = fileDirectory;
+            for (let depth = 0; depth < MAX_NESTED_CONFIG_DEPTH && isBelowRoot(directory); depth++) {
+                // A config a referenced project keeps beside the nearest one (a
+                // tsconfig.app.json) belongs to the same directory.
+                const beside = this.aliasScopes.filter(
+                    candidate => canonicalKey(candidate.directory) === canonicalKey(directory));
+                for (const scope of [this.nestedScope(directory), ...beside, this.bundlerScope(directory)]) {
+                    if (scope && !inner.includes(scope)) inner.push(scope);
+                }
+                directory = path.dirname(directory);
+            }
+        }
+        // What only the bundler knows is asked last: a project that also declares its
+        // aliases for the compiler has said the same thing there.
+        const outer = this.aliasScopes.filter(scope => !inner.includes(scope));
+        const bundler = this.bundlerScope(this.rootPath);
+        if (bundler) outer.push(bundler);
+        return { inner, outer };
+    }
+
+    /** Drops everything remembered about a file that left the workspace. */
+    forget(key) {
+        this.files.delete(key);
+        this.embeddedSources.delete(key);
+        this.moduleTargets.delete(key);
     }
 
     hasFile(p) {
@@ -349,12 +698,45 @@ class Workspace {
         return this.getScriptSource(fileName)?.diagnostics || [];
     }
 
+    /** The names an embedded file's markup uses from its script (see collectVueTemplateUsage). */
+    templateReferences(fileName) {
+        if (!embeddedLanguageAdapters.has(path.extname(fileName).toLowerCase())) return [];
+        return this.getScriptSource(fileName)?.templateReferences || [];
+    }
+
+    /** The workspace file an import in `containingFile` resolved to, as the workspace
+     * spells its path, or undefined for a package or an unresolvable name. */
+    importedProjectFile(containingFile, moduleName) {
+        const target = this.moduleTargets.get(canonicalKey(containingFile))?.get(moduleName);
+        return target ? this.files.get(canonicalKey(target))?.path : undefined;
+    }
+
     resolveModule(moduleName, containingFile) {
-        const resolved = ts.resolveModuleName(
-            moduleName, containingFile, this.compilerOptions, this.serviceHost).resolvedModule;
+        const { inner, outer } = this.aliasScopesFor(containingFile);
+        const resolveIn = scopes => {
+            for (const scope of scopes) {
+                // A catch-all `*` names no alias, and would send every package import here.
+                if (!Object.keys(scope.paths).some(
+                    pattern => pattern !== '*' && matchPathPattern(pattern, moduleName) !== undefined)) {
+                    continue;
+                }
+                const scoped = ts.resolveModuleName(
+                    moduleName, containingFile, scope.options, this.serviceHost).resolvedModule;
+                if (scoped) return scoped;
+            }
+            return undefined;
+        };
+
+        // An alias the root config does not declare may be declared by a config it
+        // references. One outside the directories that hold the importing file is
+        // honoured only once the root config has failed to resolve the import.
+        const resolved = resolveIn(inner)
+            ?? ts.resolveModuleName(moduleName, containingFile, this.compilerOptions, this.serviceHost).resolvedModule
+            ?? resolveIn(outer);
         if (resolved) return resolved;
 
-        for (const candidate of this.embeddedModuleCandidates(moduleName, containingFile)) {
+        const scopes = [...inner, this.compilerOptions, ...outer];
+        for (const candidate of this.embeddedModuleCandidates(moduleName, containingFile, scopes)) {
             if (!this.hasFile(candidate)) continue;
             const scriptKind = this.getScriptSource(candidate)?.scriptKind ?? ts.ScriptKind.TS;
             const extension = scriptKind === ts.ScriptKind.JS ? ts.Extension.Js
@@ -366,7 +748,7 @@ class Workspace {
         return undefined;
     }
 
-    embeddedModuleCandidates(moduleName, containingFile) {
+    embeddedModuleCandidates(moduleName, containingFile, scopes) {
         const candidates = [];
         const addCandidate = candidate => {
             candidates.push(candidate);
@@ -377,21 +759,97 @@ class Workspace {
             return candidates;
         }
 
-        const baseUrl = this.compilerOptions.baseUrl
-            ? path.resolve(this.rootPath, this.compilerOptions.baseUrl)
-            : this.rootPath;
-        for (const [pattern, replacements] of Object.entries(this.compilerOptions.paths || {})) {
-            const star = pattern.indexOf('*');
-            const prefix = star < 0 ? pattern : pattern.substring(0, star);
-            const suffix = star < 0 ? '' : pattern.substring(star + 1);
-            if (!moduleName.startsWith(prefix) || !moduleName.endsWith(suffix)) continue;
-            if (star < 0 && moduleName !== pattern) continue;
-            const matched = moduleName.substring(prefix.length, moduleName.length - suffix.length);
-            for (const replacement of replacements) {
-                addCandidate(path.resolve(baseUrl, replacement.replace('*', matched)));
+        for (const scope of scopes) {
+            // `paths` are relative to baseUrl, or else to the config that declares them,
+            // which for an inherited table is the extended config, not the root one.
+            const base = scope.baseUrl
+                ? path.resolve(this.rootPath, scope.baseUrl)
+                : scope.pathsBasePath ?? this.rootPath;
+            for (const [pattern, replacements] of Object.entries(scope.paths || {})) {
+                const matched = matchPathPattern(pattern, moduleName);
+                if (matched === undefined) continue;
+                for (const replacement of replacements) {
+                    addCandidate(path.resolve(base, replacement.replace('*', matched)));
+                }
             }
         }
         return candidates;
+    }
+
+    /** Where the markup of an embedded file stands in it, as `{ start, end }` offsets. */
+    templateRange(fileName) {
+        if (!embeddedLanguageAdapters.has(path.extname(fileName).toLowerCase())) return undefined;
+        return this.getScriptSource(fileName)?.templateRange;
+    }
+
+    /** True when the markup of an embedded file has declared `name` itself (a `v-for`
+     * or `v-slot` name) at `offset`, so that it is not the script's there. */
+    isHiddenInTemplate(fileName, offset, name) {
+        if (!embeddedLanguageAdapters.has(path.extname(fileName).toLowerCase())) return false;
+        return (this.getScriptSource(fileName)?.templateHidden || []).some(expression =>
+            offset >= expression.start && offset < expression.end && expression.hidden.has(name));
+    }
+
+    /** Forgets what the last analysis read from disk about the project, so that a
+     * declaration file generated since (one the host does not watch) is read again. */
+    beginAnalysis() {
+        this.directoryComponents = new Map();
+    }
+
+    /** The components declared by the generated files of one directory: name to the
+     * module specifier's absolute path, which may lack its extension. */
+    componentsDeclaredIn(directory) {
+        const key = canonicalKey(directory);
+        let components = this.directoryComponents.get(key);
+        if (components) return components;
+        components = new Map();
+        for (const relative of GLOBAL_COMPONENT_DECLARATIONS) {
+            const declarationPath = path.join(directory, relative);
+            let stamp;
+            try {
+                stamp = fs.statSync(declarationPath).mtimeMs;
+            } catch {
+                continue;
+            }
+            const cacheKey = canonicalKey(declarationPath);
+            let read = this.componentDeclarations.get(cacheKey);
+            if (read?.stamp !== stamp) {
+                read = { stamp, components: readGlobalComponents(declarationPath) };
+                this.componentDeclarations.set(cacheKey, read);
+            }
+            for (const [name, target] of read.components) {
+                if (!components.has(name)) components.set(name, target);
+            }
+        }
+        this.directoryComponents.set(key, components);
+        return components;
+    }
+
+    /**
+     * The project file of a component that no script imports but the project declares
+     * for every template: the first of `names` found in a declaration file that Nuxt or
+     * unplugin-vue-components generated, nearest the rendering file first.
+     */
+    globalComponentFile(containingFile, names) {
+        const rootKey = canonicalKey(this.rootPath);
+        let directory = path.dirname(path.resolve(containingFile));
+        for (let depth = 0; depth < MAX_NESTED_CONFIG_DEPTH; depth++) {
+            const components = this.componentsDeclaredIn(directory);
+            for (const name of names) {
+                const target = components.get(name);
+                if (!target) continue;
+                for (const candidate of [target, ...SOURCE_EXTENSIONS.flatMap(
+                    extension => [target + extension, path.join(target, 'index' + extension)])]) {
+                    const entry = this.files.get(canonicalKey(candidate));
+                    if (entry) return entry.path;
+                }
+                return undefined; // declared, but outside the project
+            }
+            const parent = path.dirname(directory);
+            if (canonicalKey(directory) === rootKey || parent === directory) break;
+            directory = parent;
+        }
+        return undefined;
     }
 
     /** Re-roots the workspace (and reloads tsconfig options) if the host opens it
@@ -400,9 +858,7 @@ class Workspace {
         const resolved = path.resolve(rootPath);
         if (canonicalKey(resolved) === canonicalKey(this.rootPath)) return;
         this.rootPath = resolved;
-        const loaded = loadCompilerOptions(resolved);
-        this.compilerOptions = loaded.options;
-        this.configDiagnostic = loaded.diagnostic;
+        this.applyConfiguration(loadCompilerOptions(resolved));
     }
 
     filePaths() {
@@ -419,10 +875,7 @@ class Workspace {
     syncApproved(approvedFiles) {
         const approved = new Set(approvedFiles.map(canonicalKey));
         for (const known of [...this.files.keys()]) {
-            if (!approved.has(known)) {
-                this.files.delete(known);
-                this.embeddedSources.delete(known);
-            }
+            if (!approved.has(known)) this.forget(known);
         }
         for (const file of approvedFiles) {
             if (!this.files.has(canonicalKey(file))) this.bump(file);
@@ -437,8 +890,8 @@ class Workspace {
             const existing = previous.get(key);
             this.files.set(key, { path: path.resolve(file), version: (existing?.version ?? 0) + 1 });
         }
-        for (const key of this.embeddedSources.keys()) {
-            if (!this.files.has(key)) this.embeddedSources.delete(key);
+        for (const key of previous.keys()) {
+            if (!this.files.has(key)) this.forget(key);
         }
     }
 
@@ -447,12 +900,10 @@ class Workspace {
         for (const change of changes) {
             touched.push(path.resolve(change.path));
             if (change.changeType === 'deleted') {
-                this.files.delete(canonicalKey(change.path));
-                this.embeddedSources.delete(canonicalKey(change.path));
+                this.forget(canonicalKey(change.path));
             } else {
                 if (change.changeType === 'renamed' && change.oldPath) {
-                    this.files.delete(canonicalKey(change.oldPath));
-                    this.embeddedSources.delete(canonicalKey(change.oldPath));
+                    this.forget(canonicalKey(change.oldPath));
                     // The old path must be inside the delta's replacement scope or
                     // the renamed file's previous facts would linger in the graph.
                     touched.push(path.resolve(change.oldPath));
@@ -537,6 +988,234 @@ class Workspace {
     }
 }
 
+/** The text `*` stands for when `moduleName` matches a tsconfig `paths` pattern ('' for
+ * a pattern without one), or undefined when it does not match. */
+function matchPathPattern(pattern, moduleName) {
+    const star = pattern.indexOf('*');
+    if (star < 0) return moduleName === pattern ? '' : undefined;
+    const prefix = pattern.substring(0, star);
+    const suffix = pattern.substring(star + 1);
+    if (moduleName.length < prefix.length + suffix.length
+        || !moduleName.startsWith(prefix) || !moduleName.endsWith(suffix)) {
+        return undefined;
+    }
+    return moduleName.substring(prefix.length, moduleName.length - suffix.length);
+}
+
+const MAX_NESTED_CONFIG_DEPTH = 64;
+const MAX_REFERENCED_CONFIGS = 32;
+
+// Reads a config for its compilerOptions alone. The host approves the file set, so a
+// config's `include` is never expanded and reading one never walks a directory.
+const OPTIONS_ONLY_CONFIG_HOST = {
+    useCaseSensitiveFileNames: ts.sys.useCaseSensitiveFileNames,
+    fileExists: ts.sys.fileExists,
+    readFile: ts.sys.readFile,
+    readDirectory: () => [],
+};
+
+// The bundler configs whose `resolve.alias` is read, in the order a directory is asked.
+const BUNDLER_CONFIGS = [
+    'vite.config.ts', 'vite.config.mts', 'vite.config.js', 'vite.config.mjs', 'vite.config.cjs',
+    'webpack.config.js', 'webpack.config.ts', 'webpack.config.mjs', 'webpack.config.cjs',
+];
+
+/**
+ * Reads the aliases a Vite or webpack config declares under `resolve.alias`, without
+ * running it: the config is parsed, and a target is taken only when it is written out,
+ * as a string, as `path.resolve(__dirname, 'src')` (or `join`, with `import.meta.dirname`
+ * or `process.cwd()`), or as `fileURLToPath(new URL('./src', import.meta.url))`. Returns
+ * the aliases as a `paths` table of absolute targets, and the names of those whose
+ * target is computed some other way.
+ */
+function readBundlerAliases(configPath) {
+    const paths = {};
+    const skipped = [];
+    const directory = path.dirname(configPath);
+    const source = ts.createSourceFile(
+        configPath, fs.readFileSync(configPath, 'utf8'), ts.ScriptTarget.Latest, true);
+
+    const text = node => (ts.isStringLiteralLike(node) ? node.text : undefined);
+    const isDirectory = node => {
+        const written = node.getText(source).replace(/\s+/g, '');
+        return written === '__dirname' || written === 'import.meta.dirname' || written === 'process.cwd()';
+    };
+    const target = node => {
+        if (text(node) !== undefined) return path.resolve(directory, text(node));
+        if (!ts.isCallExpression(node)) return undefined;
+        const callee = ts.isPropertyAccessExpression(node.expression) ? node.expression.name : node.expression;
+        if (!ts.isIdentifier(callee)) return undefined;
+        if (callee.text === 'resolve' || callee.text === 'join') {
+            const segments = node.arguments.map(argument => (isDirectory(argument) ? directory : text(argument)));
+            return segments.length > 0 && segments.every(segment => segment !== undefined)
+                ? path.resolve(directory, ...segments) : undefined;
+        }
+        const url = node.arguments[0];
+        if (callee.text === 'fileURLToPath' && url && ts.isNewExpression(url) && url.arguments?.length === 2
+            && text(url.arguments[0]) !== undefined
+            && url.arguments[1].getText(source).replace(/\s+/g, '') === 'import.meta.url') {
+            return path.resolve(directory, text(url.arguments[0]));
+        }
+        return undefined;
+    };
+    const declare = (name, value) => {
+        const resolved = value && target(value);
+        if (!resolved) {
+            skipped.push(name);
+            return;
+        }
+        // webpack's `name$` is the import `name` and nothing below it; any other alias
+        // is that import and everything below it.
+        const exact = name.endsWith('$');
+        const alias = exact ? name.slice(0, -1) : name.replace(/\/$/, '');
+        if (!alias || alias === '*') return;
+        paths[alias] ??= [resolved];
+        if (!exact) paths[`${alias}/*`] ??= [path.join(resolved, '*')];
+    };
+    const propertyName = property =>
+        (property.name && (ts.isIdentifier(property.name) || ts.isStringLiteralLike(property.name))
+            ? property.name.text : undefined);
+    const readAliases = aliases => {
+        if (ts.isObjectLiteralExpression(aliases)) {
+            for (const property of aliases.properties) {
+                const name = propertyName(property);
+                if (name !== undefined) declare(name, ts.isPropertyAssignment(property) ? property.initializer : undefined);
+            }
+        } else if (ts.isArrayLiteralExpression(aliases)) {
+            // Vite's other form: `[{ find: '@', replacement: ... }]`. A pattern for
+            // `find` names no alias that can be written down.
+            for (const entry of aliases.elements) {
+                if (!ts.isObjectLiteralExpression(entry)) continue;
+                const field = name => entry.properties.find(
+                    property => ts.isPropertyAssignment(property) && propertyName(property) === name)?.initializer;
+                const find = field('find');
+                if (find && text(find) !== undefined) declare(text(find), field('replacement'));
+            }
+        }
+    };
+    const visit = node => {
+        if (ts.isPropertyAssignment(node) && propertyName(node) === 'alias'
+            && ts.isObjectLiteralExpression(node.parent) && ts.isPropertyAssignment(node.parent.parent)
+            && propertyName(node.parent.parent) === 'resolve') {
+            readAliases(node.initializer);
+        }
+        ts.forEachChild(node, visit);
+    };
+    visit(source);
+    return { paths, skipped };
+}
+
+// Where a project declares the components every template may render without importing
+// them, relative to the project's directory: Nuxt writes the first two (which of them
+// holds the interface depends on its version), unplugin-vue-components the third.
+const NUXT_COMPONENT_DECLARATIONS = [
+    path.join('.nuxt', 'types', 'components.d.ts'), path.join('.nuxt', 'components.d.ts'),
+];
+const GLOBAL_COMPONENT_DECLARATIONS = [...NUXT_COMPONENT_DECLARATIONS, 'components.d.ts'];
+
+/**
+ * Reads a generated declaration file of global components: every member of an interface
+ * named `GlobalComponents` (or `_GlobalComponents`) whose type imports a module by a
+ * relative path, as `'BaseButton': typeof import("../components/base/Button.vue")['default']`,
+ * and every exported constant so typed, which is how some Nuxt versions write the same.
+ * Returns name to that module's absolute path. Nothing in the file is executed.
+ */
+function readGlobalComponents(declarationPath) {
+    const components = new Map();
+    let text;
+    try {
+        text = fs.readFileSync(declarationPath, 'utf8');
+    } catch {
+        return components;
+    }
+    const directory = path.dirname(declarationPath);
+    const source = ts.createSourceFile(declarationPath, text, ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);
+    const importedModule = type => {
+        let found;
+        const find = node => {
+            if (found !== undefined) return;
+            if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument)
+                && ts.isStringLiteralLike(node.argument.literal)) {
+                found = node.argument.literal.text;
+                return;
+            }
+            ts.forEachChild(node, find);
+        };
+        find(type);
+        return found;
+    };
+    const declare = (name, type) => {
+        if (!type || !name || !(ts.isIdentifier(name) || ts.isStringLiteralLike(name))) return;
+        const moduleName = importedModule(type);
+        if (moduleName && (moduleName.startsWith('.') || path.isAbsolute(moduleName))
+            && !components.has(name.text)) {
+            components.set(name.text, path.resolve(directory, moduleName));
+        }
+    };
+    const visit = node => {
+        if (ts.isInterfaceDeclaration(node) && /^_?GlobalComponents$/.test(node.name.text)) {
+            for (const member of node.members) {
+                if (ts.isPropertySignature(member)) declare(member.name, member.type);
+            }
+        }
+        ts.forEachChild(node, visit);
+    };
+    visit(source);
+    for (const statement of source.statements) {
+        if (ts.isVariableStatement(statement)
+            && statement.modifiers?.some(modifier => modifier.kind === ts.SyntaxKind.ExportKeyword)) {
+            for (const declaration of statement.declarationList.declarations) {
+                declare(declaration.name, declaration.type);
+            }
+        }
+    }
+    return components;
+}
+
+/**
+ * Collects the `paths` tables of the given configs and of every config they reference.
+ * A solution-style root config (`"files": []` plus `references`) declares no aliases of
+ * its own; the projects it references do.
+ */
+function loadAliasScopes(configPaths) {
+    const scopes = [];
+    const visited = new Set();
+    const pending = [...configPaths];
+    while (pending.length > 0 && visited.size < MAX_REFERENCED_CONFIGS) {
+        let configPath = pending.shift();
+        try {
+            if (fs.statSync(configPath).isDirectory()) configPath = path.join(configPath, 'tsconfig.json');
+            if (visited.has(canonicalKey(configPath))) continue;
+            visited.add(canonicalKey(configPath));
+            const read = readAliasConfig(configPath);
+            if (read.scope) scopes.push(read.scope);
+            pending.push(...read.references);
+        } catch {
+            // A reference to a missing or unreadable config declares no aliases.
+        }
+    }
+    return scopes;
+}
+
+/** The alias scope one config declares (undefined when it has no `paths`, its own or
+ * inherited) and the configs it references. Throws when the file cannot be read. */
+function readAliasConfig(configPath) {
+    const read = ts.readConfigFile(configPath, ts.sys.readFile);
+    if (read.error) return { scope: undefined, references: [] };
+    const directory = path.dirname(configPath);
+    const parsed = ts.parseJsonConfigFileContent(read.config, OPTIONS_ONLY_CONFIG_HOST, directory);
+    const scope = parsed.options.paths
+        ? {
+            configPath,
+            directory,
+            paths: parsed.options.paths,
+            baseUrl: parsed.options.baseUrl,
+            pathsBasePath: parsed.options.pathsBasePath ?? directory,
+        }
+        : undefined;
+    return { scope, references: (parsed.projectReferences ?? []).map(reference => reference.path) };
+}
+
 function loadCompilerOptions(rootPath) {
     const defaults = {
         allowJs: true,
@@ -550,28 +1229,37 @@ function loadCompilerOptions(rootPath) {
         skipLibCheck: true,
         noEmit: true,
     };
-    const configPath = path.join(rootPath, 'tsconfig.json');
+    let configPath = path.join(rootPath, 'tsconfig.json');
     const fallbackDiagnostic = message => ({
         options: defaults,
+        aliasScopes: [],
         diagnostic: {
             filePath: configPath,
             severity: 'warning',
-            message: `tsconfig.json could not be used (${message}); indexing with permissive defaults.`,
+            message: `${path.basename(configPath)} could not be used (${message}); indexing with permissive defaults.`,
         },
     });
     try {
+        // A JavaScript project declares its options and aliases in jsconfig.json.
+        const jsConfigPath = path.join(rootPath, 'jsconfig.json');
+        if (!fs.existsSync(configPath) && fs.existsSync(jsConfigPath)) configPath = jsConfigPath;
+        let options = defaults;
+        // Nuxt builds with aliases (`~`, `@`) that only the config it generates declares,
+        // and a project need not extend or reference that config, or have one at all.
+        const aliasConfigs = [path.join(rootPath, '.nuxt', 'tsconfig.json')];
         if (fs.existsSync(configPath)) {
             const read = ts.readConfigFile(configPath, ts.sys.readFile);
             if (read.error) {
                 return fallbackDiagnostic(ts.flattenDiagnosticMessageText(read.error.messageText, ' '));
             }
-            const parsed = ts.parseJsonConfigFileContent(read.config, ts.sys, rootPath);
-            return { options: { ...defaults, ...parsed.options, noEmit: true }, diagnostic: undefined };
+            const parsed = ts.parseJsonConfigFileContent(read.config, OPTIONS_ONLY_CONFIG_HOST, rootPath);
+            options = { ...defaults, ...parsed.options, noEmit: true };
+            aliasConfigs.unshift(...(parsed.projectReferences ?? []).map(reference => reference.path));
         }
+        return { options, aliasScopes: loadAliasScopes(aliasConfigs), diagnostic: undefined };
     } catch (error) {
         return fallbackDiagnostic(error.message);
     }
-    return { options: defaults, diagnostic: undefined };
 }
 
 // ---------------------------------------------------------------------------
@@ -707,6 +1395,21 @@ function parameterKey(node, sourceFile) {
     }).join(',')})`;
 }
 
+function makeEdge(sourceId, targetId, kind, metadata) {
+    // Line AND column in the ID: two same-target calls on one line must not
+    // silently collapse into a single edge.
+    const suffix = metadata && metadata.line
+        ? `@${metadata.line}:${metadata.column ?? '0'}`
+        : '';
+    return {
+        id: `${sourceId}=[${kind}]=>${targetId}${suffix}`,
+        sourceId,
+        targetId,
+        kind,
+        metadata: metadata && Object.keys(metadata).length > 0 ? metadata : undefined,
+    };
+}
+
 function analyzeFile(workspace, workspaceId, program, checker, fileName, diagnostics) {
     const sourceFile = program.getSourceFile(fileName);
     const nodes = [];
@@ -771,6 +1474,73 @@ function analyzeFile(workspace, workspaceId, program, checker, fileName, diagnos
         }
     };
 
+    const moduleIdOf = file => `${graphPrefix}${relPath(root, file)}`;
+
+    /** The declaration `addNode` emits a node for when `decl` declares a function,
+     * class, or arrow-function variable; null for anything else. */
+    const emittedDeclaration = decl => {
+        if (ts.isExportAssignment(decl) && isDefaultExportedArrow(decl.expression)) return decl.expression;
+        if ((ts.isFunctionDeclaration(decl) || ts.isClassDeclaration(decl))
+            && (decl.name || hasDefaultModifier(decl))) {
+            return decl;
+        }
+        if (ts.isVariableDeclaration(decl) && arrowFunctionInitializer(decl.initializer)
+            && decl.parent?.parent && ts.isVariableStatement(decl.parent.parent)) {
+            return decl;
+        }
+        return null;
+    };
+
+    /** The node a rendered component is: its declaration when one is emitted, else the
+     * other module that declares it (`export default {...}`, `const X =
+     * defineComponent(...)`). A name this file binds to anything else (a parameter, a
+     * ref, a value picked at run time) names no component here, so null. */
+    const componentTargetId = decl => {
+        const emitted = emittedDeclaration(decl);
+        if (emitted) return idOfDeclaration(emitted);
+        const declFile = decl.getSourceFile();
+        return declFile === sourceFile ? null : moduleIdOf(declFile.fileName);
+    };
+
+    /**
+     * Binds a name used by the markup of an embedded file to a project node. A component
+     * imported from a file with no default export the compiler can see (a Vue SFC
+     * without `export default`) is that file's module.
+     */
+    const templateTargetId = (symbol, isComponent) => {
+        const target = symbol.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol;
+        const decl = target.declarations && target.declarations[0];
+        if (decl) {
+            if (!workspace.hasFile(decl.getSourceFile().fileName)) return null;
+            if (isComponent) return componentTargetId(decl);
+            const emitted = emittedDeclaration(decl);
+            return emitted ? idOfDeclaration(emitted) : null;
+        }
+        if (!isComponent) return null;
+        let importNode = symbol.declarations && symbol.declarations[0];
+        while (importNode && !ts.isImportDeclaration(importNode)) importNode = importNode.parent;
+        if (!importNode || !ts.isStringLiteralLike(importNode.moduleSpecifier)) return null;
+        const file = workspace.importedProjectFile(fileName, importNode.moduleSpecifier.text);
+        return file ? moduleIdOf(file) : null;
+    };
+
+    /**
+     * The node of the function a name used as a value names: a function, a method of a
+     * class, or a variable or field holding an arrow function. Null for any other value,
+     * and for a function this project does not declare.
+     */
+    const functionValueTargetId = symbol => {
+        if (!symbol) return null;
+        const target = symbol.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol;
+        const decl = target.declarations && target.declarations[0];
+        if (!decl || ts.isClassDeclaration(decl) || !workspace.hasFile(decl.getSourceFile().fileName)) return null;
+        const emitted = emittedDeclaration(decl);
+        if (emitted) return idOfDeclaration(emitted);
+        const isMember = (ts.isMethodDeclaration(decl) && ts.isClassLike(decl.parent))
+            || (ts.isPropertyDeclaration(decl) && arrowFunctionInitializer(decl.initializer));
+        return isMember ? idOfDeclaration(decl) : null;
+    };
+
     const namespaceStack = [];
     const currentNamespace = () => namespaceStack.join('.');
 
@@ -818,19 +1588,14 @@ function analyzeFile(workspace, workspaceId, program, checker, fileName, diagnos
     });
 
     const addEdge = (sourceId, targetId, kind, metadata) => {
-        // Line AND column in the ID: two same-target calls on one line must not
-        // silently collapse into a single edge.
-        const suffix = metadata && metadata.line
-            ? `@${metadata.line}:${metadata.column ?? '0'}`
-            : '';
-        edges.push({
-            id: `${sourceId}=[${kind}]=>${targetId}${suffix}`,
-            sourceId,
-            targetId,
-            kind,
-            metadata: metadata && Object.keys(metadata).length > 0 ? metadata : undefined,
-        });
+        edges.push(makeEdge(sourceId, targetId, kind, metadata));
     };
+
+    // Components this file registers for every template (`app.component('Name', X)`),
+    // and component tags of its own markup that nothing it can see declares: the
+    // workspace matches one against the other once every file has been read.
+    const componentRegistrations = [];
+    const unboundComponentTags = [];
 
     /** Nearest enclosing emitted declaration to use as a CALLS source. */
     const enclosingDeclarationId = tsNode => {
@@ -903,8 +1668,107 @@ function analyzeFile(workspace, workspaceId, program, checker, fileName, diagnos
         }
     };
 
+    /**
+     * `items.map(format)`, `onClick={save}`, `{ run: save }`: a function handed over
+     * rather than called is a REFERENCES edge from where it is handed over. `symbol` is
+     * given for a shorthand property, whose name is not itself an expression.
+     */
+    const addValueReference = (expression, symbol) => {
+        if (!expression) return;
+        const nameNode = ts.isPropertyAccessExpression(expression) ? expression.name : expression;
+        if (!ts.isIdentifier(nameNode)) return;
+        let base = expression;
+        while (ts.isPropertyAccessExpression(base)) base = base.expression;
+        if (ts.isIdentifier(base)
+            && workspace.isHiddenInTemplate(fileName, base.getStart(sourceFile), base.text)) {
+            return;
+        }
+        let targetId;
+        try {
+            targetId = functionValueTargetId(symbol ?? checker.getSymbolAtLocation(nameNode));
+        } catch {
+            return;
+        }
+        if (!targetId) return;
+        const position = sourceFile.getLineAndCharacterOfPosition(expression.getStart(sourceFile));
+        addEdge(enclosingDeclarationId(expression), targetId, 'REFERENCES', {
+            line: String(position.line + 1),
+            column: String(position.character + 1),
+        });
+    };
+
+    // Options API: what a component declares under `methods` and `computed` is in scope
+    // in its template and on `this` in every other member, which the compiler cannot
+    // see. Only a member written as a method has a node to bind to.
+    const optionsMembers = new Map();
+    const templateRange = workspace.templateRange(fileName);
+    if (templateRange) {
+        for (const statement of sourceFile.statements) {
+            if (!ts.isExportAssignment(statement) || statement.isExportEquals) continue;
+            let options = statement.expression;
+            if (ts.isCallExpression(options)) options = options.arguments[0];
+            if (!options || !ts.isObjectLiteralExpression(options)) continue;
+            for (const option of options.properties) {
+                if (!ts.isPropertyAssignment(option) || !ts.isIdentifier(option.name)
+                    || (option.name.text !== 'methods' && option.name.text !== 'computed')
+                    || !ts.isObjectLiteralExpression(option.initializer)) {
+                    continue;
+                }
+                for (const member of option.initializer.properties) {
+                    if (ts.isMethodDeclaration(member) && ts.isIdentifier(member.name)
+                        && !optionsMembers.has(member.name.text)) {
+                        optionsMembers.set(member.name.text, member);
+                    }
+                }
+            }
+        }
+    }
+    const inTemplate = tsNode => {
+        const start = tsNode.getStart(sourceFile);
+        return start >= templateRange.start && start < templateRange.end;
+    };
+    /** The member a name the compiler could not bind names: a bare name in the template,
+     * or `this.name` in the script. */
+    const optionsMemberOf = expression => {
+        if (optionsMembers.size === 0) return undefined;
+        if (ts.isIdentifier(expression)) {
+            return inTemplate(expression)
+                && !workspace.isHiddenInTemplate(fileName, expression.getStart(sourceFile), expression.text)
+                ? optionsMembers.get(expression.text) : undefined;
+        }
+        return ts.isPropertyAccessExpression(expression)
+            && expression.expression.kind === ts.SyntaxKind.ThisKeyword && !inTemplate(expression)
+            ? optionsMembers.get(expression.name.text) : undefined;
+    };
+
     const visit = tsNode => {
         switch (tsNode.kind) {
+            case ts.SyntaxKind.Identifier: {
+                // `{{ total }}`, `:items="visible"`: the template reads a member without
+                // calling it. A call's own name is the call's to record.
+                if (optionsMembers.size === 0 || !optionsMembers.has(tsNode.text) || !inTemplate(tsNode)) break;
+                const parent = tsNode.parent;
+                if ((ts.isPropertyAccessExpression(parent) && parent.name === tsNode)
+                    || ((ts.isCallExpression(parent) || ts.isNewExpression(parent)) && parent.expression === tsNode)
+                    || (ts.isPropertyAssignment(parent) && parent.name === tsNode)) {
+                    break;
+                }
+                let bound;
+                try {
+                    bound = checker.getSymbolAtLocation(tsNode);
+                } catch {
+                    bound = undefined;
+                }
+                const member = bound ? undefined : optionsMemberOf(tsNode);
+                if (member) {
+                    const position = sourceFile.getLineAndCharacterOfPosition(tsNode.getStart(sourceFile));
+                    addEdge(enclosingDeclarationId(tsNode), idOfDeclaration(member), 'REFERENCES', {
+                        line: String(position.line + 1),
+                        column: String(position.character + 1),
+                    });
+                }
+                break;
+            }
             case ts.SyntaxKind.ModuleDeclaration: {
                 if (tsNode.name) {
                     const moduleName = tsNode.name.getText(sourceFile);
@@ -1023,10 +1887,12 @@ function analyzeFile(workspace, workspaceId, program, checker, fileName, diagnos
                 // only re-export look dependency-free.
                 if (tsNode.moduleSpecifier) {
                     const moduleName = tsNode.moduleSpecifier.getText(sourceFile).replace(/['"]/g, '');
-                    const resolved = resolveToProjectDeclaration(tsNode.moduleSpecifier);
-                    const targetId = resolved
-                        ? `${graphPrefix}${relPath(root, resolved.getSourceFile().fileName)}`
-                        : moduleName;
+                    // A file with no import or export of its own (a template-only Vue
+                    // component, a side-effect script) has no module symbol to bind,
+                    // but the import still resolved to it.
+                    const resolved = resolveToProjectDeclaration(tsNode.moduleSpecifier)?.getSourceFile().fileName
+                        ?? workspace.importedProjectFile(fileName, moduleName);
+                    const targetId = resolved ? moduleIdOf(resolved) : moduleName;
                     const metadata = { moduleSpecifier: moduleName, isFileImport: 'true' };
                     if (tsNode.kind === ts.SyntaxKind.ExportDeclaration) metadata.isReExport = 'true';
                     if (!resolved) metadata.unresolved = 'true'; // external package or unresolvable path
@@ -1045,7 +1911,8 @@ function analyzeFile(workspace, workspaceId, program, checker, fileName, diagnos
                     const callTarget = nameNode.getText(sourceFile);
                     if (callTarget) {
                         const position = sourceFile.getLineAndCharacterOfPosition(tsNode.getStart(sourceFile));
-                        const targetDecl = resolveToProjectDeclaration(nameNode, tsNode);
+                        const targetDecl = resolveToProjectDeclaration(nameNode, tsNode)
+                            ?? optionsMemberOf(expression);
                         const targetId = targetDecl ? idOfDeclaration(targetDecl) : callTarget;
                         const metadata = {
                             callTarget,
@@ -1056,6 +1923,57 @@ function analyzeFile(workspace, workspaceId, program, checker, fileName, diagnos
                         addEdge(enclosingDeclarationId(tsNode), targetId, 'CALLS', metadata);
                     }
                 }
+                for (const argument of tsNode.arguments ?? []) addValueReference(argument);
+                // `app.component('BaseButton', BaseButton)` declares the component for
+                // every template of the application.
+                if (expression && ts.isPropertyAccessExpression(expression)
+                    && expression.name.text === 'component' && tsNode.arguments?.length === 2
+                    && ts.isStringLiteralLike(tsNode.arguments[0]) && ts.isIdentifier(tsNode.arguments[1])) {
+                    let registered;
+                    try {
+                        registered = checker.getSymbolAtLocation(tsNode.arguments[1]);
+                    } catch {
+                        registered = undefined;
+                    }
+                    const targetId = registered ? templateTargetId(registered, true) : null;
+                    if (targetId) componentRegistrations.push({ name: tsNode.arguments[0].text, targetId });
+                }
+                break;
+            }
+            case ts.SyntaxKind.JsxAttribute:
+                if (tsNode.initializer && ts.isJsxExpression(tsNode.initializer)) {
+                    addValueReference(tsNode.initializer.expression);
+                }
+                break;
+            case ts.SyntaxKind.PropertyAssignment:
+                addValueReference(tsNode.initializer);
+                break;
+            case ts.SyntaxKind.ShorthandPropertyAssignment:
+                addValueReference(tsNode.name, checker.getShorthandAssignmentValueSymbol(tsNode));
+                break;
+            case ts.SyntaxKind.ArrayLiteralExpression:
+                for (const element of tsNode.elements) addValueReference(element);
+                break;
+            case ts.SyntaxKind.JsxOpeningElement:
+            case ts.SyntaxKind.JsxSelfClosingElement: {
+                // `<Foo />` renders the component Foo: a CALLS edge, as for `new Foo()`.
+                // A lower-case tag is an intrinsic element, not a symbol.
+                const tagName = tsNode.tagName;
+                const nameNode = ts.isPropertyAccessExpression(tagName) ? tagName.name : tagName;
+                if (!ts.isIdentifier(nameNode)
+                    || (nameNode === tagName && !/^[A-Z_$]/.test(nameNode.text))) {
+                    break;
+                }
+                const targetDecl = resolveToProjectDeclaration(nameNode);
+                const targetId = targetDecl && componentTargetId(targetDecl);
+                if (targetId) {
+                    const position = sourceFile.getLineAndCharacterOfPosition(tsNode.getStart(sourceFile));
+                    addEdge(enclosingDeclarationId(tsNode), targetId, 'CALLS', {
+                        callTarget: tagName.getText(sourceFile),
+                        line: String(position.line + 1),
+                        column: String(position.character + 1),
+                    });
+                }
                 break;
             }
         }
@@ -1063,7 +1981,60 @@ function analyzeFile(workspace, workspaceId, program, checker, fileName, diagnos
     };
 
     visit(sourceFile);
-    return { nodes, edges };
+
+    // Component tags and named event handlers in an embedded file's markup: each is a
+    // use, by the file's module, of whatever that name is bound to in its script.
+    const templateReferences = workspace.templateReferences(fileName);
+    if (templateReferences.length > 0) {
+        const meaning = ts.SymbolFlags.Value | ts.SymbolFlags.Alias;
+        let scope;
+        const lookup = name => {
+            // One lookup per name, where the compiler offers it, instead of a table of
+            // every global for every file.
+            if (typeof checker.resolveName === 'function') {
+                return checker.resolveName(name, sourceFile.endOfFileToken, meaning, false);
+            }
+            if (!scope) {
+                scope = new Map();
+                for (const symbol of checker.getSymbolsInScope(sourceFile.endOfFileToken, meaning)) {
+                    if (!scope.has(symbol.name)) scope.set(symbol.name, symbol);
+                }
+            }
+            return scope.get(name);
+        };
+        for (const reference of templateReferences) {
+            const symbol = reference.names.map(lookup).find(Boolean);
+            let targetId = symbol ? templateTargetId(symbol, reference.component) : null;
+            // `@click="save"` where `save` is one of the component's `methods`.
+            if (!symbol && !reference.component && optionsMembers.has(reference.names[0])) {
+                targetId = idOfDeclaration(optionsMembers.get(reference.names[0]));
+            }
+            const position = sourceFile.getLineAndCharacterOfPosition(reference.offset);
+            const metadata = {
+                callTarget: reference.display,
+                line: String(position.line + 1),
+                column: String(position.character + 1),
+            };
+            // A name the script binds is the script's, whatever it is bound to. Any other
+            // component is one the project declares for every template, if it does.
+            const boundByScript = symbol?.declarations?.some(decl => decl.getSourceFile() === sourceFile);
+            if (!targetId && reference.component && !boundByScript) {
+                const declared = workspace.globalComponentFile(fileName, reference.names);
+                if (declared) {
+                    targetId = moduleIdOf(declared);
+                } else {
+                    unboundComponentTags.push({ names: reference.names, metadata });
+                }
+            }
+            // A tag renders its component. A handler given by name is handed to Vue and
+            // called by nothing written here, as `onClick={save}` is in JSX.
+            if (targetId) {
+                addEdge(`${graphPrefix}${fileRel}`, targetId, reference.component ? 'CALLS' : 'REFERENCES', metadata);
+            }
+        }
+    }
+
+    return { nodes, edges, componentRegistrations, unboundComponentTags };
 }
 
 // ---------------------------------------------------------------------------
@@ -1165,7 +2136,22 @@ async function analyzeWorkspace(workspace, workspaceId, token, progressContext =
         diagnostics.push(workspace.configDiagnostic);
     }
 
+    workspace.beginAnalysis();
+    const nuxtConfig = ['nuxt.config.ts', 'nuxt.config.js', 'nuxt.config.mjs']
+        .map(name => path.join(workspace.rootPath, name)).find(candidate => fs.existsSync(candidate));
+    if (nuxtConfig && !NUXT_COMPONENT_DECLARATIONS.some(
+        relative => fs.existsSync(path.join(workspace.rootPath, relative)))) {
+        diagnostics.push({
+            filePath: nuxtConfig,
+            severity: 'warning',
+            message: 'Nuxt has not generated .nuxt/components.d.ts (run `nuxi prepare`), so a component '
+                + 'a template renders without importing it is not bound.',
+        });
+    }
+
     const rawBuckets = [];
+    const pendingTags = [];
+    const registrations = [];
     const files = workspace.filePaths();
     const total = files.length;
     const progressInterval = Math.max(1, Math.ceil(total / 100));
@@ -1191,6 +2177,9 @@ async function analyzeWorkspace(workspace, workspaceId, token, progressContext =
         // bucket.path is the verbatim filePaths() entry — the same string analyzeFile
         // stamped on each node's filePath and the same string ReplacesFiles must carry.
         rawBuckets.push({ path: file, nodes: result.nodes, edges: result.edges });
+        const moduleId = result.nodes[0]?.id;
+        for (const tag of result.unboundComponentTags ?? []) pendingTags.push({ ...tag, moduleId, edges: result.edges });
+        for (const registration of result.componentRegistrations ?? []) registrations.push({ ...registration, path: file });
         processed++;
         if (progressContext && (processed === total || processed % progressInterval === 0)) {
             await emitAnalysisProgress(progressContext.requestId, workspaceId,
@@ -1198,6 +2187,21 @@ async function analyzeWorkspace(workspace, workspaceId, token, progressContext =
         }
         await breathe(); // let $/cancel land between files
     }
+
+    // A component registered on the application is every template's. Of two
+    // registrations of one name, the file that sorts first wins, whatever was edited last.
+    if (pendingTags.length > 0 && registrations.length > 0) {
+        const registered = new Map();
+        for (const registration of [...registrations].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))) {
+            if (!registered.has(registration.name)) registered.set(registration.name, registration.targetId);
+        }
+        for (const tag of pendingTags) {
+            const name = tag.names.find(candidate => registered.has(candidate));
+            if (name) tag.edges.push(makeEdge(tag.moduleId, registered.get(name), 'CALLS', tag.metadata));
+        }
+    }
+
+    diagnostics.push(...workspace.bundlerDiagnostics.values());
 
     const nodeOwner = computeOwners(rawBuckets, b => b.nodes, n => n.id);
     const edgeOwner = computeOwners(rawBuckets, b => b.edges, e => e.id);

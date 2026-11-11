@@ -1,16 +1,29 @@
 ---
 name: code-context
-description: Use BEFORE grep/Read for C# and TypeScript/JavaScript questions about a symbol's relationships - who calls, implements, or depends on it, the impact of changing or deleting it, which tests cover it - or exact syntax structure. One query on a live index replaces many greps. Not for literal strings, comments, config values, filenames, docs, or non-indexed files (shell, SQL, Python, YAML/JSON, markdown, csproj): use grep/rg.
+description: Use for C#, TypeScript/JavaScript and Vue questions about how symbols relate - who calls, renders, implements, or depends on something, the impact of changing or deleting it, which tests cover it - or exact syntax structure. One query on a live index replaces many greps, so ask it BEFORE grep/Read when those relationships are unknown; skip it for an edit confined to a file you already know. Not for literal strings, comments, config values, filenames, docs, or non-indexed files (shell, SQL, Python, YAML/JSON, markdown, csproj): use grep/rg.
 ---
 
 # CodeContext
 
 **Scope:** the bundled index contains C# (`.cs`) and TypeScript/JavaScript (`.ts`,
-`.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`, `.cjs`) plus JavaScript/TypeScript
-embedded in Vue SFCs (`.vue`). Symbols defined anywhere else — shell scripts, SQL, Python,
-YAML/JSON config, markdown, csproj/MSBuild — are absent by design, so a query for
-them proves nothing; use `rg`. Even in supported languages, `rg` remains the primary
-tool for literal strings, comments, configuration values, filenames, and docs.
+`.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`, `.cjs`) plus Vue SFCs (`.vue`): their
+script blocks and what their templates use from them. Symbols defined anywhere else —
+shell scripts, SQL, Python, YAML/JSON config, markdown, csproj/MSBuild — are absent by
+design, so a query for them proves nothing; use `rg`. Even in supported languages, `rg`
+remains the primary tool for literal strings, comments, configuration values, filenames,
+and docs.
+
+## Choose the tool
+
+- **Query the index** when the answer depends on how symbols relate and you do not know
+  yet: the callers of a helper, the views that render a component, what a signature
+  change or a deletion reaches, which tests touch a symbol.
+- **Read the file** when the edit is local and its scope is clear. A query adds nothing
+  to "put active items first in this handler".
+- **Use `rg`** for filenames, route strings, comments, config values and other literal
+  text, and to cross-check an empty result before a decision rests on it.
+- **Use the [native syntax tree](references/native-syntax.md)** when exact structure
+  matters: overloads, modifiers, spans.
 
 ## Query
 
@@ -20,7 +33,8 @@ codecontext query ContextService --tests    # add static test evidence (off by d
 codecontext query multi Foo Bar             # several identifiers, one round trip, in order
 ```
 
-`query` auto-discovers (or starts) the repo's instance, waits for indexing, and
+`query` auto-discovers (or starts) the repo's instance, waits up to 30 seconds for
+indexing (exit code 3 on timeout; see [operations](references/operations.md)), and
 prints compact agent-oriented text; progress goes to stderr. Options: `--depth N`
 (`0` = cheap identity lookup), `--relation CALLS,REFERENCES`, `--exact`,
 `--limit N` (entries per relationship list, 1-100, default 10), `--external` (include
@@ -109,8 +123,39 @@ anything else, cross-check with `rg -w <Name>`.
     counts names that failed to bind and lists the commonest.
   - **Files in no project.** They bind against the workspace's projects together, so a
     name two projects declare is ambiguous there and is not guessed.
-- **TypeScript/JavaScript** records calls, construction, imports and inheritance. It
-  **does not record** property reads and writes or type references.
+- **TypeScript/JavaScript** records calls, construction, imports, inheritance, and a JSX
+  render of a component (`<Button />`, as `CALLS`). A function handed over rather than
+  called is a `REFERENCES`: as an argument (`items.map(format)`), a JSX attribute
+  (`onClick={save}`), an object property (`{ run: save }`, `{ save }`) or an array
+  element. It **does not record** property reads and writes, type references, a function
+  assigned to a variable or returned, or a class passed as a value.
+- **Vue** files are indexed through their `<script>` blocks, and a component is its file:
+  `query DownloadQueue` matches `components/DownloadQueue.vue`. From the template, a
+  component tag (`<DownloadQueue>`, `<download-queue>`, `<component :is="X">`) and a call
+  in an expression (`{{ format(x) }}`, `@click="save()"`) are each a `CALLS` from the
+  rendering file's module to whatever the script binds that name to. An event handler
+  given by name (`@click="save"`) is a `REFERENCES`, as `onClick={save}` is in JSX. A component tag no script imports binds to what the project
+  declares for every template: the `components.d.ts` that Nuxt (under `.nuxt/`) or
+  `unplugin-vue-components` generates, or `app.component('Name', X)`. In an Options API
+  component, a method under `methods` or `computed` is bound from the template (a call
+  as `CALLS`, a handler by name or a read such as `{{ total }}` as `REFERENCES`) and from
+  `this.name()` in its other members.
+- **Vue templates are blind to these; run `rg -w <Name>`:** an auto-imported component
+  before its declaration file exists (run `nuxi prepare`; status then carries a
+  diagnostic) or whose file is generated somewhere other than the project's directory;
+  Options API `data` and `props`, and a member not written as a method (`save: function
+  () {}`, a `get`/`set` computed); a handler
+  reached through an object (`@click="store.save"`); a `pug` template; a dotted tag
+  (`<Icons.Close>`).
+- **Import aliases** (`@/`, `~/`) resolve from the `tsconfig.json` or `jsconfig.json`
+  nearest the importing file, then the root one, the configs it extends or references,
+  and the `.nuxt/tsconfig.json` Nuxt generates. So `@/` in each package of a monorepo
+  means that package. An alias declared only under `resolve.alias` in `vite.config` or
+  `webpack.config` resolves when its target is written out (a string,
+  `path.resolve(__dirname, 'src')`, `fileURLToPath(new URL('./src', import.meta.url))`).
+  The config is never run, so an alias whose target it computes does not resolve: status
+  names it in a diagnostic, and an import through it is missing from `usedBy` and
+  `fileDependents`.
 
 ## Going deeper
 
