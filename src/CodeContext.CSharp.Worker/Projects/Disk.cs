@@ -3,6 +3,7 @@
 // guard sits. A test fails if the suppression appears anywhere else.
 #pragma warning disable RS0030
 
+using System.Collections.Concurrent;
 using System.Xml;
 using System.Xml.Linq;
 using Microsoft.CodeAnalysis;
@@ -20,6 +21,11 @@ namespace CodeContext.CSharp.Worker.Projects;
 /// instance was given, and everything else is refused, however it is spelled. A refused path
 /// looks like a missing one, so callers need no check of their own and have no way to forget
 /// one. Off Windows nothing is refused.
+///
+/// A link is how a path on a drive reaches a share after all. Inside the repository, where a
+/// link is the repository's to make, a path is followed through links only while each leads
+/// to a place that would itself be read; the link is read, never opened, to find out. Outside
+/// the repository a link is the machine owner's and is taken as it is.
 ///
 /// Normalizing a path counts as reaching the disk: <see cref="Path.GetFullPath(string)"/> asks
 /// the file system for the long form of any path holding a <c>~</c>, and so opens a connection
@@ -43,7 +49,28 @@ public sealed class Disk
     private static readonly StringComparison PathComparison =
         OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
 
+    private const int MaxLinkHops = 40;
+
+    /// <summary>Stand in for a directory in <see cref="_realDirectories"/>; compared by reference.</summary>
+    private static readonly string RefusedMark = new('!', 1);
+    private static readonly string MissingMark = new('?', 1);
+
     private readonly HashSet<string> _shares = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The repository in full form with no trailing separator, or null with none.</summary>
+    private readonly string? _root;
+
+    /// <summary>A directory inside the repository, and where it really is, or a mark.</summary>
+    private readonly ConcurrentDictionary<string, string> _realDirectories = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// A directory, and its entries that are reparse points (true for a directory), from one
+    /// listing; null when it cannot be listed.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, Dictionary<string, bool>?> _reparsePoints = new(StringComparer.OrdinalIgnoreCase);
+
+    private readonly Func<string, Dictionary<string, bool>?> _reparsePointsIn = ReparsePointsIn;
+    private readonly Func<string, bool, string?> _linkTarget = LinkTargetOf;
 
     /// <summary><c>&lt;root&gt;/.codecontext/cache</c>, or null with no root, when nothing may be written.</summary>
     private readonly string? _cacheDirectory;
@@ -54,7 +81,29 @@ public sealed class Disk
         : this(toolchain.All.Prepend(root))
     {
         // In full form, as the host's own path is: short names in a root must not fail the comparison.
-        if (!string.IsNullOrEmpty(root)) _cacheDirectory = Path.Combine(FullPath(root), ".codecontext", "cache");
+        if (string.IsNullOrEmpty(root)) return;
+        var full = FullPath(root);
+        _cacheDirectory = Path.Combine(full, ".codecontext", "cache");
+        _root = Path.TrimEndingDirectorySeparator(full);
+    }
+
+    /// <summary>For tests: a disk whose links are what these say, so a link to a share needs no privilege to make.</summary>
+    internal Disk(
+        string root,
+        ToolchainLocations toolchain,
+        Func<string, Dictionary<string, bool>?> reparsePointsIn,
+        Func<string, bool, string?> linkTarget)
+        : this(root, toolchain)
+    {
+        _reparsePointsIn = reparsePointsIn;
+        _linkTarget = linkTarget;
+    }
+
+    /// <summary>Forgets which directories are links. Called before each request that reads the repository.</summary>
+    public void ForgetLinks()
+    {
+        _realDirectories.Clear();
+        _reparsePoints.Clear();
     }
 
     /// <param name="locations">
@@ -218,8 +267,95 @@ public sealed class Disk
     {
         if (Lexical(path) is not { } full) return true;
         if (!OperatingSystem.IsWindows()) return false;
-        return !IsOnDrive(full) && !(ShareOf(full) is { } share && _shares.Contains(share));
+        return !AllowedAsSpelled(full) || LeadsSomewhereRefused(full);
     }
+
+    private bool AllowedAsSpelled(string full) => IsOnDrive(full) || (ShareOf(full) is { } share && _shares.Contains(share));
+
+    /// <summary>Below the repository, not the repository itself.</summary>
+    private bool InRepository(string full)
+        => _root is not null && full.Length > _root.Length + 1 && full[_root.Length] == Path.DirectorySeparatorChar
+            && full.StartsWith(_root, StringComparison.OrdinalIgnoreCase);
+
+    private bool LeadsSomewhereRefused(string full)
+    {
+        if (!InRepository(full)) return false;
+        var parent = RealDirectory(Path.GetDirectoryName(full)!, 0);
+        if (ReferenceEquals(parent, RefusedMark)) return true;
+        if (ReferenceEquals(parent, MissingMark)) return false;
+        return ReferenceEquals(Followed(Path.Combine(parent, Path.GetFileName(full)), 0), RefusedMark);
+    }
+
+    private static bool IsMark(string value) => ReferenceEquals(value, RefusedMark) || ReferenceEquals(value, MissingMark);
+
+    /// <summary>Where a directory really is: itself, unless a link inside the repository leads elsewhere.</summary>
+    private string RealDirectory(string directory, int hops)
+    {
+        if (_realDirectories.TryGetValue(directory, out var known)) return known;
+        string real;
+        if (!InRepository(directory))
+        {
+            real = directory;
+        }
+        else
+        {
+            var parent = RealDirectory(Path.GetDirectoryName(directory)!, hops);
+            real = IsMark(parent) ? parent : Followed(Path.Combine(parent, Path.GetFileName(directory)), hops);
+        }
+        _realDirectories[directory] = real;
+        return real;
+    }
+
+    /// <summary>An entry whose directory is real: itself, where its link leads, or a mark.</summary>
+    private string Followed(string entry, int hops)
+    {
+        var directory = Path.GetDirectoryName(entry);
+        if (directory is null) return entry;
+        var reparsePoints = _reparsePoints.GetOrAdd(directory, _reparsePointsIn);
+        if (reparsePoints is null) return MissingMark;
+        if (!reparsePoints.TryGetValue(Path.GetFileName(entry), out var isDirectory)) return entry;
+        if (hops >= MaxLinkHops) return RefusedMark;
+
+        string? target;
+        try
+        {
+            target = _linkTarget(entry, isDirectory);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return RefusedMark;
+        }
+
+        // A reparse point of another kind, such as a file kept in the cloud, leads nowhere else.
+        if (target is null) return entry;
+        if (Lexical(target, directory) is not { } full || !AllowedAsSpelled(full)) return RefusedMark;
+        if (!InRepository(full)) return full;
+        var parent = RealDirectory(Path.GetDirectoryName(full)!, hops + 1);
+        return IsMark(parent) ? parent : Followed(Path.Combine(parent, Path.GetFileName(full)), hops + 1);
+    }
+
+    /// <summary>One listing of a directory, which says of each entry whether it is a reparse point without opening it.</summary>
+    private static Dictionary<string, bool>? ReparsePointsIn(string directory)
+    {
+        try
+        {
+            var found = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+            foreach (var entry in new DirectoryInfo(directory).EnumerateFileSystemInfos())
+            {
+                if (entry.Attributes.HasFlag(FileAttributes.ReparsePoint)) found[entry.Name] = entry.Attributes.HasFlag(FileAttributes.Directory);
+            }
+
+            return found;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>What a link says, read from the link and not from where it leads.</summary>
+    private static string? LinkTargetOf(string entry, bool isDirectory)
+        => isDirectory ? new DirectoryInfo(entry).LinkTarget : new FileInfo(entry).LinkTarget;
 
     /// <summary>
     /// What cannot name a file. A path holding the shield as well as a tilde could not be told

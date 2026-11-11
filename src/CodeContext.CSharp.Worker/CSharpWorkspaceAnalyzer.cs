@@ -292,6 +292,7 @@ public sealed class CSharpWorkspaceAnalyzer
     /// <summary>Replaces the workspace file set entirely and reparses everything.</summary>
     public void ReplaceFiles(IReadOnlyList<string> files, CancellationToken ct)
     {
+        _disk.ForgetLinks();
         if (IsFreshBuildOf(files)) return;
         Rebuild(files, reuse: false, ct);
     }
@@ -494,6 +495,7 @@ public sealed class CSharpWorkspaceAnalyzer
     /// changed, which may be a project nothing has read yet, so projects are read again.</summary>
     public void ApplyChanges(IReadOnlyList<FileChangeDto> changes, CancellationToken ct)
     {
+        _disk.ForgetLinks();
         if (changes.Count == 0 && _rootPath is not null)
         {
             Rebuild(_files.ToList(), reuse: true, ct);
