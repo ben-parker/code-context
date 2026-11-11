@@ -1,6 +1,6 @@
 ---
 title: Silent misses found while using the skill on d2-roguelike
-status: open
+status: closed (all eight items addressed in 8efd796)
 date: 2026-10-31
 ---
 

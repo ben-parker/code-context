@@ -9,6 +9,10 @@ root and instance, indexing readiness, and the relevant parser session.
 Use `codecontext list --json` to inspect registrations. Only after that, use
 `codecontext start --detach --path .` for manual lifecycle troubleshooting.
 
+`query` waits at most 30 seconds for indexing. On timeout it prints "Indexing did not
+become ready within 30 seconds" and exits with code 3; check `codecontext status --path .`
+and query again once `indexing.status` is `ready`.
+
 A human can pre-warm the index before agent work with `codecontext init --path .`
 (add `--wait`) so the first query skips the cold-start scan.
 

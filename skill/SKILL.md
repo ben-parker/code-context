@@ -33,7 +33,8 @@ codecontext query ContextService --tests    # add static test evidence (off by d
 codecontext query multi Foo Bar             # several identifiers, one round trip, in order
 ```
 
-`query` auto-discovers (or starts) the repo's instance, waits for indexing, and
+`query` auto-discovers (or starts) the repo's instance, waits up to 30 seconds for
+indexing (exit code 3 on timeout; see [operations](references/operations.md)), and
 prints compact agent-oriented text; progress goes to stderr. Options: `--depth N`
 (`0` = cheap identity lookup), `--relation CALLS,REFERENCES`, `--exact`,
 `--limit N` (entries per relationship list, 1-100, default 10), `--external` (include

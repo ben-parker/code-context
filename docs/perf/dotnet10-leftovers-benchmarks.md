@@ -6,7 +6,7 @@ gathered with `scripts/measure-worker-gc.ps1` unless noted.
 ## Methodology
 
 - **Corpus**: `%TEMP%\cc-repo-copy` — the fixed 199-file / 119-`.cs` corpus used by every
-  perf phase since the .NET 10 upgrade (`DOTNET10_UPGRADE_TASKS.md`).
+  perf phase since the .NET 10 upgrade ([`docs/history/DOTNET10_UPGRADE_TASKS.md`](../history/DOTNET10_UPGRADE_TASKS.md)).
 - **Host**: Native AOT `dotnet publish -c Release -r win-x64 --self-contained` of
   `CodeContext.Api`; workers bundled (csharp = self-contained JIT+R2R).
 - **Workload per run**: cold start (time-to-listening via `/healthz`, time-to-indexed via
