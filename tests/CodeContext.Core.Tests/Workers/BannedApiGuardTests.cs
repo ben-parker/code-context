@@ -13,45 +13,95 @@ public sealed class BannedApiGuardTests
 {
     private const string Rule = "RS0030";
 
+    /// <summary>Every entry of the list. An entry is added or dropped here as well, or a test fails.</summary>
     private static readonly string[] Required =
     [
-        "T:System.IO.File;", "T:System.IO.Directory;", "T:System.IO.FileInfo;", "T:System.IO.DirectoryInfo;",
-        "T:System.IO.FileSystemInfo;", "T:System.IO.FileStream;", "T:System.IO.FileSystemWatcher;",
-        "T:System.IO.MemoryMappedFiles.MemoryMappedFile;", "T:System.IO.RandomAccess;",
-        "T:System.IO.IsolatedStorage.IsolatedStorageFile;", "T:System.IO.Compression.ZipFile;",
-        "T:System.IO.Compression.ZipFileExtensions;", "T:System.Xml.XmlTextWriter;",
-        "M:System.Xml.XmlWriter.Create(System.String);", "M:System.Xml.XmlWriter.Create(System.String,System.Xml.XmlWriterSettings);",
-        "M:System.Xml.XmlDocument.Save(System.String);", "M:System.Xml.Linq.XDocument.Save(System.String);",
-        "M:System.Xml.Linq.XDocument.Save(System.String,System.Xml.Linq.SaveOptions);",
-        "M:System.Xml.Linq.XElement.Save(System.String);", "M:System.Xml.Linq.XElement.Save(System.String,System.Xml.Linq.SaveOptions);",
-        "T:Microsoft.CodeAnalysis.FileSystemExtensions;",
-        "M:System.IO.Path.GetFullPath(System.String);", "M:System.IO.Path.GetFullPath(System.String,System.String);",
-        "M:System.IO.Path.GetRelativePath(System.String,System.String);", "M:System.IO.Path.Exists(System.String);",
-        "M:System.IO.StreamReader.#ctor(System.String);", "M:System.IO.StreamReader.#ctor(System.String,System.Boolean);",
+        "T:System.IO.File;",
+        "T:System.IO.Directory;",
+        "T:System.IO.FileInfo;",
+        "T:System.IO.DirectoryInfo;",
+        "T:System.IO.FileSystemInfo;",
+        "T:System.IO.FileStream;",
+        "T:System.IO.FileSystemWatcher;",
+        "T:System.IO.DriveInfo;",
+        "T:System.IO.MemoryMappedFiles.MemoryMappedFile;",
+        "T:System.IO.Enumeration.FileSystemEnumerable`1;",
+        "T:System.IO.Enumeration.FileSystemEnumerator`1;",
+        "T:System.Diagnostics.FileVersionInfo;",
+        "M:System.IO.Path.GetFullPath(System.String);",
+        "M:System.IO.Path.GetFullPath(System.String,System.String);",
+        "M:System.IO.Path.GetRelativePath(System.String,System.String);",
+        "M:System.IO.Path.Exists(System.String);",
+        "M:System.IO.Path.GetTempFileName;",
+        "M:System.IO.StreamReader.#ctor(System.String);",
+        "M:System.IO.StreamReader.#ctor(System.String,System.Boolean);",
         "M:System.IO.StreamReader.#ctor(System.String,System.IO.FileStreamOptions);",
         "M:System.IO.StreamReader.#ctor(System.String,System.Text.Encoding);",
         "M:System.IO.StreamReader.#ctor(System.String,System.Text.Encoding,System.Boolean);",
         "M:System.IO.StreamReader.#ctor(System.String,System.Text.Encoding,System.Boolean,System.Int32);",
         "M:System.IO.StreamReader.#ctor(System.String,System.Text.Encoding,System.Boolean,System.IO.FileStreamOptions);",
-        "M:System.Xml.XmlReader.Create(System.String);", "M:System.Xml.XmlReader.Create(System.String,System.Xml.XmlReaderSettings);",
+        "M:System.IO.StreamWriter.#ctor(System.String);",
+        "M:System.IO.StreamWriter.#ctor(System.String,System.Boolean);",
+        "M:System.IO.StreamWriter.#ctor(System.String,System.IO.FileStreamOptions);",
+        "M:System.IO.StreamWriter.#ctor(System.String,System.Boolean,System.Text.Encoding);",
+        "M:System.IO.StreamWriter.#ctor(System.String,System.Boolean,System.Text.Encoding,System.Int32);",
+        "M:System.IO.StreamWriter.#ctor(System.String,System.Text.Encoding,System.IO.FileStreamOptions);",
+        "M:System.Xml.XmlReader.Create(System.String);",
+        "M:System.Xml.XmlReader.Create(System.String,System.Xml.XmlReaderSettings);",
         "M:System.Xml.XmlReader.Create(System.String,System.Xml.XmlReaderSettings,System.Xml.XmlParserContext);",
-        "T:System.Xml.XmlTextReader;", "M:System.Xml.XmlDocument.Load(System.String);",
-        "M:System.Xml.Linq.XDocument.Load(System.String);", "M:System.Xml.Linq.XDocument.Load(System.String,System.Xml.Linq.LoadOptions);",
-        "M:System.Xml.Linq.XElement.Load(System.String);", "M:System.Xml.Linq.XElement.Load(System.String,System.Xml.Linq.LoadOptions);",
+        "T:System.Xml.XmlTextReader;",
+        "M:System.Xml.XmlDocument.Load(System.String);",
+        "M:System.Xml.Linq.XDocument.Load(System.String);",
+        "M:System.Xml.Linq.XDocument.Load(System.String,System.Xml.Linq.LoadOptions);",
+        "M:System.Xml.Linq.XElement.Load(System.String);",
+        "M:System.Xml.Linq.XElement.Load(System.String,System.Xml.Linq.LoadOptions);",
+        "M:System.Xml.XPath.XPathDocument.#ctor(System.String);",
+        "M:System.Xml.XPath.XPathDocument.#ctor(System.String,System.Xml.XmlSpace);",
+        "T:System.IO.RandomAccess;",
+        "T:System.IO.IsolatedStorage.IsolatedStorageFile;",
+        "T:System.IO.Compression.ZipFile;",
+        "T:System.IO.Compression.ZipFileExtensions;",
+        "T:System.Xml.XmlTextWriter;",
+        "M:System.Xml.XmlWriter.Create(System.String);",
+        "M:System.Xml.XmlWriter.Create(System.String,System.Xml.XmlWriterSettings);",
+        "M:System.Xml.XmlDocument.Save(System.String);",
+        "M:System.Xml.Linq.XDocument.Save(System.String);",
+        "M:System.Xml.Linq.XDocument.Save(System.String,System.Xml.Linq.SaveOptions);",
+        "M:System.Xml.Linq.XElement.Save(System.String);",
+        "M:System.Xml.Linq.XElement.Save(System.String,System.Xml.Linq.SaveOptions);",
+        "T:Microsoft.CodeAnalysis.FileSystemExtensions;",
         "M:Microsoft.CodeAnalysis.MetadataReference.CreateFromFile(System.String,Microsoft.CodeAnalysis.MetadataReferenceProperties,Microsoft.CodeAnalysis.DocumentationProvider);",
         "M:Microsoft.CodeAnalysis.AssemblyMetadata.CreateFromFile(System.String);",
         "M:Microsoft.CodeAnalysis.ModuleMetadata.CreateFromFile(System.String);",
-        "T:Microsoft.CodeAnalysis.XmlFileResolver;", "T:Microsoft.CodeAnalysis.SourceFileResolver;",
+        "T:Microsoft.CodeAnalysis.XmlFileResolver;",
+        "T:Microsoft.CodeAnalysis.SourceFileResolver;",
         "T:Microsoft.CodeAnalysis.MetadataReferenceResolver;",
         "M:Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions.WithXmlReferenceResolver(Microsoft.CodeAnalysis.XmlReferenceResolver);",
         "M:Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions.WithSourceReferenceResolver(Microsoft.CodeAnalysis.SourceReferenceResolver);",
         "M:Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions.WithMetadataReferenceResolver(Microsoft.CodeAnalysis.MetadataReferenceResolver);",
-        "M:System.Reflection.Assembly.Load(System.String);", "M:System.Reflection.Assembly.Load(System.Reflection.AssemblyName);",
-        "M:System.Reflection.Assembly.Load(System.Byte[]);", "M:System.Reflection.Assembly.Load(System.Byte[],System.Byte[]);",
-        "M:System.Reflection.Assembly.LoadFile(System.String);", "M:System.Reflection.Assembly.LoadFrom(System.String);",
+        "M:System.Reflection.Assembly.Load(System.String);",
+        "M:System.Reflection.Assembly.Load(System.Reflection.AssemblyName);",
+        "M:System.Reflection.Assembly.Load(System.Byte[]);",
+        "M:System.Reflection.Assembly.Load(System.Byte[],System.Byte[]);",
+        "M:System.Reflection.Assembly.LoadFile(System.String);",
+        "M:System.Reflection.Assembly.LoadFrom(System.String);",
         "M:System.Reflection.Assembly.LoadFrom(System.String,System.Byte[],System.Configuration.Assemblies.AssemblyHashAlgorithm);",
         "M:System.Reflection.Assembly.UnsafeLoadFrom(System.String);",
+        "M:System.Reflection.AssemblyName.GetAssemblyName(System.String);",
         "M:System.Runtime.Loader.AssemblyLoadContext.LoadFromAssemblyPath(System.String);",
+        "M:System.Runtime.Loader.AssemblyLoadContext.LoadFromNativeImagePath(System.String,System.String);",
+        "T:System.Runtime.InteropServices.NativeLibrary;",
+        "T:Microsoft.CodeAnalysis.Diagnostics.AnalyzerFileReference;",
+        "T:System.Diagnostics.Process;",
+        "T:System.Net.Http.HttpClient;",
+        "T:System.Net.Http.HttpMessageInvoker;",
+        "T:System.Net.WebClient;",
+        "T:System.Net.WebRequest;",
+        "T:System.Net.Dns;",
+        "T:System.Net.Sockets.Socket;",
+        "T:System.Net.Sockets.TcpClient;",
+        "T:System.Net.Sockets.UdpClient;",
+        "T:System.Net.NetworkInformation.Ping;",
     ];
 
     private static string RepositoryRoot()
@@ -83,14 +133,15 @@ public sealed class BannedApiGuardTests
     }
 
     [Fact]
-    public void EveryBanStaysInTheList()
+    public void TheListIsExactlyTheBansPinnedHere()
     {
         var entries = File.ReadAllLines(Path.Combine(Worker, "BannedSymbols.txt"));
 
-        foreach (var required in Required)
-        {
-            Assert.Contains(entries, entry => entry.StartsWith(required, StringComparison.Ordinal));
-        }
+        var banned = entries
+            .Where(entry => entry.Length > 0 && !entry.StartsWith('#'))
+            .Select(entry => entry[..(entry.IndexOf(';') + 1)]);
+
+        Assert.Equal(Required.Order(StringComparer.Ordinal), banned.Order(StringComparer.Ordinal));
     }
 
     [Fact]

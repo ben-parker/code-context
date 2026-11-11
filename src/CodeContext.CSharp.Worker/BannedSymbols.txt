@@ -12,6 +12,7 @@ T:System.IO.DriveInfo;Use Disk: it refuses paths that would reach the network
 T:System.IO.MemoryMappedFiles.MemoryMappedFile;Use Disk: it refuses paths that would reach the network
 T:System.IO.Enumeration.FileSystemEnumerable`1;Use Disk: it refuses paths that would reach the network
 T:System.IO.Enumeration.FileSystemEnumerator`1;Use Disk: it refuses paths that would reach the network
+T:System.Diagnostics.FileVersionInfo;Use Disk: it refuses paths that would reach the network
 
 # Normalizing a path asks the file system for the long form of anything holding a tilde.
 M:System.IO.Path.GetFullPath(System.String);Use Disk.FullPath: this contacts the host of a path holding a tilde
@@ -27,12 +28,12 @@ M:System.IO.StreamReader.#ctor(System.String,System.Text.Encoding);Use Disk.Open
 M:System.IO.StreamReader.#ctor(System.String,System.Text.Encoding,System.Boolean);Use Disk.OpenRead: it refuses paths that would reach the network
 M:System.IO.StreamReader.#ctor(System.String,System.Text.Encoding,System.Boolean,System.Int32);Use Disk.OpenRead: it refuses paths that would reach the network
 M:System.IO.StreamReader.#ctor(System.String,System.Text.Encoding,System.Boolean,System.IO.FileStreamOptions);Use Disk.OpenRead: it refuses paths that would reach the network
-M:System.IO.StreamWriter.#ctor(System.String);The worker writes nothing to disk
-M:System.IO.StreamWriter.#ctor(System.String,System.Boolean);The worker writes nothing to disk
-M:System.IO.StreamWriter.#ctor(System.String,System.IO.FileStreamOptions);The worker writes nothing to disk
-M:System.IO.StreamWriter.#ctor(System.String,System.Boolean,System.Text.Encoding);The worker writes nothing to disk
-M:System.IO.StreamWriter.#ctor(System.String,System.Boolean,System.Text.Encoding,System.Int32);The worker writes nothing to disk
-M:System.IO.StreamWriter.#ctor(System.String,System.Text.Encoding,System.IO.FileStreamOptions);The worker writes nothing to disk
+M:System.IO.StreamWriter.#ctor(System.String);The worker writes only its state file, through Disk.ReplaceStateFile
+M:System.IO.StreamWriter.#ctor(System.String,System.Boolean);The worker writes only its state file, through Disk.ReplaceStateFile
+M:System.IO.StreamWriter.#ctor(System.String,System.IO.FileStreamOptions);The worker writes only its state file, through Disk.ReplaceStateFile
+M:System.IO.StreamWriter.#ctor(System.String,System.Boolean,System.Text.Encoding);The worker writes only its state file, through Disk.ReplaceStateFile
+M:System.IO.StreamWriter.#ctor(System.String,System.Boolean,System.Text.Encoding,System.Int32);The worker writes only its state file, through Disk.ReplaceStateFile
+M:System.IO.StreamWriter.#ctor(System.String,System.Text.Encoding,System.IO.FileStreamOptions);The worker writes only its state file, through Disk.ReplaceStateFile
 
 M:System.Xml.XmlReader.Create(System.String);Use Disk.LoadXml: this opens the path, or a URL, itself
 M:System.Xml.XmlReader.Create(System.String,System.Xml.XmlReaderSettings);Use Disk.LoadXml: this opens the path, or a URL, itself
@@ -43,6 +44,8 @@ M:System.Xml.Linq.XDocument.Load(System.String);Use Disk.LoadXml: this opens the
 M:System.Xml.Linq.XDocument.Load(System.String,System.Xml.Linq.LoadOptions);Use Disk.LoadXml: this opens the path, or a URL, itself
 M:System.Xml.Linq.XElement.Load(System.String);Use Disk.LoadXml: this opens the path, or a URL, itself
 M:System.Xml.Linq.XElement.Load(System.String,System.Xml.Linq.LoadOptions);Use Disk.LoadXml: this opens the path, or a URL, itself
+M:System.Xml.XPath.XPathDocument.#ctor(System.String);Use Disk.LoadXml: this opens the path, or a URL, itself
+M:System.Xml.XPath.XPathDocument.#ctor(System.String,System.Xml.XmlSpace);Use Disk.LoadXml: this opens the path, or a URL, itself
 
 # The worker writes one file, through Disk.ReplaceStateFile. File and FileStream above cover the
 # usual ways; these are the others that take a path or a handle.
@@ -84,4 +87,16 @@ M:System.Reflection.AssemblyName.GetAssemblyName(System.String);Nothing from a r
 M:System.Runtime.Loader.AssemblyLoadContext.LoadFromAssemblyPath(System.String);Nothing from a repository is loaded
 M:System.Runtime.Loader.AssemblyLoadContext.LoadFromNativeImagePath(System.String,System.String);Nothing from a repository is loaded
 T:System.Runtime.InteropServices.NativeLibrary;Nothing from a repository is loaded
+T:Microsoft.CodeAnalysis.Diagnostics.AnalyzerFileReference;Nothing from a repository is loaded: this runs an analyzer a path names
 T:System.Diagnostics.Process;Nothing from a repository is executed
+
+# Reading a repository never reaches the network, by a path or any other way.
+T:System.Net.Http.HttpClient;The worker never reaches the network
+T:System.Net.Http.HttpMessageInvoker;The worker never reaches the network
+T:System.Net.WebClient;The worker never reaches the network
+T:System.Net.WebRequest;The worker never reaches the network
+T:System.Net.Dns;The worker never reaches the network
+T:System.Net.Sockets.Socket;The worker never reaches the network
+T:System.Net.Sockets.TcpClient;The worker never reaches the network
+T:System.Net.Sockets.UdpClient;The worker never reaches the network
+T:System.Net.NetworkInformation.Ping;The worker never reaches the network
