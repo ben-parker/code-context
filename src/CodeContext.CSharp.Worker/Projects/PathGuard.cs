@@ -3,6 +3,7 @@
 #pragma warning disable RS0030
 
 using System.Collections.Concurrent;
+using System.Text;
 
 namespace CodeContext.CSharp.Worker.Projects;
 
@@ -234,7 +235,8 @@ internal sealed class PathGuard
             if (!reparsePoints.TryGetValue(name, out var isDirectory))
             {
                 // Not a reparse point by this name. A name that could be a second one is asked about.
-                if (!CouldBeASecondName(name)) return Entry.Plain;
+                // So is any name beside a link with a letter past ASCII, which may answer to plain letters.
+                if (!CouldBeASecondName(name) && reparsePoints.Keys.All(static other => Ascii.IsValid(other))) return Entry.Plain;
                 if (_probe.Entry(path) is not { } entry) return Entry.Missing;
                 if (!entry.IsReparsePoint) return Entry.Plain;
                 isDirectory = entry.IsDirectory;
@@ -248,8 +250,12 @@ internal sealed class PathGuard
         }
     }
 
-    /// <summary>A short name, or a name Windows trims before it looks.</summary>
-    private static bool CouldBeASecondName(string name) => name.Contains('~') || name[^1] is '.' or ' ';
+    /// <summary>
+    /// A short name, a name Windows trims before it looks, or a name with a letter past ASCII:
+    /// the file system matches those without regard to case by its own table, which is not
+    /// this runtime's, so only the file system can say what such a name names.
+    /// </summary>
+    private static bool CouldBeASecondName(string name) => name.Contains('~') || name[^1] is '.' or ' ' || !Ascii.IsValid(name);
 
     /// <summary>What cannot name a file. The shield is refused outright: it would come back as a tilde.</summary>
     private static bool IsUsable(string? path)

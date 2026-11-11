@@ -20,7 +20,10 @@
         "C:\\Users\\benparker\\repo\\device": "\\\\?\\UNC\\evil\\share",
         "C:\\Users\\benparker\\repo\\nt": "\\??\\GLOBALROOT\\Device\\Mup\\evil\\share",
         "C:\\Users\\benparker\\repo\\back": "C:\\Users\\BENPAR~1\\repo\\vendor",
-        "C:\\tools\\sdk": "\\\\owner\\share\\sdk"
+        "C:\\tools\\sdk": "\\\\owner\\share\\sdk",
+        "C:\\Users\\benparker\\repo\\up": "C:\\",
+        "C:\\Users\\benparker\\repo\\folded\\lınk": "\\\\evil\\share\\a",
+        "C:\\Users\\benparker\\repo\\folded2\\plain": "\\\\evil\\share\\b"
       },
       "aliases": {
         "C:\\Users\\BENPAR~1": "C:\\Users\\benparker",
@@ -28,7 +31,9 @@
         "C:\\Users\\benparker\\repo\\vendor.": "C:\\Users\\benparker\\repo\\vendor",
         "C:\\Users\\benparker\\repo\\NODE_M~1": "C:\\Users\\benparker\\repo\\node_modules",
         "C:\\Users\\benparker\\repo.": "C:\\Users\\benparker\\repo",
-        "C:\\Users\\benparker.": "C:\\Users\\benparker"
+        "C:\\Users\\benparker.": "C:\\Users\\benparker",
+        "C:\\Users\\benparker\\repo\\folded\\link": "C:\\Users\\benparker\\repo\\folded\\lınk",
+        "C:\\Users\\benparker\\repo\\folded2\\plaın": "C:\\Users\\benparker\\repo\\folded2\\plain"
       },
       "cases": [
         { "path": "C:\\Users\\benparker\\repo\\src\\a.ts", "refused": false, "why": "a file in the repository" },
@@ -70,11 +75,17 @@
         { "path": "C:\\Users\\benparker.\\repo\\src\\a.ts", "refused": false, "why": "such a name above the repository is no fault" },
         { "path": "C:\\Users\\BENPAR~1\\repo\\src\\a.ts", "refused": false, "why": "a short name above the repository is no fault" },
         { "path": "C:\\Users\\benparker\\repo\\NODE_M~1\\left\\index.js", "refused": false, "why": "a short name of a plain directory" },
+        { "path": "C:\\Users\\benparker\\repo\\folded\\link\\x.ts", "refused": true, "why": "a link with a letter past ASCII, by the plain letters the file system folds it to" },
+        { "path": "C:\\Users\\benparker\\repo\\folded2\\plaın\\x.ts", "refused": true, "why": "a link of plain letters, by a letter the file system folds to one of them" },
+        { "path": "C:\\Users\\benparker\\repo\\folded2\\other\\x.ts", "refused": false, "why": "a plain entry beside it" },
         { "path": "C:\\Users\\benparker\\repo\\a\\x.ts", "refused": true, "why": "a link to a link to a share" },
         { "path": "C:\\Users\\benparker\\repo\\loop1\\x.ts", "refused": true, "why": "links that lead to each other" },
         { "path": "C:\\Users\\benparker\\repo\\device\\x.ts", "refused": true, "why": "a link to a device path" },
         { "path": "C:\\Users\\benparker\\repo\\nt\\x.ts", "refused": true, "why": "a link whose text is in the system's own form" },
         { "path": "C:\\Users\\benparker\\repo\\back\\x.ts", "refused": true, "why": "a link that comes back in by a short name" },
+        { "path": "C:\\Users\\benparker\\repo\\up\\Users\\benparker\\repo\\vendor\\x.ts", "refused": true, "why": "out by one link and back in to another" },
+        { "path": "C:\\Users\\benparker\\repo\\up\\Users\\benparker\\repo\\up\\Users\\benparker\\repo\\vendor\\x.ts", "refused": true, "why": "out and back in twice" },
+        { "path": "C:\\Users\\benparker\\repo\\up\\Users\\benparker\\repo\\src\\a.ts", "refused": { "csharp": true, "typescript": false }, "why": "out by a link and back in to a plain file" },
         { "path": "C:\\Users\\benparker\\repo\\node_modules\\pkg\\index.d.ts", "refused": { "csharp": true, "typescript": false }, "why": "a package manager's link" },
         { "path": "C:\\Users\\benparker\\repo\\shared\\x.ts", "refused": { "csharp": true, "typescript": false }, "why": "a link to another drive" },
         { "path": "C:\\Users\\benparker\\repo\\relative\\x.ts", "refused": { "csharp": true, "typescript": false }, "why": "a link by a relative path" },

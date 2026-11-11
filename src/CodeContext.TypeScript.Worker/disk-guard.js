@@ -116,8 +116,17 @@ function createGuard({ platform = process.platform, io } = {}) {
         return found;
     }
 
-    /** A short name, or a name Windows trims before it looks. */
-    const couldBeASecondName = name => name.includes('~') || name.endsWith('.') || name.endsWith(' ');
+    const plainLetters = name => {
+        for (let i = 0; i < name.length; i++) if (name.charCodeAt(i) > 0x7f) return false;
+        return true;
+    };
+
+    /**
+     * A short name, a name Windows trims before it looks, or a name with a letter past
+     * ASCII: the file system matches those without regard to case by its own table, which is
+     * not this language's, so only the file system can say what such a name names.
+     */
+    const couldBeASecondName = name => name.includes('~') || name.endsWith('.') || name.endsWith(' ') || !plainLetters(name);
 
     function expanded(spelled) {
         let known = expansions.get(key(spelled));
@@ -160,6 +169,8 @@ function createGuard({ platform = process.platform, io } = {}) {
         if (names === undefined) {
             try {
                 names = io.links(directory);
+                // A link with a letter past ASCII may answer to a name of plain letters.
+                if (names) names.anyName = [...names].some(name => !plainLetters(name));
             } catch {
                 names = null;
             }
@@ -173,7 +184,7 @@ function createGuard({ platform = process.platform, io } = {}) {
         const names = linksIn(directory);
         if (names === null) return MISSING;
         const entry = path.win32.join(directory, name);
-        if (!names.has(key(name)) && !couldBeASecondName(name)) return entry;
+        if (!names.has(key(name)) && !names.anyName && !couldBeASecondName(name)) return entry;
         let result = followed.get(key(entry));
         if (result === undefined) {
             result = follow(entry, hops);
@@ -215,8 +226,13 @@ function createGuard({ platform = process.platform, io } = {}) {
             const next = step(real, names[i], hops);
             if (typeof next === 'symbol') return next;
             real = next;
-            // A link led out of every repository: from there on the path is the owner's.
-            if (!isRootOrBelow(real)) return path.win32.join(real, ...names.slice(i + 1));
+            // A link led out of every repository. What is left of the path can lead back in,
+            // so the whole of it is judged again from where the link leads.
+            if (!isRootOrBelow(real)) {
+                const rest = names.slice(i + 1);
+                if (rest.length === 0) return real;
+                return hops >= MAX_LINK_HOPS ? REFUSED : resolve(path.win32.join(real, ...rest), hops + 1);
+            }
         }
         return real;
     }
