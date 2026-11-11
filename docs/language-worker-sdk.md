@@ -87,6 +87,27 @@ the worker records their diagnostic. The final notification must report
 buffering graph deltas and does not expose the new generation until its terminal delta
 commits.
 
+## Open only what the owner would
+
+The host approves source files, but a language's own inputs name more paths: a project
+file's imports and references, a config's `extends`, an import in any source file. A
+repository writes all of them. On Windows a path such as `\\host\share\x` makes the
+system authenticate to `host` the moment it is opened, or even normalized, which tells
+that host who indexed the repository. A worker must therefore decide before it touches
+a path, in one place every read goes through:
+
+- Read a path only on a drive letter, or on the share of a location the machine's
+  owner supplied: the root the host sent, the worker's own install, a toolchain
+  directory from the machine's settings. Refuse every other spelling, including
+  `//host/share`, `\\?\UNC\...` and `file://host/...`, and treat a refused path as
+  missing.
+- Inside the repository, follow a link only when what it says leads to such a place.
+  Read the link itself to find out; do not open it.
+- Never load or run code a repository names, and open no network connection.
+
+Off Windows a path does not reach another host, and the bundled workers refuse
+nothing there.
+
 ## Preserve graph ownership
 
 Every emitted node ID, edge ID, and edge source ID must begin with:
@@ -237,5 +258,6 @@ facts.
 
 Test fragmented/adjacent frames, EOF exit, cancellation, crashes/restarts, invalid
 requests, workspace replacement, one-file semantic changes, and protocol range
-fallback. Start CodeContext from a directory unrelated to the install and confirm the
+fallback. Index a repository whose project files and sources name a network share and
+confirm the worker opens nothing there. Start CodeContext from a directory unrelated to the install and confirm the
 worker reaches `ready` in `/api/status`.

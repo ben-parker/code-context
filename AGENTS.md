@@ -102,6 +102,14 @@ workers to save their state when it captures.
 - Worker stdout is protocol-only JSON-RPC with Content-Length framing. Diagnostics go
   to stderr. Workers must exit on stdin EOF and must not register an independent
   CodeContext instance or open a service port.
+- Nothing a repository writes makes a worker reach the network. On Windows, opening
+  `\\host\share` authenticates to that host, so each bundled worker reaches the disk
+  through one guard that refuses a path, or a link inside the repository, leading
+  anywhere but a drive or a share the machine's owner chose: `Projects/Disk.cs` in the
+  C# worker, where `BannedSymbols.txt` makes every other route a compile error, and
+  `disk-guard.js` in the TypeScript worker, installed under `fs` before a compiler is
+  loaded. New worker code that reads a file goes through the guard; the host only
+  walks the root and follows no link.
 - Every worker-owned node ID, edge ID, and edge source ID starts with
   `<parserId>:<workspaceId>:`. IDs are stable semantic identities, not source offsets.
   A worker must replace all facts whose meaning may change and reanalyze semantic
