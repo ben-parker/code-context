@@ -1,0 +1,118 @@
+{
+  "about": "What the workers' disk guards decide on Windows, tested against both: PathGuard (C#) through DiskGuardVectorTests and disk-guard.js through disk-guard.test.js. Each scenario is a made-up disk. 'links' maps a link to the text it holds, as the system reports it. 'aliases' maps a second name for an entry (a short name, or a name Windows trims) to the entry. 'refused' is true or false for both workers, or one answer for each: the C# worker follows no link inside a repository, and the TypeScript worker follows one that leads to a place it would read, as a package manager's links do.",
+  "scenarios": [
+    {
+      "name": "a repository on a drive",
+      "root": "C:\\Users\\benparker\\repo",
+      "allow": ["\\\\tools\\node\\bin\\node.exe"],
+      "links": {
+        "C:\\Users\\benparker\\repo\\vendor": "\\\\evil\\share\\vendor",
+        "C:\\Users\\benparker\\repo\\src\\leaf.ts": "\\\\evil\\share\\leaf.ts",
+        "C:\\Users\\benparker\\repo\\node_modules\\pkg": "C:\\Users\\benparker\\repo\\node_modules\\.store\\pkg@1",
+        "C:\\Users\\benparker\\repo\\shared": "D:\\elsewhere\\shared",
+        "C:\\Users\\benparker\\repo\\relative": "..\\sibling",
+        "C:\\Users\\benparker\\repo\\a": "C:\\Users\\benparker\\repo\\b",
+        "C:\\Users\\benparker\\repo\\b": "\\\\evil\\share\\b",
+        "C:\\Users\\benparker\\repo\\loop1": "C:\\Users\\benparker\\repo\\loop2",
+        "C:\\Users\\benparker\\repo\\loop2": "C:\\Users\\benparker\\repo\\loop1",
+        "C:\\Users\\benparker\\repo\\device": "\\\\?\\UNC\\evil\\share",
+        "C:\\Users\\benparker\\repo\\nt": "\\??\\GLOBALROOT\\Device\\Mup\\evil\\share",
+        "C:\\Users\\benparker\\repo\\back": "C:\\Users\\BENPAR~1\\repo\\vendor",
+        "C:\\tools\\sdk": "\\\\owner\\share\\sdk"
+      },
+      "aliases": {
+        "C:\\Users\\BENPAR~1": "C:\\Users\\benparker",
+        "C:\\Users\\benparker\\repo\\VENDOR~1": "C:\\Users\\benparker\\repo\\vendor",
+        "C:\\Users\\benparker\\repo\\vendor.": "C:\\Users\\benparker\\repo\\vendor",
+        "C:\\Users\\benparker\\repo\\NODE_M~1": "C:\\Users\\benparker\\repo\\node_modules"
+      },
+      "cases": [
+        { "path": "C:\\Users\\benparker\\repo\\src\\a.ts", "refused": false, "why": "a file in the repository" },
+        { "path": "C:/Users/benparker/repo/src/a.ts", "refused": false, "why": "the other separator" },
+        { "path": "C:\\Users\\benparker\\repo", "refused": false, "why": "the repository itself" },
+        { "path": "C:\\Users\\benparker\\repo\\src\\missing.ts", "refused": false, "why": "a file that is not there is only missing" },
+        { "path": "D:\\other\\project\\tsconfig.json", "refused": false, "why": "another drive" },
+
+        { "path": "\\\\evil\\share\\x.json", "refused": true, "why": "a share nobody chose" },
+        { "path": "//evil/share/x.json", "refused": true, "why": "the other separator" },
+        { "path": "\\/evil/share/x.json", "refused": true, "why": "mixed separators" },
+        { "path": "\\\\evil\\share", "refused": true, "why": "the share itself" },
+        { "path": "\\\\evil\\share\\a\\..\\b", "refused": true, "why": "segments to fold" },
+        { "path": "\\\\?\\UNC\\evil\\share\\x.json", "refused": true, "why": "a device path to a share" },
+        { "path": "\\\\.\\UNC\\evil\\share\\x.json", "refused": true, "why": "the other device prefix" },
+        { "path": "\\\\?\\C:\\Users\\benparker\\repo\\src\\a.ts", "refused": true, "why": "a device path is not taken at its word" },
+        { "path": "\\\\evil@80\\share\\x.json", "refused": true, "why": "WebDAV by port" },
+        { "path": "\\\\evil@SSL\\DavWWWRoot\\x.json", "refused": true, "why": "WebDAV over TLS" },
+        { "path": "\\\\127.0.0.1\\C$\\Users\\benparker\\repo\\src\\a.ts", "refused": true, "why": "this machine, by its share" },
+        { "path": "", "refused": true, "why": "nothing" },
+
+        { "path": "\\\\tools\\node\\lib\\x.js", "refused": false, "why": "the share of a place the owner chose" },
+        { "path": "\\\\TOOLS\\Node\\lib\\x.js", "refused": false, "why": "in any case" },
+        { "path": "\\\\tools\\other\\x.js", "refused": true, "why": "another share of that host" },
+
+        { "path": "C:\\Users\\benparker\\repo\\vendor\\lib\\x.ts", "refused": true, "why": "through a link to a share" },
+        { "path": "C:\\Users\\benparker\\repo\\vendor", "refused": true, "why": "the link itself" },
+        { "path": "C:\\Users\\benparker\\repo\\src\\leaf.ts", "refused": true, "why": "a file that is a link to a share" },
+        { "path": "C:\\Users\\benparker\\repo\\src\\..\\vendor\\x.ts", "refused": true, "why": "reached by folding segments" },
+        { "path": "C:\\USERS\\BENPARKER\\REPO\\VENDOR\\x.ts", "refused": true, "why": "in another case" },
+
+        { "path": "C:\\Users\\benparker\\repo\\VENDOR~1\\x.ts", "refused": true, "why": "the link by its short name" },
+        { "path": "C:\\Users\\benparker\\repo\\vendor.\\x.ts", "refused": true, "why": "the link by a name Windows trims" },
+        { "path": "C:\\Users\\benparker\\repo\\vendor::$INDEX_ALLOCATION\\x.ts", "refused": true, "why": "the link by a stream of it" },
+        { "path": "C:\\Users\\benparker\\repo\\vendor:$I30:$INDEX_ALLOCATION\\x.ts", "refused": true, "why": "the link by a named stream" },
+        { "path": "C:\\Users\\BENPAR~1\\repo\\vendor\\x.ts", "refused": true, "why": "into the repository by a short name above it" },
+        { "path": "C:\\Users\\BENPAR~1\\repo\\VENDOR~1\\x.ts", "refused": true, "why": "both at once" },
+        { "path": "C:\\Users\\BENPAR~1\\repo\\src\\a.ts", "refused": false, "why": "a short name above the repository is no fault" },
+        { "path": "C:\\Users\\benparker\\repo\\NODE_M~1\\left\\index.js", "refused": false, "why": "a short name of a plain directory" },
+
+        { "path": "C:\\Users\\benparker\\repo\\a\\x.ts", "refused": true, "why": "a link to a link to a share" },
+        { "path": "C:\\Users\\benparker\\repo\\loop1\\x.ts", "refused": true, "why": "links that lead to each other" },
+        { "path": "C:\\Users\\benparker\\repo\\device\\x.ts", "refused": true, "why": "a link to a device path" },
+        { "path": "C:\\Users\\benparker\\repo\\nt\\x.ts", "refused": true, "why": "a link whose text is in the system's own form" },
+        { "path": "C:\\Users\\benparker\\repo\\back\\x.ts", "refused": true, "why": "a link that comes back in by a short name" },
+
+        { "path": "C:\\Users\\benparker\\repo\\node_modules\\pkg\\index.d.ts", "refused": { "csharp": true, "typescript": false }, "why": "a package manager's link" },
+        { "path": "C:\\Users\\benparker\\repo\\shared\\x.ts", "refused": { "csharp": true, "typescript": false }, "why": "a link to another drive" },
+        { "path": "C:\\Users\\benparker\\repo\\relative\\x.ts", "refused": { "csharp": true, "typescript": false }, "why": "a link by a relative path" },
+
+        { "path": "C:\\tools\\sdk\\ref\\System.Runtime.dll", "refused": false, "why": "a link outside the repository is the owner's" }
+      ]
+    },
+    {
+      "name": "a repository that is a whole drive",
+      "root": "X:\\",
+      "links": { "X:\\vendor": "\\\\evil\\share\\vendor" },
+      "aliases": {},
+      "cases": [
+        { "path": "X:\\src\\a.ts", "refused": false, "why": "a file in the repository" },
+        { "path": "X:\\vendor\\x.ts", "refused": true, "why": "through a link to a share" },
+        { "path": "X:\\vendor", "refused": true, "why": "the link itself" }
+      ]
+    },
+    {
+      "name": "a repository on a share",
+      "root": "\\\\files\\team\\repo",
+      "links": { "\\\\files\\team\\repo\\vendor": "\\\\evil\\share\\vendor" },
+      "aliases": {},
+      "cases": [
+        { "path": "\\\\files\\team\\repo\\src\\a.ts", "refused": false, "why": "a file in the repository" },
+        { "path": "\\\\files\\team\\other\\tsconfig.json", "refused": false, "why": "elsewhere on its share" },
+        { "path": "\\\\files\\other\\x", "refused": true, "why": "another share of that host" },
+        { "path": "\\\\evil\\team\\repo\\src\\a.ts", "refused": true, "why": "the same share name on another host" },
+        { "path": "\\\\files\\team\\repo\\vendor\\x.ts", "refused": true, "why": "through a link to another share" }
+      ]
+    },
+    {
+      "name": "a repository the host named by a short name",
+      "root": "C:\\Users\\BENPAR~1\\repo",
+      "links": { "C:\\Users\\benparker\\repo\\vendor": "\\\\evil\\share\\vendor" },
+      "aliases": { "C:\\Users\\BENPAR~1": "C:\\Users\\benparker" },
+      "cases": [
+        { "path": "C:\\Users\\BENPAR~1\\repo\\src\\a.ts", "refused": false, "why": "as the host spells it" },
+        { "path": "C:\\Users\\benparker\\repo\\src\\a.ts", "refused": false, "why": "as the disk spells it" },
+        { "path": "C:\\Users\\BENPAR~1\\repo\\vendor\\x.ts", "refused": true, "why": "the link, as the host spells the repository" },
+        { "path": "C:\\Users\\benparker\\repo\\vendor\\x.ts", "refused": true, "why": "the link, as the disk spells it" }
+      ]
+    }
+  ]
+}

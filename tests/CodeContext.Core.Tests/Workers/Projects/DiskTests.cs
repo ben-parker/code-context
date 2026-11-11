@@ -278,125 +278,110 @@ public sealed class DiskTests : IDisposable
         Assert.Equal([real], On(_directory).RealDirectories(_directory));
     }
 
-    /// <summary>A disk over <c>C:\repo</c> whose links are these, so a link to a share needs no privilege to make.</summary>
-    private static Disk WithLinks(Dictionary<string, string?> links, List<string>? listed = null)
-        => new(
-            @"C:\repo",
-            NoToolchain,
-            directory =>
-            {
-                listed?.Add(directory);
-                return links.Keys
-                    .Where(link => string.Equals(Path.GetDirectoryName(link), directory, StringComparison.OrdinalIgnoreCase))
-                    .ToDictionary(link => Path.GetFileName(link), _ => true, StringComparer.OrdinalIgnoreCase);
-            },
-            (entry, _) => links.First(link => string.Equals(link.Key, entry, StringComparison.OrdinalIgnoreCase)).Value);
-
-    [WindowsFact]
-    public void ALinkInTheRepositoryThatLeadsToAShareIsRefusedWhereverItSits()
+    /// <summary>Makes a junction, which needs no privilege, and returns its path.</summary>
+    private string Junction(string name, string target)
     {
-        var listed = new List<string>();
-        var disk = WithLinks(
-            new()
-            {
-                [@"C:\repo\vendor"] = @"\\evil\share\vendor",
-                [@"C:\repo\src\Leaf.cs"] = @"\\evil\share\Leaf.cs",
-            },
-            listed);
+        var link = Path.Combine(_directory, name);
+        using var mklink = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(
+            "cmd.exe", $"/c mklink /J \"{link}\" \"{target}\"") { CreateNoWindow = true, UseShellExecute = false, RedirectStandardOutput = true })!;
+        mklink.StandardOutput.ReadToEnd();
+        mklink.WaitForExit();
+        Assert.Equal(0, mklink.ExitCode);
+        return link;
+    }
 
-        Assert.True(Refused(disk, @"C:\repo\vendor\lib\X.cs"));
-        Assert.True(Refused(disk, @"C:\repo\vendor"));
-        Assert.True(Refused(disk, @"C:\repo\src\Leaf.cs"));
-        Assert.True(Refused(disk, @"C:\repo\src\..\vendor\X.cs"));
-        Assert.False(Refused(disk, @"C:\repo\src\Real.cs"));
-        Assert.False(disk.FileExists(@"C:\repo\vendor\lib\X.cs"));
-        Assert.Throws<FileNotFoundException>(() => disk.ReadAllText(@"C:\repo\src\Leaf.cs"));
-        // Nothing on the share was looked at to decide.
-        Assert.DoesNotContain(listed, directory => directory.StartsWith(@"\\", StringComparison.Ordinal));
+    /// <summary>The short name the volume gave an entry, or null where it gives none.</summary>
+    private static string? ShortNameOf(string path)
+    {
+        using var cmd = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(
+            "cmd.exe", $"/c for %I in (\"{path}\") do @echo %~snxI") { CreateNoWindow = true, UseShellExecute = false, RedirectStandardOutput = true })!;
+        var name = cmd.StandardOutput.ReadToEnd().Trim();
+        cmd.WaitForExit();
+        return name.Length > 0 && !string.Equals(name, Path.GetFileName(path), StringComparison.OrdinalIgnoreCase) ? name : null;
     }
 
     [WindowsFact]
-    public void ALinkToADriveIsFollowed()
+    public void ALinkInTheRepositoryIsNotFollowedByAnyOfItsNames()
     {
-        var disk = WithLinks(new()
-        {
-            [@"C:\repo\packages\Lib"] = @"C:\repo\.store\Lib.1.0",
-            [@"C:\repo\shared"] = @"D:\elsewhere\shared",
-            [@"C:\repo\relative"] = @"..\sibling",
-            [@"C:\repo\cloud.cs"] = null,
-        });
-
-        Assert.False(Refused(disk, @"C:\repo\packages\Lib\Lib.dll"));
-        Assert.False(Refused(disk, @"C:\repo\shared\X.cs"));
-        Assert.False(Refused(disk, @"C:\repo\relative\X.cs"));
-        // A reparse point that is not a link: a file kept in the cloud, say.
-        Assert.False(Refused(disk, @"C:\repo\cloud.cs"));
-    }
-
-    [WindowsFact]
-    public void ALinkThroughAnotherLinkToAShareIsRefusedAndALoopEnds()
-    {
-        var disk = WithLinks(new()
-        {
-            [@"C:\repo\a"] = @"C:\repo\b",
-            [@"C:\repo\b"] = @"\\evil\share\b",
-            [@"C:\repo\device"] = @"\\?\UNC\evil\share",
-            [@"C:\repo\loop1"] = @"C:\repo\loop2",
-            [@"C:\repo\loop2"] = @"C:\repo\loop1",
-        });
-
-        Assert.True(Refused(disk, @"C:\repo\a\X.cs"));
-        Assert.True(Refused(disk, @"C:\repo\device\X.cs"));
-        Assert.True(Refused(disk, @"C:\repo\loop1\X.cs"));
-    }
-
-    [WindowsFact]
-    public void ALinkOutsideTheRepositoryIsTheOwnersAndIsNotLookedAt()
-    {
-        var listed = new List<string>();
-        var disk = WithLinks(new() { [@"C:\tools\sdk"] = @"\\owner\share\sdk" }, listed);
-
-        Assert.False(Refused(disk, @"C:\tools\sdk\ref\System.Runtime.dll"));
-        Assert.False(Refused(disk, @"C:\repo"));
-        Assert.Empty(listed);
-    }
-
-    [WindowsFact]
-    public void LinksAreLookedAtOncePerDirectoryUntilForgotten()
-    {
-        var listed = new List<string>();
-        var disk = WithLinks([], listed);
-
-        Refused(disk, @"C:\repo\src\A.cs");
-        Refused(disk, @"C:\repo\src\B.cs");
-        Assert.Equal([@"C:\repo", @"C:\repo\src"], listed);
-
-        disk.ForgetLinks();
-        Refused(disk, @"C:\repo\src\C.cs");
-        Assert.Equal([@"C:\repo", @"C:\repo\src", @"C:\repo", @"C:\repo\src"], listed);
-    }
-
-    [WindowsFact]
-    public void AJunctionInTheRepositoryToADriveIsRead()
-    {
+        // The decisions are in DiskGuardVectorTests, over a made-up disk. This is the real one.
         var real = Directory.CreateDirectory(Path.Combine(_directory, "real")).FullName;
         File.WriteAllText(Path.Combine(real, "held.txt"), "held");
-        var link = Path.Combine(_directory, "link");
-        using (var mklink = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(
-            "cmd.exe", $"/c mklink /J \"{link}\" \"{real}\"") { CreateNoWindow = true, UseShellExecute = false })!)
-        {
-            mklink.WaitForExit();
-            Assert.Equal(0, mklink.ExitCode);
-        }
-
+        var link = Junction("a long name for a link", real);
         try
         {
-            Assert.Equal("held", On(_directory).ReadAllText(Path.Combine(link, "held.txt")));
+            var disk = On(_directory);
+
+            Assert.Equal("held", disk.ReadAllText(Path.Combine(real, "held.txt")));
+            Assert.False(disk.FileExists(Path.Combine(link, "held.txt")));
+            Assert.False(disk.DirectoryExists(link));
+            Assert.Throws<FileNotFoundException>(() => disk.ReadAllText(Path.Combine(link, "held.txt")));
+            Assert.False(disk.FileExists(Path.Combine(link + "::$INDEX_ALLOCATION", "held.txt")));
+            Assert.False(disk.FileExists(Path.Combine(link + ".", "held.txt")));
+            // Where the volume keeps short names, the link answers to one, which no listing shows.
+            if (ShortNameOf(link) is { } shortName)
+            {
+                Assert.True(File.Exists(Path.Combine(_directory, shortName, "held.txt")));
+                Assert.False(disk.FileExists(Path.Combine(_directory, shortName, "held.txt")));
+            }
         }
         finally
         {
             Directory.Delete(link);
         }
+    }
+
+    [WindowsFact]
+    public void ALinkOutsideTheRepositoryIsTheOwners()
+    {
+        var repository = Directory.CreateDirectory(Path.Combine(_directory, "repository")).FullName;
+        var real = Directory.CreateDirectory(Path.Combine(_directory, "real")).FullName;
+        File.WriteAllText(Path.Combine(real, "held.txt"), "held");
+        var link = Junction("link", real);
+        try
+        {
+            Assert.Equal("held", On(repository).ReadAllText(Path.Combine(link, "held.txt")));
+        }
+        finally
+        {
+            Directory.Delete(link);
+        }
+    }
+
+    [WindowsFact]
+    public void TheStandInForATildeNamesNoFile()
+    {
+        var disk = On(_directory);
+
+        // It would come back from normalizing as a tilde, and so as another name.
+        Assert.True(Refused(disk, Path.Combine(_directory, "x1", "held.txt")));
+        Assert.True(Refused(disk, Path.Combine(_directory, "x~1", "held.txt")));
+    }
+
+    [Fact]
+    public void APatternThatNamesAnotherDirectoryFindsNothing()
+    {
+        Directory.CreateDirectory(Path.Combine(_directory, "sub"));
+        File.WriteAllText(Path.Combine(_directory, "sub", "held.txt"), "held");
+        var disk = On(_directory);
+
+        Assert.Single(disk.Files(Path.Combine(_directory, "sub"), "*.txt"));
+        Assert.Empty(disk.Files(_directory, "sub/*.txt"));
+        Assert.Empty(disk.Files(_directory, @"sub\*.txt"));
+        Assert.Empty(disk.Files(_directory, @"..\*"));
+    }
+
+    [Fact]
+    public void AnAssemblyInTheRepositoryIsReadWholeSoRoslynOpensNothingBesideIt()
+    {
+        var inside = Path.Combine(_directory, "Held.dll");
+        File.Copy(typeof(object).Assembly.Location, inside);
+
+        var reference = (Microsoft.CodeAnalysis.PortableExecutableReference)On(_directory).Reference(inside);
+        File.Delete(inside);
+
+        // From the bytes: the file is gone, and with it anything Roslyn could have opened beside it.
+        Assert.NotNull(reference.GetMetadata());
+        Assert.Equal(inside, reference.FilePath);
     }
 
     [Fact]

@@ -14,142 +14,102 @@ const { createGuard, install } = require(path.join(workerDirectory, 'disk-guard.
 
 const B = String.fromCharCode(92);
 const win = text => text.split('/').join(B);
+const lower = text => text.toLowerCase();
 
-/** A guard on Windows over a made-up disk: `links` maps a path to where it leads. */
-function windowsGuard(links = {}) {
-    const lowered = new Map(Object.entries(links).map(([from, to]) => [win(from).toLowerCase(), win(to)]));
-    const looked = [];
+const { scenarios } = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'Shared', 'disk-guard-vectors.json'), 'utf8'));
+
+/** A guard on Windows over the made-up disk of a scenario, and every path it asked that disk about. */
+function guardOver(scenario) {
+    const links = new Map(Object.entries(scenario.links ?? {}).map(([link, text]) => [lower(link), text]));
+    const aliases = new Map(Object.entries(scenario.aliases ?? {}).map(([alias, entry]) => [lower(alias), entry]));
+    // A path as the disk spells it: each second name replaced by the entry it names.
+    const real = spelled => {
+        const root = path.win32.parse(spelled).root;
+        let current = root;
+        for (const name of spelled.slice(root.length).split(B).filter(Boolean)) {
+            current = path.win32.join(current, name);
+            current = aliases.get(lower(current)) ?? current;
+        }
+        return current;
+    };
+    const asked = [];
     const guard = createGuard({
         platform: 'win32',
         io: {
             links: directory => {
-                looked.push(directory);
-                return new Set([...lowered.keys()]
-                    .filter(link => path.win32.dirname(link) === directory.toLowerCase())
+                asked.push(directory);
+                const listed = lower(real(directory));
+                return new Set([...links.keys()]
+                    .filter(link => path.win32.dirname(link) === listed)
                     .map(link => path.win32.basename(link)));
             },
             lstat: entry => {
-                looked.push(entry);
-                return lowered.has(entry.toLowerCase()) ? { isSymbolicLink: () => true } : undefined;
+                asked.push(entry);
+                return { isSymbolicLink: () => links.has(lower(real(entry))) };
             },
-            readlink: entry => lowered.get(entry.toLowerCase()),
+            readlink: entry => links.get(lower(real(entry))),
+            expand: spelled => {
+                asked.push(spelled);
+                return real(spelled);
+            },
         },
     });
-    guard.looked = looked;
-    return guard;
+    for (const location of scenario.allow ?? []) guard.allow(location);
+    guard.addRoot(scenario.root);
+    return { guard, asked };
 }
 
-test('a drive path is read and every spelling of a share is refused', () => {
-    const guard = windowsGuard();
-    guard.addRoot(win('C:/repo'));
+for (const scenario of scenarios) {
+    test(`vectors: ${scenario.name}`, () => {
+        const { guard, asked } = guardOver(scenario);
 
-    assert.equal(guard.refused(win('C:/repo/src/a.ts')), false);
-    assert.equal(guard.refused('C:/repo/src/a.ts'), false);
-    for (const spelling of [
-        win('//evil/share/x.json'),
-        '//evil/share/x.json',
-        win('/') + '/evil/share/x.json',
-        win('//evil/share'),
-        win('//evil/share/a/../b'),
-        win('//?/UNC/evil/share/x.json'),
-        win('//./UNC/evil/share/x.json'),
-        win('//?/C:/repo/src/a.ts'),
-        win('//evil@80/share/x.json'),
-        win('//evil@SSL/DavWWWRoot/x.json'),
-        win('//127.0.0.1/C$/repo/src/a.ts'),
-    ]) {
-        assert.equal(guard.refused(spelling), true, spelling);
-    }
-});
+        for (const { path: given, refused, why } of scenario.cases) {
+            const expected = typeof refused === 'boolean' ? refused : refused.typescript;
+            assert.equal(guard.refused(given), expected, `${why}: ${given}`);
+        }
+        // No share nobody chose was looked at to decide.
+        assert.deepEqual(asked.filter(looked => lower(looked).startsWith(B + B + 'evil')), []);
+    });
+}
 
 test('a share is refused when it is named by a URL or by bytes', () => {
-    const guard = windowsGuard();
+    const { guard } = guardOver({ root: win('C:/repo') });
 
     assert.equal(guard.refused(new URL('file://evil/share/x.json')), true);
+    assert.equal(guard.refused({ href: 'file://evil/share/x.json', protocol: 'file:' }), true);
     assert.equal(guard.refused(Buffer.from(win('//evil/share/x.json'))), true);
+    assert.equal(guard.refused(new Uint8Array(Buffer.from(win('//evil/share/x.json')))), true);
     assert.equal(guard.refused(new URL('file:///C:/repo/a.ts')), false);
     assert.equal(guard.refused(Buffer.from(win('C:/repo/a.ts'))), false);
 });
 
 test('what cannot name a file is refused, and what is no path is left alone', () => {
-    const guard = windowsGuard();
+    const { guard } = guardOver({ root: win('C:/repo') });
 
-    assert.equal(guard.refused(''), true);
     assert.equal(guard.refused('C:/a\0b'), true);
     assert.equal(guard.refused(3), false);
     assert.equal(guard.refused(undefined), false);
 });
 
-test('the share of the repository and of a place the owner chose are read, and no other', () => {
-    const guard = windowsGuard();
-    guard.addRoot(win('//files/team/repo'));
-    guard.allow(win('//tools/node/bin/node.exe'));
-
-    assert.equal(guard.refused(win('//files/team/repo/src/a.ts')), false);
-    assert.equal(guard.refused(win('//FILES/Team/other/tsconfig.json')), false);
-    assert.equal(guard.refused(win('//tools/node/lib')), false);
-    assert.equal(guard.refused(win('//files/other/x')), true);
-    assert.equal(guard.refused(win('//evil/team/repo')), true);
-});
-
-test('a link inside the repository that leads to a share is refused, wherever it sits in the path', () => {
-    const guard = windowsGuard(
-        { 'C:/repo/vendor': '//evil/share/vendor', 'C:/repo/src/leaf.ts': '//evil/share/leaf.ts' });
-    guard.addRoot(win('C:/repo'));
-
-    assert.equal(guard.refused(win('C:/repo/vendor/lib/x.ts')), true);
-    assert.equal(guard.refused(win('C:/repo/vendor')), true);
-    assert.equal(guard.refused(win('C:/repo/src/leaf.ts')), true);
-    assert.equal(guard.refused(win('C:/repo/src/missing.ts')), false);
-    // Nothing on the share was looked at to decide.
-    assert.deepEqual(guard.looked.filter(entry => entry.startsWith(B + B)), []);
-});
-
-test('a link to a drive is followed, as a package manager\'s links are', () => {
-    const guard = windowsGuard(
-        {
-            'C:/repo/node_modules/pkg': 'C:/repo/node_modules/.pnpm/pkg@1/node_modules/pkg',
-            'C:/repo/shared': 'D:/elsewhere/shared',
-            'C:/repo/relative': '../sibling',
-        });
-    guard.addRoot(win('C:/repo'));
-
-    assert.equal(guard.refused(win('C:/repo/node_modules/pkg/index.d.ts')), false);
-    assert.equal(guard.refused(win('C:/repo/shared/x.ts')), false);
-    assert.equal(guard.refused(win('C:/repo/relative/x.ts')), false);
-});
-
-test('a link that leads through another link to a share is refused, and a loop of links ends', () => {
-    const guard = windowsGuard({
-        'C:/repo/a': 'C:/repo/b',
-        'C:/repo/b': '//evil/share/b',
-        'C:/repo/loop1': 'C:/repo/loop2',
-        'C:/repo/loop2': 'C:/repo/loop1',
-    });
-    guard.addRoot(win('C:/repo'));
-
-    assert.equal(guard.refused(win('C:/repo/a/x.ts')), true);
-    assert.equal(guard.refused(win('C:/repo/loop1/x.ts')), true);
-});
-
-test('links are looked at again after forget', () => {
-    const guard = windowsGuard();
-    guard.addRoot(win('C:/repo'));
+test('a directory is asked about once until forget', () => {
+    const { guard, asked } = guardOver({ root: win('C:/repo') });
+    const before = asked.length;
     assert.equal(guard.refused(win('C:/repo/dir/x.ts')), false);
-    const first = guard.looked.length;
+    const first = asked.length - before;
     assert.ok(first > 0);
 
     // A second path in the same directory costs no look at the disk.
     guard.refused(win('C:/repo/dir/y.ts'));
-    assert.equal(guard.looked.length, first);
+    assert.equal(asked.length - before, first);
 
     guard.forget();
     guard.refused(win('C:/repo/dir/z.ts'));
-    assert.equal(guard.looked.length, first * 2);
+    assert.equal(asked.length - before, first * 2);
 });
 
 test('off Windows nothing is refused', () => {
-    const guard = createGuard({ platform: 'linux', io: { lstat: () => assert.fail('no look is needed'), readlink: () => '' } });
+    const never = () => assert.fail('no look is needed');
+    const guard = createGuard({ platform: 'linux', io: { links: never, lstat: never, readlink: never, expand: never } });
     guard.addRoot('/home/me/repo');
 
     assert.equal(guard.refused('//evil/share/x.json'), false);
@@ -214,6 +174,10 @@ test('installed, every way into fs treats a share as missing', onWindows, async 
     const error = await new Promise(resolve => fs.readFile(share + 'x.json', resolve));
     assert.equal(error.code, 'ENOENT');
     assert.equal(await new Promise(resolve => fs.exists(share + 'x.json', resolve)), false);
+    // The forms util.promisify takes are guarded as well.
+    assert.equal(await require('node:util').promisify(fs.exists)(share + 'x.json'), false);
+    await assert.rejects(require('node:util').promisify(fs.readFile)(share + 'x.json'), { code: 'ENOENT' });
+    assert.throws(() => fs.readFileSync(new Uint8Array(Buffer.from(share + 'x.json'))), { code: 'ENOENT' });
 });
 
 test('installed, a file on a drive is still read every way', onWindows, async () => {

@@ -79,6 +79,8 @@ public sealed class BannedApiGuardTests
         "M:Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions.WithXmlReferenceResolver(Microsoft.CodeAnalysis.XmlReferenceResolver);",
         "M:Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions.WithSourceReferenceResolver(Microsoft.CodeAnalysis.SourceReferenceResolver);",
         "M:Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions.WithMetadataReferenceResolver(Microsoft.CodeAnalysis.MetadataReferenceResolver);",
+        "M:Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions.WithStrongNameProvider(Microsoft.CodeAnalysis.StrongNameProvider);",
+        "M:Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions.WithCryptoKeyFile(System.String);",
         "M:System.Reflection.Assembly.Load(System.String);",
         "M:System.Reflection.Assembly.Load(System.Reflection.AssemblyName);",
         "M:System.Reflection.Assembly.Load(System.Byte[]);",
@@ -93,6 +95,8 @@ public sealed class BannedApiGuardTests
         "T:System.Runtime.InteropServices.NativeLibrary;",
         "T:Microsoft.CodeAnalysis.Diagnostics.AnalyzerFileReference;",
         "T:System.Diagnostics.Process;",
+        "T:System.Runtime.InteropServices.DllImportAttribute;",
+        "T:System.Runtime.InteropServices.LibraryImportAttribute;",
         "T:System.Net.Http.HttpClient;",
         "T:System.Net.Http.HttpMessageInvoker;",
         "T:System.Net.WebClient;",
@@ -102,6 +106,8 @@ public sealed class BannedApiGuardTests
         "T:System.Net.Sockets.TcpClient;",
         "T:System.Net.Sockets.UdpClient;",
         "T:System.Net.NetworkInformation.Ping;",
+        "T:System.IO.Pipes.NamedPipeClientStream;",
+        "T:System.Xml.XmlUrlResolver;",
     ];
 
     private static string RepositoryRoot()
@@ -163,7 +169,8 @@ public sealed class BannedApiGuardTests
             .Select(path => Path.GetFileName(path))
             .Order(StringComparer.Ordinal);
 
-        Assert.Equal(["CodeContext.CSharp.Worker.csproj", "Disk.cs"], mentions);
+        // Disk holds the guarded calls. PathGuard normalizes paths it has first made safe to normalize.
+        Assert.Equal(["CodeContext.CSharp.Worker.csproj", "Disk.cs", "PathGuard.cs"], mentions);
     }
 
     [Fact]

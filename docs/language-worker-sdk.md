@@ -101,12 +101,19 @@ a path, in one place every read goes through:
   directory from the machine's settings. Refuse every other spelling, including
   `//host/share`, `\\?\UNC\...` and `file://host/...`, and treat a refused path as
   missing.
-- Inside the repository, follow a link only when what it says leads to such a place.
-  Read the link itself to find out; do not open it.
+- Inside the repository, follow no link, or follow one only when what it says leads
+  to such a place. Read the link itself to find out; do not open it, and refuse text
+  you cannot judge, such as a target in the system's own `\??\` form.
+- A link answers to more than its name. Windows also reaches it by its short name
+  (`LONGLI~1`), by a name with a trailing dot or space, by a stream
+  (`link::$INDEX_ALLOCATION`), and through a short name of a directory above the
+  repository. Ask the system about any name that could be a second name instead of
+  looking it up in a listing, and refuse a `:` below the repository.
 - Never load or run code a repository names, and open no network connection.
 
-Off Windows a path does not reach another host, and the bundled workers refuse
-nothing there.
+`tests/Shared/disk-guard-vectors.json` holds the cases the bundled workers are tested
+against, and is a ready list for your own. The bundled workers refuse nothing off
+Windows, where a path does not make the system sign in to another host.
 
 ## Preserve graph ownership
 

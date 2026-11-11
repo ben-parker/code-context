@@ -104,12 +104,15 @@ workers to save their state when it captures.
   CodeContext instance or open a service port.
 - Nothing a repository writes makes a worker reach the network. On Windows, opening
   `\\host\share` authenticates to that host, so each bundled worker reaches the disk
-  through one guard that refuses a path, or a link inside the repository, leading
-  anywhere but a drive or a share the machine's owner chose: `Projects/Disk.cs` in the
-  C# worker, where `BannedSymbols.txt` makes every other route a compile error, and
-  `disk-guard.js` in the TypeScript worker, installed under `fs` before a compiler is
-  loaded. New worker code that reads a file goes through the guard; the host only
-  walks the root and follows no link.
+  through one guard that reads a path only on a drive or on a share the machine's
+  owner chose: `Projects/Disk.cs` in the C# worker, which asks `PathGuard` and where
+  `BannedSymbols.txt` makes every other route a compile error, and `disk-guard.js` in
+  the TypeScript worker, installed under `fs` before a compiler is loaded. A link the
+  repository holds can lead a drive path to a share: the C# worker follows none, as
+  the host follows none when it walks the root, and the TypeScript worker follows one
+  only to a place it would read, since package managers link packages. Both are tested
+  against `tests/Shared/disk-guard-vectors.json`; a new rule goes there first. New
+  worker code that reads a file goes through the guard.
 - Every worker-owned node ID, edge ID, and edge source ID starts with
   `<parserId>:<workspaceId>:`. IDs are stable semantic identities, not source offsets.
   A worker must replace all facts whose meaning may change and reanalyze semantic

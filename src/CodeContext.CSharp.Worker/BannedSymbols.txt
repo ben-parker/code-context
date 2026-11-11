@@ -74,6 +74,8 @@ T:Microsoft.CodeAnalysis.MetadataReferenceResolver;Roslyn would open what a sour
 M:Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions.WithXmlReferenceResolver(Microsoft.CodeAnalysis.XmlReferenceResolver);Roslyn would open what a doc comment's include names
 M:Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions.WithSourceReferenceResolver(Microsoft.CodeAnalysis.SourceReferenceResolver);Roslyn would open what a source file names
 M:Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions.WithMetadataReferenceResolver(Microsoft.CodeAnalysis.MetadataReferenceResolver);Roslyn would open what a source file names
+M:Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions.WithStrongNameProvider(Microsoft.CodeAnalysis.StrongNameProvider);Roslyn would open the key file a project names
+M:Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions.WithCryptoKeyFile(System.String);Roslyn would open the key file a project names
 
 M:System.Reflection.Assembly.Load(System.String);Nothing from a repository is loaded
 M:System.Reflection.Assembly.Load(System.Reflection.AssemblyName);Nothing from a repository is loaded
@@ -90,6 +92,10 @@ T:System.Runtime.InteropServices.NativeLibrary;Nothing from a repository is load
 T:Microsoft.CodeAnalysis.Diagnostics.AnalyzerFileReference;Nothing from a repository is loaded: this runs an analyzer a path names
 T:System.Diagnostics.Process;Nothing from a repository is executed
 
+# A call into the system reaches the disk past every entry above.
+T:System.Runtime.InteropServices.DllImportAttribute;Use Disk: a call into the system is not guarded
+T:System.Runtime.InteropServices.LibraryImportAttribute;Use Disk: a call into the system is not guarded
+
 # Reading a repository never reaches the network, by a path or any other way.
 T:System.Net.Http.HttpClient;The worker never reaches the network
 T:System.Net.Http.HttpMessageInvoker;The worker never reaches the network
@@ -100,3 +106,5 @@ T:System.Net.Sockets.Socket;The worker never reaches the network
 T:System.Net.Sockets.TcpClient;The worker never reaches the network
 T:System.Net.Sockets.UdpClient;The worker never reaches the network
 T:System.Net.NetworkInformation.Ping;The worker never reaches the network
+T:System.IO.Pipes.NamedPipeClientStream;The worker never reaches the network: a pipe can be on another host
+T:System.Xml.XmlUrlResolver;The worker never reaches the network: this fetches what a document names
