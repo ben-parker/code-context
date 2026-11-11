@@ -45,10 +45,10 @@ internal interface ILinkProbe
 /// nothing is refused.
 ///
 /// A path can name a link without spelling its name: by its short name
-/// (<c>LONGLI~1</c>), by a stream of it (<c>link::$INDEX_ALLOCATION</c>), or through a short
-/// name of a directory above the repository. A stream is refused. A name that could be a
-/// second name is asked about, and short names above the repository are written out before
-/// the path is judged.
+/// (<c>LONGLI~1</c>), by a stream of it (<c>link::$INDEX_ALLOCATION</c>), or through a second
+/// name of a directory above the repository. A stream is refused wherever it stands. A name
+/// that could be a second name is asked about, and second names above the repository are
+/// written out before the path is judged.
 /// </summary>
 internal sealed class PathGuard
 {
@@ -140,7 +140,13 @@ internal sealed class PathGuard
         return Path.GetRelativePath(Shielded(relativeTo), Shielded(path)).Replace(Shield, '~');
     }
 
-    private bool AllowedAsSpelled(string full) => IsOnDrive(full) || (ShareOf(full) is { } share && _shares.Contains(share));
+    /// <summary>
+    /// On a drive or a share that was given. A colon after the drive names a stream, and a
+    /// stream of a directory is the directory by another name, which no comparison of names
+    /// would see; nothing the worker reads has one.
+    /// </summary>
+    private bool AllowedAsSpelled(string full)
+        => full.IndexOf(':', 2) < 0 && (IsOnDrive(full) || (ShareOf(full) is { } share && _shares.Contains(share)));
 
     private bool Below(string full)
         => _rootPrefix is not null && full.Length > _rootPrefix.Length && full.StartsWith(_rootPrefix, StringComparison.OrdinalIgnoreCase);
@@ -155,15 +161,16 @@ internal sealed class PathGuard
     /// </summary>
     private string WithoutShortNamesOutside(string full)
     {
-        if (!full.Contains('~') || _rootPrefix is null) return full;
+        if (_rootPrefix is null) return full;
         var start = Path.GetPathRoot(full)?.Length ?? 0;
         if (start == 0) return full;
         var prefix = full[..start];
         var names = full[start..].Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries);
+        if (!names.Any(CouldBeASecondName)) return full;
         for (var i = 0; i < names.Length; i++)
         {
             var candidate = Path.Join(prefix, names[i]);
-            if (names[i].Contains('~') && !IsRootOrBelow(candidate))
+            if (CouldBeASecondName(names[i]) && !IsRootOrBelow(candidate))
             {
                 candidate = Expanded(candidate);
 
@@ -219,8 +226,6 @@ internal sealed class PathGuard
     /// <summary>One name in a directory that is itself plain.</summary>
     private Entry Step(string directory, string name)
     {
-        // A stream of a directory names the directory, and no listing shows it.
-        if (name.Contains(':')) return Entry.Link;
         var reparsePoints = _listings.GetOrAdd(directory, _probe.ReparsePointsIn);
         if (reparsePoints is null) return Entry.Missing;
         var path = Path.Join(directory, name);

@@ -18,9 +18,9 @@
 // packages into node_modules, so a link inside the repository is followed, but only to a
 // place that would itself be read: the link is read, never opened, to find out. A path can
 // name a link without spelling its name, by a short name (LONGLI~1), by a stream of it
-// (link::$INDEX_ALLOCATION) or through a short name of a directory above the repository.
-// A stream is refused, a name that could be a second name is asked about, and short names
-// above the repository are written out before the path is judged.
+// (link::$INDEX_ALLOCATION) or through a second name of a directory above the repository.
+// A stream is refused wherever it stands, a name that could be a second name is asked
+// about, and second names above the repository are written out before the path is judged.
 //
 // Off Windows nothing is refused and install() changes nothing.
 //
@@ -69,7 +69,9 @@ function createGuard({ platform = process.platform, io } = {}) {
         return full.length >= 3 && letter >= 0x61 && letter <= 0x7a && full[1] === ':' && full[2] === B;
     }
 
-    const allowedAsSpelled = full => onDrive(full) || shares.has(shareOf(full));
+    // A colon after the drive names a stream, and a stream of a directory is the directory by
+    // another name, which no comparison of names would see. Nothing the worker reads has one.
+    const allowedAsSpelled = full => !full.includes(':', 2) && (onDrive(full) || shares.has(shareOf(full)));
 
     /** The path as text, or null for what names no file here (a descriptor, say). */
     function textOf(value) {
@@ -114,6 +116,9 @@ function createGuard({ platform = process.platform, io } = {}) {
         return found;
     }
 
+    /** A short name, or a name Windows trims before it looks. */
+    const couldBeASecondName = name => name.includes('~') || name.endsWith('.') || name.endsWith(' ');
+
     function expanded(spelled) {
         let known = expansions.get(key(spelled));
         if (known === undefined) {
@@ -133,12 +138,13 @@ function createGuard({ platform = process.platform, io } = {}) {
      * path so far is outside the repository, where a link is the owner's.
      */
     function withoutShortNamesOutside(full) {
-        if (!full.includes('~') || roots.length === 0) return full;
+        if (roots.length === 0) return full;
         let prefix = path.win32.parse(full).root;
         const names = full.slice(prefix.length).split(B).filter(Boolean);
+        if (!names.some(couldBeASecondName)) return full;
         for (let i = 0; i < names.length; i++) {
             let candidate = path.win32.join(prefix, names[i]);
-            if (names[i].includes('~') && !isRootOrBelow(candidate)) {
+            if (couldBeASecondName(names[i]) && !isRootOrBelow(candidate)) {
                 candidate = expanded(candidate);
                 // The owner's own link to a share: theirs, and taken as it is.
                 if (!allowedAsSpelled(candidate)) return full;
@@ -148,9 +154,6 @@ function createGuard({ platform = process.platform, io } = {}) {
         }
         return prefix;
     }
-
-    /** A short name, or a name Windows trims before it looks. */
-    const couldBeASecondName = name => name.includes('~') || name.endsWith('.') || name.endsWith(' ');
 
     function linksIn(directory) {
         let names = listings.get(key(directory));
@@ -167,8 +170,6 @@ function createGuard({ platform = process.platform, io } = {}) {
 
     /** One name in a directory that is itself real: the entry, where its link leads, REFUSED or MISSING. */
     function step(directory, name, hops) {
-        // A stream of a directory names the directory, and no listing shows it.
-        if (name.includes(':')) return REFUSED;
         const names = linksIn(directory);
         if (names === null) return MISSING;
         const entry = path.win32.join(directory, name);
