@@ -64,8 +64,8 @@ curl -fsSL https://raw.githubusercontent.com/ben-parker/code-context/main/script
 
 The installer places a versioned release under `~/.codecontext` and adds a stable
 `codecontext` launcher. After extracting the release, it offers an interactive agent
-skill menu. Use the up/down arrows to move, Space to toggle a destination, and Enter
-to continue. On a first install Shared agents is selected and the other destinations
+skill menu. Use the up/down arrows (or `k`/`j`) to move, Space to toggle a destination,
+a digit `1`-`6` to toggle that row directly, and Enter to continue. On a first install Shared agents is selected and the other destinations
 start unchecked. On an upgrade every destination that already holds a `code-context`
 skill starts selected, and the others start unchecked:
 
@@ -79,7 +79,8 @@ skill starts selected, and the others start unchecked:
 | Gemini CLI | `~/.gemini/skills/code-context` |
 
 If a selected folder already exists, the installer asks about that destination
-separately. Overwrite defaults to No and a skipped folder is left unchanged. An
+separately. Overwrite defaults to Yes, so Enter replaces it; answer `n` to keep the
+folder as it is. An
 approved overwrite replaces the complete `code-context` folder with the packaged
 `SKILL.md` and `references/` content. Skill-copy failures are reported without
 preventing CodeContext or another selected skill target from being installed.
