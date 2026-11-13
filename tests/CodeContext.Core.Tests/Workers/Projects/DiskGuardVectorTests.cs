@@ -100,6 +100,37 @@ public sealed class DiskGuardVectorTests
         Assert.False(guard.Refused(@"C:\repo\src\A.cs"));
     }
 
+    /// <summary>
+    /// The rule for a device's name reads only the path's text, so it is tested on every
+    /// platform. On Windows the vectors hold the same cases; this keeps the rule from resting
+    /// on what one version of Windows makes of such a path, as it once did.
+    /// </summary>
+    [Theory]
+    [InlineData(@"C:\repo\CON", true)]
+    [InlineData(@"C:\repo\src\nul", true)]
+    [InlineData(@"C:\repo\src\NUL.txt", true)]
+    [InlineData(@"C:\repo\src\aux .d.ts", true)]
+    [InlineData(@"C:\repo\src\con.", true)]
+    [InlineData(@"C:\repo\PRN\", true)]
+    [InlineData(@"C:\repo\COM1", true)]
+    [InlineData(@"C:\repo\com0.txt", true)]
+    [InlineData(@"C:\repo\LPT9.log", true)]
+    [InlineData("C:\\repo\\COM\u00b9", true)]
+    [InlineData("C:\\repo\\lpt\u00b3", true)]
+    [InlineData(@"C:\repo\CONIN$", true)]
+    [InlineData(@"C:\repo\conout$", true)]
+    [InlineData(@"\.\NUL", true)]
+    [InlineData(@"C:\repo\CON\x.ts", false)]
+    [InlineData(@"C:\repo\src\console.ts", false)]
+    [InlineData(@"C:\repo\src\com10.ts", false)]
+    [InlineData(@"C:\repo\src\comx", false)]
+    [InlineData(@"C:\repo\src\.nul", false)]
+    [InlineData(@"C:\repo\src\a.nul", false)]
+    [InlineData(@"C:\repo\src\ nul", false)]
+    [InlineData(@"C:\", false)]
+    public void ADeviceNameIsToldByTheLastNameAlone(string path, bool device)
+        => Assert.Equal(device, PathGuard.NamesADevice(path));
+
     /// <summary>The disk a scenario describes: its links, and the second names its entries answer to.</summary>
     private sealed class MadeUpDisk : ILinkProbe
     {

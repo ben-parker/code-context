@@ -50,6 +50,12 @@ internal interface ILinkProbe
 /// name of a directory above the repository. A stream is refused wherever it stands. A name
 /// that could be a second name is asked about, and second names above the repository are
 /// written out before the path is judged.
+///
+/// A device's reserved name (<c>CON</c>, <c>NUL</c>, <c>COM1</c>) is refused as the last name
+/// of a path. Older Windows opens the device there, wherever the path stands and whatever
+/// extension follows, and normalizing turns such a path into <c>\\.\CON</c>, which is on no
+/// drive; newer Windows does both only for the bare name. Which one runs here is not asked:
+/// the name is refused on both.
 /// </summary>
 internal sealed class PathGuard
 {
@@ -106,7 +112,7 @@ internal sealed class PathGuard
     {
         if (Lexical(path) is not { } full) return true;
         if (!_windows) return false;
-        return !AllowedAsSpelled(full) || HoldsALink(WithoutShortNamesOutside(full));
+        return !AllowedAsSpelled(full) || NamesADevice(full) || HoldsALink(WithoutShortNamesOutside(full));
     }
 
     /// <summary>Below the repository, not the repository itself.</summary>
@@ -151,6 +157,30 @@ internal sealed class PathGuard
     /// </summary>
     private bool AllowedAsSpelled(string full)
         => full.IndexOf(':', 2) < 0 && (IsOnDrive(full) || (ShareOf(full) is { } share && _shares.Contains(share)));
+
+    /// <summary>
+    /// Whether the last name of a path is a device's, as older Windows reads it: up to the
+    /// first dot or colon, less trailing spaces, in any case.
+    /// </summary>
+    internal static bool NamesADevice(string full)
+    {
+        var name = full.AsSpan().TrimEnd('\\');
+        name = name[(name.LastIndexOf('\\') + 1)..];
+        var end = name.IndexOfAny('.', ':');
+        var stem = (end < 0 ? name : name[..end]).TrimEnd(' ');
+        if (stem.Length == 4 && (stem.StartsWith("COM", StringComparison.OrdinalIgnoreCase) || stem.StartsWith("LPT", StringComparison.OrdinalIgnoreCase)))
+        {
+            // Superscript digits name the first three ports as well.
+            return char.IsAsciiDigit(stem[3]) || stem[3] is '\u00b9' or '\u00b2' or '\u00b3';
+        }
+
+        return stem.Equals("CON", StringComparison.OrdinalIgnoreCase)
+            || stem.Equals("PRN", StringComparison.OrdinalIgnoreCase)
+            || stem.Equals("AUX", StringComparison.OrdinalIgnoreCase)
+            || stem.Equals("NUL", StringComparison.OrdinalIgnoreCase)
+            || stem.Equals("CONIN$", StringComparison.OrdinalIgnoreCase)
+            || stem.Equals("CONOUT$", StringComparison.OrdinalIgnoreCase);
+    }
 
     private bool Below(string full)
         => _rootPrefix is not null && full.Length > _rootPrefix.Length && full.StartsWith(_rootPrefix, StringComparison.OrdinalIgnoreCase);

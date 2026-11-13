@@ -22,6 +22,11 @@
 // A stream is refused wherever it stands, a name that could be a second name is asked
 // about, and second names above the repository are written out before the path is judged.
 //
+// A device's reserved name (CON, NUL, COM1) is refused as the last name of a path. Older
+// Windows opens the device there, wherever the path stands and whatever extension follows,
+// and reading a console or a port never returns; newer Windows does so only for the bare
+// name. Which one runs here is not asked: the name is refused on both.
+//
 // Off Windows nothing is refused and install() changes nothing.
 //
 // The decisions are shared with the C# worker's PathGuard through
@@ -33,6 +38,8 @@ const path = require('path');
 const B = String.fromCharCode(92);
 const NT_PREFIX = B + '??' + B;
 const MAX_LINK_HOPS = 40;
+// Superscript digits name the first three ports as well.
+const DEVICE_NAME = /^(?:CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|(?:COM|LPT)[0-9\u00b9\u00b2\u00b3])$/i;
 
 /**
  * Creates a guard. `platform` and `io` exist for tests. Nothing in `io` follows a link:
@@ -75,6 +82,14 @@ function createGuard({ platform = process.platform, io } = {}) {
     // A colon after the drive names a stream, and a stream of a directory is the directory by
     // another name, which no comparison of names would see. Nothing the worker reads has one.
     const allowedAsSpelled = full => !full.includes(':', 2) && (onDrive(full) || shares.has(shareOf(full)));
+
+    /** Whether the last name of a path is a device's, as older Windows reads it: up to the first dot or colon, less trailing spaces. */
+    function namesADevice(full) {
+        const names = full.split(B).filter(Boolean);
+        if (names.length === 0) return false;
+        const stem = names[names.length - 1].split(/[.:]/, 1)[0].replace(/ +$/, '');
+        return DEVICE_NAME.test(stem);
+    }
 
     /** The path as text, or null for what names no file here (a descriptor, say). */
     function textOf(value) {
@@ -247,7 +262,10 @@ function createGuard({ platform = process.platform, io } = {}) {
         const text = textOf(value);
         if (text === null) return false;
         const full = lexical(text);
-        return !full || !allowedAsSpelled(full) || resolve(full, 0) === REFUSED;
+        if (!full || !allowedAsSpelled(full) || namesADevice(full)) return true;
+        // Where a link leads is judged as well: a link can hold a device's name.
+        const real = resolve(full, 0);
+        return real === REFUSED || (typeof real === 'string' && namesADevice(real));
     }
 
     function forget() {

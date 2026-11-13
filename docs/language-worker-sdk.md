@@ -109,6 +109,10 @@ a path, in one place every read goes through:
   (`link::$INDEX_ALLOCATION`), and through a short name of a directory above the
   repository. Ask the system about any name that could be a second name instead of
   looking it up in a listing, and refuse a `:` below the repository.
+- Refuse a device's reserved name (`CON`, `PRN`, `AUX`, `NUL`, `COM1`, `LPT1` and the
+  rest) as the last name of a path, with any extension. Older Windows opens the device
+  there, wherever the path stands, and a read of a console or a port never returns;
+  newer Windows does so only for the bare name. Do not leave it to the system to say.
 - Never load or run code a repository names, and open no network connection.
 
 `tests/Shared/disk-guard-vectors.json` holds the cases the bundled workers are tested

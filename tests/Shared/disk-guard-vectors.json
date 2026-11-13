@@ -1,5 +1,5 @@
 {
-  "about": "What the workers' disk guards decide on Windows, tested against both: PathGuard (C#) through DiskGuardVectorTests and disk-guard.js through disk-guard.test.js. Each scenario is a made-up disk. 'links' maps a link to the text it holds, as the system reports it. 'aliases' maps a second name for an entry (a short name, or a name Windows trims) to the entry. 'refused' is true or false for both workers, or one answer for each: the C# worker follows no link inside a repository, and the TypeScript worker follows one that leads to a place it would read, as a package manager's links do.",
+  "about": "What the workers' disk guards decide on Windows, tested against both: PathGuard (C#) through DiskGuardVectorTests and disk-guard.js through disk-guard.test.js. Each scenario is a made-up disk. 'links' maps a link to the text it holds, as the system reports it. 'aliases' maps a second name for an entry (a short name, or a name Windows trims) to the entry. A device's reserved name (CON, NUL, COM1 and the rest) is refused as the last name of a path, with any extension: older Windows opens the device there, wherever the path stands, and newer Windows only for the bare name, so neither guard leaves it to the system. 'refused' is true or false for both workers, or one answer for each: the C# worker follows no link inside a repository, and the TypeScript worker follows one that leads to a place it would read, as a package manager's links do.",
   "scenarios": [
     {
       "name": "a repository on a drive",
@@ -23,7 +23,9 @@
         "C:\\tools\\sdk": "\\\\owner\\share\\sdk",
         "C:\\Users\\benparker\\repo\\up": "C:\\",
         "C:\\Users\\benparker\\repo\\folded\\lınk": "\\\\evil\\share\\a",
-        "C:\\Users\\benparker\\repo\\folded2\\plain": "\\\\evil\\share\\b"
+        "C:\\Users\\benparker\\repo\\folded2\\plain": "\\\\evil\\share\\b",
+        "C:\\Users\\benparker\\repo\\tty": "C:\\Users\\benparker\\repo\\CON",
+        "C:\\Users\\benparker\\repo\\sink": "NUL"
       },
       "aliases": {
         "C:\\Users\\BENPAR~1": "C:\\Users\\benparker",
@@ -89,6 +91,23 @@
         { "path": "C:\\Users\\benparker\\repo\\node_modules\\pkg\\index.d.ts", "refused": { "csharp": true, "typescript": false }, "why": "a package manager's link" },
         { "path": "C:\\Users\\benparker\\repo\\shared\\x.ts", "refused": { "csharp": true, "typescript": false }, "why": "a link to another drive" },
         { "path": "C:\\Users\\benparker\\repo\\relative\\x.ts", "refused": { "csharp": true, "typescript": false }, "why": "a link by a relative path" },
+        { "path": "C:\\Users\\benparker\\repo\\CON", "refused": true, "why": "a device by its reserved name: older Windows opens it wherever the path stands" },
+        { "path": "C:\\Users\\benparker\\repo\\src\\nul", "refused": true, "why": "in any case" },
+        { "path": "C:\\Users\\benparker\\repo\\src\\NUL.txt", "refused": true, "why": "with an extension, which older Windows sets aside" },
+        { "path": "C:\\Users\\benparker\\repo\\src\\aux .d.ts", "refused": true, "why": "with spaces before the extension" },
+        { "path": "C:\\Users\\benparker\\repo\\src\\con.", "refused": true, "why": "by a name Windows trims to it" },
+        { "path": "C:\\Users\\benparker\\repo\\COM1", "refused": true, "why": "a serial port" },
+        { "path": "C:\\Users\\benparker\\repo\\LPT9.log", "refused": true, "why": "a printer port" },
+        { "path": "C:\\Users\\benparker\\repo\\COM¹", "refused": true, "why": "a port by a superscript digit" },
+        { "path": "C:\\Users\\benparker\\repo\\CONIN$", "refused": true, "why": "the console's input" },
+        { "path": "D:\\other\\project\\PRN", "refused": true, "why": "outside the repository as well" },
+        { "path": "NUL", "refused": true, "why": "the bare name" },
+        { "path": "C:\\Users\\benparker\\repo\\tty", "refused": true, "why": "a link to a device's name" },
+        { "path": "C:\\Users\\benparker\\repo\\sink", "refused": true, "why": "a link that holds only the name" },
+        { "path": "C:\\Users\\benparker\\repo\\CON\\x.ts", "refused": false, "why": "below a directory of that name is no device" },
+        { "path": "C:\\Users\\benparker\\repo\\src\\console.ts", "refused": false, "why": "a name that only starts with one" },
+        { "path": "C:\\Users\\benparker\\repo\\src\\com10.ts", "refused": false, "why": "a port number no device has" },
+        { "path": "C:\\Users\\benparker\\repo\\src\\.nul", "refused": false, "why": "an extension alone" },
         { "path": "C:\\tools\\sdk\\ref\\System.Runtime.dll", "refused": false, "why": "a link outside the repository is the owner's" }
       ]
     },
