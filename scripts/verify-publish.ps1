@@ -53,9 +53,15 @@ if ($LASTEXITCODE -ne 0) {
 # remove them so what CI zips is exactly the shippable payload. Workers keep their symbols
 # (they are already part of the self-contained worker payload the size table accounts for).
 # Contributors debugging locally can pass -KeepSymbols to skip this.
+# StripSymbols on the other platforms moves the symbols out of the binary into a file
+# beside it: codecontext.dbg on Linux, the codecontext.dSYM bundle on macOS. Those are the
+# same payload under another name (about 18 MB and 14 MB of the zipped release), so they go too.
 if (-not $KeepSymbols) {
-    Get-ChildItem -LiteralPath $publishPath -Filter '*.pdb' -File |
+    Get-ChildItem -LiteralPath $publishPath -File |
+        Where-Object { $_.Extension -in @('.pdb', '.dbg') } |
         Remove-Item -Force
+    Get-ChildItem -LiteralPath $publishPath -Directory -Filter '*.dSYM' |
+        Remove-Item -Recurse -Force
 }
 
 # AOT payload guard: a Native AOT publish must leave NO managed *.dll next to the host
@@ -68,12 +74,12 @@ if (-not $KeepSymbols) {
 # workers/typescript/** are exempt.
 # A stray *.dll always fails the guard. A stray *.pdb fails too, unless -KeepSymbols was
 # passed (in which case the contributor deliberately kept native symbols for local debugging).
-$strayExtensions = if ($KeepSymbols) { @('.dll') } else { @('.dll', '.pdb') }
-$strayFiles = Get-ChildItem -LiteralPath $publishPath -File |
+$strayExtensions = if ($KeepSymbols) { @('.dll') } else { @('.dll', '.pdb', '.dbg', '.dSYM') }
+$strayFiles = Get-ChildItem -LiteralPath $publishPath |
     Where-Object { $_.Extension -in $strayExtensions } |
     Select-Object -ExpandProperty Name
 if ($strayFiles) {
-    throw ("Native AOT host publish leaked managed DLL/PDB file(s) into the publish root: " +
+    throw ("Native AOT host publish leaked managed DLL or debug symbol file(s) into the publish root: " +
         ($strayFiles -join ', ') + ". The AOT host must be a single native binary with no shipped symbols.")
 }
 
@@ -91,6 +97,34 @@ foreach ($relativeSkillFile in $skillPayloadFiles) {
     if ($canonicalHash -cne $packagedHash) {
         throw "Packaged skill file differs byte-for-byte from canonical skill/$relativeSkillFile."
     }
+}
+
+# Agents read the skill's frontmatter with parsers of varying strictness. A plain
+# (unquoted) YAML value that contains ": " or " #" is a nested mapping or a comment to the
+# strict ones, which then reject or truncate the skill, so each value stays free of both.
+$skillLines = [IO.File]::ReadAllLines((Join-Path (Join-Path $repoRoot 'skill') 'SKILL.md'))
+if ($skillLines.Count -lt 3 -or $skillLines[0] -cne '---') {
+    throw 'skill/SKILL.md must open with a --- frontmatter line.'
+}
+$frontmatterKeys = @()
+$frontmatterClosed = $false
+for ($lineIndex = 1; $lineIndex -lt $skillLines.Count; $lineIndex++) {
+    $frontmatterLine = $skillLines[$lineIndex]
+    if ($frontmatterLine -ceq '---') { $frontmatterClosed = $true; break }
+    if ($frontmatterLine -cnotmatch '^(?<key>[a-z][a-z0-9-]*): (?<value>\S.*)$') {
+        throw "skill/SKILL.md frontmatter line $($lineIndex + 1) is not a single-line 'key: value' pair."
+    }
+    $frontmatterKey = $Matches['key']
+    $frontmatterKeys += $frontmatterKey
+    $frontmatterValue = $Matches['value']
+    if ($frontmatterValue -match ': | #|:$' -or $frontmatterValue -match '^[\s"''\[\]{}>|*&!%@`#,?-]') {
+        throw ("skill/SKILL.md frontmatter '$frontmatterKey' is not a safe plain YAML value: " +
+            "reword it so it has no ': ', no ' #', no trailing ':', and no leading YAML indicator.")
+    }
+}
+if (-not $frontmatterClosed) { throw 'skill/SKILL.md frontmatter has no closing --- line.' }
+foreach ($requiredKey in @('name', 'description')) {
+    if ($requiredKey -notin $frontmatterKeys) { throw "skill/SKILL.md frontmatter is missing '$requiredKey'." }
 }
 
 $executableName = if ($RuntimeIdentifier -like 'win-*') { 'codecontext.exe' } else { 'codecontext' }
