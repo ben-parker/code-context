@@ -8,8 +8,15 @@ codecontext_home="$HOME/.codecontext"
 install_dir="$codecontext_home/bin"
 tmp_dir=''
 tty_state=''
+download_pid=''
 
 cleanup() {
+  # A shell reading its script from a pipe starts background commands with SIGINT
+  # ignored, so Ctrl-C never reaches the download itself.
+  if [ -n "$download_pid" ]; then
+    kill "$download_pid" 2>/dev/null || true
+    download_pid=''
+  fi
   if [ -n "$tty_state" ]; then
     stty "$tty_state" <&3 2>/dev/null || true
     tty_state=''
@@ -51,6 +58,31 @@ draw_skill_menu() {
   done
 }
 
+read_menu_key() {
+  dd bs=1 count=1 <&3 2>/dev/null || true
+}
+
+toggle_skill_row() {
+  case "$1" in
+    0) if [ "$skill_shared" = true ]; then skill_shared=false; else skill_shared=true; fi ;;
+    1) if [ "$skill_claude" = true ]; then skill_claude=false; else skill_claude=true; fi ;;
+    2) if [ "$skill_devin" = true ]; then skill_devin=false; else skill_devin=true; fi ;;
+    3) if [ "$skill_codex" = true ]; then skill_codex=false; else skill_codex=true; fi ;;
+    4) if [ "$skill_cursor" = true ]; then skill_cursor=false; else skill_cursor=true; fi ;;
+    5) if [ "$skill_gemini" = true ]; then skill_gemini=false; else skill_gemini=true; fi ;;
+  esac
+  draw_skill_menu
+}
+
+move_menu_cursor() {
+  if [ "$1" = up ]; then
+    if [ "$menu_cursor" -eq 0 ]; then menu_cursor=5; else menu_cursor=$((menu_cursor - 1)); fi
+  else
+    if [ "$menu_cursor" -eq 5 ]; then menu_cursor=0; else menu_cursor=$((menu_cursor + 1)); fi
+  fi
+  draw_skill_menu
+}
+
 select_skill_targets() {
   # Pre-select targets that already have a code-context skill installed, so an upgrade
   # refreshes exactly what's there instead of re-asking about every possible agent. Only
@@ -88,7 +120,7 @@ select_skill_targets() {
   }
 
   skills_interactive=true
-  printf '\nSelect agent skill targets (space to toggle, enter to continue):\n\n' >&3
+  printf '\nSelect agent skill targets (up/down or j/k to move, space to toggle, 1-6 to toggle a row, enter to continue):\n\n' >&3
   if ! stty -echo -icanon min 1 time 0 <&3 2>/dev/null; then
     echo "No usable interactive terminal is available; skipping agent skill installation."
     skills_interactive=false
@@ -97,31 +129,34 @@ select_skill_targets() {
     return
   fi
   draw_skill_menu
+  escape=$(printf '\033')
   while :; do
-    key=$(dd bs=1 count=1 <&3 2>/dev/null) || key=''
+    key=$(read_menu_key)
     case "$key" in
       '') break ;;
-      ' ')
-        case "$menu_cursor" in
-          0) if [ "$skill_shared" = true ]; then skill_shared=false; else skill_shared=true; fi ;;
-          1) if [ "$skill_claude" = true ]; then skill_claude=false; else skill_claude=true; fi ;;
-          2) if [ "$skill_devin" = true ]; then skill_devin=false; else skill_devin=true; fi ;;
-          3) if [ "$skill_codex" = true ]; then skill_codex=false; else skill_codex=true; fi ;;
-          4) if [ "$skill_cursor" = true ]; then skill_cursor=false; else skill_cursor=true; fi ;;
-          5) if [ "$skill_gemini" = true ]; then skill_gemini=false; else skill_gemini=true; fi ;;
+      ' ') toggle_skill_row "$menu_cursor" ;;
+      [1-6]) menu_cursor=$((key - 1)); toggle_skill_row "$menu_cursor" ;;
+      k|K) move_menu_cursor up ;;
+      j|J) move_menu_cursor down ;;
+      "$escape")
+        # An arrow key is ESC [ A/B, or ESC O A/B from a terminal left in application
+        # cursor mode; a modified one carries parameters before the final letter.
+        key=$(read_menu_key)
+        case "$key" in
+          '['|O)
+            while :; do
+              key=$(read_menu_key)
+              case "$key" in
+                [0-9]|';') ;;
+                *) break ;;
+              esac
+            done
+            case "$key" in
+              A) move_menu_cursor up ;;
+              B) move_menu_cursor down ;;
+            esac
+            ;;
         esac
-        draw_skill_menu
-        ;;
-      "$(printf '\033')")
-        key2=$(dd bs=1 count=1 <&3 2>/dev/null) || key2=''
-        key3=$(dd bs=1 count=1 <&3 2>/dev/null) || key3=''
-        if [ "$key2$key3" = '[A' ]; then
-          if [ "$menu_cursor" -eq 0 ]; then menu_cursor=5; else menu_cursor=$((menu_cursor - 1)); fi
-          draw_skill_menu
-        elif [ "$key2$key3" = '[B' ]; then
-          if [ "$menu_cursor" -eq 5 ]; then menu_cursor=0; else menu_cursor=$((menu_cursor + 1)); fi
-          draw_skill_menu
-        fi
         ;;
     esac
   done
@@ -136,12 +171,13 @@ target_exists() {
 confirm_skill_overwrite() {
   target_label=$1
   target_path=$2
-  printf 'Overwrite %s at %s? [y/N] ' "$target_label" "$target_path" >&3
+  printf 'Overwrite %s at %s? [Y/n] ' "$target_label" "$target_path" >&3
   answer=''
-  IFS= read -r answer <&3 || true
+  # Enter accepts the default; a terminal that closes instead of answering does not.
+  IFS= read -r answer <&3 || return 1
   case "$answer" in
-    y|Y|yes|YES|Yes) return 0 ;;
-    *) return 1 ;;
+    n|N|no|NO|No) return 1 ;;
+    *) return 0 ;;
   esac
 }
 
@@ -249,6 +285,52 @@ print_skill_summary() {
   echo "  Failed: ${skill_failed_summary:-none}"
 }
 
+draw_download_progress() {
+  received=0
+  [ ! -f "$1" ] || received=$(($(wc -c < "$1")))
+  received_mb="$((received / 1048576)).$((received % 1048576 * 10 / 1048576))"
+  if [ "$2" -gt 0 ]; then
+    [ "$received" -le "$2" ] || received=$2
+    filled=$((received * 30 / $2))
+    bar=''
+    column=0
+    while [ "$column" -lt 30 ]; do
+      if [ "$column" -lt "$filled" ]; then bar="$bar#"; else bar="$bar-"; fi
+      column=$((column + 1))
+    done
+    printf '\r\033[2K  [%s] %3d%%  %s / %s MB' "$bar" "$((received * 100 / $2))" \
+      "$received_mb" "$(($2 / 1048576)).$(($2 % 1048576 * 10 / 1048576))" >&2
+  else
+    printf '\r\033[2K  %s MB' "$received_mb" >&2
+  fi
+}
+
+# Downloads $1 to $2, drawing progress against the $3 bytes the release lists (0 when
+# unknown). curl's own --progress-bar animates a placeholder until the redirected
+# response reports a length, which flashes on screen before the real bar.
+download_release() {
+  if [ ! -t 2 ]; then
+    curl -fsSL --retry 3 --retry-delay 1 \
+      --connect-timeout 15 --speed-limit 1024 --speed-time 30 \
+      -o "$2" "$1"
+    return
+  fi
+  curl -fsSL --retry 3 --retry-delay 1 \
+    --connect-timeout 15 --speed-limit 1024 --speed-time 30 \
+    -o "$2" "$1" &
+  download_pid=$!
+  while kill -0 "$download_pid" 2>/dev/null; do
+    draw_download_progress "$2" "$3"
+    sleep 0.2 2>/dev/null || sleep 1
+  done
+  download_status=0
+  wait "$download_pid" || download_status=$?
+  download_pid=''
+  if [ "$download_status" -eq 0 ]; then draw_download_progress "$2" "$3"; fi
+  printf '\n' >&2
+  return "$download_status"
+}
+
 # Run installer tools from a stable directory instead of inheriting an arbitrary
 # caller directory. This avoids macOS child-process getcwd failures during install.
 cd "$HOME"
@@ -277,18 +359,23 @@ if [ -x "$existing_launcher" ]; then
 fi
 
 echo "Resolving latest release for $rid..."
-url=$(curl -fsSL "https://api.github.com/repos/$repo/releases/latest" \
+release_json=$(curl -fsSL "https://api.github.com/repos/$repo/releases/latest") || release_json=''
+url=$(printf '%s\n' "$release_json" \
   | grep -o "\"browser_download_url\": *\"[^\"]*-$rid\.zip\"" \
   | head -1 | sed 's/.*"\(https[^"]*\)"/\1/')
 [ -n "$url" ] || { echo "No asset found for $rid." >&2; exit 1; }
+# Each asset lists its "size" ahead of its download URL; the size only scales the bar.
+asset_size=$(printf '%s\n' "$release_json" | awk -v suffix="-$rid.zip\"" '
+  /"size":/ { size = $0; gsub(/[^0-9]/, "", size) }
+  /"browser_download_url":/ && index($0, suffix) { print size; exit }')
+case "$asset_size" in
+  ''|*[!0-9]*) asset_size=0 ;;
+esac
 
 tmp_dir=$(mktemp -d /tmp/codecontext.XXXXXX)
 tmp_zip="$tmp_dir/release.zip"
 echo "Downloading $url..."
-if ! curl -fL --progress-bar \
-    --retry 3 --retry-delay 1 \
-    --connect-timeout 15 --speed-limit 1024 --speed-time 30 \
-    -o "$tmp_zip" "$url"; then
+if ! download_release "$url" "$tmp_zip" "$asset_size"; then
   echo "Download failed. Check access to github.com and release-assets.githubusercontent.com, then retry." >&2
   exit 1
 fi

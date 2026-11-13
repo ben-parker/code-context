@@ -42,7 +42,7 @@ function Select-SkillTargets {
     $originalCursorVisible = $true
     try {
         Write-Host ''
-        Write-Host 'Select agent skill targets (space to toggle, enter to continue):'
+        Write-Host 'Select agent skill targets (up/down or j/k to move, space to toggle, 1-6 to toggle a row, enter to continue):'
         Write-Host ''
         $menuTop = [Console]::CursorTop
         $originalCursorVisible = [Console]::CursorVisible
@@ -61,20 +61,22 @@ function Select-SkillTargets {
 
             $key = [Console]::ReadKey($true)
             Throw-IfControlC $key
-            switch ($key.Key) {
-                ([ConsoleKey]::UpArrow) {
-                    $cursor = if ($cursor -eq 0) { $Targets.Count - 1 } else { $cursor - 1 }
-                }
-                ([ConsoleKey]::DownArrow) {
-                    $cursor = if ($cursor -eq $Targets.Count - 1) { 0 } else { $cursor + 1 }
-                }
-                ([ConsoleKey]::Spacebar) {
-                    $Targets[$cursor].Selected = -not $Targets[$cursor].Selected
-                }
-                ([ConsoleKey]::Enter) {
-                    [Console]::SetCursorPosition(0, $menuTop + $Targets.Count)
-                    return $Targets
-                }
+            # Letters and digits are matched on the character typed, so a host that
+            # reports no virtual key for them, or none for the arrows, still has a way
+            # to move.
+            $typed = [string]$key.KeyChar
+            if ($key.Key -eq [ConsoleKey]::Enter) {
+                [Console]::SetCursorPosition(0, $menuTop + $Targets.Count)
+                return $Targets
+            } elseif ($key.Key -eq [ConsoleKey]::UpArrow -or $typed -eq 'k') {
+                $cursor = if ($cursor -eq 0) { $Targets.Count - 1 } else { $cursor - 1 }
+            } elseif ($key.Key -eq [ConsoleKey]::DownArrow -or $typed -eq 'j') {
+                $cursor = if ($cursor -eq $Targets.Count - 1) { 0 } else { $cursor + 1 }
+            } elseif ($key.Key -eq [ConsoleKey]::Spacebar -or $typed -eq ' ') {
+                $Targets[$cursor].Selected = -not $Targets[$cursor].Selected
+            } elseif ($typed -match '^[1-9]$' -and [int]$typed -le $Targets.Count) {
+                $cursor = [int]$typed - 1
+                $Targets[$cursor].Selected = -not $Targets[$cursor].Selected
             }
         }
     } finally {
@@ -85,15 +87,81 @@ function Select-SkillTargets {
 function Confirm-SkillOverwrite {
     param([Parameter(Mandatory = $true)][object]$Target)
 
-    Write-Host -NoNewline "Overwrite $($Target.Label) at $($Target.Path)? [y/N] "
+    Write-Host -NoNewline "Overwrite $($Target.Label) at $($Target.Path)? [Y/n] "
     while ($true) {
         $key = [Console]::ReadKey($true)
         Throw-IfControlC $key
         switch ($key.Key) {
             ([ConsoleKey]::Y) { Write-Host 'Yes'; return $true }
+            ([ConsoleKey]::Enter) { Write-Host 'Yes'; return $true }
             ([ConsoleKey]::N) { Write-Host 'No'; return $false }
-            ([ConsoleKey]::Enter) { Write-Host 'No'; return $false }
         }
+    }
+}
+
+function Write-DownloadProgress {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][long]$Total
+    )
+
+    # Ask an open handle for the length: the directory entry of a file another process
+    # is still writing reports a stale size on Windows.
+    $received = 0L
+    try {
+        $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read,
+            ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
+        try { $received = $stream.Length } finally { $stream.Dispose() }
+    } catch { }
+
+    $invariant = [System.Globalization.CultureInfo]::InvariantCulture
+    $receivedText = ($received / 1MB).ToString('0.0', $invariant)
+    if ($Total -gt 0) {
+        if ($received -gt $Total) { $received = $Total }
+        $filled = [int][Math]::Floor($received * 30 / $Total)
+        $percent = [int][Math]::Floor($received * 100 / $Total)
+        $line = '  [{0}{1}] {2,3}%  {3} / {4} MB' -f ('#' * $filled), ('-' * (30 - $filled)), $percent,
+            $receivedText, ($Total / 1MB).ToString('0.0', $invariant)
+    } else {
+        $line = "  $receivedText MB"
+    }
+    $width = [Math]::Max(1, [Console]::WindowWidth - 1)
+    if ($line.Length -gt $width) { $line = $line.Substring(0, $width) }
+    Write-Host -NoNewline ("`r" + $line.PadRight($width))
+}
+
+# Downloads $Url to $Path, drawing progress against the size the release lists. curl's own
+# --progress-bar animates a placeholder until the redirected response reports a length,
+# which flashes on screen before the real bar.
+function Save-ReleaseAsset {
+    param(
+        [Parameter(Mandatory = $true)][string]$Url,
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][long]$Total
+    )
+
+    $arguments = '-fsSL --retry 3 --retry-delay 1 --connect-timeout 15 --speed-limit 1024 --speed-time 30'
+    if (-not (Test-InstallerInteractiveConsole)) {
+        & curl.exe @($arguments -split ' ') -o $Path $Url
+        return $LASTEXITCODE
+    }
+
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new('curl.exe')
+    $startInfo.UseShellExecute = $false
+    $startInfo.Arguments = '{0} -o "{1}" "{2}"' -f $arguments, $Path, $Url
+    $download = [System.Diagnostics.Process]::Start($startInfo)
+    try {
+        while (-not $download.WaitForExit(200)) {
+            Write-DownloadProgress -Path $Path -Total $Total
+        }
+        if ($download.ExitCode -eq 0) { Write-DownloadProgress -Path $Path -Total $Total }
+        Write-Host ''
+        return $download.ExitCode
+    } finally {
+        if (-not $download.HasExited) {
+            try { $download.Kill() } catch { }
+        }
+        $download.Dispose()
     }
 }
 
@@ -175,7 +243,12 @@ if (Test-Path $existingLauncher) {
     }
 }
 
-$release = Invoke-RestMethod "https://api.github.com/repos/$repo/releases/latest"
+# Windows PowerShell paints a progress banner over the console for even this small
+# request; the child scope keeps the preference out of the caller's session.
+$release = & {
+    $ProgressPreference = 'SilentlyContinue'
+    Invoke-RestMethod "https://api.github.com/repos/$repo/releases/latest"
+}
 $asset = $release.assets | Where-Object { $_.name -like "*-$rid.zip" } | Select-Object -First 1
 if (-not $asset) { throw "No asset for $rid in release $($release.tag_name). Available: $($release.assets.name -join ', ')" }
 
@@ -213,11 +286,8 @@ try {
     New-Item -ItemType Directory -Force $temporary | Out-Null
     $zipPath = Join-Path $temporary $asset.name
     $stageDir = Join-Path $temporary 'payload'
-    & curl.exe -fL --progress-bar `
-        --retry 3 --retry-delay 1 `
-        --connect-timeout 15 --speed-limit 1024 --speed-time 30 `
-        -o $zipPath $asset.browser_download_url
-    if ($LASTEXITCODE -ne 0) {
+    $downloadExitCode = Save-ReleaseAsset -Url $asset.browser_download_url -Path $zipPath -Total ([long]$asset.size)
+    if ($downloadExitCode -ne 0) {
         throw "Download failed. Check access to github.com and release-assets.githubusercontent.com, then retry."
     }
 
