@@ -2,7 +2,7 @@ param(
     [Parameter(Mandatory = $true)]
     [ValidateSet('win-x64', 'linux-x64', 'osx-x64', 'osx-arm64')]
     [string] $RuntimeIdentifier,
-    [string] $NodeVersion = '22.15.0',
+    [string] $NodeVersion = '26.13.1',
     [string] $WorkerDirectory = (Join-Path $PSScriptRoot '..\src\CodeContext.TypeScript.Worker')
 )
 
