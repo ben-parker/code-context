@@ -4,7 +4,7 @@
 // its rows cannot be summed for variable-size types such as strings and arrays.
 // Used by scripts/bench/measure-memory.sh --heap.
 // Usage: GCDUMP_DLL=<dotnet-gcdump tool dir>/dotnet-gcdump.dll \
-//          dotnet run --file scripts/bench/gcdump-types.cs -- <file.gcdump> [top=15]
+//          dotnet run --file scripts/bench/gcdump-types.csx -- <file.gcdump> [top=15]
 // It compiles against the graph reader inside dotnet-gcdump.dll (GCHeapDump, MemoryGraph).
 // Output: "total <bytes> <objects>", then "<bytes>\t<count>\t<type>" per type.
 #:property AdditionalExplicitAssemblyReferences=$(GCDUMP_DLL)
@@ -17,7 +17,7 @@ using Graphs;
 
 if (args.Length < 1)
 {
-    Console.Error.WriteLine("usage: gcdump-types.cs <file.gcdump> [top]");
+    Console.Error.WriteLine("usage: gcdump-types.csx <file.gcdump> [top]");
     return 2;
 }
 

@@ -11,7 +11,9 @@
 # Pss_Anon and Pss_File from /proc/<pid>/smaps_rollup for the host and each worker.
 # --queries runs a fixed query mix, settles again and reads again; --heap then reports
 # the live managed heap of the host and the C# worker with dotnet-gcdump, by type
-# (gcdump-types.cs). Readings are taken before any gcdump, which grows the target's RSS.
+# (gcdump-types.csx: not .cs, so this repository's own index holds no loose C# file and
+# the C# worker builds no fallback compilation). Readings are taken before any gcdump,
+# which grows the target's RSS.
 #
 # Settling, idle reading: first the snapshot the start writes after its scan commits
 # (about 10 s after ready; status shows a new cache.snapshotSequence once it is written
@@ -44,7 +46,7 @@ write_timeout=60
 json=0
 timeout=300
 
-usage() { sed -n '2,30s/^# \{0,1\}//p' "${BASH_SOURCE[0]}"; }
+usage() { sed -n '2,31s/^# \{0,1\}//p' "${BASH_SOURCE[0]}"; }
 
 while [ $# -gt 0 ]; do
   case $1 in
@@ -300,9 +302,9 @@ if [ "$heap" = 1 ]; then
   stop_instance
   for label in host csharp; do
     [ -f "$work/$label.gcdump" ] || continue
-    dotnet run --file "$script_dir/gcdump-types.cs" -- "$work/$label.gcdump" "$top" \
+    dotnet run --file "$script_dir/gcdump-types.csx" -- "$work/$label.gcdump" "$top" \
       >"$work/$label.types" 2>"$work/gcdump-types.log" \
-      || { cat "$work/gcdump-types.log" >&2; die "gcdump-types.cs failed"; }
+      || { cat "$work/gcdump-types.log" >&2; die "gcdump-types.csx failed"; }
     sed "s/^/$label\t/" "$work/$label.types" >>"$work/heap"
   done
 fi
