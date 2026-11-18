@@ -772,6 +772,57 @@ public class ProjectModelTests : IDisposable
     }
 
     [Fact]
+    public void GeneratorOutputAProjectWritesIntoItsTreeCompilesWithIt()
+    {
+        // A project that keeps its source generators' output checked in removes it from
+        // Compile, because at build time the generator supplies it. The worker runs no
+        // generator, so it compiles the written output in the generator's place.
+        InstallCoreFramework();
+        Write("App/App.csproj", """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <TargetFramework>net8.0</TargetFramework>
+                <EmitCompilerGeneratedFiles>true</EmitCompilerGeneratedFiles>
+                <CompilerGeneratedFilesOutputPath>Generated</CompilerGeneratedFilesOutputPath>
+              </PropertyGroup>
+              <ItemGroup><Compile Remove="Generated/**/*.cs" /></ItemGroup>
+            </Project>
+            """);
+        var code = Source("App/A.cs");
+        var generated = Source("App/Generated/Gen/Gen.CsvModelGenerator/Skill.g.cs");
+
+        var model = Load(code, generated);
+
+        Assert.Empty(model.UnassignedFiles);
+        var project = Assert.Single(model.ProjectsCompiling(generated));
+        Assert.Same(project, Assert.Single(model.ProjectsCompiling(code)));
+        Assert.Equal(ProjectCoverageState.Complete, project.State);
+        Assert.Contains(project.Notes, note => note.Contains("Generated", StringComparison.Ordinal)
+            && note.Contains("not run", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("<EmitCompilerGeneratedFiles>false</EmitCompilerGeneratedFiles><CompilerGeneratedFilesOutputPath>Generated</CompilerGeneratedFilesOutputPath>")]
+    [InlineData("<EmitCompilerGeneratedFiles>true</EmitCompilerGeneratedFiles>")]
+    public void RemovedFilesStayOutWithoutGeneratorOutputThere(string properties)
+    {
+        // Not emitting, or emitting to the default under obj/, leaves the removed files out.
+        InstallCoreFramework();
+        Write("App/App.csproj", $"""
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup><TargetFramework>net8.0</TargetFramework>{properties}</PropertyGroup>
+              <ItemGroup><Compile Remove="Generated/**/*.cs" /></ItemGroup>
+            </Project>
+            """);
+        var generated = Source("App/Generated/Gen/Gen.CsvModelGenerator/Skill.g.cs");
+
+        var model = Load(Source("App/A.cs"), generated);
+
+        Assert.Equal([generated], model.UnassignedFiles);
+        Assert.DoesNotContain(Assert.Single(model.Projects).Notes, note => note.Contains("not run", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void AnItemListItCannotExpandIsRecorded()
     {
         InstallCoreFramework();
