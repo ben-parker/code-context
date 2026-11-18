@@ -36,6 +36,12 @@ public sealed class EvaluatedProject
     /// </summary>
     public required IReadOnlyList<string> CompilerUncertainties { get; init; }
 
+    /// <summary>
+    /// Where the project's source generators write their output, when it compiles that
+    /// output from disk because the generators are not run; otherwise null.
+    /// </summary>
+    public string? GeneratedSourceFolder { get; init; }
+
     public string Property(string name) => Properties.GetValueOrDefault(name, string.Empty);
 
     public IReadOnlyList<ProjectItem> ItemsOf(string type)
@@ -181,6 +187,7 @@ public sealed class ProjectEvaluator
         {
             _properties[name] = value;
         }
+        var generatedSourceFolder = IncludeGeneratedSources();
 
         return new EvaluatedProject
         {
@@ -195,7 +202,32 @@ public sealed class ProjectEvaluator
             MissingImports = _missingImports,
             Uncertainties = _uncertainties,
             CompilerUncertainties = _compilerUncertainties,
+            GeneratedSourceFolder = generatedSourceFolder,
         };
+    }
+
+    /// <summary>
+    /// A build hands the compiler what the project's source generators produce, after every
+    /// Compile item, and a project that writes that output into its tree
+    /// (<c>EmitCompilerGeneratedFiles</c>) usually removes it from Compile so it is not
+    /// compiled twice. The worker runs no generator, so it compiles the written output in the
+    /// generator's place, as fresh as the last build that wrote it. The default output folder
+    /// is under <c>obj/</c>, which is never indexed, so only a chosen folder matters.
+    /// </summary>
+    /// <returns>The folder, relative to the project as written, or null when there is none.</returns>
+    private string? IncludeGeneratedSources()
+    {
+        if (!IsSet("EmitCompilerGeneratedFiles")) return null;
+        var folder = (Get("CompilerGeneratedFilesOutputPath") ?? string.Empty).Trim();
+        if (folder.Length == 0) return null;
+        if (!IsUsablePath(folder))
+        {
+            NoteUncertain($"CompilerGeneratedFilesOutputPath = {folder}", reachesCompiler: true);
+            return null;
+        }
+        var pattern = MsBuildExpander.ToNative(folder).TrimEnd(Path.DirectorySeparatorChar) + "/**/*.cs";
+        _compileItems.Include([Expander(_projectPath).FullPath(pattern)], []);
+        return folder;
     }
 
     private XElement Load(string file)

@@ -525,6 +525,10 @@ public sealed class ProjectModel
             {
                 remarks.Add($"{evaluated.Uncertainties.Count} project expression(s) could not be read; first: {evaluated.Uncertainties[0]}");
             }
+            if (evaluated.GeneratedSourceFolder is { } generated)
+            {
+                remarks.Add($"Source generator output is compiled from {generated} as a build last wrote it; the generators are not run.");
+            }
 
             var inputs = evaluated.Inputs.ToList();
             if (candidate.Restore is not null) inputs.Add(candidate.Restore.AssetsPath);
