@@ -30,6 +30,8 @@ namespace CodeContext.Core.Snapshots
         private readonly uint _foldedNameFirstRef;
         private readonly string?[] _strings;
         private string?[]? _fileKeys;
+        private readonly Dictionary<(uint SetRef, int Column, int Line), FactMetadata> _metadata = new();
+        private readonly FactMetadataPool _metadataContent = new();
 
         public SnapshotShardReader(MappedRegion region, long blobOffset, long blobLength, uint directoryNodeCount, uint directoryEdgeCount)
         {
@@ -251,7 +253,7 @@ namespace CodeContext.Core.Snapshots
             if (fileIndex >= (uint)FileCount) throw new SnapshotCorruptException($"Node record {index} names file {fileIndex}.");
             var (first, count) = FileNodes((int)fileIndex);
             if (index < first || index >= first + count) throw new SnapshotCorruptException($"Node record {index} lies outside its file's node range.");
-            var metadata = Metadata(_region.ReadU32(record + 68), null, null);
+            var metadata = Metadata(_region.ReadU32(record + 68), SnapshotFormat.AbsentPosition, SnapshotFormat.AbsentPosition);
             var flags = _region.ReadU32(record + 72);
             if (flags != (SnapshotFormat.IsExternal(metadata) ? SnapshotFormat.NodeFlagExternal : 0))
                 throw new SnapshotCorruptException($"Node record {index}'s flags disagree with its metadata.");
@@ -294,7 +296,7 @@ namespace CodeContext.Core.Snapshots
             var source = sourceSid == SnapshotFormat.NoIndex ? null : Id(sourceSid);
             var target = targetSid == SnapshotFormat.NoIndex ? null : Id(targetSid);
             var metaAndForm = _region.ReadU32(record + 28);
-            var metadata = Metadata(metaAndForm >> 2, Position(_region.ReadI32(record + 24)), Position(_region.ReadI32(record + 20)));
+            var metadata = Metadata(metaAndForm >> 2, _region.ReadI32(record + 24), _region.ReadI32(record + 20));
             return new CodeEdge
             {
                 Id = EdgeId(record, metaAndForm, source, target),
@@ -810,9 +812,29 @@ namespace CodeContext.Core.Snapshots
         /// <summary>
         /// A fact's metadata: the stored set (in the writer's ordinal key order) merged with the keys the
         /// writer moved out of it, <c>column</c>, <c>line</c>, <c>parserId</c> and <c>workspaceId</c> (in
-        /// that ordinal order), so the dictionary enumerates in ordinal key order. A repeated key is corrupt.
+        /// that ordinal order), so the map enumerates in ordinal key order. A repeated key is corrupt.
+        /// Every fact of this shard with the same content shares one immutable instance; the set, the
+        /// record's column and line, and the shard fix the content, so a repeated three is answered at once.
         /// </summary>
-        private Dictionary<string, string> Metadata(uint setRef, string? column, string? line)
+        private FactMetadata Metadata(uint setRef, int columnValue, int lineValue)
+        {
+            var cacheKey = (setRef, columnValue, lineValue);
+            lock (_metadata)
+            {
+                if (_metadata.TryGetValue(cacheKey, out var shared)) return shared;
+            }
+            var built = BuildMetadata(setRef, Position(columnValue), Position(lineValue));
+            lock (_metadata)
+            {
+                if (_metadata.TryGetValue(cacheKey, out var shared)) return shared;
+                // Two references can hold one content (a node set and an edge set are stored apart).
+                shared = _metadataContent.Get(built);
+                _metadata.Add(cacheKey, shared);
+                return shared;
+            }
+        }
+
+        private string[] BuildMetadata(uint setRef, string? column, string? line)
         {
             var extraTotal = 0;
             var extras = new (string Key, string Value)[4];
@@ -835,7 +857,9 @@ namespace CodeContext.Core.Snapshots
                 pairs += 4;
             }
 
-            var dictionary = new Dictionary<string, string>((int)pairCount + extraTotal, StringComparer.Ordinal);
+            var keys = new HashSet<string>((int)pairCount + extraTotal, StringComparer.Ordinal);
+            var flat = new string[2 * ((int)pairCount + extraTotal)];
+            var filled = 0;
             var next = 0;
             for (long p = 0; p < pairCount; p++)
             {
@@ -845,11 +869,13 @@ namespace CodeContext.Core.Snapshots
                 Add(key, GetString(_region.ReadU32(at + 4))!);
             }
             while (next < extraTotal) Add(extras[next].Key, extras[next++].Value);
-            return dictionary;
+            return flat;
 
             void Add(string key, string value)
             {
-                if (!dictionary.TryAdd(key, value)) throw new SnapshotCorruptException($"Metadata key '{key}' appears twice.");
+                if (!keys.Add(key)) throw new SnapshotCorruptException($"Metadata key '{key}' appears twice.");
+                flat[filled++] = key;
+                flat[filled++] = value;
             }
         }
 

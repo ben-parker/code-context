@@ -309,9 +309,10 @@ namespace CodeContext.Core.Snapshots
         /// <c>&lt;parserId&gt;:&lt;Uri.EscapeDataString(workspaceId)&gt;:</c>, the prefix the host enforces on worker deltas
         /// (an edge target may be anything, or null);
         /// every node's identifier is non-null (the store always sets one; a record cannot tell null from absent);
-        /// every node and edge has metadata that is a <see cref="Dictionary{TKey, TValue}"/> comparing keys
-        /// ordinally (default or <see cref="StringComparer.Ordinal"/>), because a loaded fact's metadata is
-        /// one, and a lookup in any other comparer can answer differently (a metadata value may be null);
+        /// every node and edge has metadata that is a <see cref="FactMetadata"/> or a <see cref="Dictionary{TKey, TValue}"/>
+        /// comparing keys ordinally (default or <see cref="StringComparer.Ordinal"/>), because a loaded fact's
+        /// metadata compares ordinally, and a lookup in any other comparer can answer differently (a metadata
+        /// value may be null);
         /// that metadata carries <c>parserId</c> and <c>workspaceId</c> equal to the shard key
         /// (a scoped commit routes delta facts to its scope's shard whatever their metadata says, so a
         /// disagreeing or absent value can occur, and would not be reproduced by a load);
@@ -371,8 +372,9 @@ namespace CodeContext.Core.Snapshots
         }
 
         private static bool OrdinalMetadata(IReadOnlyDictionary<string, string>? metadata)
-            => metadata is Dictionary<string, string> dictionary
-                && (ReferenceEquals(dictionary.Comparer, EqualityComparer<string>.Default) || ReferenceEquals(dictionary.Comparer, StringComparer.Ordinal));
+            => metadata is FactMetadata
+                || (metadata is Dictionary<string, string> dictionary
+                    && (ReferenceEquals(dictionary.Comparer, EqualityComparer<string>.Default) || ReferenceEquals(dictionary.Comparer, StringComparer.Ordinal)));
 
         private static bool OwnedBy(IReadOnlyDictionary<string, string>? metadata, ShardKey key)
             => metadata is not null

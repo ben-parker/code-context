@@ -136,8 +136,10 @@ public sealed class AnalysisDeltaApplier : IAnalysisDeltaSink
             }
 
             _pending.Remove(pendingKey);
-            var nodes = pending.Nodes.Select(n => ToCodeNode(n, pending)).ToList();
-            var edges = pending.Edges.Select(e => ToCodeEdge(e, pending)).ToList();
+            // One pool per request: facts of the commit with equal metadata share one immutable instance.
+            var pool = new FactMetadataPool();
+            var nodes = pending.Nodes.Select(n => ToCodeNode(n, pending, pool)).ToList();
+            var edges = pending.Edges.Select(e => ToCodeEdge(e, pending, pool)).ToList();
 
             // The scope names the (parser, workspace) shard this delta replaces (optionally narrowed
             // to the listed files). The store routes and partitions by the ownership metadata that
@@ -208,42 +210,53 @@ public sealed class AnalysisDeltaApplier : IAnalysisDeltaSink
             "[{ParserId}] discarded stale delta: generation {Stale} <= newest {Newest} for workspace {WorkspaceId}.",
             delta.ParserId, delta.Generation, newestGeneration, delta.WorkspaceId);
 
-    // The node/edge metadata dictionaries arrive freshly deserialized on this delta and are
-    // never read again after this mapping (pending.Nodes/Edges are each projected exactly once
-    // and then discarded), so we take ownership of the dictionary in place and stamp the two
-    // ownership keys onto it instead of allocating a fresh dictionary and copying every entry.
-    // The ownership keys are assigned last so they always win over any same-named source key
-    // (matching the previous ownership-first + TryAdd precedence).
-    private static Dictionary<string, string> BuildOwnedMetadata(
-        IReadOnlyDictionary<string, string>? source, PendingDelta delta)
+    // The fact's metadata: the source's entries in their order, with the two ownership keys set to the
+    // delta's values (in place where the source has them, appended in this order where it does not), so
+    // the ownership keys always win over a same-named source key. The source is only read; the result is
+    // the pool's shared, immutable instance for that content.
+    private static FactMetadata BuildOwnedMetadata(
+        IReadOnlyDictionary<string, string>? source, PendingDelta delta, FactMetadataPool pool)
     {
-        if (source is null)
+        var count = source?.Count ?? 0;
+        var pairs = new List<string>(2 * count + 4);
+        bool hasParser = false, hasWorkspace = false;
+        if (source is not null)
         {
-            return new Dictionary<string, string>(2)
-            {
-                [ParserIdKey] = delta.ParserId,
-                [WorkspaceIdKey] = delta.WorkspaceId,
-            };
-        }
-
-        if (source is not Dictionary<string, string> owned)
-        {
-            // Defensive: an IReadOnlyDictionary that is not a mutable Dictionary must be copied.
-            owned = new Dictionary<string, string>(source.Count + 2);
             foreach (var (key, value) in source)
             {
-                owned[key] = value;
+                pairs.Add(key);
+                if (key == ParserIdKey)
+                {
+                    hasParser = true;
+                    pairs.Add(delta.ParserId);
+                }
+                else if (key == WorkspaceIdKey)
+                {
+                    hasWorkspace = true;
+                    pairs.Add(delta.WorkspaceId);
+                }
+                else
+                {
+                    pairs.Add(value);
+                }
             }
         }
-
-        owned[ParserIdKey] = delta.ParserId;
-        owned[WorkspaceIdKey] = delta.WorkspaceId;
-        return owned;
+        if (!hasParser)
+        {
+            pairs.Add(ParserIdKey);
+            pairs.Add(delta.ParserId);
+        }
+        if (!hasWorkspace)
+        {
+            pairs.Add(WorkspaceIdKey);
+            pairs.Add(delta.WorkspaceId);
+        }
+        return pool.Get(pairs.ToArray());
     }
 
-    private static CodeNode ToCodeNode(ProtocolNode node, PendingDelta delta)
+    private static CodeNode ToCodeNode(ProtocolNode node, PendingDelta delta, FactMetadataPool pool)
     {
-        var metadata = BuildOwnedMetadata(node.Metadata, delta);
+        var metadata = BuildOwnedMetadata(node.Metadata, delta, pool);
 
         return new CodeNode
         {
@@ -267,9 +280,9 @@ public sealed class AnalysisDeltaApplier : IAnalysisDeltaSink
         };
     }
 
-    private static CodeEdge ToCodeEdge(ProtocolEdge edge, PendingDelta delta)
+    private static CodeEdge ToCodeEdge(ProtocolEdge edge, PendingDelta delta, FactMetadataPool pool)
     {
-        var metadata = BuildOwnedMetadata(edge.Metadata, delta);
+        var metadata = BuildOwnedMetadata(edge.Metadata, delta, pool);
 
         return new CodeEdge
         {
