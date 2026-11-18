@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using CodeContext.Core.Memory;
+using Microsoft.Extensions.Configuration;
 using CodeContext.Core.Services;
 using NSubstitute;
 using CodeContext.Core.Tests.Snapshots;
@@ -297,5 +298,17 @@ public class IndexCoordinatorMemoryTrimTests
             if (DateTime.UtcNow > deadline) throw new TimeoutException("condition not reached");
             await Task.Delay(10);
         }
+    }
+
+    /// <summary>
+    /// The test assembly turns the trim off for every host it composes (TestAssemblyGuards): a host built
+    /// from the environment, as the product's builders build it, reads a quiet period of zero.
+    /// </summary>
+    [Fact]
+    public void HostsTheTestsCompose_HaveTheTrimOff()
+    {
+        var configuration = new ConfigurationBuilder().AddEnvironmentVariables().Build();
+        Assert.Equal("0", configuration[QuietTimeTrimSettings.ConfigurationKey]);
+        Assert.Equal(TimeSpan.Zero, MemoryTrimServiceCollectionExtensions.Read(configuration).QuietPeriod);
     }
 }

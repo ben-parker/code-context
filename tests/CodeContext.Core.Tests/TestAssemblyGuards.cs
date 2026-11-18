@@ -1,5 +1,6 @@
 using System;
 using System.Runtime.CompilerServices;
+using CodeContext.Core.Memory;
 using CodeContext.Core.Snapshots;
 
 namespace CodeContext.Core.Tests;
@@ -18,4 +19,15 @@ internal static class TestAssemblyGuards
         => SnapshotServiceSettings.DefaultKeyPath = () => throw new InvalidOperationException(
             "A test turned the snapshot cache on without its own key path. Set CodeContextOptions.CacheKeyPath " +
             "to a temp file (and index a temp root), or turn the cache off with CodeContext:CacheEnabled=false.");
+
+    /// <summary>
+    /// The hosts tests compose with the product builders read configuration from the environment, and the default is a
+    /// quiet-time trim on real time: a blocking, compacting collection of the whole test process 15 s after a
+    /// host's last activity, which can land inside an unrelated timing-sensitive test. Off for every host
+    /// the tests build and every worker they start (which inherit the variable); the trim's own tests drive it
+    /// with explicit settings on fake time.
+    /// </summary>
+    [ModuleInitializer]
+    internal static void TurnTheQuietTimeTrimOff()
+        => Environment.SetEnvironmentVariable(QuietTimeTrimSettings.EnvironmentVariable, "0");
 }
