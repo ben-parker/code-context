@@ -2,15 +2,26 @@
 # Measures the resident memory of a CodeContext instance (host and worker processes).
 #
 # Usage: scripts/bench/measure-memory.sh [--path DIR] [--no-cache] [--queries]
-#          [--queries-file FILE] [--heap] [--top N] [--settle SECONDS] [--json] [--binary PATH]
+#          [--queries-file FILE] [--heap] [--top N] [--settle SECONDS]
+#          [--write-timeout SECONDS] [--json] [--binary PATH]
 #
 # Starts an instance on DIR (default: the current directory), cached (the default: a
 # warm-up start writes a snapshot, then the measured start loads it) or --no-cache,
-# waits until the index is ready and verified, waits --settle seconds (default 5), and
-# prints Rss, Pss_Anon and Pss_File from /proc/<pid>/smaps_rollup for the host and each
-# worker. --queries runs a fixed query mix and reads again; --heap then reports the live
-# managed heap of the host and the C# worker with dotnet-gcdump, by type (gcdump-types.cs).
-# Readings are taken before any gcdump, because collecting one grows the target's RSS.
+# waits until the index is ready and verified, then settles (below) and prints Rss,
+# Pss_Anon and Pss_File from /proc/<pid>/smaps_rollup for the host and each worker.
+# --queries runs a fixed query mix, settles again and reads again; --heap then reports
+# the live managed heap of the host and the C# worker with dotnet-gcdump, by type
+# (gcdump-types.cs). Readings are taken before any gcdump, which grows the target's RSS.
+#
+# Settling, idle reading: first the snapshot the start writes after its scan commits
+# (about 10 s after ready; status shows a new cache.snapshotSequence once it is written
+# and verified), up to --write-timeout seconds (default 60); then --settle seconds
+# (default 20) with no traffic, which covers V8's memory reducer in the TypeScript
+# worker (about 12 s after its last work) and the quiet-time memory trim of the host and
+# the C# worker (15 s, CodeContext:MemoryTrimSeconds); then until every process's RSS
+# moved less than 2 MB over 3 one-second samples (at most 30 s more). After the query
+# mix, the same without the snapshot step (queries write nothing). The output's write=
+# and stable= are the seconds the first and last waits took (write=-1: no write seen).
 #
 # The instance is always stopped; a .codecontext directory the script created is removed;
 # `git status --short` must be unchanged at the end. Linux only; needs jq, and
@@ -28,11 +39,12 @@ queries=0
 queries_file=
 heap=0
 top=12
-settle=5
+settle=20
+write_timeout=60
 json=0
 timeout=300
 
-usage() { sed -n '2,19s/^# \{0,1\}//p' "${BASH_SOURCE[0]}"; }
+usage() { sed -n '2,30s/^# \{0,1\}//p' "${BASH_SOURCE[0]}"; }
 
 while [ $# -gt 0 ]; do
   case $1 in
@@ -43,6 +55,7 @@ while [ $# -gt 0 ]; do
     --heap) heap=1; shift ;;
     --top) top=$2; shift 2 ;;
     --settle) settle=$2; shift 2 ;;
+    --write-timeout) write_timeout=$2; shift 2 ;;
     --json) json=1; shift ;;
     --binary) bin=$2; shift 2 ;;
     -h|--help) usage; exit 0 ;;
@@ -198,7 +211,64 @@ read_memory() {
   awk '{ r += $3; a += $4; f += $5; print } END { print $1, "total", r, a, f }' "$work/phase" >>"$work/memory"
 }
 
+# The newest snapshot sequence status reports, or empty when none was written or loaded.
+snapshot_sequence() {
+  "$bin" status --path "$root" 2>/dev/null | jq -r '.indexing.cache.snapshotSequence // empty' 2>/dev/null || true
+}
+
+# Waits for the snapshot write that follows the start's scan: status reports a sequence
+# other than the one at ready (the loaded snapshot's, or none without a cache). Without a
+# snapshot service (--no-cache) there is none to wait for. Prints the seconds waited.
+wait_snapshot_write() {
+  local before=$1 deadline=$((SECONDS + write_timeout)) start=$SECONDS cur
+  while [ $SECONDS -lt $deadline ]; do
+    cur=$(snapshot_sequence)
+    if [ -n "$cur" ] && [ "$cur" != "$before" ]; then
+      echo $((SECONDS - start))
+      return 0
+    fi
+    sleep 1
+  done
+  log "no snapshot written within ${write_timeout}s of ready (sequence ${before:-none}); reading anyway"
+  echo -1
+}
+
+# Sum of the processes' RSS in kB, one line per process, in a fixed order.
+rss_line() {
+  local label pid
+  processes | while read -r label pid; do
+    awk '$1 == "Rss:" { printf "%s ", $2 }' "/proc/$pid/smaps_rollup" 2>/dev/null
+  done
+}
+
+# Waits until no process's RSS moved more than 2 MB across 3 consecutive one-second
+# samples, at most 30 s. Prints the seconds waited.
+wait_stable() {
+  local start=$SECONDS prev cur stable=0
+  prev=$(rss_line)
+  while [ $((SECONDS - start)) -lt 30 ]; do
+    sleep 1
+    cur=$(rss_line)
+    if awk -v a="$prev" -v b="$cur" 'BEGIN { n = split(a, x, " "); m = split(b, y, " "); if (n != m) exit 1;
+        for (i = 1; i <= n; i++) { d = x[i] - y[i]; if (d < 0) d = -d; if (d > 2048) exit 1 } exit 0 }'; then
+      stable=$((stable + 1))
+      [ $stable -ge 2 ] && break
+    else
+      stable=0
+    fi
+    prev=$cur
+  done
+  echo $((SECONDS - start))
+}
+
+ready_sequence=$(jq -r '.indexing.cache.snapshotSequence // empty' "$work/status.json")
+write_wait=-1
+[ "$cache" = 1 ] || ready_sequence=
+if [ "$cache" = 1 ] || [ "$(jq -r '.indexing.cache // empty' "$work/status.json")" != "" ]; then
+  write_wait=$(wait_snapshot_write "$ready_sequence")
+fi
 sleep "$settle"
+stable_wait=$(wait_stable)
 read_memory idle
 
 query_count=0
@@ -216,6 +286,7 @@ if [ "$queries" = 1 ]; then
     "$bin" query "$id" "${args[@]}" --path "$root" </dev/null >/dev/null 2>&1 || query_failures=$((query_failures + 1))
   done <"$queries_file"
   sleep "$settle"
+  stable_wait_queries=$(wait_stable)
   read_memory queries
 fi
 
@@ -240,9 +311,10 @@ mode=$([ "$cache" = 1 ] && echo cached || echo no-cache)
 files=$(jq -r '.indexing.filesTotal' "$work/status.json")
 if [ "$json" = 1 ]; then
   jq -n --arg root "$root" --arg mode "$mode" --argjson files "$files" --argjson ready "$ready_s" \
-    --argjson settle "$settle" --argjson queries "$query_count" --argjson failures "$query_failures" \
+    --argjson settle "$settle" --argjson writeWait "$write_wait" --argjson stableWait "$stable_wait" --argjson queries "$query_count" --argjson failures "$query_failures" \
     --rawfile memory "$work/memory" --rawfile heap "$( [ -f "$work/heap" ] && echo "$work/heap" || echo /dev/null)" '
     { root: $root, mode: $mode, files: $files, readySeconds: $ready, settleSeconds: $settle,
+      snapshotWriteWaitSeconds: $writeWait, stableWaitSeconds: $stableWait,
       queries: $queries, queryFailures: $failures,
       memory: [ $memory | split("\n")[] | select(length > 0) | split(" ")
         | { phase: .[0], process: .[1], rssKb: (.[2] | tonumber),
@@ -256,7 +328,8 @@ if [ "$json" = 1 ]; then
   exit 0
 fi
 
-printf '%s  %s  files=%s  ready=%ss  settle=%ss' "$root" "$mode" "$files" "$ready_s" "$settle"
+printf '%s  %s  files=%s  ready=%ss  write=%ss  settle=%ss  stable=%ss' "$root" "$mode" "$files" "$ready_s" \
+  "$write_wait" "$settle" "$stable_wait"
 [ "$queries" = 1 ] && printf '  queries=%s (failed %s)' "$query_count" "$query_failures"
 printf '\n%-8s %-11s %9s %9s %9s\n' phase process rss_mb anon_mb file_mb
 awk '{ printf "%-8s %-11s %9.1f %9.1f %9.1f\n", $1, $2, $3/1024, $4/1024, $5/1024 }' "$work/memory"
