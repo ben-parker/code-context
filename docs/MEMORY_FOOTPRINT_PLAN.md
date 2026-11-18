@@ -56,11 +56,24 @@ Findings that shape the plan:
 | Id | Item | Status |
 |---|---|---|
 | M0 | Repeatable memory measurement script | done, `6036848` |
-| M1 | Compact host heap representation | not started |
-| M2 | Trace the non-live resident memory | not started |
+| M1 | Compact host heap representation, steps 1 to 3 | done (`3a8b0d4`, `4c1623b`), review pending |
+| M1b | Derived edge ids (about -44 MB live), then frozen tables (-3 to -4 MB) | not started |
+| M2 | Trace the non-live resident memory | done, [perf/memory-non-live.md](perf/memory-non-live.md) |
+| M2a | Aggressive compacting GC after bursts, host and C# worker | not started |
+| M2b | Snapshot writer: no re-decode of snapshot-backed shards in `CheckPersistable` | not started |
+| M2c | C# worker: fallback runtime references only when a file falls back (-57 MB) | not started |
+| M2d | C# worker: metadata-only or mapped reference images (-56 to -85 MB), needs a Windows file-lock answer | not scheduled |
+| M2e | Query path allocation (72 MB per 60 queries in three `ContextService` methods) | not scheduled |
+| M0b | Measurement script waits for the post-start snapshot write and V8 shrink before reading | not started |
 | M3 | Worker hibernation, both workers | not started |
 | M4 | Gate: mapped shard (cache plan phase 8) or stop | not started |
 | M5 | Daemonless `query` from the snapshot | not started |
+
+Order: M2a + M2b + M0b together, M2c in parallel, then M1b, then M3.
+
+Known in this container, present before this work (`42d2d03`): 7 tests fail in the full
+suite (`SnapshotKeyTests.FileThatIsNotAKey_IsRefused`, 3 `InitCommandHandlerTests`,
+1 `QueryCommandHandlerTests`, 2 `DetachedStartOrchestratorTests`); cause not looked at.
 
 ### M0: measurement script
 
@@ -170,3 +183,5 @@ outcome for whether it reads a mapped or a materialized shard.
 |---|---|---|
 | 2026-11-18 | Baseline | Table in "Why" above |
 | 2026-11-18 | M0 | `scripts/bench/measure-memory.sh` (+ `gcdump-types.cs`, `queries-<repo>.txt`). Cached baseline, this repo, RSS MB: idle host 254, csharp 265, typescript 249, total 767; after 60 queries host 440, total 915. Live heap: host 107.3 MB (String 53.5, `Entry<string,string>[]` 18.5, `Dictionary<string,string>` 8.3, `Int32[]` 5.9, `CodeEdge` 5.3), csharp 49.6 MB. No-cache: host 313, csharp 551, typescript 218; live heap host 183, csharp 122. Consecutive runs within 5%; outliers seen: typescript after queries once 249 instead of 212, one first run host 289 idle |
+| 2026-11-18 | M1 steps 1-3 | Host live heap, cached: 107.5 to 79.8 MB; no-cache 173.6 to 89.6 MB. Target of 60 MB not met: edge id strings are 46.4 MB (495 bytes each, source + middle + target + tail), hence M1b. Query growth is uncollected garbage (72 MB allocated per 60 queries, live +4.3 MB for `GraphAdjacency`), not live memory. Idle RSS varies about 25 MB between runs |
+| 2026-11-18 | M2 | Non-live memory is mostly uncollected gen0/LOH garbage from bursts (snapshot load 231 MB allocated, snapshot write 218 MB, queries). `GC.Collect(2, Aggressive, blocking, compacting)` with LOH compaction: host anon 265 to 134 MB, worker 200 to 149 (uncached 463 to 214); pause 80-240 ms. Worker native: 85 MB of copied PE images, 57 of it for an eagerly built fallback compilation. TypeScript worker floor about 180-210 MB while alive; only hibernation recovers it. The container's 260 MB L3 inflates gen0 budgets, so absolute figures here overstate a desktop. M0 read too early (snapshot write lands 10 s after ready): true idle host is 340-360 MB RSS |
