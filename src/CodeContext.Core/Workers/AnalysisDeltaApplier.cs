@@ -138,9 +138,11 @@ public sealed class AnalysisDeltaApplier : IAnalysisDeltaSink
             _pending.Remove(pendingKey);
             // One pool per request: facts of the commit with equal metadata share one immutable instance,
             // and repeated strings one instance.
-            var pool = new FactMetadataPool();
-            var nodes = pending.Nodes.Select(n => ToCodeNode(n, pending, pool)).ToList();
-            var edges = pending.Edges.Select(e => ToCodeEdge(e, pending, pool)).ToList();
+            var mapper = new FactMapper(pending);
+            var nodes = new List<CodeNode>(pending.Nodes.Count);
+            foreach (var node in pending.Nodes) nodes.Add(mapper.ToCodeNode(node));
+            var edges = new List<CodeEdge>(pending.Edges.Count);
+            foreach (var edge in pending.Edges) edges.Add(mapper.ToCodeEdge(edge));
 
             // The scope names the (parser, workspace) shard this delta replaces (optionally narrowed
             // to the listed files). The store routes and partitions by the ownership metadata that
@@ -211,91 +213,163 @@ public sealed class AnalysisDeltaApplier : IAnalysisDeltaSink
             "[{ParserId}] discarded stale delta: generation {Stale} <= newest {Newest} for workspace {WorkspaceId}.",
             delta.ParserId, delta.Generation, newestGeneration, delta.WorkspaceId);
 
-    // The fact's metadata: the source's entries in their order, with the two ownership keys set to the
-    // delta's values (in place where the source has them, appended in this order where it does not), so
-    // the ownership keys always win over a same-named source key. The source is only read; the result is
-    // the pool's shared, immutable instance for that content.
-    private static FactMetadata BuildOwnedMetadata(
-        IReadOnlyDictionary<string, string>? source, PendingDelta delta, FactMetadataPool pool)
+    /// <summary>
+    /// Maps one request's facts to stored ones through one pool, so facts of the commit with equal metadata
+    /// share one immutable instance and repeated strings one instance.
+    /// </summary>
+    private sealed class FactMapper
     {
-        var count = source?.Count ?? 0;
-        var pairs = new List<string>(2 * count + 4);
-        bool hasParser = false, hasWorkspace = false;
-        if (source is not null)
+        private readonly FactMetadataPool _pool;
+        private readonly string _parserId;
+        private readonly string _workspaceId;
+        private readonly FactMetadata _ownershipOnly;
+        private string[] _scratch = new string[16];
+
+        public FactMapper(PendingDelta delta)
         {
-            foreach (var (key, value) in source)
+            // Node ids, paths and the other repeated text of the request: presized for about two per node.
+            _pool = new FactMetadataPool(stringCapacity: 2 * delta.Nodes.Count + 64);
+            _parserId = _pool.Intern(delta.ParserId);
+            _workspaceId = _pool.Intern(delta.WorkspaceId);
+            _ownershipOnly = _pool.Get([ParserIdKey, _parserId, WorkspaceIdKey, _workspaceId]);
+        }
+
+        // The fact's metadata: the source's entries in their order, with the two ownership keys set to the
+        // delta's values (in place where the source has them, appended in this order where it does not), so
+        // the ownership keys always win over a same-named source key. A key the source yields twice keeps its
+        // first position and its last value, as a dictionary assignment would. The source is only read; the
+        // result is the pool's shared, immutable instance for that content, found without allocating when
+        // the request already holds it.
+        private FactMetadata OwnedMetadata(IReadOnlyDictionary<string, string>? source)
+        {
+            var count = source?.Count ?? 0;
+            if (count == 0) return _ownershipOnly;
+
+            var needed = 2 * count + 4;
+            if (_scratch.Length < needed) _scratch = new string[Math.Max(needed, 2 * _scratch.Length)];
+            _length = 0;
+            _parserAt = _workspaceAt = -1;
+            _positions = null;
+            // A dictionary with an ordinal-consistent comparer cannot yield a key twice; it is also read
+            // through its own enumerator rather than the interface's.
+            if (source is Dictionary<string, string> dictionary
+                && (ReferenceEquals(dictionary.Comparer, EqualityComparer<string>.Default)
+                    || ReferenceEquals(dictionary.Comparer, StringComparer.Ordinal)
+                    || ReferenceEquals(dictionary.Comparer, StringComparer.OrdinalIgnoreCase)))
             {
-                pairs.Add(key);
-                if (key == ParserIdKey)
-                {
-                    hasParser = true;
-                    pairs.Add(delta.ParserId);
-                }
-                else if (key == WorkspaceIdKey)
-                {
-                    hasWorkspace = true;
-                    pairs.Add(delta.WorkspaceId);
-                }
-                else
-                {
-                    pairs.Add(value);
-                }
+                foreach (var (key, value) in dictionary) Put(key, value, checkRepeats: false);
             }
+            else
+            {
+                foreach (var (key, value) in source!) Put(key, value, checkRepeats: true);
+            }
+            var pairs = _scratch;
+            var length = _length;
+            if (_parserAt < 0)
+            {
+                pairs[length++] = ParserIdKey;
+                pairs[length++] = _parserId;
+            }
+            if (_workspaceAt < 0)
+            {
+                pairs[length++] = WorkspaceIdKey;
+                pairs[length++] = _workspaceId;
+            }
+            var shared = _pool.Get(new ReadOnlySpan<string>(pairs, 0, length));
+            Array.Clear(pairs, 0, length);
+            return shared;
         }
-        if (!hasParser)
-        {
-            pairs.Add(ParserIdKey);
-            pairs.Add(delta.ParserId);
-        }
-        if (!hasWorkspace)
-        {
-            pairs.Add(WorkspaceIdKey);
-            pairs.Add(delta.WorkspaceId);
-        }
-        return pool.Get(pairs.ToArray());
-    }
 
-    // Strings that repeat across the facts of a request (paths, kinds, languages, names, and node ids
-    // that edges name as endpoints) arrive as one instance per occurrence from the deserializer; each is
-    // stored through the request's pool, as a snapshot load shares them through the shard's string
-    // table. Nodes are mapped before edges, so an endpoint is the instance its node holds.
-    private static CodeNode ToCodeNode(ProtocolNode node, PendingDelta delta, FactMetadataPool pool)
-    {
-        var metadata = BuildOwnedMetadata(node.Metadata, delta, pool);
+        private int _length;
+        private int _parserAt;
+        private int _workspaceAt;
+        private Dictionary<string, int>? _positions;
 
-        return new CodeNode
+        private void Put(string key, string value, bool checkRepeats)
         {
-            Id = pool.Intern(node.Id),
+            if (key == ParserIdKey)
+            {
+                if (_parserAt >= 0) return;
+                _parserAt = _length;
+                value = _parserId;
+            }
+            else if (key == WorkspaceIdKey)
+            {
+                if (_workspaceAt >= 0) return;
+                _workspaceAt = _length;
+                value = _workspaceId;
+            }
+            else if (checkRepeats && Find(_scratch, _length, key, ref _positions) is var at and >= 0)
+            {
+                _scratch[at + 1] = value;
+                return;
+            }
+            // Room for this pair and the two ownership pairs (a map may yield more pairs than its count).
+            if (_length + 6 > _scratch.Length) Array.Resize(ref _scratch, 2 * _scratch.Length);
+            _scratch[_length] = key;
+            _scratch[_length + 1] = value;
+            _positions?.Add(key, _length);
+            _length += 2;
+        }
+
+        // The position of key among the first length pairs, or -1: in order for a few, through an index for many.
+        private static int Find(string[] pairs, int length, string key, ref Dictionary<string, int>? positions)
+        {
+            if (positions is null && length >= 32)
+            {
+                positions = new Dictionary<string, int>(StringComparer.Ordinal);
+                for (var i = 0; i < length; i += 2) positions.TryAdd(pairs[i], i);
+            }
+            if (positions is not null) return positions.TryGetValue(key, out var at) ? at : -1;
+            for (var i = 0; i < length; i += 2)
+                if (string.Equals(pairs[i], key, StringComparison.Ordinal)) return i;
+            return -1;
+        }
+
+        private string? _lastSource;
+        private string? _lastSourcePooled;
+
+        // A worker sends a member's edges together, so most sources repeat the previous edge's: one compare
+        // instead of a hash and a probe of the pool.
+        private string? InternSource(string? source)
+        {
+            if (source is not null && string.Equals(source, _lastSource, StringComparison.Ordinal)) return _lastSourcePooled;
+            _lastSource = source;
+            return _lastSourcePooled = _pool.Intern(source);
+        }
+
+        // Strings that repeat across the facts of a request (paths, kinds, languages, names, and node ids
+        // that edges name as endpoints) arrive as one instance per occurrence from the deserializer; each is
+        // stored through the request's pool, as a snapshot load shares them through the shard's string
+        // table. Nodes are mapped before edges, so an endpoint is the instance its node holds.
+        public CodeNode ToCodeNode(ProtocolNode node) => new()
+        {
+            Id = _pool.Intern(node.Id),
             Identifier = node.Identifier,
-            Name = pool.Intern(node.Name),
-            Type = pool.Intern(node.Kind),
-            Language = pool.Intern(node.Language),
-            FilePath = pool.Intern(node.FilePath),
+            Name = _pool.Intern(node.Name),
+            Type = _pool.Intern(node.Kind),
+            Language = _pool.Intern(node.Language),
+            FilePath = _pool.Intern(node.FilePath),
             StartLine = node.StartLine,
             EndLine = node.EndLine,
             StartCol = node.StartColumn,
             EndCol = node.EndColumn,
-            Namespace = pool.Intern(node.Namespace),
-            Visibility = pool.Intern(node.Visibility),
-            Signature = pool.Intern(node.Signature),
-            ReturnType = pool.Intern(node.ReturnType),
-            Parameters = pool.Intern(node.Parameters),
-            Modifiers = pool.Intern(node.Modifiers),
-            Metadata = metadata,
+            Namespace = _pool.Intern(node.Namespace),
+            Visibility = _pool.Intern(node.Visibility),
+            Signature = _pool.Intern(node.Signature),
+            ReturnType = _pool.Intern(node.ReturnType),
+            Parameters = _pool.Intern(node.Parameters),
+            Modifiers = _pool.Intern(node.Modifiers),
+            Metadata = OwnedMetadata(node.Metadata),
         };
-    }
 
-    private static CodeEdge ToCodeEdge(ProtocolEdge edge, PendingDelta delta, FactMetadataPool pool)
-    {
-        var metadata = BuildOwnedMetadata(edge.Metadata, delta, pool);
-
-        return new CodeEdge
+        public CodeEdge ToCodeEdge(ProtocolEdge edge) => new()
         {
             Id = edge.Id,
-            SourceId = pool.Intern(edge.SourceId),
-            TargetId = pool.Intern(edge.TargetId),
-            Type = pool.Intern(edge.Kind),
-            Metadata = metadata,
+            SourceId = InternSource(edge.SourceId),
+            TargetId = _pool.Intern(edge.TargetId),
+            Type = _pool.Intern(edge.Kind),
+            Metadata = OwnedMetadata(edge.Metadata),
         };
     }
 }

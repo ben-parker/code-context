@@ -155,6 +155,56 @@ public class SharedMetadataTests
         Assert.Same(ab.Type, ba.Type);
     }
 
+    /// <summary>
+    /// A source map that yields a key twice (any IReadOnlyDictionary a worker host hands over, not only a
+    /// Dictionary) keeps the last value at the key's first position, as the store did before M1, and the
+    /// request still commits.
+    /// </summary>
+    [Fact]
+    public async Task Commit_ASourceKeyRepeated_KeepsTheLastValue_AndCommitsTheRequest()
+    {
+        var factory = new InMemoryRepositoryFactory(NullLogger<InMemoryRepositoryFactory>.Instance);
+        var store = (IGenerationalGraphStore)factory.CreateGraphRepository();
+        var applier = new AnalysisDeltaApplier(store, NullLogger<AnalysisDeltaApplier>.Instance);
+        var repeated = new RepeatingMap(("a", "1"), ("parserId", "x"), ("b", "3"), ("a", "2"), ("parserId", "y"));
+        var many = new RepeatingMap(Enumerable.Range(0, 20).Select(i => ($"k{i % 12}", $"v{i}")).ToArray());
+        var delta = new AnalysisDelta(
+            ParserId: "fake", ParserVersion: "1.0", WorkspaceId: "ws-1", Generation: 1, RequestId: 1,
+            ReplacesWorkspace: true, ReplacesFiles: [],
+            Nodes: [Node("fake:ws-1:A", repeated), Node("fake:ws-1:B", many)],
+            Edges: [new ProtocolEdge("fake:ws-1:A->B", "fake:ws-1:A", "fake:ws-1:B", "calls", repeated)],
+            IsLastForRequest: true);
+
+        Assert.True(await applier.ApplyAsync(delta));
+
+        var graph = (await ((ICodeGraphRepository)store).GetGraphAsync())!;
+        var a = graph.Nodes.Single(node => node.Id == "fake:ws-1:A");
+        Assert.Equal(["a", "parserId", "b", "workspaceId"], a.Metadata!.Keys);
+        Assert.Equal(["2", "fake", "3", "ws-1"], a.Metadata!.Values);
+        Assert.Same(a.Metadata, graph.Edges.Single().Metadata);
+        var b = graph.Nodes.Single(node => node.Id == "fake:ws-1:B");
+        Assert.Equal(Enumerable.Range(0, 12).Select(i => $"k{i}").Concat(["parserId", "workspaceId"]), b.Metadata!.Keys);
+        Assert.Equal(Enumerable.Range(0, 12).Select(i => i < 8 ? $"v{i + 12}" : $"v{i}").Concat(["fake", "ws-1"]), b.Metadata!.Values);
+    }
+
+    /// <summary>A read-only map that enumerates its pairs as given, repeats included.</summary>
+    private sealed class RepeatingMap(params (string Key, string Value)[] pairs) : IReadOnlyDictionary<string, string>
+    {
+        public string this[string key] => pairs.Last(pair => pair.Key == key).Value;
+        public IEnumerable<string> Keys => pairs.Select(pair => pair.Key);
+        public IEnumerable<string> Values => pairs.Select(pair => pair.Value);
+        public int Count => pairs.Length;
+        public bool ContainsKey(string key) => pairs.Any(pair => pair.Key == key);
+        public bool TryGetValue(string key, out string value)
+        {
+            value = ContainsKey(key) ? this[key] : null!;
+            return ContainsKey(key);
+        }
+        public IEnumerator<KeyValuePair<string, string>> GetEnumerator()
+            => pairs.Select(pair => KeyValuePair.Create(pair.Key, pair.Value)).GetEnumerator();
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+    }
+
     [Fact]
     public void FactMetadata_ReadsAsADictionaryWouldAndRefusesARepeatedKey()
     {

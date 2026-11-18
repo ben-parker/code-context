@@ -1,5 +1,6 @@
 using System.Collections;
 using System.Diagnostics.CodeAnalysis;
+using System.Runtime.InteropServices;
 
 namespace CodeContext.Core
 {
@@ -114,8 +115,16 @@ namespace CodeContext.Core
     /// </summary>
     internal sealed class FactMetadataPool
     {
-        private readonly Dictionary<PairsKey, FactMetadata> _sets = new();
-        private readonly Dictionary<string, string> _strings = new(StringComparer.Ordinal);
+        private readonly Dictionary<PairsKey, FactMetadata> _sets;
+        private readonly Dictionary<PairsKey, FactMetadata>.AlternateLookup<ReadOnlySpan<string>> _setsBySpan;
+        private readonly Dictionary<string, string> _strings;
+
+        public FactMetadataPool(int stringCapacity = 0)
+        {
+            _sets = new Dictionary<PairsKey, FactMetadata>(PairsComparer.Instance);
+            _setsBySpan = _sets.GetAlternateLookup<ReadOnlySpan<string>>();
+            _strings = new Dictionary<string, string>(Math.Max(0, stringCapacity), StringComparer.Ordinal);
+        }
 
         public int DistinctSets => _sets.Count;
 
@@ -124,9 +133,8 @@ namespace CodeContext.Core
         public string? Intern(string? value)
         {
             if (value is null) return null;
-            if (_strings.TryGetValue(value, out var pooled)) return pooled;
-            _strings.Add(value, value);
-            return value;
+            ref var pooled = ref CollectionsMarshal.GetValueRefOrAddDefault(_strings, value, out _);
+            return pooled ??= value;
         }
 
         /// <summary>
@@ -135,27 +143,54 @@ namespace CodeContext.Core
         /// </summary>
         public FactMetadata Get(string[] pairs)
         {
+            if (_setsBySpan.TryGetValue(pairs, out var shared)) return shared;
+            return Add(pairs);
+        }
+
+        /// <summary>
+        /// The shared map of <paramref name="pairs"/> (key, value, ...), which is only read: a content already
+        /// pooled costs one hash per string and no allocation; a new one is copied.
+        /// </summary>
+        public FactMetadata Get(ReadOnlySpan<string> pairs)
+        {
+            if (_setsBySpan.TryGetValue(pairs, out var shared)) return shared;
+            return Add(pairs.ToArray());
+        }
+
+        private FactMetadata Add(string[] pairs)
+        {
             for (var i = 0; i < pairs.Length; i++) pairs[i] = Intern(pairs[i]);
-            var key = new PairsKey(pairs);
-            if (_sets.TryGetValue(key, out var shared)) return shared;
-            shared = new FactMetadata(pairs);
-            _sets.Add(key, shared);
+            var shared = new FactMetadata(pairs);
+            _sets.Add(new PairsKey(pairs, PairsComparer.Hash(pairs)), shared);
             return shared;
         }
 
-        private readonly struct PairsKey(string[] pairs) : IEquatable<PairsKey>
+        /// <summary>A pooled content and its hash, computed once.</summary>
+        private readonly record struct PairsKey(string[] Pairs, int Hash);
+
+        private sealed class PairsComparer : IEqualityComparer<PairsKey>, IAlternateEqualityComparer<ReadOnlySpan<string>, PairsKey>
         {
-            private readonly string[] _pairs = pairs;
+            public static readonly PairsComparer Instance = new();
 
-            public bool Equals(PairsKey other) => _pairs.AsSpan().SequenceEqual(other._pairs);
-
-            public override bool Equals(object? obj) => obj is PairsKey other && Equals(other);
-
-            public override int GetHashCode()
+            public static int Hash(ReadOnlySpan<string> pairs)
             {
                 var hash = new HashCode();
-                foreach (var value in _pairs) hash.Add(value is null ? 0 : StringComparer.Ordinal.GetHashCode(value));
+                foreach (var value in pairs) hash.Add(value is null ? 0 : StringComparer.Ordinal.GetHashCode(value));
                 return hash.ToHashCode();
+            }
+
+            public bool Equals(PairsKey x, PairsKey y) => x.Hash == y.Hash && x.Pairs.AsSpan().SequenceEqual(y.Pairs);
+
+            public int GetHashCode(PairsKey key) => key.Hash;
+
+            public bool Equals(ReadOnlySpan<string> alternate, PairsKey other) => alternate.SequenceEqual(other.Pairs);
+
+            public int GetHashCode(ReadOnlySpan<string> alternate) => Hash(alternate);
+
+            public PairsKey Create(ReadOnlySpan<string> alternate)
+            {
+                var pairs = alternate.ToArray();
+                return new PairsKey(pairs, Hash(pairs));
             }
         }
     }
