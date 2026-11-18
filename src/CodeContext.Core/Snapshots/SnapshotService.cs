@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using CodeContext.Core.Memory;
 using CodeContext.Core.Repositories;
 using CodeContext.Core.Repositories.InMemory;
 using CodeContext.Core.Services;
@@ -175,6 +176,7 @@ namespace CodeContext.Core.Snapshots
         private readonly TimeProvider _time;
         private readonly ILogger<SnapshotService> _logger;
         private readonly IWorkerStateSaver? _workers;
+        private readonly QuietTimeTrim? _memoryTrim;
 
         private readonly object _gate = new();
         private CacheDirectory? _directory;
@@ -214,8 +216,10 @@ namespace CodeContext.Core.Snapshots
             TimeProvider time,
             ILogger<SnapshotService> logger,
             CacheState? cacheState = null,
-            IWorkerStateSaver? workers = null)
+            IWorkerStateSaver? workers = null,
+            QuietTimeTrim? memoryTrim = null)
         {
+            _memoryTrim = memoryTrim;
             _coordinator = coordinator;
             _database = database;
             _scanState = scanState;
@@ -643,7 +647,12 @@ namespace CodeContext.Core.Snapshots
             _writing = true;
             _writesInProgress++;
             _dirtySince = null;
-            return _writeTask = Task.Run(() => FinishWrite(capture, Write(capture)));
+            // A write is work for the quiet-time memory trim from here until its bookkeeping is done.
+            var activity = _memoryTrim?.BeginActivity();
+            return _writeTask = Task.Run(() =>
+            {
+                using (activity) FinishWrite(capture, Write(capture));
+            });
         }
 
         private enum WriteOutcomeKind { Written, Discarded, Failed, Disabled }

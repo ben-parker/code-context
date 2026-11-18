@@ -1,3 +1,4 @@
+using CodeContext.Core.Memory;
 using CodeContext.Parser.Protocol;
 using Microsoft.Extensions.Configuration;
 
@@ -64,6 +65,13 @@ public sealed class ParserWorkerOptions
     public IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>>? WorkerEnvironment { get; set; }
 
     /// <summary>
+    /// Environment overlays for every worker, applied after <see cref="WorkerLaunchSpec.Environment"/> and before
+    /// <see cref="WorkerEnvironment"/> (which wins on collision). Carries host settings a worker shares, such as
+    /// <c>CodeContext__MemoryTrimSeconds</c>. Null (the default) touches nothing.
+    /// </summary>
+    public IReadOnlyDictionary<string, string>? CommonEnvironment { get; set; }
+
+    /// <summary>
     /// Builds options from host configuration, reading the <c>CodeContext:WorkerEnvironment</c>
     /// section: each child key is a parser id and each grandchild a <c>KEY=VALUE</c> environment
     /// entry (env-var form <c>CodeContext__WorkerEnvironment__csharp__DOTNET_gcServer=1</c>).
@@ -91,7 +99,17 @@ public sealed class ParserWorkerOptions
                     [parserSection.Key] = environment;
             }
         }
-        return new ParserWorkerOptions { WorkerEnvironment = workerEnvironment };
+        // The host's quiet-time trim setting reaches the workers that read it (the C# worker), whichever
+        // configuration source set it; per-parser WorkerEnvironment entries still win.
+        Dictionary<string, string>? commonEnvironment = null;
+        if (configuration[QuietTimeTrimSettings.ConfigurationKey] is { } trimSeconds)
+        {
+            commonEnvironment = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                [QuietTimeTrimSettings.EnvironmentVariable] = trimSeconds,
+            };
+        }
+        return new ParserWorkerOptions { WorkerEnvironment = workerEnvironment, CommonEnvironment = commonEnvironment };
     }
 }
 

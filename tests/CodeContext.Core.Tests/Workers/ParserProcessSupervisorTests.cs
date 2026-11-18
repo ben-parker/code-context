@@ -3,6 +3,7 @@ using CodeContext.Core.Repositories;
 using CodeContext.Core.Repositories.InMemory;
 using CodeContext.Core.Workers;
 using CodeContext.Parser.Protocol;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace CodeContext.Core.Tests.Workers;
@@ -452,6 +453,40 @@ public class ParserProcessSupervisorTests
         var startInfo = ParserProcessSupervisor.BuildStartInfo(spec, options);
 
         Assert.Equal("from-options", startInfo.Environment["KEY"]);
+    }
+
+    [Fact]
+    public void BuildStartInfo_CommonEnvironment_ReachesEveryWorker_AndAParserEntryWins()
+    {
+        var options = new ParserWorkerOptions
+        {
+            CommonEnvironment = new Dictionary<string, string> { ["SHARED"] = "common", ["KEY"] = "common" },
+            WorkerEnvironment = new Dictionary<string, IReadOnlyDictionary<string, string>>
+            {
+                ["csharp"] = new Dictionary<string, string> { ["KEY"] = "from-options" },
+            },
+        };
+        var spec = new WorkerLaunchSpec("csharp", "C#", "worker", [],
+            Environment: new Dictionary<string, string> { ["SHARED"] = "from-spec" });
+
+        var csharp = ParserProcessSupervisor.BuildStartInfo(spec, options);
+        var typescript = ParserProcessSupervisor.BuildStartInfo(new WorkerLaunchSpec("typescript", "TS", "worker", []), options);
+
+        Assert.Equal("common", csharp.Environment["SHARED"]);
+        Assert.Equal("from-options", csharp.Environment["KEY"]);
+        Assert.Equal("common", typescript.Environment["KEY"]);
+    }
+
+    [Fact]
+    public void FromConfiguration_ForwardsTheMemoryTrimSetting_ToEveryWorker()
+    {
+        var configured = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["CodeContext:MemoryTrimSeconds"] = "0" })
+            .Build();
+        var unconfigured = new ConfigurationBuilder().Build();
+
+        Assert.Equal("0", ParserWorkerOptions.FromConfiguration(configured).CommonEnvironment!["CodeContext__MemoryTrimSeconds"]);
+        Assert.Null(ParserWorkerOptions.FromConfiguration(unconfigured).CommonEnvironment);
     }
 
     [Fact]

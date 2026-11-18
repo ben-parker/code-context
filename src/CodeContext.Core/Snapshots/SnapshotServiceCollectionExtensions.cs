@@ -1,4 +1,5 @@
 using System.Globalization;
+using CodeContext.Core.Memory;
 using CodeContext.Core.Repositories;
 using CodeContext.Core.Repositories.InMemory;
 using CodeContext.Core.Services;
@@ -64,7 +65,8 @@ namespace CodeContext.Core.Snapshots
                 TimeProvider.System,
                 sp.GetRequiredService<ILogger<SnapshotService>>(),
                 sp.GetRequiredService<CacheState>(),
-                sp.GetService<LanguageWorkerService>()));
+                sp.GetService<LanguageWorkerService>(),
+                sp.GetService<QuietTimeTrim>()));
             services.AddHostedService(sp => sp.GetRequiredService<SnapshotService>());
             return services;
         }

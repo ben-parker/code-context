@@ -1,4 +1,5 @@
 using System.Text.Json;
+using CodeContext.CSharp.Worker.Memory;
 using CodeContext.Parser.Protocol;
 
 namespace CodeContext.CSharp.Worker;
@@ -15,7 +16,8 @@ internal static class Program
         var stdout = Console.OpenStandardOutput();
 
         var connection = new JsonRpcConnection(stdin, stdout);
-        var host = new CSharpWorkerHost(connection);
+        using var memoryTrim = CreateMemoryTrim();
+        var host = new CSharpWorkerHost(connection, memoryTrim);
 
         connection.AddRequestHandler(ParserProtocolMethods.Initialize, host.HandleInitializeAsync);
         connection.AddRequestHandler(ParserProtocolMethods.OpenWorkspace, host.HandleOpenWorkspaceAsync);
@@ -38,6 +40,24 @@ internal static class Program
         }
         return 0;
     }
+
+    /// <summary>
+    /// The quiet-time memory trim (<see cref="QuietTimeTrim"/>), configured by the environment variable
+    /// <c>CodeContext__MemoryTrimSeconds</c>, which the host forwards from its own <c>CodeContext:MemoryTrimSeconds</c>:
+    /// absent means 15 s, 0 turns it off. Its one line per trim goes to stderr.
+    /// </summary>
+    internal static QuietTimeTrim CreateMemoryTrim()
+    {
+        var text = Environment.GetEnvironmentVariable(QuietTimeTrimSettings.EnvironmentVariable);
+        var settings = QuietTimeTrimSettings.FromSeconds(text);
+        if (settings is null)
+        {
+            Console.Error.WriteLine($"csharp-worker: ignoring {QuietTimeTrimSettings.EnvironmentVariable}='{text}': not a valid value; keeping {QuietTimeTrimSettings.DefaultQuietSeconds}.");
+            settings = new QuietTimeTrimSettings();
+        }
+        return new QuietTimeTrim(settings, TimeProvider.System, trimmed: result => Console.Error.WriteLine(
+            $"trim: working set {result.WorkingSetBefore / 1048576.0:F0} MB -> {result.WorkingSetAfter / 1048576.0:F0} MB, pause {result.Pause.TotalMilliseconds:F0} ms"));
+    }
 }
 
 /// <summary>Reads each request's JSON, hands it to the <see cref="WorkerSession"/> and writes its answer.</summary>
@@ -45,15 +65,18 @@ internal sealed class CSharpWorkerHost : IWorkerOutput
 {
     private readonly JsonRpcConnection _connection;
     private readonly WorkerSession _session;
+    private readonly QuietTimeTrim? _memoryTrim;
 
-    public CSharpWorkerHost(JsonRpcConnection connection)
+    public CSharpWorkerHost(JsonRpcConnection connection, QuietTimeTrim? memoryTrim = null)
     {
         _connection = connection;
         _session = new WorkerSession(this);
+        _memoryTrim = memoryTrim;
     }
 
     public Task<JsonElement?> HandleInitializeAsync(JsonElement? paramsElement, CancellationToken ct)
     {
+        using var activity = _memoryTrim?.BeginActivity();
         _ = Deserialize(paramsElement, ParserProtocolJsonContext.Default.InitializeParams);
         return Task.FromResult<JsonElement?>(
             JsonSerializer.SerializeToElement(WorkerSession.Initialize(), ParserProtocolJsonContext.Default.InitializeResult));
@@ -61,30 +84,36 @@ internal sealed class CSharpWorkerHost : IWorkerOutput
 
     public async Task<JsonElement?> HandleOpenWorkspaceAsync(JsonElement? paramsElement, CancellationToken ct)
     {
+        // Each request is work: no trim starts until it has answered.
+        using var activity = _memoryTrim?.BeginActivity();
         var result = await _session.OpenAsync(Deserialize(paramsElement, ParserProtocolJsonContext.Default.OpenWorkspaceParams), ct);
         return JsonSerializer.SerializeToElement(result, ParserProtocolJsonContext.Default.OpenWorkspaceResult);
     }
 
     public async Task<JsonElement?> HandleIndexWorkspaceAsync(long requestId, JsonElement? paramsElement, CancellationToken ct)
     {
+        using var activity = _memoryTrim?.BeginActivity();
         var result = await _session.IndexAsync(requestId, Deserialize(paramsElement, ParserProtocolJsonContext.Default.IndexWorkspaceParams), ct);
         return JsonSerializer.SerializeToElement(result, ParserProtocolJsonContext.Default.IndexWorkspaceResult);
     }
 
     public async Task<JsonElement?> HandleApplyChangesAsync(long requestId, JsonElement? paramsElement, CancellationToken ct)
     {
+        using var activity = _memoryTrim?.BeginActivity();
         var result = await _session.ApplyAsync(requestId, Deserialize(paramsElement, ParserProtocolJsonContext.Default.ApplyChangesParams), ct);
         return JsonSerializer.SerializeToElement(result, ParserProtocolJsonContext.Default.ApplyChangesResult);
     }
 
     public async Task<JsonElement?> HandleNativeSyntaxTreeAsync(JsonElement? paramsElement, CancellationToken ct)
     {
+        using var activity = _memoryTrim?.BeginActivity();
         var result = await _session.SyntaxTreeAsync(Deserialize(paramsElement, ParserProtocolJsonContext.Default.NativeSyntaxTreeParams), ct);
         return JsonSerializer.SerializeToElement(result, ParserProtocolJsonContext.Default.NativeSyntaxTreeResult);
     }
 
     public async Task<JsonElement?> HandleSaveStateAsync(JsonElement? paramsElement, CancellationToken ct)
     {
+        using var activity = _memoryTrim?.BeginActivity();
         var result = await _session.SaveStateAsync(Deserialize(paramsElement, ParserProtocolJsonContext.Default.SaveStateParams), ct);
         return JsonSerializer.SerializeToElement(result, ParserProtocolJsonContext.Default.SaveStateResult);
     }

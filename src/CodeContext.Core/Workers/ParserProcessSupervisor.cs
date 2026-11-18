@@ -299,6 +299,7 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
     /// Builds the <see cref="ProcessStartInfo"/> for one worker: redirected stdio, no
     /// window, working directory from the spec. Environment overlays are applied on top
     /// of the inherited host environment — first <see cref="WorkerLaunchSpec.Environment"/>,
+    /// then <see cref="ParserWorkerOptions.CommonEnvironment"/>,
     /// then <see cref="ParserWorkerOptions.WorkerEnvironment"/> for this parser id (options
     /// win on key collision). Each var is upserted (never <c>Add</c>) because names may
     /// already be present in the inherited environment and are case-insensitive on Windows.
@@ -325,6 +326,13 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
         if (spec.Environment is { } specEnvironment)
         {
             foreach (var (key, value) in specEnvironment)
+            {
+                startInfo.Environment[key] = value;
+            }
+        }
+        if (options.CommonEnvironment is { } commonEnvironment)
+        {
+            foreach (var (key, value) in commonEnvironment)
             {
                 startInfo.Environment[key] = value;
             }

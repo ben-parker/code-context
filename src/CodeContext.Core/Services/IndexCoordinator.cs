@@ -1,4 +1,5 @@
 using System.Threading.Channels;
+using CodeContext.Core.Memory;
 using CodeContext.Core.Snapshots;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -84,6 +85,7 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
     private readonly ILogger<IndexCoordinator> _logger;
     private readonly IRepositoryFileSelector _fileSelector;
     private readonly CacheState? _cacheState;
+    private readonly QuietTimeTrim? _memoryTrim;
 
     private int _busy;
     private int _queuedMaintenance;
@@ -95,8 +97,10 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
         IOptions<CodeContextOptions> options,
         ILoggerFactory loggerFactory,
         IRepositoryFileSelector? fileSelector = null,
-        CacheState? cacheState = null)
+        CacheState? cacheState = null,
+        QuietTimeTrim? memoryTrim = null)
     {
+        _memoryTrim = memoryTrim;
         _graphUpdateService = graphUpdateService;
         _scanState = scanState;
         _options = options.Value;
@@ -202,18 +206,22 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
             // are published in one swap, and status says "scanning" until then. The load itself is not
             // cancellable (it is bounded by the candidate cap and the size cap); a stop that arrived
             // during it is honoured before the scan starts.
-            var loaded = RunLoadStep();
-            stoppingToken.ThrowIfCancellationRequested();
-
-            // Startup scan: resumable, so an instance restarted over a warm metadata
-            // store only re-processes what changed; after a load, the full-scan flow, so
-            // every worker replaces what the snapshot holds. Runs after the HTTP host has
-            // bound, and inside the try so a shutdown mid-scan still drains queued refresh
-            // waiters in the finally below.
-            if (_scanState.TryBeginScan())
+            // The load and the startup scan are one burst for the quiet-time memory trim.
+            using (_memoryTrim?.BeginActivity())
             {
-                await RunScanAsync(resumable: !loaded, stoppingToken);
-                NotifyMutationObserver();
+                var loaded = RunLoadStep();
+                stoppingToken.ThrowIfCancellationRequested();
+
+                // Startup scan: resumable, so an instance restarted over a warm metadata
+                // store only re-processes what changed; after a load, the full-scan flow, so
+                // every worker replaces what the snapshot holds. Runs after the HTTP host has
+                // bound, and inside the try so a shutdown mid-scan still drains queued refresh
+                // waiters in the finally below.
+                if (_scanState.TryBeginScan())
+                {
+                    await RunScanAsync(resumable: !loaded, stoppingToken);
+                    NotifyMutationObserver();
+                }
             }
 
             while (await _commands.Reader.WaitToReadAsync(stoppingToken))
@@ -253,6 +261,7 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
     /// <summary>Processes one command; returns a follow-up command if one was read while draining.</summary>
     private async Task<Command?> ProcessCommandAsync(Command command, CancellationToken ct)
     {
+        using var activity = _memoryTrim?.BeginActivity();
         if (command is MaintenanceCommand maintenance)
         {
             // Not indexing work: _busy stays as it is.

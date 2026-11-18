@@ -1,5 +1,6 @@
 using CodeContext.Api.Endpoints;
 using CodeContext.Core;
+using CodeContext.Core.Memory;
 using CodeContext.Core.Repositories;
 using CodeContext.Core.Serialization;
 using CodeContext.Core.Services;
@@ -68,6 +69,8 @@ public static class ProgramHelpers
 
         // Register services
         services.AddSingleton<IParserSessionRegistry, ParserSessionRegistry>();
+        // Returns the garbage of a burst (load, scan, snapshot write, queries) once the host is quiet.
+        services.AddCodeContextMemoryTrim();
         // Reads the coverage recorded with the published shards, so it always describes the facts served.
         services.AddSingleton(sp => AnalysisCoverageRegistry.ForStore(sp.GetRequiredService<IRepositoryFactory>()));
         services.AddSingleton<IRepositoryFileSelector, RepositoryFileSelector>();

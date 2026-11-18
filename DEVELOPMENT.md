@@ -62,10 +62,11 @@ dotnet test tests/CodeContext.Core.Tests/CodeContext.Core.Tests.csproj -c Releas
 
 To measure memory, build in Release and run `scripts/bench/measure-memory.sh` (Linux,
 needs `jq`; `--heap` needs `dotnet-gcdump`). It starts an instance on `--path`, cached by
-default or with `--no-cache`, and prints RSS and anonymous/file PSS per process when the
-index is ready; `--queries` adds a reading after a fixed query mix, `--heap` the live
-managed heap of the host and C# worker by type. It stops the instance and removes a
-`.codecontext` it created:
+default or with `--no-cache`, and prints RSS and anonymous/file PSS per process once the
+index is ready, the snapshot written after the start is on disk, and the processes have
+been quiet for `--settle` seconds (default 20) and their RSS is stable; `--queries` adds
+a reading after a fixed query mix, `--heap` the live managed heap of the host and C#
+worker by type. It stops the instance and removes a `.codecontext` it created:
 
 ```bash
 scripts/bench/measure-memory.sh --path . --queries --heap
@@ -137,6 +138,15 @@ To clear the cache, stop the instance and delete `<root>/.codecontext/cache/`;
 deleting `~/.codecontext/cache.key` invalidates every snapshot of that user. To run
 without it, start with `--no-cache` (or set `CodeContext__CacheEnabled=false`): no
 key, no directory, nothing loaded or written.
+
+After a burst of work (the start-up load and scan, a snapshot write, a run of queries, a
+C# worker index or update) the host and the C# worker each run one aggressive compacting
+garbage collection once they have been quiet for 15 seconds, which returns the burst's
+garbage to the operating system (a pause of about 0.1 to 0.25 s, never while a request,
+commit, snapshot write or worker request is in flight, at most once per 30 s, and only
+after 32 MB or more was allocated since the last). The host's log has one line per trim,
+the C# worker's (`[csharp stderr] trim:`) as well. `CodeContext__MemoryTrimSeconds` sets
+the quiet period in seconds for both; `0` turns it off.
 
 Keep `.codecontext/` out of version control. The cache directory writes its own
 `.gitignore`, and this repository ignores `.codecontext/` too. A committed snapshot
