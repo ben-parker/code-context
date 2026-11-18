@@ -650,12 +650,14 @@ namespace CodeContext.Core.Snapshots
 
         private sealed record WriteOutcome(
             WriteOutcomeKind Kind, string? Cause = null, string? Message = null,
-            ulong Sequence = 0, string? FileName = null, long Length = 0, long Milliseconds = 0);
+            ulong Sequence = 0, string? FileName = null, long Length = 0, long Milliseconds = 0, long AllocatedBytes = 0);
 
         /// <summary>The background write of one capture. Never throws.</summary>
         private WriteOutcome Write(SnapshotCapture capture)
         {
             var started = Stopwatch.GetTimestamp();
+            // The write runs on this one thread, so this counter is what it allocated (reported in the log line).
+            var allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
             string? tempPath = null;
             string? renamedPath = null;
             try
@@ -714,7 +716,8 @@ namespace CodeContext.Core.Snapshots
                 }
 
                 var written = new WriteOutcome(WriteOutcomeKind.Written, Sequence: sequence, FileName: name, Length: result.Length,
-                    Milliseconds: (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+                    Milliseconds: (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds,
+                    AllocatedBytes: GC.GetAllocatedBytesForCurrentThread() - allocatedBefore);
                 // Checked again before deleting anything; the snapshot itself is written either way.
                 if (LevelsStillPlain(directory)) TryRetireOlderThan(directory, sequence, capture);
                 return written;
@@ -957,8 +960,8 @@ namespace CodeContext.Core.Snapshots
             switch (outcome.Kind)
             {
                 case WriteOutcomeKind.Written:
-                    _logger.LogInformation("Wrote snapshot {Name} ({Bytes} bytes, {Milliseconds} ms).",
-                        outcome.FileName, outcome.Length, outcome.Milliseconds);
+                    _logger.LogInformation("Wrote snapshot {Name} ({Bytes} bytes, {Milliseconds} ms, {Allocated:F1} MB allocated).",
+                        outcome.FileName, outcome.Length, outcome.Milliseconds, outcome.AllocatedBytes / 1048576.0);
                     break;
                 case WriteOutcomeKind.Discarded:
                     _logger.LogDebug("Discarded a snapshot: a shard changed in place while it was written.");

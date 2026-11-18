@@ -114,6 +114,8 @@ namespace CodeContext.Core.Snapshots
                     reader.Key, nodes.Count, edges.Length, nodes, edges, state.TryGetNodeIdByIdentifier);
                 if (reason is not null)
                     throw new SnapshotCorruptException($"Shard {reader.Key} holds a fact the writer never writes: {reason}.");
+                // The next write of this shard, unchanged, need not walk every fact again (SnapshotWriter.Plan).
+                state.MarkPersistable(reader.Key, state.Version);
                 shards.Add(new LoadedSnapshotShard(reader.Key, state, reader.ReadInfo()));
             }
             return new SnapshotLoadResult(SnapshotRejection.None, null, file.Header, shards, dropped) { DroppedStateFiles = droppedStateFiles };

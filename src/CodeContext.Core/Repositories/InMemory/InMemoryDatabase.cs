@@ -91,6 +91,23 @@ namespace CodeContext.Core.Repositories.InMemory
 
             private sealed record CachedAdjacency(long Version, GraphAdjacency Value);
 
+            /// <summary>The shard key and version at which this shard's facts passed the snapshot persistability rule.</summary>
+            private sealed record PersistableMark(ShardKey Key, long Version);
+
+            private volatile PersistableMark? _persistable;
+
+            /// <summary>
+            /// Whether this shard's facts, as of its current <see cref="Version"/>, passed
+            /// <see cref="Snapshots.SnapshotWriter.CheckPersistable(ShardKey, IGraphShard)"/> under <paramref name="key"/>:
+            /// checked by the loader that materialized it from an authenticated snapshot, or by a write of this shard.
+            /// A committed shard is immutable, and an in-place write bumps the version, which clears this.
+            /// </summary>
+            internal bool IsKnownPersistable(ShardKey key)
+                => _persistable is { } mark && mark.Key == key && mark.Version == Version;
+
+            /// <summary>Records that the facts of <paramref name="version"/> (read before the check ran) passed the rule under <paramref name="key"/>.</summary>
+            internal void MarkPersistable(ShardKey key, long version) => _persistable = new PersistableMark(key, version);
+
             private sealed record CachedHistogram(
                 long Version, Dictionary<string, int> NodesByType, Dictionary<string, int> EdgesByType);
 

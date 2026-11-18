@@ -49,6 +49,9 @@ namespace CodeContext.Core
 
         public int Count => _pairs.Length / 2;
 
+        /// <summary>The pairs as held (key, value, ...), in enumeration order, for callers that must not allocate an enumerator.</summary>
+        internal ReadOnlySpan<string> Pairs => _pairs;
+
         public string this[string key]
             => TryGetValue(key, out var value) ? value : throw new KeyNotFoundException($"The metadata key '{key}' was not present.");
 

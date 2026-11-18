@@ -180,7 +180,7 @@ namespace CodeContext.Core.Snapshots
 
             foreach (var (shardKey, shard) in input.Shards.OrderBy(pair => pair.Key, ShardKey.Comparer))
             {
-                var reason = CheckPersistable(shardKey, shard);
+                var reason = CheckPersistableOnce(shardKey, shard);
                 if (reason is not null)
                 {
                     skipped.Add(new SnapshotSkippedShard(shardKey, reason));
@@ -326,6 +326,23 @@ namespace CodeContext.Core.Snapshots
         internal static string? CheckPersistable(ShardKey key, IGraphShard shard)
             => CheckPersistable(key, shard.NodeCount, shard.EdgeCount, shard.GetAllNodes(), shard.GetAllEdges(), shard.TryGetNodeIdByIdentifier);
 
+        /// <summary>
+        /// <see cref="CheckPersistable(ShardKey, IGraphShard)"/>, except for a heap shard whose facts already passed it
+        /// at its current version under the same key: one the loader materialized (it applies the same rule to every
+        /// shard it loads) or one an earlier write checked. Every other shard, which includes every shard a worker's
+        /// commit built, is checked, and marked when it passes. The version is read before the check, so an in-place
+        /// write during the check leaves the mark stale and the next write checks again.
+        /// </summary>
+        internal static string? CheckPersistableOnce(ShardKey key, IGraphShard shard)
+        {
+            if (shard is not InMemoryDatabase.GraphState heap) return CheckPersistable(key, shard);
+            if (heap.IsKnownPersistable(key)) return null;
+            var version = heap.Version;
+            var reason = CheckPersistable(key, shard);
+            if (reason is null) heap.MarkPersistable(key, version);
+            return reason;
+        }
+
         /// <summary>Resolves an identifier through a shard's identifier map.</summary>
         internal delegate bool IdentifierResolver(string identifier, out string? id);
 
@@ -393,6 +410,13 @@ namespace CodeContext.Core.Snapshots
         private static bool WellFormed(IReadOnlyDictionary<string, string>? metadata)
         {
             if (metadata is null) return true;
+            if (metadata is FactMetadata fact)
+            {
+                // The stored form: no boxed enumerator per fact.
+                foreach (var value in fact.Pairs)
+                    if (!SnapshotFormat.IsWellFormed(value)) return false;
+                return true;
+            }
             foreach (var (k, v) in metadata)
                 if (!SnapshotFormat.IsWellFormed(k) || !SnapshotFormat.IsWellFormed(v)) return false;
             return true;
@@ -587,6 +611,15 @@ namespace CodeContext.Core.Snapshots
                 }
 
                 var edgeParts = new List<(uint Form, string A, string? B, int Line, int Column, string[] Set)>(edges.Count);
+                // The middles and tails of composed edge ids repeat across edges: each distinct one is allocated once.
+                var pieces = new HashSet<string>(StringComparer.Ordinal).GetAlternateLookup<ReadOnlySpan<char>>();
+                string Piece(ReadOnlySpan<char> text)
+                {
+                    if (pieces.TryGetValue(text, out var existing)) return existing;
+                    var created = text.ToString();
+                    pieces.Add(created);
+                    return created;
+                }
                 foreach (var edge in edges)
                 {
                     Collect(edge.Type);
@@ -603,8 +636,8 @@ namespace CodeContext.Core.Snapshots
                         {
                             // By construction id == source + middle + target + tail.
                             form = SnapshotFormat.EdgeIdFormComposed;
-                            a = id[source.Length..at];
-                            b = id[(at + target.Length)..];
+                            a = Piece(id.AsSpan(source.Length, at - source.Length));
+                            b = Piece(id.AsSpan(at + target.Length));
                         }
                     }
                     Collect(a);
@@ -643,13 +676,18 @@ namespace CodeContext.Core.Snapshots
                 if (info.StateSha256 is not null) meta.Add((SnapshotFormat.StateSha256Key, info.StateSha256));
                 sections[0] = EncodeKeyValues(meta);
 
-                var stringOffsets = new LittleEndianBuffer();
-                var stringBytes = new LittleEndianBuffer();
+                var stringOffsets = new LittleEndianBuffer((_strings.Count + 1) * 4);
                 var stringUtf8 = new byte[_strings.Count][];
-                stringOffsets.WriteU32(0);
+                var stringLength = 0L;
                 for (var i = 0; i < _strings.Count; i++)
                 {
                     stringUtf8[i] = SnapshotFormat.StrictUtf8.GetBytes(_strings[i]);
+                    stringLength += stringUtf8[i].Length;
+                }
+                var stringBytes = new LittleEndianBuffer((int)Math.Min(stringLength, Array.MaxLength));
+                stringOffsets.WriteU32(0);
+                for (var i = 0; i < _strings.Count; i++)
+                {
                     stringBytes.WriteBytes(stringUtf8[i]);
                     if (stringBytes.Length > uint.MaxValue)
                     {
@@ -738,7 +776,15 @@ namespace CodeContext.Core.Snapshots
                     if (!string.IsNullOrWhiteSpace(nodes[i].Identifier)) identified.Add(i);
                 sections[7] = HashTable(identified.Count, k => stringUtf8[Ref(nodes[identified[k]].Identifier) - 1], k => (uint)identified[k] + 1);
 
-                sections[8] = HashTable(edges.Count, j => SnapshotFormat.StrictUtf8.GetBytes(edges[j].Id!), j => (uint)j + 1);
+                // Edge ids are long and not in the string table: each is encoded into one reused buffer, not an array of its own.
+                var edgeIdBytes = new byte[256];
+                sections[8] = HashTable(edges.Count, j =>
+                {
+                    var id = edges[j].Id!;
+                    var max = SnapshotFormat.StrictUtf8.GetMaxByteCount(id.Length);
+                    if (edgeIdBytes.Length < max) edgeIdBytes = new byte[max];
+                    return edgeIdBytes.AsSpan(0, SnapshotFormat.StrictUtf8.GetBytes(id, edgeIdBytes));
+                }, j => (uint)j + 1);
 
                 // Runs: by source over Edges (null sources would follow BySourceOffsets[S]); by target
                 // over ByTargetEdges, null targets after ByTargetOffsets[S].
@@ -830,8 +876,11 @@ namespace CodeContext.Core.Snapshots
                 sections[18] = info.Coverage ?? Array.Empty<byte>();
                 sections[19] = info.Fingerprints ?? Array.Empty<byte>();
 
-                // ---- Blob ----
-                var blob = new LittleEndianBuffer();
+                // ---- Blob ----, sized exactly: the layout below, computed first.
+                var blobLength = (long)SnapshotFormat.ShardHeaderSize + SnapshotFormat.SectionCount * SnapshotFormat.SectionEntrySize;
+                foreach (var section in sections) blobLength = SnapshotFormat.Align8(blobLength) + section.Length;
+                blobLength = SnapshotFormat.Align8(blobLength);
+                var blob = new LittleEndianBuffer((int)Math.Min(blobLength, Array.MaxLength));
                 blob.WriteU32(SnapshotFormat.ShardMagic);
                 blob.WriteU32(SnapshotFormat.SectionCount);
                 blob.WriteU32((uint)nodes.Count);
@@ -888,24 +937,50 @@ namespace CodeContext.Core.Snapshots
             private static string[] MetadataPairs(IReadOnlyDictionary<string, string>? metadata, (bool Line, bool Column)? inRecord)
             {
                 if (metadata is null) return Array.Empty<string>();
-                var pairs = new List<KeyValuePair<string, string>>(metadata.Count);
-                foreach (var pair in metadata)
+                if (metadata is FactMetadata fact) return KeptPairsSorted(fact.Pairs, inRecord);
+                var all = new string[metadata.Count * 2];
+                var at = 0;
+                foreach (var (key, value) in metadata)
                 {
-                    if (pair.Key == SnapshotFormat.ParserIdKey || pair.Key == SnapshotFormat.WorkspaceIdKey) continue;
-                    if (inRecord is { } held
-                        && ((held.Line && pair.Key == SnapshotFormat.LineKey) || (held.Column && pair.Key == SnapshotFormat.ColumnKey)))
-                        continue;
-                    pairs.Add(pair);
+                    all[at++] = key;
+                    all[at++] = value;
                 }
-                pairs.Sort(static (left, right) => string.CompareOrdinal(left.Key, right.Key));
-                var flat = new string[pairs.Count * 2];
-                for (var i = 0; i < pairs.Count; i++)
+                return KeptPairsSorted(all.AsSpan(0, at), inRecord);
+            }
+
+            /// <summary>The pairs <see cref="MetadataPairs"/> keeps, flat, sorted by key (keys are distinct, so any sort gives this order).</summary>
+            private static string[] KeptPairsSorted(ReadOnlySpan<string> pairs, (bool Line, bool Column)? inRecord)
+            {
+                var kept = 0;
+                for (var i = 0; i < pairs.Length; i += 2)
+                    if (Kept(pairs[i], inRecord)) kept++;
+                if (kept == 0) return Array.Empty<string>();
+                var flat = new string[kept * 2];
+                var n = 0;
+                for (var i = 0; i < pairs.Length; i += 2)
                 {
-                    flat[2 * i] = pairs[i].Key;
-                    flat[2 * i + 1] = pairs[i].Value;
+                    if (!Kept(pairs[i], inRecord)) continue;
+                    // Insertion by key: a fact holds a handful of pairs.
+                    var key = pairs[i];
+                    var value = pairs[i + 1];
+                    var k = n;
+                    while (k > 0 && string.CompareOrdinal(flat[2 * (k - 1)], key) > 0)
+                    {
+                        flat[2 * k] = flat[2 * (k - 1)];
+                        flat[2 * k + 1] = flat[2 * (k - 1) + 1];
+                        k--;
+                    }
+                    flat[2 * k] = key;
+                    flat[2 * k + 1] = value;
+                    n++;
                 }
                 return flat;
             }
+
+            private static bool Kept(string key, (bool Line, bool Column)? inRecord)
+                => key != SnapshotFormat.ParserIdKey && key != SnapshotFormat.WorkspaceIdKey
+                    && !(inRecord is { } held
+                        && ((held.Line && key == SnapshotFormat.LineKey) || (held.Column && key == SnapshotFormat.ColumnKey)));
 
             private void WriteHistogram(LittleEndianBuffer buffer, IEnumerable<string?> types)
             {
@@ -920,7 +995,9 @@ namespace CodeContext.Core.Snapshots
                 }
             }
 
-            private static byte[] HashTable(int count, Func<int, byte[]> keyOf, Func<int, uint> valueOf)
+            private delegate ReadOnlySpan<byte> KeyBytes(int index);
+
+            private static byte[] HashTable(int count, KeyBytes keyOf, Func<int, uint> valueOf)
             {
                 var capacity = SnapshotFormat.HashCapacity(count);
                 EnsureSectionFits(capacity * 4);
@@ -997,7 +1074,11 @@ namespace CodeContext.Core.Snapshots
 
         public void PatchU64(long offset, ulong value) => BinaryPrimitives.WriteUInt64LittleEndian(_bytes.AsSpan((int)offset, 8), value);
 
-        public byte[] ToArray() => _bytes.AsSpan(0, _length).ToArray();
+        /// <summary>
+        /// The bytes written. When the buffer is exactly full, its own array, not a copy: every caller takes the
+        /// array as the buffer's last use.
+        /// </summary>
+        public byte[] ToArray() => _length == _bytes.Length ? _bytes : _bytes.AsSpan(0, _length).ToArray();
 
         private Span<byte> Reserve(int count)
         {
