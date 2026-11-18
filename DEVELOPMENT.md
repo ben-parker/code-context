@@ -60,6 +60,17 @@ Release on an otherwise idle machine:
 dotnet test tests/CodeContext.Core.Tests/CodeContext.Core.Tests.csproj -c Release --filter "Category=Benchmark" --logger "console;verbosity=detailed"
 ```
 
+To measure memory, build in Release and run `scripts/bench/measure-memory.sh` (Linux,
+needs `jq`; `--heap` needs `dotnet-gcdump`). It starts an instance on `--path`, cached by
+default or with `--no-cache`, and prints RSS and anonymous/file PSS per process when the
+index is ready; `--queries` adds a reading after a fixed query mix, `--heap` the live
+managed heap of the host and C# worker by type. It stops the instance and removes a
+`.codecontext` it created:
+
+```bash
+scripts/bench/measure-memory.sh --path . --queries --heap
+```
+
 Test the standalone worker SDKs as well:
 
 ```bash

@@ -1,0 +1,267 @@
+#!/usr/bin/env bash
+# Measures the resident memory of a CodeContext instance (host and worker processes).
+#
+# Usage: scripts/bench/measure-memory.sh [--path DIR] [--no-cache] [--queries]
+#          [--queries-file FILE] [--heap] [--top N] [--settle SECONDS] [--json] [--binary PATH]
+#
+# Starts an instance on DIR (default: the current directory), cached (the default: a
+# warm-up start writes a snapshot, then the measured start loads it) or --no-cache,
+# waits until the index is ready and verified, waits --settle seconds (default 5), and
+# prints Rss, Pss_Anon and Pss_File from /proc/<pid>/smaps_rollup for the host and each
+# worker. --queries runs a fixed query mix and reads again; --heap then reports the live
+# managed heap of the host and the C# worker with dotnet-gcdump, by type (gcdump-types.cs).
+# Readings are taken before any gcdump, because collecting one grows the target's RSS.
+#
+# The instance is always stopped; a .codecontext directory the script created is removed;
+# `git status --short` must be unchanged at the end. Linux only; needs jq, and
+# dotnet-gcdump for --heap. The binary defaults to the Release build in this repository
+# (override with --binary or CODECONTEXT_BIN).
+set -euo pipefail
+
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+repo_dir=$(cd "$script_dir/../.." && pwd)
+
+bin=${CODECONTEXT_BIN:-$repo_dir/src/CodeContext.Api/bin/Release/net10.0/codecontext}
+path=.
+cache=1
+queries=0
+queries_file=
+heap=0
+top=12
+settle=5
+json=0
+timeout=300
+
+usage() { sed -n '2,19s/^# \{0,1\}//p' "${BASH_SOURCE[0]}"; }
+
+while [ $# -gt 0 ]; do
+  case $1 in
+    --path) path=$2; shift 2 ;;
+    --no-cache) cache=0; shift ;;
+    --queries) queries=1; shift ;;
+    --queries-file) queries=1; queries_file=$2; shift 2 ;;
+    --heap) heap=1; shift ;;
+    --top) top=$2; shift 2 ;;
+    --settle) settle=$2; shift 2 ;;
+    --json) json=1; shift ;;
+    --binary) bin=$2; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+die() { echo "measure-memory: $*" >&2; exit 1; }
+log() { echo "measure-memory: $*" >&2; }
+
+command -v jq >/dev/null || die "jq is required"
+[ -x "$bin" ] || die "no codecontext binary at $bin (build with: dotnet build -c Release)"
+root=$(cd "$path" && pwd -P) || die "no such directory: $path"
+
+# The apphost needs DOTNET_ROOT when the runtime is not in a default location.
+if [ -z "${DOTNET_ROOT:-}" ] && command -v dotnet >/dev/null; then
+  export DOTNET_ROOT=$(dirname "$(readlink -f "$(command -v dotnet)")")
+fi
+if [ "$heap" = 1 ]; then
+  command -v dotnet-gcdump >/dev/null || die "--heap needs dotnet-gcdump (dotnet tool install -g dotnet-gcdump)"
+  gcdump_dir=$(dirname "$(readlink -f "$(command -v dotnet-gcdump)")")
+  GCDUMP_DLL=$(find "$gcdump_dir" -name dotnet-gcdump.dll -path '*/tools/*' 2>/dev/null | sort | tail -1)
+  [ -n "$GCDUMP_DLL" ] || die "cannot find dotnet-gcdump.dll under $gcdump_dir"
+  export GCDUMP_DLL
+fi
+
+# The fixed query mix: the symbol and tests lines of the repository's query list
+# (scripts/bench/queries-<name>.txt, 40 + 20 for this repository). A line is
+# "<kind><TAB><identifier>" or a bare identifier (kind symbol); other kinds are skipped.
+if [ "$queries" = 1 ]; then
+  [ -n "$queries_file" ] || queries_file=$script_dir/queries-$(basename "$root").txt
+  [ -f "$queries_file" ] || die "no query list at $queries_file (pass --queries-file)"
+fi
+
+work=$(mktemp -d)
+created_cc=0
+[ -e "$root/.codecontext" ] || created_cc=1
+git_before=
+in_git=0
+if git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  in_git=1
+  git_before=$(git -C "$root" status --short)
+fi
+
+host_pid() {
+  "$bin" list --json 2>/dev/null | jq -r --arg r "$root" '.[] | select(.rootPath == $r) | .pid' | head -1
+}
+
+stop_instance() {
+  local pid
+  pid=$(host_pid)
+  [ -n "$pid" ] || return 0
+  "$bin" stop --path "$root" >/dev/null 2>&1 || true
+  for _ in $(seq 1 60); do
+    kill -0 "$pid" 2>/dev/null || return 0
+    sleep 0.5
+  done
+  log "instance $pid did not stop; killing it"
+  pkill -P "$pid" 2>/dev/null || true
+  kill "$pid" 2>/dev/null || true
+}
+
+cleanup() {
+  local status=$?
+  stop_instance
+  if [ "$created_cc" = 1 ]; then rm -rf "$root/.codecontext"; fi
+  rm -rf "$work"
+  if [ "$in_git" = 1 ] && [ "$(git -C "$root" status --short)" != "$git_before" ]; then
+    log "warning: git status --short changed during the run"
+    [ "$status" != 0 ] || status=1
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+
+[ -z "$(host_pid)" ] || die "an instance is already running for $root; stop it first"
+
+start_instance() {
+  local args=(start --detach --path "$root")
+  [ "$cache" = 1 ] || args+=(--no-cache)
+  "$bin" "${args[@]}" >"$work/start.out" 2>&1 || { cat "$work/start.out" >&2; die "start failed"; }
+}
+
+# Ready: indexed, status ready, and not serving the snapshot while it is verified.
+wait_ready() {
+  local deadline=$((SECONDS + timeout)) s
+  while [ $SECONDS -lt $deadline ]; do
+    s=$("$bin" status --path "$root" 2>/dev/null || true)
+    if [ -n "$s" ] && echo "$s" | jq -e '.indexing.indexed == true and .indexing.status == "ready"
+        and ((.indexing.cache.servingCached // false) == false)' >/dev/null 2>&1; then
+      echo "$s" >"$work/status.json"
+      return 0
+    fi
+    sleep 0.5
+  done
+  die "index not ready after ${timeout}s"
+}
+
+if [ "$cache" = 1 ]; then
+  log "warm-up start to write a snapshot"
+  start_instance
+  wait_ready
+  stop_instance
+  # The stop writes the snapshot; wait until it exists and its size is stable.
+  prev=
+  for _ in $(seq 1 60); do
+    cur=$(ls -l "$root"/.codecontext/cache/*/graph.*.ccsnap 2>/dev/null || true)
+    [ -n "$cur" ] && [ "$cur" = "$prev" ] && break
+    prev=$cur
+    sleep 1
+  done
+  [ -n "$cur" ] || die "no snapshot under $root/.codecontext/cache after the warm-up start"
+fi
+
+log "measured start ($([ "$cache" = 1 ] && echo cached || echo no-cache))"
+t0=$SECONDS
+start_instance
+wait_ready
+ready_s=$((SECONDS - t0))
+if [ "$cache" = 1 ]; then
+  jq -e '.indexing.cache.verification != null' "$work/status.json" >/dev/null \
+    || die "the measured start did not load the snapshot: $(jq -c .indexing.cache "$work/status.json")"
+fi
+host=$(host_pid)
+[ -n "$host" ] || die "cannot find the host process"
+
+# Processes as "<label> <pid>": the host, then its children (the workers) in a fixed
+# order: csharp, typescript, then any other worker by name.
+processes() {
+  echo "host $host"
+  local c cmd label
+  for c in $(pgrep -P "$host"); do
+    cmd=$(tr '\0' ' ' <"/proc/$c/cmdline" 2>/dev/null || true)
+    case $cmd in
+      *CodeContext.CSharp.Worker*) label="1 csharp" ;;
+      *typescript-worker*) label="2 typescript" ;;
+      *) label="3 $(basename "${cmd%% *}")" ;;
+    esac
+    echo "$label $c"
+  done | sort | cut -d' ' -f2-
+}
+
+# Appends "<phase> <label> <rss_kb> <pss_anon_kb> <pss_file_kb>" per process and a total.
+read_memory() {
+  local phase=$1 label pid
+  processes >"$work/procs"
+  while read -r label pid; do
+    awk -v p="$phase" -v l="$label" '
+      $1 == "Rss:" { r = $2 } $1 == "Pss_Anon:" { a = $2 } $1 == "Pss_File:" { f = $2 }
+      END { print p, l, r, a, f }' "/proc/$pid/smaps_rollup"
+  done <"$work/procs" >"$work/phase"
+  awk '{ r += $3; a += $4; f += $5; print } END { print $1, "total", r, a, f }' "$work/phase" >>"$work/memory"
+}
+
+sleep "$settle"
+read_memory idle
+
+query_count=0
+query_failures=0
+if [ "$queries" = 1 ]; then
+  while IFS=$'\t' read -r kind id; do
+    case $kind in ''|'#'*) continue ;; esac
+    if [ -z "$id" ]; then id=$kind; kind=symbol; fi
+    case $kind in
+      symbol) args=() ;;
+      tests) args=(--tests) ;;
+      *) continue ;;
+    esac
+    query_count=$((query_count + 1))
+    "$bin" query "$id" "${args[@]}" --path "$root" </dev/null >/dev/null 2>&1 || query_failures=$((query_failures + 1))
+  done <"$queries_file"
+  sleep "$settle"
+  read_memory queries
+fi
+
+heap_rows=
+if [ "$heap" = 1 ]; then
+  while read -r label pid; do
+    case $label in host|csharp) ;; *) continue ;; esac
+    dotnet-gcdump collect -p "$pid" -o "$work/$label.gcdump" </dev/null >"$work/gcdump.log" 2>&1 \
+      || { cat "$work/gcdump.log" >&2; die "gcdump of $label failed"; }
+  done <"$work/procs"
+  stop_instance
+  for label in host csharp; do
+    [ -f "$work/$label.gcdump" ] || continue
+    dotnet run --file "$script_dir/gcdump-types.cs" -- "$work/$label.gcdump" "$top" \
+      >"$work/$label.types" 2>"$work/gcdump-types.log" \
+      || { cat "$work/gcdump-types.log" >&2; die "gcdump-types.cs failed"; }
+    sed "s/^/$label\t/" "$work/$label.types" >>"$work/heap"
+  done
+fi
+
+mode=$([ "$cache" = 1 ] && echo cached || echo no-cache)
+files=$(jq -r '.indexing.filesTotal' "$work/status.json")
+if [ "$json" = 1 ]; then
+  jq -n --arg root "$root" --arg mode "$mode" --argjson files "$files" --argjson ready "$ready_s" \
+    --argjson settle "$settle" --argjson queries "$query_count" --argjson failures "$query_failures" \
+    --rawfile memory "$work/memory" --rawfile heap "$( [ -f "$work/heap" ] && echo "$work/heap" || echo /dev/null)" '
+    { root: $root, mode: $mode, files: $files, readySeconds: $ready, settleSeconds: $settle,
+      queries: $queries, queryFailures: $failures,
+      memory: [ $memory | split("\n")[] | select(length > 0) | split(" ")
+        | { phase: .[0], process: .[1], rssKb: (.[2] | tonumber),
+            pssAnonKb: (.[3] | tonumber), pssFileKb: (.[4] | tonumber) } ],
+      heap: ([ $heap | split("\n")[] | select(length > 0) | split("\t") ]
+        | group_by(.[0]) | map({ (.[0][0]): {
+            liveBytes: (map(select(.[1] == "total"))[0][2] | tonumber),
+            liveObjects: (map(select(.[1] == "total"))[0][3] | tonumber),
+            types: map(select(.[1] != "total")
+              | { type: .[3], bytes: (.[1] | tonumber), objects: (.[2] | tonumber) }) } }) | add) }'
+  exit 0
+fi
+
+printf '%s  %s  files=%s  ready=%ss  settle=%ss' "$root" "$mode" "$files" "$ready_s" "$settle"
+[ "$queries" = 1 ] && printf '  queries=%s (failed %s)' "$query_count" "$query_failures"
+printf '\n%-8s %-11s %9s %9s %9s\n' phase process rss_mb anon_mb file_mb
+awk '{ printf "%-8s %-11s %9.1f %9.1f %9.1f\n", $1, $2, $3/1024, $4/1024, $5/1024 }' "$work/memory"
+if [ -f "$work/heap" ]; then
+  awk -F'\t' '
+    $2 == "total" { printf "\n%s live heap %.1f MB, %d objects\n", $1, $3/1048576, $4; next }
+    { printf "  %9.1f MB %10d  %s\n", $2/1048576, $3, $4 }' "$work/heap"
+fi
