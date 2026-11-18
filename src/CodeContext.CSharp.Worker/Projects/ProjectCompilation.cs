@@ -33,19 +33,26 @@ internal sealed class ProjectCompilation
     private readonly Dictionary<string, SyntaxTree> _trees = new(PathComparer);
     private SyntaxTree? _generatedTree;
     private HashSet<string> _signedFriends = new(StringComparer.Ordinal);
-    private readonly ImmutableArray<MetadataReference> _metadataReferences;
+    private ImmutableArray<MetadataReference> _metadataReferences;
+    private Func<ImmutableArray<MetadataReference>>? _deferredReferences;
 
+    /// <param name="deferredReferences">
+    /// References that go before <paramref name="metadataReferences"/> but are only taken when the first
+    /// file arrives: a unit with no files binds nothing, so until then they would only hold memory.
+    /// </param>
     public ProjectCompilation(
         ProjectInfo? project,
         string idPrefix,
         CSharpParseOptions parseOptions,
         ImmutableArray<MetadataReference> metadataReferences,
-        string fallbackUsings = "")
+        string fallbackUsings = "",
+        Func<ImmutableArray<MetadataReference>>? deferredReferences = null)
     {
         Project = project;
         IdPrefix = idPrefix;
         ParseOptions = parseOptions;
         _metadataReferences = metadataReferences;
+        _deferredReferences = deferredReferences;
         _generatedTree = (project is null ? fallbackUsings : GeneratedSource(project, _signedFriends)) is { Length: > 0 } text
             ? CSharpSyntaxTree.ParseText(text, parseOptions, path: $"{Qualifier}.Project.g.cs")
             : null;
@@ -112,6 +119,7 @@ internal sealed class ProjectCompilation
     /// </summary>
     public bool SetText(string path, SourceText text)
     {
+        TakeDeferredReferences();
         var tree = CSharpSyntaxTree.ParseText(text, ParseOptions, path);
         if (!_trees.TryGetValue(path, out var old))
         {
@@ -131,9 +139,23 @@ internal sealed class ProjectCompilation
     /// <summary>Takes over a tree parsed with these options, sparing a reparse.</summary>
     public void Adopt(string path, SyntaxTree tree)
     {
+        TakeDeferredReferences();
         Compilation = Compilation.AddSyntaxTrees(tree);
         _trees[path] = tree;
         Changed = true;
+    }
+
+    /// <summary>
+    /// Puts the deferred references in front of those the compilation has, which is where they would
+    /// have been from the start: the compilation is then the one an eager unit would hold.
+    /// </summary>
+    private void TakeDeferredReferences()
+    {
+        if (_deferredReferences is not { } deferred) return;
+        _deferredReferences = null;
+        var taken = deferred();
+        _metadataReferences = taken.AddRange(_metadataReferences);
+        Compilation = Compilation.WithReferences(taken.AddRange(Compilation.ExternalReferences));
     }
 
     public bool Remove(string path)
