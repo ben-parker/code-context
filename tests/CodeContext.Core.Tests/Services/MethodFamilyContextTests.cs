@@ -60,6 +60,105 @@ public class MethodFamilyContextTests
     }
 
     [Fact]
+    public async Task MethodUsedBy_ListsAFamilyMemberThatCallsAnotherMember()
+    {
+        // A decorator implements the interface and delegates to an inner instance of it, so
+        // it is both a member of Run's family and a caller of it. Being in the family must
+        // not hide the call; only the queried method itself is never its own user.
+        var nodes = new[]
+        {
+            Node("i", "csharp:Example.IService.Run()", "Run", "Method"),
+            Node("impl", "csharp:Example.Service.Run()", "Run", "Method"),
+            Node("decorator", "csharp:Example.LoggingService.Run()", "Run", "Method"),
+            Node("caller", "csharp:Example.Caller()", "Caller", "Method"),
+            Node("composition", "csharp:Example.Compose()", "Compose", "Method"),
+        };
+        var edges = new[]
+        {
+            Edge("impl", "i", "IMPLEMENTS_MEMBER"), Edge("decorator", "i", "IMPLEMENTS_MEMBER"),
+            Edge("decorator", "i", "CALLS", 10),
+            Edge("caller", "i", "CALLS", 20),
+            Edge("composition", "decorator", "CALLS", 30),
+        };
+        var service = CreateService(nodes, edges);
+
+        foreach (var queried in new[] { "csharp:Example.IService.Run()", "csharp:Example.Service.Run()" })
+        {
+            var usedBy = Assert.Single((await service.GetCompactContextAsync(queried, depth: 1, maxRelationships: 10)).Matches)
+                .Relationships!;
+            Assert.Equal(["Caller", "Compose", "Run"], usedBy.UsedBy!.Select(node => node.Name).Order());
+            Assert.Equal(3, usedBy.UsedByCount);
+            var decorator = usedBy.UsedBy!.Single(node => node.Name == "Run");
+            Assert.Equal("csharp:Example.LoggingService.Run()", decorator.Identifier);
+            Assert.Equal(["CALLS"], decorator.Relations);
+            Assert.Equal([11], decorator.Lines);
+        }
+
+        var self = Assert.Single((await service.GetCompactContextAsync(
+            "csharp:Example.LoggingService.Run()", depth: 1, maxRelationships: 10)).Matches).Relationships!;
+        Assert.DoesNotContain(self.UsedBy!, node => node.Identifier == "csharp:Example.LoggingService.Run()");
+        Assert.Equal(["Caller", "Compose"], self.UsedBy!.Select(node => node.Name).Order());
+
+        var full = await service.GetCompleteContextAsync("csharp:Example.IService.Run()", depth: 1);
+        Assert.Contains(Assert.Single(full.Matches).Relationships.UsedBy,
+            node => node.Identifier == "csharp:Example.LoggingService.Run()");
+    }
+
+    [Fact]
+    public async Task MethodUsedBy_ListsAnOverrideThatCallsBase()
+    {
+        var nodes = new[]
+        {
+            Node("base", "csharp:Example.Base.Save()", "Save", "Method"),
+            Node("derived", "csharp:Example.Derived.Save()", "Save", "Method"),
+        };
+        var edges = new[]
+        {
+            Edge("derived", "base", "OVERRIDES_MEMBER"),
+            Edge("derived", "base", "CALLS", 5),
+        };
+        var service = CreateService(nodes, edges);
+
+        var relationships = Assert.Single((await service.GetCompactContextAsync(
+            "csharp:Example.Base.Save()", depth: 1, maxRelationships: 10)).Matches).Relationships!;
+        var caller = Assert.Single(relationships.UsedBy!);
+        Assert.Equal("csharp:Example.Derived.Save()", caller.Identifier);
+        Assert.Equal(["base"], caller.Bindings);
+    }
+
+    [Fact]
+    public async Task MethodUsedBy_LeavesASiblingsBaseCallToTheMethodItNames()
+    {
+        // Two overrides of one virtual method; one calls base. That call is bound to the base
+        // method, so it reaches neither the other override nor any override but its own base,
+        // while a call through the base type, which dispatches, is a user of every override.
+        var nodes = new[]
+        {
+            Node("base", "csharp:Example.Folder.Validate()", "Validate", "Method"),
+            Node("collection", "csharp:Example.CollectionFolder.Validate()", "Validate", "Method"),
+            Node("aggregate", "csharp:Example.AggregateFolder.Validate()", "Validate", "Method"),
+            Node("dispatcher", "csharp:Example.Refresh()", "Refresh", "Method"),
+        };
+        var edges = new[]
+        {
+            Edge("collection", "base", "OVERRIDES_MEMBER"), Edge("aggregate", "base", "OVERRIDES_MEMBER"),
+            Edge("aggregate", "base", "CALLS", 7),
+            Edge("dispatcher", "base", "CALLS", 9),
+        };
+        var service = CreateService(nodes, edges);
+
+        var sibling = Assert.Single((await service.GetCompactContextAsync(
+            "csharp:Example.CollectionFolder.Validate()", depth: 1, maxRelationships: 10)).Matches).Relationships!;
+        Assert.Equal(["Refresh"], sibling.UsedBy!.Select(node => node.Name));
+        Assert.Equal(1, sibling.UsedByCount);
+
+        var named = Assert.Single((await service.GetCompactContextAsync(
+            "csharp:Example.Folder.Validate()", depth: 1, maxRelationships: 10)).Matches).Relationships!;
+        Assert.Equal(["csharp:Example.AggregateFolder.Validate()", "csharp:Example.Refresh()"],
+            named.UsedBy!.Select(node => node.Identifier).Order());
+    }
+
+    [Fact]
     public async Task TestCaps_AreIndependentAndSupportCountOnly()
     {
         var target = Node("target", "csharp:Example.Target.Run()", "Run", "Method");
