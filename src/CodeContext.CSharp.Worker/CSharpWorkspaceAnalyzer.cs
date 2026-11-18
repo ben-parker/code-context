@@ -153,7 +153,8 @@ public sealed class CSharpWorkspaceAnalyzer
     /// <summary>
     /// A file in no project is usually written for the projects around it, so it binds
     /// against them and sees their global usings. Getting that wrong costs a name clash;
-    /// the opposite mistake loses every collection and LINQ call in the file.
+    /// the opposite mistake loses every collection and LINQ call in the file. The runtime
+    /// references are taken when the first such file arrives.
     /// </summary>
     private ProjectCompilation CreateFallback(IReadOnlyList<ProjectInfo> projects)
     {
@@ -161,10 +162,20 @@ public sealed class CSharpWorkspaceAnalyzer
             .Where(line => line.StartsWith("global using", StringComparison.Ordinal))
             .Distinct(StringComparer.Ordinal));
         return new ProjectCompilation(
-            null, _workspaceIdPrefix, ProjectCompilation.ParseOptionsFor(null), SharedReferences.Value, usings)
+            null, _workspaceIdPrefix, ProjectCompilation.ParseOptionsFor(null), [], usings, RuntimeReferences)
         {
             Signature = usings,
         };
+    }
+
+    /// <summary>
+    /// The runtime's assemblies, held in memory once read, for a unit that has a file to bind. Most
+    /// workspaces put every file in a project and never need them.
+    /// </summary>
+    private ImmutableArray<MetadataReference> RuntimeReferences()
+    {
+        RuntimeReferenceLoads++;
+        return SharedReferences.Value;
     }
 
     private static ImmutableArray<MetadataReference> ResolveReferences()
@@ -285,6 +296,9 @@ public sealed class CSharpWorkspaceAnalyzer
 
     /// <summary>How many compilations this analyzer created for projects and files in no project.</summary>
     public int CompilationCount { get; private set; }
+
+    /// <summary>How many times a unit of this analyzer took the runtime references code with no project binds against.</summary>
+    public int RuntimeReferenceLoads { get; private set; }
 
     /// <summary>How many files the last analysis walked.</summary>
     public int LastWalkCount { get; private set; }
@@ -466,7 +480,7 @@ public sealed class CSharpWorkspaceAnalyzer
     private ImmutableArray<MetadataReference> ReferencesFor(ProjectInfo project)
     {
         var references = ImmutableArray.CreateBuilder<MetadataReference>();
-        if (project.State == ProjectCoverageState.Fallback) references.AddRange(SharedReferences.Value);
+        if (project.State == ProjectCoverageState.Fallback) references.AddRange(RuntimeReferences());
         foreach (var path in project.MetadataReferences)
         {
             if (AssemblyReference(path) is { } reference) references.Add(reference);
