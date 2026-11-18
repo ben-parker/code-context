@@ -55,7 +55,7 @@ Findings that shape the plan:
 
 | Id | Item | Status |
 |---|---|---|
-| M0 | Repeatable memory measurement script | not started |
+| M0 | Repeatable memory measurement script | done, `6036848` |
 | M1 | Compact host heap representation | not started |
 | M2 | Trace the non-live resident memory | not started |
 | M3 | Worker hibernation, both workers | not started |
@@ -89,7 +89,11 @@ Steps, each separately measurable, smallest first:
 2. Intern strings that repeat across facts on the delta path as the loader already
    does on its path: file paths, type, language, visibility, namespace, ids used as
    edge endpoints.
-3. Measure what the edge id strings and the `ConcurrentDictionary` tables cost after 1
+3. Find what the 60-query mix adds: the host goes from 254 to 440 MB resident (anonymous
+   182 to 362 MB) while the workers do not move. Take a `--heap` reading after the queries
+   and say how much is `GraphAdjacency`, how much is retained per-request allocation, and
+   how much is not live. Fix what is cheap; report the rest.
+4. Measure what the edge id strings and the `ConcurrentDictionary` tables cost after 1
    and 2, and what `GraphAdjacency` adds after queries. Propose, do not implement, the
    next cut (derived edge ids, frozen tables) with figures; the coordinator decides.
 
@@ -165,3 +169,4 @@ outcome for whether it reads a mapped or a materialized shard.
 | Date | Item | Result |
 |---|---|---|
 | 2026-11-18 | Baseline | Table in "Why" above |
+| 2026-11-18 | M0 | `scripts/bench/measure-memory.sh` (+ `gcdump-types.cs`, `queries-<repo>.txt`). Cached baseline, this repo, RSS MB: idle host 254, csharp 265, typescript 249, total 767; after 60 queries host 440, total 915. Live heap: host 107.3 MB (String 53.5, `Entry<string,string>[]` 18.5, `Dictionary<string,string>` 8.3, `Int32[]` 5.9, `CodeEdge` 5.3), csharp 49.6 MB. No-cache: host 313, csharp 551, typescript 218; live heap host 183, csharp 122. Consecutive runs within 5%; outliers seen: typescript after queries once 249 instead of 212, one first run host 289 idle |
