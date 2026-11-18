@@ -110,6 +110,51 @@ public class SharedMetadataTests
         AssertImmutable(edges["fake:ws-1:A->B"].Metadata);
     }
 
+    /// <summary>Plan M1 step 2: a request's repeated strings are stored as one instance each.</summary>
+    [Fact]
+    public async Task Commit_StoresRepeatedStringsOfARequestAsOneInstance()
+    {
+        var factory = new InMemoryRepositoryFactory(NullLogger<InMemoryRepositoryFactory>.Instance);
+        var store = (IGenerationalGraphStore)factory.CreateGraphRepository();
+        var applier = new AnalysisDeltaApplier(store, NullLogger<AnalysisDeltaApplier>.Instance);
+        // Distinct instances of equal text, as a deserializer produces them.
+        static string Fresh(string text) => new(text.AsSpan());
+        ProtocolNode NodeIn(string name) => new(Fresh($"fake:ws-1:{name}"), Fresh($"fake:{name}"), Fresh("Run"), Fresh("method"),
+            Fresh("fake"), Fresh("src/a.fake"), Namespace: Fresh("App"), Visibility: Fresh("public"), ReturnType: Fresh("void"),
+            Parameters: Fresh("()"), Modifiers: Fresh("static"), Signature: Fresh("void Run()"));
+        var delta = new AnalysisDelta(
+            ParserId: "fake", ParserVersion: "1.0", WorkspaceId: "ws-1", Generation: 1, RequestId: 1,
+            ReplacesWorkspace: true, ReplacesFiles: [],
+            Nodes: [NodeIn("A"), NodeIn("B")],
+            Edges:
+            [
+                new ProtocolEdge(Fresh("fake:ws-1:A->B"), Fresh("fake:ws-1:A"), Fresh("fake:ws-1:B"), Fresh("calls")),
+                new ProtocolEdge(Fresh("fake:ws-1:B->A"), Fresh("fake:ws-1:B"), Fresh("fake:ws-1:A"), Fresh("calls")),
+            ],
+            IsLastForRequest: true);
+
+        Assert.True(await applier.ApplyAsync(delta));
+
+        var graph = (await ((ICodeGraphRepository)store).GetGraphAsync())!;
+        var a = graph.Nodes.Single(node => node.Id == "fake:ws-1:A");
+        var b = graph.Nodes.Single(node => node.Id == "fake:ws-1:B");
+        foreach (var field in new Func<CodeNode, string?>[]
+                 {
+                     n => n.Name, n => n.Type, n => n.Language, n => n.FilePath, n => n.Namespace, n => n.Visibility,
+                     n => n.Signature, n => n.ReturnType, n => n.Parameters, n => n.Modifiers,
+                 })
+        {
+            Assert.Same(field(a), field(b));
+        }
+        var ab = graph.Edges.Single(edge => edge.Id == "fake:ws-1:A->B");
+        var ba = graph.Edges.Single(edge => edge.Id == "fake:ws-1:B->A");
+        Assert.Same(a.Id, ab.SourceId);
+        Assert.Same(b.Id, ab.TargetId);
+        Assert.Same(b.Id, ba.SourceId);
+        Assert.Same(a.Id, ba.TargetId);
+        Assert.Same(ab.Type, ba.Type);
+    }
+
     [Fact]
     public void FactMetadata_ReadsAsADictionaryWouldAndRefusesARepeatedKey()
     {

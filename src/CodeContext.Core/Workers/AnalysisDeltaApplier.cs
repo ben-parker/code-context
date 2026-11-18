@@ -136,7 +136,8 @@ public sealed class AnalysisDeltaApplier : IAnalysisDeltaSink
             }
 
             _pending.Remove(pendingKey);
-            // One pool per request: facts of the commit with equal metadata share one immutable instance.
+            // One pool per request: facts of the commit with equal metadata share one immutable instance,
+            // and repeated strings one instance.
             var pool = new FactMetadataPool();
             var nodes = pending.Nodes.Select(n => ToCodeNode(n, pending, pool)).ToList();
             var edges = pending.Edges.Select(e => ToCodeEdge(e, pending, pool)).ToList();
@@ -254,28 +255,32 @@ public sealed class AnalysisDeltaApplier : IAnalysisDeltaSink
         return pool.Get(pairs.ToArray());
     }
 
+    // Strings that repeat across the facts of a request (paths, kinds, languages, names, and node ids
+    // that edges name as endpoints) arrive as one instance per occurrence from the deserializer; each is
+    // stored through the request's pool, as a snapshot load shares them through the shard's string
+    // table. Nodes are mapped before edges, so an endpoint is the instance its node holds.
     private static CodeNode ToCodeNode(ProtocolNode node, PendingDelta delta, FactMetadataPool pool)
     {
         var metadata = BuildOwnedMetadata(node.Metadata, delta, pool);
 
         return new CodeNode
         {
-            Id = node.Id,
+            Id = pool.Intern(node.Id),
             Identifier = node.Identifier,
-            Name = node.Name,
-            Type = node.Kind,
-            Language = node.Language,
-            FilePath = node.FilePath,
+            Name = pool.Intern(node.Name),
+            Type = pool.Intern(node.Kind),
+            Language = pool.Intern(node.Language),
+            FilePath = pool.Intern(node.FilePath),
             StartLine = node.StartLine,
             EndLine = node.EndLine,
             StartCol = node.StartColumn,
             EndCol = node.EndColumn,
-            Namespace = node.Namespace,
-            Visibility = node.Visibility,
-            Signature = node.Signature,
-            ReturnType = node.ReturnType,
-            Parameters = node.Parameters,
-            Modifiers = node.Modifiers,
+            Namespace = pool.Intern(node.Namespace),
+            Visibility = pool.Intern(node.Visibility),
+            Signature = pool.Intern(node.Signature),
+            ReturnType = pool.Intern(node.ReturnType),
+            Parameters = pool.Intern(node.Parameters),
+            Modifiers = pool.Intern(node.Modifiers),
             Metadata = metadata,
         };
     }
@@ -287,9 +292,9 @@ public sealed class AnalysisDeltaApplier : IAnalysisDeltaSink
         return new CodeEdge
         {
             Id = edge.Id,
-            SourceId = edge.SourceId,
-            TargetId = edge.TargetId,
-            Type = edge.Kind,
+            SourceId = pool.Intern(edge.SourceId),
+            TargetId = pool.Intern(edge.TargetId),
+            Type = pool.Intern(edge.Kind),
             Metadata = metadata,
         };
     }
