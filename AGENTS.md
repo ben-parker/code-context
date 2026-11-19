@@ -53,8 +53,9 @@ rg --files -g '*.cs' -g '*.ts'
 
 - `src/CodeContext.Api` is the composition root and CLI. `Program.cs` defines
   `start`, `init`, `stop`, `list`, `status`, and `query`; `CodeContextEndpoints.cs` owns REST routes.
-- `src/CodeContext.Mcp` exposes `get_context`, `get_multi_context`, and `get_status` over
-  MCP stdio using the same Core services as REST.
+- `src/CodeContext.Mcp` exposes `get_context`, `get_multi_context`, `get_status`, and the
+  graph queries `get_path`, `get_affected`, and `get_hubs` over MCP stdio using the same
+  Core services as REST.
 - `src/CodeContext.Core` owns graph models, in-memory repositories, context assembly,
   indexing, file selection/watching, worker discovery/supervision, and delta commits.
 - `src/CodeContext.Core/Snapshots` owns the persistent fact cache: the snapshot file
@@ -90,7 +91,9 @@ generation swap in `InMemoryCodeGraphRepository`. Readers see either the previou
 new complete generation, never a partial worker update.
 
 `ContextService` performs identity resolution and assembles relationships for both
-REST and MCP. The store is intentionally in-memory, with no configurable database
+REST and MCP. It also answers the whole-graph queries (`IGraphQueryService`: path,
+affected, hubs), traversing one published generation of the store's shards through
+`GraphWalk`. The store is intentionally in-memory, with no configurable database
 backend. Unless the host is started with `--no-cache`, the coordinator's first step
 loads the newest snapshot under `<root>/.codecontext/cache/` that authenticates with
 the per-user key, and answers from it, labelled `cache verifying`, while the startup

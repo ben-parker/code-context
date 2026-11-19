@@ -99,6 +99,9 @@ Query the current repository in one command:
 codecontext query ContextService
 codecontext query ContextService --tests
 codecontext query multi ContextService StartCommandHandler
+codecontext query path StartCommandHandler ContextService   # how one reaches the other
+codecontext query affected ContextService.FindPathAsync     # what depends on it, transitively
+codecontext query hubs --within src/CodeContext.Core        # the most depended-on symbols
 ```
 
 `query` finds the closest instance watching the requested path and queries its compact
@@ -120,6 +123,14 @@ prints "Indexing did not become ready within 30 seconds" and exits with code `3`
 Returned targets include canonical identifiers that can be passed back as
 `identifier` without modification. Name searches use exact-first matching with a
 substring fallback.
+
+`query path`, `query affected` and `query hubs` answer questions about the whole graph in
+one call: the shortest chain of recorded relationships from one symbol to another
+(following dispatch from an interface or base member to its implementations), everything
+that depends on a symbol or file transitively, and the symbols with the most distinct
+direct dependents. They match identifiers exactly (canonical identifier, exact or
+qualified name, or file path) and are described in [the skill](skill/SKILL.md). A symbol
+named like a subcommand is queried after a separator: `codecontext query -- path`.
 
 ## Instance lifecycle
 
@@ -168,6 +179,8 @@ The main endpoints are:
 - `GET /api/status` for indexing, parser, graph, watcher, and contract status.
 - `GET /api/context/complete` for one symbol or source file.
 - `POST /api/context/multi` for several context queries in one round trip.
+- `GET /api/graph/path`, `GET /api/graph/affected` and `GET /api/graph/hubs` for
+  whole-graph queries; a parameter one of them does not take is a 400 that says so.
 - `POST /api/syntax-tree` for an optional parser-native syntax tree.
 - `POST /api/index/refresh` for a full or single-file refresh.
 - `GET /healthz` for process liveness.
@@ -204,7 +217,8 @@ A typical MCP client configuration is:
 }
 ```
 
-The MCP tools are `get_context`, `get_multi_context`, and `get_status`. MCP mode is owned
+The MCP tools are `get_context`, `get_multi_context`, `get_status`, and the graph queries
+`get_path`, `get_affected`, and `get_hubs`. MCP mode is owned
 by the client process and does not register a REST instance.
 
 ## Architecture

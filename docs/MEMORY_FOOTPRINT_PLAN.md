@@ -290,12 +290,63 @@ start. Not built: a stale answer with a count (option b).
 
 | Id | Item | Notes |
 |---|---|---|
-| F1 | Whole-graph queries: shortest path, transitive `affected`, hubs | Over existing adjacency; REST, MCP and CLI together; contract and skill updates |
+| F1 | Whole-graph queries: shortest path, transitive `affected`, hubs | Over existing adjacency; REST, MCP and CLI together; contract and skill updates. Implemented, pending review (`40b854a`..; see "F1 as built") |
 | F2 | Diff and PR impact | `affected` seeded from a git diff's changed symbols |
 | F3 | Loud incompleteness | `query` says when a project is unrestored or has many unresolved names; `complete` with hundreds of unresolved names is not `complete` (jellyfin lost 29% of edges before `dotnet restore`; diablo2-draft ModBuilder reported `complete` with 292 unresolved names) |
 | F4 | Labelled possible callers | Unresolved same-name calls shown as `possible`, never mixed with bound edges |
 | F5 | Generic tree-sitter worker | Out of process, through the worker protocol, edges labelled inferred; breadth for languages with no semantic worker |
 | F6 | Communities and overview report | Lowest priority |
+
+### F1 as built
+
+Surface. `GET /api/graph/path?from&to[&maxDepth=10][&relation][&includeTests]`,
+`GET /api/graph/affected?identifier[&maxDepth=5][&relation][&includeTests][&limit=20]`,
+`GET /api/graph/hubs[?limit=20][&relation][&type][&within][&includeTests][&includeExternal]`; MCP `get_path`,
+`get_affected`, `get_hubs` with the same names; `codecontext query path <from> <to>`, `query affected <id>`,
+`query hubs` (`--depth` is maxDepth, `--within` and `--type` are hubs only). `maxDepth` 1-20, `limit` 1-100.
+`status` lists the three endpoints. All go through `ContextService` (partial `ContextService.Graph.cs`, interface
+`IGraphQueryService`, the same singleton registered for both interfaces; no resolver interface, no `EdgeCount`);
+`query --snapshot` answers them through the same service (`OneShotSnapshot.Graph`). Responses reuse
+`CompactCodeNode` (subclasses add hop, relation, via, dependents), canonical identifiers, `cache` and `coverage`.
+
+Decisions where the backlog was silent:
+
+1. Identifiers resolve exactly (canonical identifier, exact or qualified name, file path), never by substring: a
+   traversal from a guessed symbol is worse than a miss. Ambiguous or missing endpoints traverse nothing and exit 2.
+   A type stands for itself and its members (containment, transitively); a file for its symbols.
+2. Hops: usage edges forward (containment and method-family kinds are not usage, as in `uses`); dispatch from a
+   member reached by a call to its implementations and overrides, downward only, free (0 hops), not after a call
+   marked `dispatch: static`, not through a library member (as `usedBy` stops families there); containment only at
+   an endpoint, never mid-path (a use of a type does not reach what its members call). `relatedItems` proximity is
+   never used. A relation filter selects usage kinds; dispatch is followed whatever it says.
+3. Path: one shortest path, counting relationship hops; ties broken by canonical edge order, so answers are
+   deterministic. Test files are not passed through unless `includeTests` (endpoints may be tests). No path: the
+   explanation names the request's own filter when dropping it finds one (`excludedBy`), else the depth limit when
+   something lies beyond it (`depthLimited` is exact: some node unreached within the limit is reachable), else a
+   path the other way round, else what the graph does not record.
+4. Affected: impact moves from a symbol to each source of a usage edge into it; without a relation filter, to each
+   implementation or override of it (it must stay compatible with a changed declaration); and to each source of a
+   non-static usage edge into a declaration it implements or overrides, at any height (`through` names it). Not to
+   siblings implementing the same declaration, the declaration itself, containers or neighbours. Seeds (a type's
+   members included) are never listed. Test-file symbols are traversed and counted (`testsHidden`), listed with
+   `includeTests`.
+5. Hubs: distinct other symbols with a counted usage edge into the symbol, then their distinct files; no dispatch
+   or member aggregation (a type's count is uses of the type). Test files are neither ranked nor counted unless
+   `includeTests`; library symbols are ranked only with `includeExternal`, never under `within`. `within` is a
+   root-relative directory or file, matched on whole segments; one outside the root is refused. Computed per call,
+   no degree cache.
+6. One generation: the shards of the published map are read directly; the answer is kept only if the store's
+   mutation version did not move while it was computed (resolution reads the repositories, which follow the newest
+   map, and a legacy in-place write changes a shard where it stands), else it is computed again; after 3 changed
+   attempts the query fails with `GRAPH_CHANGING` (REST 503).
+7. Refusals: an option a query does not take is an error naming the query it belongs to (REST: checked before
+   binding, 400 `INVALID_GRAPH_QUERY`; MCP: unknown names, wrong JSON kinds and missing required arguments are
+   `isError`, unlike the lenient context tools; CLI: an option the subcommand does not read, exit 1). `query -- path`
+   queries a symbol named like a subcommand.
+8. The test-file rule (root-relative path contains `test` or `spec`) is one function, `RepositoryPaths.IsTestFile`,
+   now also used by `--tests` evidence, test-file discovery and candidate ranking, which matched the absolute path
+   before: a checkout under a folder named `tests` made every file a test. That is the only change to existing
+   answers, and only for such roots. The name rule itself is unchanged (`WorkerLaunchSpec.cs` counts as a test).
 
 ## Log
 
