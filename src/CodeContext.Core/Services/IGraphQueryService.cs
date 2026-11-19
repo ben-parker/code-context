@@ -124,8 +124,8 @@ namespace CodeContext.Core.Services
     {
         /// <summary>
         /// <c>start</c> (the first node), <c>uses</c> (a recorded relationship from the previous node),
-        /// <c>dispatch</c> (to an implementation or override of the member just reached, as a call through the
-        /// declaration can), <c>member</c> (from a starting type into one of its members), or <c>memberOf</c>
+        /// <c>dispatch</c> (to an implementation or override of the member just reached or started from, as a call
+        /// through the declaration can), <c>member</c> (from a starting type into one of its members), or <c>memberOf</c>
         /// (from a member into the target type that contains it).
         /// </summary>
         public string Hop { get; set; } = "start";

@@ -100,7 +100,7 @@ public class GraphReferenceTests
     private static Dictionary<(string, bool), int> PathDistances(
         Graph graph, HashSet<string> starts, HashSet<string> goals, string[]? relations, bool includeTests)
     {
-        var distance = starts.ToDictionary(start => (start, false), _ => 0);
+        var distance = starts.ToDictionary(start => (start, true), _ => 0);
         bool Allowed(string id) => graph.Node(id) is { } node && (includeTests || goals.Contains(id) || !IsTest(node));
         bool changed;
         do
@@ -241,7 +241,8 @@ public class GraphReferenceTests
         string IdOf(string identifier) => graph.Nodes.Single(node => node.Identifier == identifier).Id!;
         var hops = response.Path!;
         var ids = hops.Select(hop => IdOf(hop.Identifier)).ToList();
-        var mayDispatch = false;
+        // A start may dispatch, as a call to it would (a member hop leads from a type to a start).
+        var mayDispatch = true;
         var traversed = hops.Where(hop => hop.Hop is not ("member" or "memberOf")).ToList();
         for (var i = 1; i < hops.Count; i++)
         {
@@ -259,7 +260,7 @@ public class GraphReferenceTests
                     mayDispatch = used.Any(edge => !IsStatic(edge));
                     break;
                 case "dispatch":
-                    Assert.True(mayDispatch, $"{context}: hop {i} dispatches after a statically bound call or a start.");
+                    Assert.True(mayDispatch, $"{context}: hop {i} dispatches after a statically bound call.");
                     Assert.Contains(edges, edge => edge.SourceId == current && edge.TargetId == previous && IsFamily(edge));
                     Assert.False(IsExternal(graph.Node(previous)!));
                     break;

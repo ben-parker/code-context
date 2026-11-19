@@ -125,7 +125,9 @@ namespace CodeContext.Core.Services
         {
             depthLimited = false;
             // A state is a node and whether a call reached it by dispatch-capable means: a node reached by a statically
-            // bound call (or a start, whose own body runs) may not continue to implementations of itself. Relationship
+            // bound call may not continue to implementations of itself. A start may, as a call to it would: an interface
+            // or abstract member has no body of its own, so from it (or from its type) only dispatch leads anywhere, and
+            // `affected` lists the callers of such a declaration as reaching what its implementations call. Relationship
             // hops cost one and dispatch hops nothing, so this is a breadth-first search in which a state may still move
             // to an earlier level while that level is open (a dispatch hop finding what a relationship hop found first).
             var distance = new Dictionary<(string Id, bool Dispatch), int>();
@@ -133,7 +135,7 @@ namespace CodeContext.Core.Services
             var level = new List<(string Id, bool Dispatch)>();
             foreach (var start in starts)
             {
-                if (Node(start) is not null && distance.TryAdd((start, false), 0)) level.Add((start, false));
+                if (Node(start) is not null && distance.TryAdd((start, true), 0)) level.Add((start, true));
             }
 
             // Past the limit the search goes on without looking for goals, only to learn whether anything lies beyond.

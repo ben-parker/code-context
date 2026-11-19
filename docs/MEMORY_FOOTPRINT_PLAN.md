@@ -315,7 +315,7 @@ Decisions where the backlog was silent:
    traversal from a guessed symbol is worse than a miss. Ambiguous or missing endpoints traverse nothing and exit 2.
    A type stands for itself and its members (containment, transitively); a file for its symbols.
 2. Hops: usage edges forward (containment and method-family kinds are not usage, as in `uses`); dispatch from a
-   member reached by a call to its implementations and overrides, downward only, free (0 hops), not after a call
+   member reached by a call, or started from, to its implementations and overrides, downward only, free (0 hops), not after a call
    marked `dispatch: static`, not through a library member (as `usedBy` stops families there); containment only at
    an endpoint, never mid-path (a use of a type does not reach what its members call). `relatedItems` proximity is
    never used. A relation filter selects usage kinds; dispatch is followed whatever it says.

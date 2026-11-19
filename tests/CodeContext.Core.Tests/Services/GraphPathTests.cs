@@ -55,6 +55,28 @@ public class GraphPathTests
     }
 
     [Fact]
+    public async Task AnInterfaceMemberOrType_AsTheStart_ReachesWhatItsImplementationsCall()
+    {
+        // Affected(Target) lists Caller through IFoo.Run, so a path from IFoo.Run (or IFoo) to Target must exist too:
+        // an interface member has no body of its own, and a call to it runs an implementation.
+        var service = new GraphTestGraph()
+            .Node("IFoo", "Interface").Node("IFoo.Run").Node("Foo.Run").Node("Target")
+            .Edge("IFoo", "IFoo.Run", "HAS_METHOD")
+            .Edge("Foo.Run", "IFoo.Run", "IMPLEMENTS_MEMBER")
+            .Edge("Foo.Run", "Target", line: 7)
+            .Build();
+
+        var member = await Path(service, I("IFoo.Run"), I("Target"));
+        var type = await Path(service, I("IFoo"), I("Target"));
+
+        Assert.True(member.Found, member.Explanation);
+        Assert.Equal("Run -dispatch:IMPLEMENTS_MEMBER-> Run -uses:CALLS-> Target", Render(member));
+        Assert.Equal(1, member.Length);
+        Assert.True(type.Found, type.Explanation);
+        Assert.Equal("IFoo -member:HAS_METHOD-> Run -dispatch:IMPLEMENTS_MEMBER-> Run -uses:CALLS-> Target", Render(type));
+    }
+
+    [Fact]
     public async Task AStaticallyBoundBaseCall_ReachesTheNamedMemberAlone()
     {
         // Derived.Run calls base.Run(); Other.Run overrides Base.Run and is the only way on to Target.

@@ -92,8 +92,8 @@ codecontext query hubs --within src/CodeContext.Core        # the most depended-
   file for its symbols.
 - **`path`** prints one shortest chain, a line per hop: `start`; the relationship and the
   line it is recorded at (`CALLS line 42`); `dispatch IMPLEMENTS_MEMBER` or `OVERRIDES_MEMBER`
-  where a call through an interface or base member reaches an implementation (never after
-  a statically bound `base.M()` or `super.m()` call); `member` and `memberOf` at a type
+  where a call through an interface or base member reaches an implementation, a starting
+  member included (never after a statically bound `base.M()` or `super.m()` call); `member` and `memberOf` at a type
   endpoint. A use of a type never leads into its members mid-path. `--depth N` is the most
   hops (1-20, default 10). Test files are not passed through without `--tests`. `path none`
   comes with an `explanation`: `excludedBy relation` or `tests` means your own filter hid
