@@ -174,24 +174,33 @@ namespace CodeContext.Core.Services
             {
                 var excluded = new List<string>();
                 int? length = null;
+                var limitedWithoutRelation = false;
+                var limitedWithTests = false;
                 if (walk.FiltersRelations
-                    && walk.With(null, walk.IncludesTests).ShortestPath(from.Seeds!, goals, request.MaxDepth, out _) is { } withoutRelation)
+                    && walk.With(null, walk.IncludesTests).ShortestPath(from.Seeds!, goals, request.MaxDepth, out limitedWithoutRelation) is { } withoutRelation)
                 {
                     excluded.Add("relation");
                     length = UsesHops(withoutRelation);
                 }
                 if (!walk.IncludesTests
                     && walk.With(walk.FiltersRelations ? RelationsOf(request) : null, true)
-                        .ShortestPath(from.Seeds!, goals, request.MaxDepth, out _) is { } withTests)
+                        .ShortestPath(from.Seeds!, goals, request.MaxDepth, out limitedWithTests) is { } withTests)
                 {
                     excluded.Add("tests");
                     length = Math.Min(length ?? int.MaxValue, UsesHops(withTests));
                 }
-                var unfiltered = walk.With(null, true).ShortestPath(from.Seeds!, goals, request.MaxDepth, out unfilteredLimited);
-                if (excluded.Count == 0 && unfiltered is not null)
+                if (excluded.Count == 0)
                 {
-                    excluded.AddRange(walk.FiltersRelations && !walk.IncludesTests ? ["relation", "tests"] : walk.FiltersRelations ? ["relation"] : ["tests"]);
-                    length = UsesHops(unfiltered);
+                    // With one filter, the search without it was the unfiltered search: it is not run again.
+                    if (walk.FiltersRelations && !walk.IncludesTests)
+                    {
+                        if (walk.With(null, true).ShortestPath(from.Seeds!, goals, request.MaxDepth, out unfilteredLimited) is { } unfiltered)
+                        {
+                            excluded.AddRange(["relation", "tests"]);
+                            length = UsesHops(unfiltered);
+                        }
+                    }
+                    else unfilteredLimited = walk.FiltersRelations ? limitedWithoutRelation : limitedWithTests;
                 }
                 if (excluded.Count > 0)
                 {
