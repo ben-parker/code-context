@@ -534,11 +534,13 @@ namespace CodeContext.Core.Repositories.InMemory
             }
         }
 
-        /// <summary>Probes shards in ordinal <see cref="ShardKey"/> order (ids are globally unique).</summary>
+        /// <summary>
+        /// Probes shards in ordinal <see cref="ShardKey"/> order (ids are globally unique), over the published
+        /// map's shards as an array: every hop of a query looks a node up, and enumerating the map allocates.
+        /// </summary>
         public bool TryGetNode(string id, out CodeNode? node)
         {
-            var shards = _shards;
-            foreach (var shard in shards.Values)
+            foreach (var shard in GetAdjacency().Shards)
             {
                 if (shard.TryGetNode(id, out node)) return true;
             }
@@ -552,8 +554,7 @@ namespace CodeContext.Core.Repositories.InMemory
 
         public bool TryGetNodeIdByIdentifier(string identifier, out string? id)
         {
-            var shards = _shards;
-            foreach (var shard in shards.Values)
+            foreach (var shard in GetAdjacency().Shards)
             {
                 if (shard.TryGetNodeIdByIdentifier(identifier, out id)) return true;
             }
@@ -563,8 +564,7 @@ namespace CodeContext.Core.Repositories.InMemory
 
         public bool TryGetEdge(string id, out CodeEdge? edge)
         {
-            var shards = _shards;
-            foreach (var shard in shards.Values)
+            foreach (var shard in GetAdjacency().Shards)
             {
                 if (shard.TryGetEdge(id, out edge)) return true;
             }
@@ -1534,6 +1534,9 @@ namespace CodeContext.Core.Repositories.InMemory
             private IReadOnlyList<string>? _filePaths;
 
             private CompositeAdjacency(IGraphShard[] shards) => _shards = shards;
+
+            /// <summary>The shards of the map, in <see cref="ShardKey"/> order. Not to be written.</summary>
+            internal IGraphShard[] Shards => _shards;
 
             internal static CompositeAdjacency Build(ImmutableSortedDictionary<ShardKey, IGraphShard> shards)
                 => new(shards.Values.ToArray());
