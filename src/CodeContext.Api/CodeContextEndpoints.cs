@@ -133,6 +133,78 @@ public static class CodeContextEndpoints
         .Produces<List<CompactContextResponse>>(StatusCodes.Status200OK)
         .Produces(StatusCodes.Status400BadRequest);
 
+        // Whole-graph queries. UseGraphQueryValidation has already refused unknown or inapplicable parameters and
+        // values of the wrong kind with a message, so binding here does not fail; ranges are the service's.
+        app.MapGet(GraphRoutes.Path, (
+            IGraphQueryService graph,
+            string from,
+            string to,
+            int maxDepth = GraphQueryLimits.DefaultPathDepth,
+            string? relation = null,
+            bool includeTests = false,
+            CancellationToken ct = default) =>
+            GraphResultAsync(() => graph.FindPathAsync(new GraphPathRequest
+            {
+                From = from, To = to, MaxDepth = maxDepth, Relation = relation, IncludeTests = includeTests,
+            }, ct)))
+        .WithName("FindGraphPath")
+        .WithSummary("Find how one symbol reaches another")
+        .WithDescription("Returns a shortest chain of recorded relationships (calls, references, inheritance, imports) from " +
+                        "'from' to 'to', following dispatch from a called interface or base member to its implementations " +
+                        "(not for calls marked statically bound, such as base.M()). A type stands for its members; a file " +
+                        "path for its symbols. Test files are not passed through unless includeTests. When there is no path, " +
+                        "'explanation' says why, naming the request's own filters when they hid one ('excludedBy').")
+        .Produces<GraphPathResponse>(StatusCodes.Status200OK)
+        .Produces(StatusCodes.Status400BadRequest)
+        .Produces(StatusCodes.Status503ServiceUnavailable);
+
+        app.MapGet(GraphRoutes.Affected, (
+            IGraphQueryService graph,
+            string identifier,
+            int maxDepth = GraphQueryLimits.DefaultAffectedDepth,
+            string? relation = null,
+            bool includeTests = false,
+            int limit = GraphQueryLimits.DefaultLimit,
+            CancellationToken ct = default) =>
+            GraphResultAsync(() => graph.GetAffectedAsync(new GraphAffectedRequest
+            {
+                Identifier = identifier, MaxDepth = maxDepth, Relation = relation, IncludeTests = includeTests, Limit = limit,
+            }, ct)))
+        .WithName("GetAffected")
+        .WithSummary("List what depends on a symbol, transitively")
+        .WithDescription("Returns the symbols that use the identifier, then their users, up to maxDepth hops, nearest first: " +
+                        "users through every usage kind, implementations and overrides of a declaration, and callers of a " +
+                        "declaration the symbol implements or overrides ('through'), unless the call is statically bound. " +
+                        "Nothing is added by containment or proximity. Symbols in test files are counted in 'testsHidden' " +
+                        "and listed only with includeTests. A relation filter limits which uses carry impact.")
+        .Produces<GraphAffectedResponse>(StatusCodes.Status200OK)
+        .Produces(StatusCodes.Status400BadRequest)
+        .Produces(StatusCodes.Status503ServiceUnavailable);
+
+        app.MapGet(GraphRoutes.Hubs, (
+            IGraphQueryService graph,
+            int limit = GraphQueryLimits.DefaultLimit,
+            string? relation = null,
+            string? type = null,
+            string? within = null,
+            bool includeTests = false,
+            bool includeExternal = false,
+            CancellationToken ct = default) =>
+            GraphResultAsync(() => graph.GetHubsAsync(new GraphHubsRequest
+            {
+                Limit = limit, Relation = relation, Type = type, Within = within,
+                IncludeTests = includeTests, IncludeExternal = includeExternal,
+            }, ct)))
+        .WithName("GetHubs")
+        .WithSummary("List the symbols most others depend on")
+        .WithDescription("Ranks symbols by distinct direct dependents (symbols with a recorded use of them; a type's count " +
+                        "does not include uses of its members), then by the files those are in. 'within' keeps symbols " +
+                        "under a repository-relative directory or file; 'type' keeps one symbol type. Test files are " +
+                        "neither ranked nor counted unless includeTests; library symbols are ranked only with includeExternal.")
+        .Produces<GraphHubsResponse>(StatusCodes.Status200OK)
+        .Produces(StatusCodes.Status400BadRequest)
+        .Produces(StatusCodes.Status503ServiceUnavailable);
+
         // Index refresh endpoint. All work is queued on the index coordinator — the
         // endpoint owns no background tasks and mutations stay ordered.
         app.MapPost("/api/index/refresh", async (
@@ -310,6 +382,63 @@ public static class CodeContextEndpoints
         .Produces(StatusCodes.Status403Forbidden);
 
         return app;
+    }
+
+    /// <summary>The graph query routes and the query each one answers.</summary>
+    internal static class GraphRoutes
+    {
+        public const string Path = "/api/graph/path";
+        public const string Affected = "/api/graph/affected";
+        public const string Hubs = "/api/graph/hubs";
+
+        public static string? QueryOf(PathString path)
+            => path.Equals(Path, StringComparison.OrdinalIgnoreCase) ? GraphQueryParameters.PathQuery
+                : path.Equals(Affected, StringComparison.OrdinalIgnoreCase) ? GraphQueryParameters.AffectedQuery
+                : path.Equals(Hubs, StringComparison.OrdinalIgnoreCase) ? GraphQueryParameters.HubsQuery
+                : null;
+    }
+
+    /// <summary>
+    /// Refuses a graph query whose parameters are unknown to it, belong to another query, are given twice, are of the
+    /// wrong kind, or are missing, with a 400 that says which and why. Minimal API binding would answer those with an
+    /// empty 400, or not at all for a parameter it does not know.
+    /// </summary>
+    public static IApplicationBuilder UseGraphQueryValidation(this IApplicationBuilder app)
+        => app.Use(async (context, next) =>
+        {
+            if (GraphRoutes.QueryOf(context.Request.Path) is { } query
+                && GraphQueryParameters.Check(query, context.Request.Query.Select(pair =>
+                    new KeyValuePair<string, IReadOnlyList<string?>>(pair.Key, pair.Value.ToArray()))) is { } problem)
+            {
+                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                await context.Response.WriteAsJsonAsync(
+                    new ApiErrorResponse(new ApiError("INVALID_GRAPH_QUERY", problem)),
+                    CodeContextJsonContext.Default.ApiErrorResponse);
+                return;
+            }
+            await next();
+        });
+
+    private static async Task<IResult> GraphResultAsync<T>(Func<Task<T>> query)
+    {
+        try
+        {
+            return Results.Ok(await query());
+        }
+        catch (ArgumentException ex)
+        {
+            return Results.Json(
+                new ApiErrorResponse(new ApiError("INVALID_GRAPH_QUERY", ex.Message)),
+                CodeContextJsonContext.Default.ApiErrorResponse,
+                statusCode: StatusCodes.Status400BadRequest);
+        }
+        catch (GraphChangingException ex)
+        {
+            return Results.Json(
+                new ApiErrorResponse(new ApiError("GRAPH_CHANGING", ex.Message)),
+                CodeContextJsonContext.Default.ApiErrorResponse,
+                statusCode: StatusCodes.Status503ServiceUnavailable);
+        }
     }
 
     private static JsonElement CompactNativeTree(JsonElement tree)

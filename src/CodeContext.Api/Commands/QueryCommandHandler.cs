@@ -23,7 +23,15 @@ public sealed record QuerySettings(
     int? Limit = null,
     bool External = false,
     bool Start = false,
-    bool Snapshot = false);
+    bool Snapshot = false,
+    GraphQuerySettings? Graph = null,
+    IReadOnlyCollection<string>? Given = null);
+
+/// <summary>
+/// A whole-graph query (<c>query path</c>, <c>query affected</c>, <c>query hubs</c>): which one, and the options only graph
+/// queries read. <see cref="MaxDepth"/> is <c>--depth</c> when given, else the query's own default applies.
+/// </summary>
+public sealed record GraphQuerySettings(string Query, int? MaxDepth = null, string? Within = null, string? Type = null);
 
 internal sealed record QueryRuntime(
     IInstanceRegistry Registry,
@@ -38,7 +46,7 @@ internal sealed record QueryRuntime(
     Func<string, OneShotSnapshotOpen>? OpenSnapshot = null,
     bool SnapshotByDefault = false);
 
-public static class QueryCommandHandler
+public static partial class QueryCommandHandler
 {
     /// <summary>The API's per-list cap for a single query. <c>query multi</c> sends it
     /// explicitly, because the multi endpoint defaults to a smaller one.</summary>
@@ -46,8 +54,17 @@ public static class QueryCommandHandler
 
     internal const int MaxRelationshipLimit = 100;
 
+    /// <summary>Tests only: receives the settings a command line bound, in place of running the query (this flow only).</summary>
+    internal static readonly AsyncLocal<Action<QuerySettings>?> SettingsForTests = new();
+
     public static async Task<int> ExecuteAsync(QuerySettings settings, CancellationToken ct)
     {
+        if (SettingsForTests.Value is { } capture)
+        {
+            capture(settings);
+            return 0;
+        }
+
         var registry = new InstanceRegistry();
         using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
         var orchestrator = new DetachedStartOrchestrator(registry);
@@ -96,7 +113,21 @@ public static class QueryCommandHandler
         QueryRuntime runtime,
         CancellationToken ct)
     {
-        if (settings.Identifiers.Count == 0 || settings.Identifiers.Any(string.IsNullOrWhiteSpace))
+        if (InapplicableOption(settings) is { } inapplicable)
+        {
+            runtime.Error.WriteLine(inapplicable);
+            return 1;
+        }
+
+        if (settings.Graph is { } graph)
+        {
+            if (GraphArgumentProblem(settings, graph) is { } problem)
+            {
+                runtime.Error.WriteLine(problem);
+                return 1;
+            }
+        }
+        else if (settings.Identifiers.Count == 0 || settings.Identifiers.Any(string.IsNullOrWhiteSpace))
         {
             runtime.Error.WriteLine("At least one non-empty identifier is required.");
             return 1;
@@ -166,7 +197,9 @@ public static class QueryCommandHandler
             {
                 try
                 {
-                    return await AnswerFromSnapshotAsync(settings, snapshot, runtime);
+                    return settings.Graph is not null
+                        ? await AnswerGraphFromSnapshotAsync(settings, snapshot, runtime, ct)
+                        : await AnswerFromSnapshotAsync(settings, snapshot, runtime);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
@@ -248,8 +281,8 @@ public static class QueryCommandHandler
 
         try
         {
-            return settings.Multi
-                ? await ExecuteMultiAsync(settings, instance, runtime, ct)
+            return settings.Graph is not null ? await ExecuteGraphAsync(settings, instance, runtime, ct)
+                : settings.Multi ? await ExecuteMultiAsync(settings, instance, runtime, ct)
                 : await ExecuteSingleAsync(settings, instance, runtime, ct);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)

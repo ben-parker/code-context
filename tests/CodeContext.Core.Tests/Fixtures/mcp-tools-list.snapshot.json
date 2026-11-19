@@ -281,6 +281,141 @@
       "execution": {
         "taskSupport": "optional"
       }
+    },
+    {
+      "name": "get_path",
+      "description": "Find how one symbol reaches another: a shortest chain of recorded calls, references, inheritance and imports, with dispatch from an interface or base member to its implementations. When there is none, explanation says why, naming your own filters if they hid one. Static evidence, not runtime behavior.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "from": {
+            "description": "Where the path starts: canonical identifier, exact or qualified name, or file path (no substring match)",
+            "type": "string"
+          },
+          "to": {
+            "description": "Where the path ends, as from",
+            "type": "string"
+          },
+          "maxDepth": {
+            "description": "Most relationship hops searched (1-20)",
+            "type": "integer",
+            "default": 10
+          },
+          "relation": {
+            "description": "Comma-separated relation kinds a hop may follow (CALLS, MOCK_CALLS, REFERENCES, IMPLEMENTS, INHERITS, EXTENDS, IMPORTS, USES); dispatch to implementations is always followed",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "includeTests": {
+            "description": "Whether the path may pass through symbols in test files",
+            "type": "boolean",
+            "default": false
+          }
+        },
+        "required": [
+          "from",
+          "to"
+        ]
+      },
+      "execution": {
+        "taskSupport": "optional"
+      }
+    },
+    {
+      "name": "get_affected",
+      "description": "List what could break if a symbol or file changes: everything that uses it, transitively, nearest first, including callers through the interface or base member it implements. Nothing is added for merely sitting nearby. Test-file dependents are counted and listed with includeTests. Static evidence, not runtime behavior.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "identifier": {
+            "description": "The symbol or file that would change: canonical identifier, exact or qualified name, or file path (no substring match)",
+            "type": "string"
+          },
+          "maxDepth": {
+            "description": "Most dependency hops followed (1-20)",
+            "type": "integer",
+            "default": 5
+          },
+          "relation": {
+            "description": "Comma-separated relation kinds that carry impact (CALLS, MOCK_CALLS, REFERENCES, IMPLEMENTS, INHERITS, EXTENDS, IMPORTS, USES); without it implementations of a changed declaration are affected too",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "includeTests": {
+            "description": "Whether affected symbols in test files are listed (they are always counted)",
+            "type": "boolean",
+            "default": false
+          },
+          "limit": {
+            "description": "Most entries returned (1-100)",
+            "type": "integer",
+            "default": 20
+          }
+        },
+        "required": [
+          "identifier"
+        ]
+      },
+      "execution": {
+        "taskSupport": "optional"
+      }
+    },
+    {
+      "name": "get_hubs",
+      "description": "List the load-bearing symbols: those with the most distinct direct dependents, optionally within a directory or of one type. Tests and library symbols are left out unless asked for.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "description": "Most entries returned (1-100)",
+            "type": "integer",
+            "default": 20
+          },
+          "relation": {
+            "description": "Comma-separated relation kinds counted (CALLS, MOCK_CALLS, REFERENCES, IMPLEMENTS, INHERITS, EXTENDS, IMPORTS, USES)",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "type": {
+            "description": "Only symbols of this type (Class, Method, Interface, ...)",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "within": {
+            "description": "Only symbols under this repository-relative directory or file",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "includeTests": {
+            "description": "Whether symbols in test files are ranked and their uses counted",
+            "type": "boolean",
+            "default": false
+          },
+          "includeExternal": {
+            "description": "Whether library symbols are ranked",
+            "type": "boolean",
+            "default": false
+          }
+        }
+      },
+      "execution": {
+        "taskSupport": "optional"
+      }
     }
   ]
 }

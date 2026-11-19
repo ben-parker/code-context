@@ -78,8 +78,7 @@ namespace CodeContext.Core.Services
                     && !value.AsSpan().TrimEnd("/\\").Equals(rootPath.AsSpan().TrimEnd("/\\"), RootComparison))
                 {
                     throw new ArgumentException(
-                        $"within '{scope}' is not inside the indexed root{(string.IsNullOrEmpty(rootPath) ? string.Empty : $" '{rootPath}'")}.",
-                        nameof(scope));
+                        $"within '{scope}' is not inside the indexed root{(string.IsNullOrEmpty(rootPath) ? string.Empty : $" '{rootPath}'")}.");
                 }
                 value = relative.Length == value.Length ? string.Empty : relative.ToString();
             }
@@ -88,7 +87,7 @@ namespace CodeContext.Core.Services
             value = value.Trim('/');
             if (value == ".") value = string.Empty;
             if (value.Split('/').Any(segment => segment == ".."))
-                throw new ArgumentException($"within '{scope}' must not leave the indexed root.", nameof(scope));
+                throw new ArgumentException($"within '{scope}' must not leave the indexed root.");
             return value;
         }
 

@@ -95,7 +95,10 @@ public static class ProgramHelpers
         services.AddSingleton(sp => AnalysisCoverageRegistry.ForStore(sp.GetRequiredService<IRepositoryFactory>()));
         services.AddSingleton<IRepositoryFileSelector, RepositoryFileSelector>();
         services.AddSingleton<IGraphUpdateService, GraphUpdateService>();
-        services.AddSingleton<IContextService, ContextService>();
+        // One service answers context and whole-graph queries: they share identifier resolution and response shapes.
+        services.AddSingleton<ContextService>();
+        services.AddSingleton<IContextService>(sp => sp.GetRequiredService<ContextService>());
+        services.AddSingleton<IGraphQueryService>(sp => sp.GetRequiredService<ContextService>());
         services.AddSingleton<IApiMetrics, ApiMetrics>();
         services.AddSingleton<IStatusService, StatusService>();
         services.AddSingleton<ScanStateService>();
@@ -155,6 +158,7 @@ public static class ProgramHelpers
         }
 #endif
 
+        app.UseGraphQueryValidation();
         app.MapCodeContextEndpoints();
     }
 }

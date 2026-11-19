@@ -32,6 +32,21 @@ internal static class McpToolCatalog
         {"type":"object","properties":{"identifier":{"description":"Canonical returned identifier, symbol name, or file path","type":"string"},"type":{"description":"Filter by type (Class, Method, Interface, Property, etc.)","type":["string","null"],"default":null},"depth":{"description":"How many relationship levels to traverse (0-10)","type":"integer","default":1},"includeTests":{"description":"Whether to include test-related information","type":"boolean","default":false},"includeContent":{"description":"Whether to include file content snippets","type":"boolean","default":false},"exact":{"description":"Exact matching; omit for exact-first with substring fallback","type":["boolean","null"],"default":null},"includeRelated":{"description":"Whether to include loosely related symbols","type":"boolean","default":false},"includeMetrics":{"description":"Whether to include heuristic metrics","type":"boolean","default":false},"maxMatches":{"description":"Maximum ambiguous candidates returned","type":"integer","default":5},"maxRelationships":{"description":"Maximum entries returned per relationship list","type":"integer","default":10},"maxCallSites":{"description":"Maximum source locations returned per aggregated relationship; zero is count-only","type":"integer","default":3},"maxTestFiles":{"description":"Maximum test files returned; zero is count-only","type":"integer","default":5},"maxTestMethods":{"description":"Maximum test methods returned per file; zero is count-only","type":"integer","default":5},"expandAmbiguous":{"description":"Expand bounded ambiguous matches instead of returning summaries","type":"boolean","default":false},"containingType":{"description":"Filter members by their containing type","type":["string","null"],"default":null},"namespace":{"description":"Filter by exact namespace or module","type":["string","null"],"default":null},"signature":{"description":"Filter by exact signature","type":["string","null"],"default":null},"sourceFile":{"description":"Filter by repository-relative or absolute source file","type":["string","null"],"default":null},"relation":{"description":"Comma-separated relation kinds to filter uses/usedBy (CALLS, MOCK_CALLS, REFERENCES, IMPLEMENTS, INHERITS, EXTENDS, IMPORTS, USES); compact view only","type":["string","null"],"default":null},"view":{"description":"Response shape; compact is the default","type":"string","enum":["Compact","Full"],"default":"Compact"},"includeExternal":{"description":"Whether to include library symbols, which name matches and uses otherwise leave out","type":"boolean","default":false}},"required":["identifier"]}
         """;
 
+    private const string GetPathSchema =
+        """
+        {"type":"object","properties":{"from":{"description":"Where the path starts: canonical identifier, exact or qualified name, or file path (no substring match)","type":"string"},"to":{"description":"Where the path ends, as from","type":"string"},"maxDepth":{"description":"Most relationship hops searched (1-20)","type":"integer","default":10},"relation":{"description":"Comma-separated relation kinds a hop may follow (CALLS, MOCK_CALLS, REFERENCES, IMPLEMENTS, INHERITS, EXTENDS, IMPORTS, USES); dispatch to implementations is always followed","type":["string","null"],"default":null},"includeTests":{"description":"Whether the path may pass through symbols in test files","type":"boolean","default":false}},"required":["from","to"]}
+        """;
+
+    private const string GetAffectedSchema =
+        """
+        {"type":"object","properties":{"identifier":{"description":"The symbol or file that would change: canonical identifier, exact or qualified name, or file path (no substring match)","type":"string"},"maxDepth":{"description":"Most dependency hops followed (1-20)","type":"integer","default":5},"relation":{"description":"Comma-separated relation kinds that carry impact (CALLS, MOCK_CALLS, REFERENCES, IMPLEMENTS, INHERITS, EXTENDS, IMPORTS, USES); without it implementations of a changed declaration are affected too","type":["string","null"],"default":null},"includeTests":{"description":"Whether affected symbols in test files are listed (they are always counted)","type":"boolean","default":false},"limit":{"description":"Most entries returned (1-100)","type":"integer","default":20}},"required":["identifier"]}
+        """;
+
+    private const string GetHubsSchema =
+        """
+        {"type":"object","properties":{"limit":{"description":"Most entries returned (1-100)","type":"integer","default":20},"relation":{"description":"Comma-separated relation kinds counted (CALLS, MOCK_CALLS, REFERENCES, IMPLEMENTS, INHERITS, EXTENDS, IMPORTS, USES)","type":["string","null"],"default":null},"type":{"description":"Only symbols of this type (Class, Method, Interface, ...)","type":["string","null"],"default":null},"within":{"description":"Only symbols under this repository-relative directory or file","type":["string","null"],"default":null},"includeTests":{"description":"Whether symbols in test files are ranked and their uses counted","type":"boolean","default":false},"includeExternal":{"description":"Whether library symbols are ranked","type":"boolean","default":false}}}
+        """;
+
     private const string GetStatusSchema =
         """
         {"type":"object","properties":{}}
@@ -52,6 +67,18 @@ internal static class McpToolCatalog
             "get_status",
             "Get comprehensive system health and debugging information",
             GetStatusSchema),
+        MakeTool(
+            "get_path",
+            "Find how one symbol reaches another: a shortest chain of recorded calls, references, inheritance and imports, with dispatch from an interface or base member to its implementations. When there is none, explanation says why, naming your own filters if they hid one. Static evidence, not runtime behavior.",
+            GetPathSchema),
+        MakeTool(
+            "get_affected",
+            "List what could break if a symbol or file changes: everything that uses it, transitively, nearest first, including callers through the interface or base member it implements. Nothing is added for merely sitting nearby. Test-file dependents are counted and listed with includeTests. Static evidence, not runtime behavior.",
+            GetAffectedSchema),
+        MakeTool(
+            "get_hubs",
+            "List the load-bearing symbols: those with the most distinct direct dependents, optionally within a directory or of one type. Tests and library symbols are left out unless asked for.",
+            GetHubsSchema),
     ];
 
     private static Tool MakeTool(string name, string description, string schema)
@@ -86,7 +113,7 @@ internal static class McpToolCatalog
         // stdio: `no_such_tool` returned {"error":{"code":-32602,...}}). It must be THROWN so the
         // request pipeline emits a JsonRpcError, not folded into the in-band isError path below.
         // McpProtocolException is the McpException subtype that carries the wire error code.
-        if (name is not ("get_context" or "get_multi_context" or "get_status"))
+        if (name is not ("get_context" or "get_multi_context" or "get_status" or "get_path" or "get_affected" or "get_hubs"))
             throw new McpProtocolException($"Unknown tool: '{name}'", McpErrorCode.InvalidParams);
 
         try
@@ -96,6 +123,9 @@ internal static class McpToolCatalog
                 "get_context" => await InvokeGetContextAsync(context, args),
                 "get_multi_context" => await InvokeGetMultiContextAsync(context, args),
                 "get_status" => await InvokeGetStatusAsync(context),
+                "get_path" => await CodeContextTools.GetPath(Graph(context), GraphArguments(GraphQueryParameters.PathQuery, args), cancellationToken),
+                "get_affected" => await CodeContextTools.GetAffected(Graph(context), GraphArguments(GraphQueryParameters.AffectedQuery, args), cancellationToken),
+                "get_hubs" => await CodeContextTools.GetHubs(Graph(context), GraphArguments(GraphQueryParameters.HubsQuery, args), cancellationToken),
                 _ => throw new InvalidOperationException("Unreachable: tool name validated above."),
             };
             return Success(text);
@@ -170,6 +200,47 @@ internal static class McpToolCatalog
     {
         var service = context.Services!.GetRequiredService<IStatusService>();
         return CodeContextTools.GetStatus(service);
+    }
+
+    private static IGraphQueryService Graph(RequestContext<CallToolRequestParams> context)
+        => context.Services!.GetRequiredService<IGraphQueryService>();
+
+    /// <summary>
+    /// The arguments of a graph tool, checked strictly, unlike the context tools' lenient binding: a name the tool does not
+    /// take (another graph query's option included), a value of the wrong JSON kind, or a missing required one is an
+    /// error saying which, as REST answers 400. A JSON null is the same as leaving the argument out.
+    /// </summary>
+    internal static CodeContextTools.GraphArguments GraphArguments(string query, IDictionary<string, JsonElement>? args)
+    {
+        var values = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
+        foreach (var (key, value) in args ?? new Dictionary<string, JsonElement>())
+        {
+            if (GraphQueryParameters.Find(query, key) is not { } parameter || parameter.Name != key)
+                throw new ArgumentException(GraphQueryParameters.NotApplicable(query, key));
+            if (value.ValueKind == JsonValueKind.Null) continue;
+            var expected = parameter.Kind switch
+            {
+                GraphQueryParameters.Kind.Integer => value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out _),
+                GraphQueryParameters.Kind.Boolean => value.ValueKind is JsonValueKind.True or JsonValueKind.False,
+                _ => value.ValueKind == JsonValueKind.String,
+            };
+            if (!expected)
+            {
+                throw new ArgumentException(parameter.Kind switch
+                {
+                    GraphQueryParameters.Kind.Integer => $"{key} must be an integer.",
+                    GraphQueryParameters.Kind.Boolean => $"{key} must be true or false.",
+                    _ => $"{key} must be a string.",
+                });
+            }
+            values[key] = value;
+        }
+        foreach (var parameter in GraphQueryParameters.For(query))
+        {
+            if (parameter.Required && (!values.TryGetValue(parameter.Name, out var given) || string.IsNullOrWhiteSpace(given.GetString())))
+                throw new ArgumentException($"{parameter.Name} is required.");
+        }
+        return new CodeContextTools.GraphArguments(values);
     }
 
     private static CallToolResult Success(string text) =>
