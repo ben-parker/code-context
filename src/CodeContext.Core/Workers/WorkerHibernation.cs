@@ -118,8 +118,15 @@ internal sealed class WorkerHibernation : IHostedService, IDisposable
     private readonly TimeProvider _time;
     private readonly ILogger? _logger;
     private readonly QuietTimeTrim? _memoryTrim;
+    private readonly Func<bool>? _writesSnapshots;
     private readonly ITimer? _timer;
     private readonly object _gate = new();
+
+    /// <summary>
+    /// How soon a worker found idle with its state not yet saved is looked at again (or its idle time, if shorter):
+    /// long enough for a pending snapshot, which follows a commit within the snapshot delays, to be written.
+    /// </summary>
+    internal static readonly TimeSpan StateRetry = TimeSpan.FromSeconds(30);
 
     // Guarded by _gate.
     private bool _stopped;
@@ -135,9 +142,11 @@ internal sealed class WorkerHibernation : IHostedService, IDisposable
         TimeProvider time,
         Func<bool>? snapshotWritten,
         ILogger? logger = null,
-        QuietTimeTrim? memoryTrim = null)
+        QuietTimeTrim? memoryTrim = null,
+        Func<bool>? writesSnapshots = null)
     {
         _memoryTrim = memoryTrim;
+        _writesSnapshots = writesSnapshots;
         _workers = workers;
         _coordinator = coordinator;
         _settings = settings;
@@ -248,8 +257,13 @@ internal sealed class WorkerHibernation : IHostedService, IDisposable
             DateTimeOffset? due = outcome switch
             {
                 LanguageWorkerService.HibernationOutcome.NotIdle => _workers.LastActivity(parserId) + idle,
-                // The state is saved with the next snapshot, which follows a commit within the snapshot delays.
-                LanguageWorkerService.HibernationOutcome.StateNotSaved => _time.GetUtcNow() + idle,
+                // The state is saved with the next snapshot, which follows a commit within the snapshot delays: a commit
+                // of another worker's just before this check leaves it pending, so look again soon, not an idle time
+                // later. Where no snapshot is written (cache off, read-only) it never is, and nothing looks again until
+                // the worker has had work.
+                LanguageWorkerService.HibernationOutcome.StateNotSaved => _writesSnapshots?.Invoke() == true
+                    ? _time.GetUtcNow() + (idle < StateRetry ? idle : StateRetry)
+                    : null,
                 _ => null,
             };
             if (due is { } d && (next is null || d < next)) next = d;
@@ -285,7 +299,8 @@ public static class WorkerHibernationServiceCollectionExtensions
                 TimeProvider.System,
                 snapshots is null ? null : () => snapshots.WrittenMatchesStore,
                 logger,
-                sp.GetService<QuietTimeTrim>());
+                sp.GetService<QuietTimeTrim>(),
+                snapshots is null ? null : () => snapshots.WritesSnapshots);
         });
         services.AddHostedService(sp => sp.GetRequiredService<WorkerHibernation>());
         return services;

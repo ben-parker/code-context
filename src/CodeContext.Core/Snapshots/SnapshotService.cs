@@ -309,6 +309,12 @@ namespace CodeContext.Core.Snapshots
             }
         }
 
+        /// <summary>This instance writes snapshots (it holds the writer lock and is not stopping), so a worker's state can come to be saved.</summary>
+        internal bool WritesSnapshots
+        {
+            get { lock (_gate) return _status.Mode == SnapshotCacheMode.Writer && !_stopping; }
+        }
+
         /// <summary>A capture was requested from the coordinator and its result not yet handled. For tests.</summary>
         internal bool IsCaptureRequested
         {
