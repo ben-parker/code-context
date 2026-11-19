@@ -128,8 +128,8 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
     private bool _restartPending;
     private bool _unavailable;
     private volatile bool _stopping;
-    // Set while a hibernation stops the process: its exit is deliberate, as during a stop. The connection can also
-    // end early: the host's reader refuses the `"result": null` answer workers give to shutdown.
+    // Set while a hibernation stops the process: its exit is deliberate, as during a stop (a worker may exit as soon
+    // as it has answered shutdown, before the pipes are closed).
     private volatile bool _hibernating;
     private volatile bool _disposed;
     private long _incarnation;

@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using System.Diagnostics;
 using CodeContext.Core.Repositories;
 using CodeContext.Core.Repositories.InMemory;
@@ -35,10 +36,11 @@ public class ParserProcessSupervisorTests
     private static ParserProcessSupervisor CreateSupervisor(
         WorkerLaunchSpec spec,
         ParserWorkerOptions? options = null,
-        IParserSessionRegistry? registry = null)
+        IParserSessionRegistry? registry = null,
+        ILogger<ParserProcessSupervisor>? logger = null)
         => new(spec,
             options ?? TestWorkerOptions.Patient(),
-            NullLogger<ParserProcessSupervisor>.Instance,
+            logger ?? NullLogger<ParserProcessSupervisor>.Instance,
             registry,
             new CodeContextOptions { RootPath = Path.GetTempPath() });
 
@@ -323,6 +325,25 @@ public class ParserProcessSupervisorTests
         Assert.Equal(ParserSessionState.Stopped, supervisor.Snapshot.State);
         Assert.True(HasProcessExited(pid), "Worker process should have exited after graceful shutdown.");
         await supervisor.DisposeAsync();
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task TheWorkersShutdownAnswer_IsAcceptedAsClean(bool hibernate)
+    {
+        // The fake worker answers shutdown as the schema says: "result": null. The host used to refuse that envelope,
+        // end the read loop and fall back to EOF; the stop went on, so only this log line showed it.
+        var logger = new CodeContext.Core.Tests.Snapshots.ListLogger<ParserProcessSupervisor>();
+        await using var supervisor = CreateSupervisor(FakeWorkerSpec(), logger: logger);
+        supervisor.DeltaHandler = (_, _) => Task.FromResult(true);
+        await supervisor.IndexWorkspaceAsync(new IndexWorkspaceParams("ws-1", 1, ["a.fake"]));
+
+        if (hibernate) Assert.True(await supervisor.HibernateAsync());
+        else await supervisor.ShutdownAsync();
+
+        Assert.DoesNotContain(logger.Entries, entry => entry.Message.Contains("shutdown request", StringComparison.Ordinal));
+        Assert.DoesNotContain(logger.Entries, entry => entry.Message.Contains("malformed", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]

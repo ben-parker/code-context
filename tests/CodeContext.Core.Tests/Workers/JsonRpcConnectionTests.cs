@@ -55,6 +55,51 @@ public class JsonRpcConnectionTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task InvokeVoid_AcceptsTheNullResultTheSchemaGivesShutdown_AndTheConnectionStaysUp()
+    {
+        // parser-protocol.schema.json: "shutdown": { "params": null, "result": null }. A handler that returns
+        // nothing is answered with exactly that: {"jsonrpc":"2.0","id":n,"result":null}.
+        _worker.AddRequestHandler(ParserProtocolMethods.Shutdown, (_, _) => Task.FromResult<JsonElement?>(null));
+        _worker.AddRequestHandler(ParserProtocolMethods.OpenWorkspace, (_, _) => Task.FromResult<JsonElement?>(
+            JsonSerializer.SerializeToElement(new OpenWorkspaceResult("ws", Opened: true, Message: null),
+                ParserProtocolJsonContext.Default.OpenWorkspaceResult)));
+        StartBoth();
+
+        await _host.InvokeVoidAsync(ParserProtocolMethods.Shutdown).WaitAsync(TimeSpan.FromSeconds(30));
+
+        // A refused envelope would have ended the read loop and failed this request.
+        var open = await new ParserWorkerClient(_host).OpenWorkspaceAsync(new OpenWorkspaceParams("ws", "/", [], []))
+            .WaitAsync(TimeSpan.FromSeconds(30));
+        Assert.True(open.Opened);
+    }
+
+    [Theory]
+    [InlineData("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":null}", true, false)]
+    [InlineData("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}", true, false)]
+    [InlineData("{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32603,\"message\":\"x\"}}", false, true)]
+    [InlineData("{\"jsonrpc\":\"2.0\",\"id\":1}", false, false)]
+    public void ResultMember_IsPresentWhenWrittenAsNull_AndAbsentWhenLeftOut(string json, bool hasResult, bool hasError)
+    {
+        var message = JsonSerializer.Deserialize(json, ParserProtocolJsonContext.Default.JsonRpcMessage)!;
+        Assert.Equal(hasResult, message.Result is not null);
+        Assert.Equal(hasError, message.Error is not null);
+        if (json.Contains("\"result\":null", StringComparison.Ordinal))
+        {
+            Assert.Equal(JsonValueKind.Null, message.Result!.Value.ValueKind);
+            // And it is written back as it was read.
+            Assert.Contains("\"result\":null",
+                JsonSerializer.Serialize(message, ParserProtocolJsonContext.Default.JsonRpcMessage), StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void ARequest_IsWrittenWithoutAResultMember()
+    {
+        var json = JsonSerializer.Serialize(new JsonRpcMessage { Id = 1, Method = "x" }, ParserProtocolJsonContext.Default.JsonRpcMessage);
+        Assert.DoesNotContain("result", json, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Invoke_UnknownMethod_ThrowsMethodNotFound()
     {
         StartBoth();
