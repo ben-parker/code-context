@@ -265,7 +265,7 @@ namespace CodeContext.Core.Snapshots
             for (var i = 0; i < blobs.Count; i++)
             {
                 blobOffsets[i] = position;
-                position = SnapshotFormat.Align8(position + blobs[i].Bytes.Length);
+                position = SnapshotFormat.Align8(position + blobs[i].Length);
             }
             var footerOffset = position;
             var fileLength = footerOffset + SnapshotFormat.FooterSize;
@@ -298,8 +298,8 @@ namespace CodeContext.Core.Snapshots
             {
                 var entry = directory.AsSpan(i * SnapshotFormat.DirectoryEntrySize, SnapshotFormat.DirectoryEntrySize);
                 BinaryPrimitives.WriteUInt64LittleEndian(entry, (ulong)blobOffsets[i]);
-                BinaryPrimitives.WriteUInt64LittleEndian(entry[8..], (ulong)blobs[i].Bytes.Length);
-                SHA256.HashData(blobs[i].Bytes, entry[16..48]);
+                BinaryPrimitives.WriteUInt64LittleEndian(entry[8..], (ulong)blobs[i].Length);
+                blobs[i].Sha256.CopyTo(entry[16..48]);
                 BinaryPrimitives.WriteUInt32LittleEndian(entry[48..], (uint)blobs[i].NodeCount);
                 BinaryPrimitives.WriteUInt32LittleEndian(entry[52..], (uint)blobs[i].EdgeCount);
             }
@@ -332,7 +332,7 @@ namespace CodeContext.Core.Snapshots
             for (var i = 0; i < plan.Blobs.Count; i++)
             {
                 sink.PadTo(plan.BlobOffsets[i]);
-                sink.Write(plan.Blobs[i].Bytes);
+                plan.Blobs[i].WriteTo(sink.Write);
             }
             sink.PadTo(plan.FooterOffset);
             sink.Write(SnapshotFormat.FooterMagic);
@@ -563,12 +563,50 @@ namespace CodeContext.Core.Snapshots
             }
         }
 
+        /// <summary>Takes the next bytes of a blob, in order.</summary>
+        internal delegate void BlobSink(ReadOnlySpan<byte> bytes);
+
+        /// <summary>
+        /// One shard's blob, kept as its parts: the shard header with the section table, then the sections. The parts
+        /// are never joined into one array (a second copy of the whole shard); <see cref="WriteTo"/> lays them out,
+        /// each section at the next 8-byte boundary and the blob ending on one, for the file and for the blob's hash.
+        /// </summary>
         internal sealed class ShardBlob
         {
-            public required byte[] Bytes { get; init; }
+            private static readonly byte[] Zeros = new byte[8];
+
+            public required byte[] Head { get; init; }
+            public required byte[][] Sections { get; init; }
+
+            /// <summary>The blob's length as laid out by <see cref="WriteTo"/>.</summary>
+            public required long Length { get; init; }
+
+            /// <summary>SHA-256 of the blob's bytes, for its directory entry.</summary>
+            public required byte[] Sha256 { get; init; }
             public required int NodeCount { get; init; }
             public required int EdgeCount { get; init; }
             public required long[] SectionLengths { get; init; }
+
+            public void WriteTo(BlobSink sink)
+            {
+                sink(Head);
+                long position = Head.Length;
+                foreach (var section in Sections)
+                {
+                    position = Pad(sink, position);
+                    sink(section);
+                    position += section.Length;
+                }
+                position = Pad(sink, position);
+                if (position != Length) throw new InvalidOperationException("A shard blob's layout did not add up.");
+            }
+
+            private static long Pad(BlobSink sink, long position)
+            {
+                var aligned = SnapshotFormat.Align8(position);
+                if (aligned > position) sink(Zeros.AsSpan(0, (int)(aligned - position)));
+                return aligned;
+            }
         }
 
         /// <summary>Builds one position-independent shard blob.</summary>
@@ -986,48 +1024,54 @@ namespace CodeContext.Core.Snapshots
                 sections[19] = info.Fingerprints ?? Array.Empty<byte>();
                 sections[20] = info.Inputs ?? Array.Empty<byte>();
 
-                // ---- Blob ----, sized exactly: the layout below, computed first.
-                var blobLength = (long)SnapshotFormat.ShardHeaderSize + SnapshotFormat.SectionCount * SnapshotFormat.SectionEntrySize;
-                foreach (var section in sections) blobLength = SnapshotFormat.Align8(blobLength) + section.Length;
-                blobLength = SnapshotFormat.Align8(blobLength);
-                var blob = new LittleEndianBuffer((int)Math.Min(blobLength, Array.MaxLength));
-                blob.WriteU32(SnapshotFormat.ShardMagic);
-                blob.WriteU32(SnapshotFormat.SectionCount);
-                blob.WriteU32((uint)nodes.Count);
-                blob.WriteU32((uint)edges.Count);
-                blob.WriteU32((uint)ids.Length);
-                blob.WriteU32((uint)_strings.Count);
-                blob.WriteU32((uint)files.Count);
-                blob.WriteU32((uint)names.Count);
-                blob.WriteU32(FoldedNameFirstRef);
-                blob.WriteU32(0);
-                blob.PadTo(SnapshotFormat.ShardHeaderSize);
+                // ---- Blob ----: the header and the section table, then the sections as they are; never one array.
+                var head = new LittleEndianBuffer(SnapshotFormat.ShardHeaderSize + SnapshotFormat.SectionCount * SnapshotFormat.SectionEntrySize);
+                head.WriteU32(SnapshotFormat.ShardMagic);
+                head.WriteU32(SnapshotFormat.SectionCount);
+                head.WriteU32((uint)nodes.Count);
+                head.WriteU32((uint)edges.Count);
+                head.WriteU32((uint)ids.Length);
+                head.WriteU32((uint)_strings.Count);
+                head.WriteU32((uint)files.Count);
+                head.WriteU32((uint)names.Count);
+                head.WriteU32(FoldedNameFirstRef);
+                head.WriteU32(0);
+                head.PadTo(SnapshotFormat.ShardHeaderSize);
 
-                var tableOffset = blob.Length;
-                blob.PadTo(tableOffset + SnapshotFormat.SectionCount * SnapshotFormat.SectionEntrySize);
+                var tableOffset = head.Length;
+                head.PadTo(tableOffset + SnapshotFormat.SectionCount * SnapshotFormat.SectionEntrySize);
                 var lengths = new long[SnapshotFormat.SectionCount];
+                var blobLength = head.Length;
                 for (var i = 0; i < SnapshotFormat.SectionCount; i++)
                 {
-                    blob.PadTo(SnapshotFormat.Align8(blob.Length));
-                    var offset = blob.Length;
-                    blob.WriteBytes(sections[i]);
+                    var offset = SnapshotFormat.Align8(blobLength);
+                    blobLength = offset + sections[i].Length;
                     lengths[i] = sections[i].Length;
                     var kind = (SnapshotSectionKind)(i + 1);
                     var entry = tableOffset + i * SnapshotFormat.SectionEntrySize;
-                    blob.PatchU32(entry, (uint)kind);
-                    blob.PatchU32(entry + 4, SnapshotFormat.ElementSize(kind));
-                    blob.PatchU64(entry + 8, (ulong)offset);
-                    blob.PatchU64(entry + 16, (ulong)sections[i].Length);
+                    head.PatchU32(entry, (uint)kind);
+                    head.PatchU32(entry + 4, SnapshotFormat.ElementSize(kind));
+                    head.PatchU64(entry + 8, (ulong)offset);
+                    head.PatchU64(entry + 16, (ulong)sections[i].Length);
                 }
-                blob.PadTo(SnapshotFormat.Align8(blob.Length));
+                blobLength = SnapshotFormat.Align8(blobLength);
+                // A reader maps a blob as one range: the limit a single array gave it stays.
+                EnsureSectionFits(blobLength);
 
-                return new ShardBlob
+                var blob = new ShardBlob
                 {
-                    Bytes = blob.ToArray(),
+                    Head = head.ToArray(),
+                    Sections = sections,
+                    Length = blobLength,
+                    Sha256 = new byte[SHA256.HashSizeInBytes],
                     NodeCount = nodes.Count,
                     EdgeCount = edges.Count,
                     SectionLengths = lengths,
                 };
+                using var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+                blob.WriteTo(sha.AppendData);
+                sha.GetHashAndReset(blob.Sha256);
+                return blob;
             }
 
             private void Intern(string value)
