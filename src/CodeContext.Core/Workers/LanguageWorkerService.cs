@@ -454,7 +454,7 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
         Hibernated,
         /// <summary>An operation ran or started within the idle time.</summary>
         NotIdle,
-        /// <summary>No process to stop: never started, already hibernated, failed, stopped.</summary>
+        /// <summary>No process to stop (never started, already hibernated, stopped), or a failed session.</summary>
         NotRunning,
         /// <summary>A worker with <c>persistentState</c> whose state is not saved with a written snapshot of its shard yet.</summary>
         StateNotSaved,
@@ -474,6 +474,10 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
         try
         {
             if (state.Hibernated || state.Supervisor is not { IsLive: true } supervisor) return HibernationOutcome.NotRunning;
+            // A request that failed (complete:false) leaves the process up and the session failed. Stopping it would
+            // show the session as hibernated and drop the failure from status; the next operation that succeeds
+            // makes it ready, and its end arms the check again.
+            if (supervisor.Snapshot.State == ParserSessionState.Failed) return HibernationOutcome.NotRunning;
             if (Time.GetUtcNow().UtcTicks - Interlocked.Read(ref state.LastActivityTicks) < idle.Ticks) return HibernationOutcome.NotIdle;
             if (supervisor.DeclaresPersistentState
                 && (BaselineSource?.TryGetBaseline(parserId, DefaultWorkspaceId, supervisor.Initialized!.ParserVersion) is null

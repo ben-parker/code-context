@@ -242,6 +242,36 @@ public sealed class WorkerHibernationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task FailedSession_WithItsProcessAlive_DoesNotHibernate_AndStaysReportedAsFailed()
+    {
+        // A worker without persistentState: nothing else holds it up.
+        var host = await StartAsync("strict");
+        File.WriteAllText(FailMarker, "fail");
+        File.WriteAllText(Path.Combine(Root, "c.fake"), "c");
+        await Assert.ThrowsAsync<ParserWorkerFailedException>(() => host.Instance.Coordinator.RefreshFileAsync(Path.Combine(Root, "c.fake")));
+        Assert.Equal(ParserSessionState.Failed, host.Session.State);
+        var pid = host.Session.ProcessId!.Value;
+        File.Delete(FailMarker);
+
+        await host.IdleAsync();
+        await host.IdleAsync();
+
+        // Hibernating would replace "failed" with "hibernated" and drop the failure from status.
+        Assert.False(host.Instance.Workers.IsHibernated("fake"));
+        Assert.Equal(Outcome.NotRunning, await host.TryHibernateNowAsync());
+        Assert.False(HasExited(pid));
+        var session = Assert.Single((await host.Instance.Status.GetStatusAsync()).Parsers.Sessions!);
+        Assert.Equal("failed", session.State);
+        Assert.NotNull(session.LastError);
+
+        // The next operation that succeeds makes the session ready, and then it may hibernate again.
+        await host.Instance.Coordinator.RefreshFileAsync(Path.Combine(Root, "c.fake"));
+        Assert.Equal(ParserSessionState.Ready, host.Session.State);
+        await host.IdleAsync();
+        Assert.True(host.Instance.Workers.IsHibernated("fake"));
+    }
+
+    [Fact]
     public async Task FailedWake_IsReportedAsAFailure_AndTheNextChangeWakesAgain()
     {
         var host = await StartAsync();
