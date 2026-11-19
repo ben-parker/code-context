@@ -2,6 +2,8 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const { METHODS, CAPABILITIES, BASELINE, MessageDecoder, encodeMessage } = require('..');
 
 test('decodes fragmented and adjacent frames', () => {
@@ -25,4 +27,14 @@ test('exports the persistent state method, capability and baseline answers', () 
     assert.equal(METHODS.saveState, 'workspace/saveState');
     assert.equal(CAPABILITIES.persistentState, 'persistentState');
     assert.deepEqual({ ...BASELINE }, { accepted: 'accepted', rejected: 'rejected' });
+});
+
+test('declares the inputs of a delta with the schema\'s fields', () => {
+    const schema = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', '..', 'src', 'CodeContext.Parser.Protocol',
+        'protocol', 'parser-protocol.schema.json'), 'utf8')).$defs;
+    const declared = /export interface WorkerInputs \{([^}]*)\}/.exec(fs.readFileSync(path.join(__dirname, '..', 'index.d.ts'), 'utf8'));
+    assert.ok(declared, 'index.d.ts declares WorkerInputs');
+    const fields = [...declared[1].matchAll(/^\s*(\w+)\??:/gm)].map(match => match[1]).sort();
+    assert.deepEqual(fields, Object.keys(schema.workerInputs.properties).sort());
+    assert.equal(schema.analysisDelta.properties.inputs.$ref, '#/$defs/workerInputs');
 });

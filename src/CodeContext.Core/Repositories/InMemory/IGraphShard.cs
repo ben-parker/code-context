@@ -67,10 +67,10 @@ namespace CodeContext.Core.Repositories.InMemory
         void AddStatistics(Dictionary<string, int> nodesByType, Dictionary<string, int> edgesByType);
 
         /// <summary>
-        /// Ids of edges with at least one endpoint that is not a node of this shard: the only edges
+        /// Edges with at least one endpoint that is not a node of this shard: the only edges
         /// a removal in another shard can leave dangling. A superset of the sweep candidates.
         /// </summary>
-        IReadOnlyCollection<string> GetCrossShardEdgeIds();
+        IReadOnlyCollection<CodeEdge> GetCrossShardEdges();
 
         // ---- Commit members ----
 
@@ -96,12 +96,15 @@ namespace CodeContext.Core.Repositories.InMemory
         /// Sweeps this shard after a commit to another shard: drops edges sourced at a removed id or
         /// targeting a removed-and-not-re-established id, drops facts whose id the delta re-supplied
         /// (the delta wins globally) and every edge touching such an evicted node.
+        /// The delta's facts are given as committed (a fact without an id, or the same id twice, may be
+        /// among them); the shard probes its own tables with each, edges by <see cref="CodeEdge.IdKey"/>
+        /// under <see cref="EdgeIdKeys.Comparer"/>.
         /// </summary>
         IGraphShard? WithoutForeignConflicts(
             IReadOnlySet<string> removedIds,
             IReadOnlySet<string> removedNotReestablished,
-            IReadOnlySet<string> deltaNodeIds,
-            IReadOnlySet<string> deltaEdgeIds);
+            IReadOnlyList<CodeNode> deltaNodes,
+            IReadOnlyList<CodeEdge> deltaEdges);
 
         /// <summary>
         /// Adds to <paramref name="into"/> the id of every node whose non-empty file path is not in

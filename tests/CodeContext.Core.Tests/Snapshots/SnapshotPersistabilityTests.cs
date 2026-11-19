@@ -235,4 +235,62 @@ public class SnapshotPersistabilityTests
         Assert.NotNull(reason);
         Assert.Contains("does not resolve", reason, StringComparison.Ordinal);
     }
+
+    private static GraphState OneGoodShard(out ShardKey key)
+    {
+        key = Good;
+        var database = SnapshotTestSupport.Commit(
+            (Good, [new CodeNode { Id = "typescript:default:T", Identifier = "typescript:T", Name = "T", Metadata = SnapshotTestSupport.Owned(Good) }],
+                [new CodeEdge { Id = "typescript:default:T=[CALLS]=>x", SourceId = "typescript:default:T", TargetId = "x", Type = "CALLS", Metadata = SnapshotTestSupport.Owned(Good) }]));
+        return (GraphState)SnapshotTestSupport.ShardsOf(database).Single(pair => pair.Key == Good).Value;
+    }
+
+    /// <summary>The loader applies the writer's rule to every shard it materializes, so its shards carry that result.</summary>
+    [Fact]
+    public void ALoadedShard_IsKnownPersistable_UnderItsOwnKeyOnly()
+    {
+        var shard = OneGoodShard(out var key);
+        using var temp = new SnapshotTempDirectory();
+        var path = temp.Snapshot();
+        SnapshotTestSupport.WriteFile(path, SnapshotTestSupport.Input([KeyValuePair.Create(key, (IGraphShard)shard)]));
+
+        var loaded = Assert.Single(SnapshotTestSupport.LoadOrFail(path).Shards);
+        Assert.True(loaded.Shard.IsKnownPersistable(key));
+        Assert.False(loaded.Shard.IsKnownPersistable(Bad));
+    }
+
+    /// <summary>
+    /// A shard a worker's commit built is checked at its first write, whatever it holds; once it passed, an unchanged
+    /// shard is not walked again, and an in-place write (which bumps the version) makes the next write check again.
+    /// </summary>
+    [Fact]
+    public void ACommittedShard_IsChecked_AndCheckedAgainAfterAnInPlaceWrite()
+    {
+        var shard = OneGoodShard(out var key);
+        Assert.False(shard.IsKnownPersistable(key));
+
+        Assert.Null(SnapshotWriter.CheckPersistableOnce(key, shard));
+        Assert.True(shard.IsKnownPersistable(key));
+
+        // A damaged fact written in place, as the legacy mutation paths do, with the version bump they make.
+        var damaged = new CodeEdge { Id = "edge:1", SourceId = "typescript:default:T", TargetId = "x", Type = "CALLS", Metadata = SnapshotTestSupport.Owned(Good) };
+        shard.Edges[damaged.Id] = damaged;
+        shard.BumpVersion();
+        Assert.False(shard.IsKnownPersistable(key));
+        Assert.Contains("does not start with", SnapshotWriter.CheckPersistableOnce(key, shard), StringComparison.Ordinal);
+        Assert.False(shard.IsKnownPersistable(key));
+
+        using var temp = new SnapshotTempDirectory();
+        var written = SnapshotTestSupport.WriteFile(temp.Snapshot(), SnapshotTestSupport.Input([KeyValuePair.Create(key, (IGraphShard)shard)]));
+        Assert.Equal(key, Assert.Single(written.Skipped).Key);
+    }
+
+    /// <summary>A mark is for one key: the same facts under another key are checked (ownership metadata differs).</summary>
+    [Fact]
+    public void AMarkUnderOneKey_DoesNotSkipTheCheckUnderAnother()
+    {
+        var shard = OneGoodShard(out var key);
+        Assert.Null(SnapshotWriter.CheckPersistableOnce(key, shard));
+        Assert.Contains("does not start with", SnapshotWriter.CheckPersistableOnce(Bad, shard), StringComparison.Ordinal);
+    }
 }

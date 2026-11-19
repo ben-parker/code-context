@@ -154,6 +154,46 @@ public class ProjectModelTests : IDisposable
     }
 
     [Fact]
+    public void WhatABuildWritesBelowObjIsNotListed()
+    {
+        // A compile rewrites files two folders down (obj/Debug/net8.0) and moves those folders' times. Listed as
+        // inputs, they would make every build look like a change to what the index was read from.
+        InstallCoreFramework();
+        var project = Write("App/App.csproj", Net8);
+        Assets("App/obj/project.assets.json", project, "net8.0");
+        Write("App/obj/Debug/net8.0/App.AssemblyInfo.cs");
+        Write("App/obj/Debug/net8.0/ref/App.dll");
+        Write("App/obj/Debug/net8.0/refint/App.dll");
+
+        var model = Load(Source("App/A.cs"));
+
+        Assert.True(Assert.Single(model.Projects).HasRestoreData);
+        string In(string relative) => Path.Combine(_root, relative.Replace('/', Path.DirectorySeparatorChar));
+        Assert.Contains(In("App"), model.ListedDirectories);
+        Assert.Contains(In("App/obj"), model.ListedDirectories);
+        Assert.DoesNotContain(model.ListedDirectories, directory => directory.StartsWith(In("App/obj/Debug/"), StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void RestoreDataOneFolderBelowObjIsFound_AsTheArtifactsLayoutPutsIt()
+    {
+        InstallCoreFramework();
+        var project = Write("src/App/App.csproj", Net8);
+        var assembly = Package("Engine", "4.0.0", "lib/net8.0/Engine.dll");
+        Assets("artifacts/obj/App/project.assets.json", project, "net8.0", ("Engine", "4.0.0", "lib/net8.0/Engine.dll"));
+        Write("artifacts/obj/App/debug/App.AssemblyInfo.cs");
+
+        var model = Load(Source("src/App/A.cs"));
+
+        var info = Assert.Single(model.Projects);
+        Assert.True(info.HasRestoreData);
+        Assert.Contains(assembly, info.MetadataReferences);
+        var built = Path.Combine(_root, "artifacts", "obj", "App", "debug");
+        Assert.Contains(Path.GetDirectoryName(built)!, model.ListedDirectories);
+        Assert.DoesNotContain(built, model.ListedDirectories);
+    }
+
+    [Fact]
     public void RestoreDataForAnotherProjectIsNotBorrowed()
     {
         InstallCoreFramework();

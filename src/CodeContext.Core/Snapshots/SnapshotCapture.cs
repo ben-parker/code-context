@@ -83,5 +83,8 @@ namespace CodeContext.Core.Snapshots
         /// capture that is not written deletes them, so a state file never outlives the snapshot it was made for.
         /// </summary>
         public IReadOnlyList<string> NewStateFiles { get; init; } = [];
+
+        /// <summary>Captured while no scan had verified the store (<see cref="SnapshotFormat.FlagUnverified"/>).</summary>
+        public bool Unverified { get; init; }
     }
 }

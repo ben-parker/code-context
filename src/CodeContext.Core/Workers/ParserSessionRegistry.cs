@@ -23,6 +23,11 @@ public enum ParserSessionState
     Failed,
     /// <summary>Shut down deliberately.</summary>
     Stopped,
+    /// <summary>
+    /// Healthy and idle: its process exited after a quiet period while the host keeps serving its committed facts.
+    /// The next change, refresh or syntax-tree request starts it again. Not a failure, and counted as enabled.
+    /// </summary>
+    Hibernated,
 }
 
 /// <summary>

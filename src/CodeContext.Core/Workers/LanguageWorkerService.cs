@@ -86,6 +86,31 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
 
         /// <summary>How the last successful index answered its baseline (<see cref="BaselineOutcomes"/>), or null when it carried none.</summary>
         public string? LastBaselineOutcome { get; set; }
+
+        /// <summary>
+        /// The process was stopped after a quiet period and no index has run since. The first operation re-indexes the
+        /// approved files, with the saved state as baseline where there is one, before doing its own work.
+        /// </summary>
+        public bool Hibernated { get; set; }
+
+        /// <summary>
+        /// A wake started and did not complete (its index failed). The process it started may still run, so the worker
+        /// is not <see cref="Hibernated"/>, but the next operation re-indexes first, as after hibernation.
+        /// </summary>
+        public bool WakeIncomplete { get; set; }
+
+        /// <summary>The next operation re-indexes before its own work.</summary>
+        public bool NeedsWake => Hibernated || WakeIncomplete;
+
+        /// <summary>When an operation on this worker last started or ended, in UTC ticks of <see cref="Time"/>.</summary>
+        public long LastActivityTicks;
+
+        /// <summary>
+        /// How long the last successful index that read the workspace from its files took (a scan or a wake, process
+        /// start included), or null before one. An index whose baseline was accepted does not count: restoring saved
+        /// state is quick because it skips the warm-up the next edit then pays.
+        /// </summary>
+        public TimeSpan? LastReadDuration { get; set; }
         public HashSet<string> ApprovedFiles { get; } = new(PathComparer);
         public SemaphoreSlim Lock { get; } = new(1, 1);
     }
@@ -136,6 +161,30 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
     /// </summary>
     internal IWorkerBaselineSource? BaselineSource { get; set; }
 
+    /// <summary>The clock of the activity stamps hibernation reads. Set once while the host is composed.</summary>
+    internal TimeProvider Time { get; set; } = TimeProvider.System;
+
+    /// <summary>Called with the parser id after each operation on a worker ends (index, batch, project refresh, syntax tree).</summary>
+    internal Action<string>? ActivityEnded { get; set; }
+
+    /// <summary>
+    /// Wakes a hibernated worker on the coordinator's ordered path (its re-index commits), for a request that does not
+    /// arrive through the coordinator: a syntax tree. Null when hibernation is not wired; such a worker never hibernates.
+    /// </summary>
+    internal Func<string, CancellationToken, Task>? Waker { get; set; }
+
+    /// <summary>
+    /// Whether the snapshot on disk holds the committed graph as it is now, so a worker's recorded state goes with a
+    /// written snapshot. Null (no writer) means never: a worker that declared <c>persistentState</c> then stays up.
+    /// </summary>
+    internal Func<bool>? SnapshotWritten { get; set; }
+
+    /// <summary>The parsers this service routes to.</summary>
+    internal IReadOnlyCollection<string> ParserIds => _workers.Keys;
+
+    /// <summary>Whether the parser's worker is hibernated (stopped while idle, not yet re-indexed).</summary>
+    internal bool IsHibernated(string parserId) => _workers.TryGetValue(parserId, out var state) && state.Hibernated;
+
     /// <summary>How the parser's last successful index answered its baseline, or null when it was offered none.</summary>
     internal string? LastBaselineOutcomeFor(string parserId)
         => _workers.TryGetValue(parserId, out var state) ? state.LastBaselineOutcome : null;
@@ -152,6 +201,58 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
     /// parser would never be replaced by a scan, so it is not loaded.
     /// </summary>
     internal bool IsIndexedParser(string parserId) => _extensionToParser.ContainsValue(parserId);
+
+    /// <summary>
+    /// What decides which files this host indexes and with what, from the manifests alone (no worker is asked):
+    /// every discovered worker's id, version, command, project markers and inputs and where its manifest is, and
+    /// which worker each extension is routed to. A snapshot records it; a query without an instance answers only
+    /// from a snapshot written under the same value, since a worker installed, removed or replaced since then
+    /// would index the tree differently. Lowercase hex SHA-256 of a canonical text.
+    /// </summary>
+    internal string WorkerSetFingerprint()
+    {
+        var text = new System.Text.StringBuilder();
+        void Field(string? value) => text.Append(value?.Length ?? -1).Append(':').Append(value).Append('\n');
+        void List(IReadOnlyList<string>? values)
+        {
+            text.Append(values?.Count ?? -1).Append('[');
+            foreach (var value in values ?? []) Field(value);
+        }
+        foreach (var worker in _workers.Values.Select(state => state.Registration).OrderBy(worker => worker.Manifest.ParserId, StringComparer.Ordinal))
+        {
+            Field(worker.Manifest.ParserId);
+            Field(worker.Manifest.Version);
+            Field(worker.Manifest.Command);
+            List(worker.Manifest.Args);
+            List(worker.Manifest.ProjectMarkers);
+            List(worker.Manifest.ProjectInputs);
+            Field(worker.ManifestPath);
+        }
+        foreach (var (extension, parserId) in _extensionToParser.OrderBy(pair => pair.Key.ToUpperInvariant(), StringComparer.Ordinal))
+        {
+            Field(extension.ToUpperInvariant());
+            Field(parserId);
+        }
+        return Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(text.ToString())));
+    }
+
+    /// <summary>
+    /// Each discovered worker's manifest and the directory it is in, where they are on disk: what a check without a
+    /// worker looks at besides the tree, so a worker updated in place (its manifest rewritten, a file added, removed
+    /// or renamed beside it) is not answered for from facts its predecessor made.
+    /// </summary>
+    internal IReadOnlyList<string> InstallationPaths()
+    {
+        var paths = new List<string>();
+        foreach (var state in _workers.Values)
+        {
+            var manifest = state.Registration.ManifestPath;
+            if (!Path.IsPathFullyQualified(manifest)) continue;
+            paths.Add(manifest);
+            if (Path.GetDirectoryName(manifest) is { Length: > 0 } directory) paths.Add(directory);
+        }
+        return paths;
+    }
 
     /// <summary>
     /// Records, before the first scan, which parsers have facts in the store from a loaded snapshot. Their
@@ -188,11 +289,14 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
     public async Task RefreshProjectsAsync(string parserId, CancellationToken ct = default)
     {
         var state = GetWorker(parserId);
+        Touch(state);
         await state.Lock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
             // Before a first index there is nothing to bring up to date.
             if (!state.EverIndexed) return;
+            // A re-index that replaced the workspace has read the projects as they are now.
+            if (state.NeedsWake && !await WakeCoreAsync(state, state.ApprovedFiles.ToList(), ct).ConfigureAwait(false)) return;
 
             var supervisor = EnsureSupervisor(state);
             var generation = ++state.Generation;
@@ -204,7 +308,7 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
         }
         finally
         {
-            state.Lock.Release();
+            Release(state);
         }
     }
 
@@ -215,6 +319,7 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
         Action<AnalysisProgress>? progressHandler = null)
     {
         var state = GetWorker(parserId);
+        Touch(state);
         await state.Lock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
@@ -225,28 +330,13 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
                 return;
             }
 
-            var supervisor = EnsureSupervisor(state);
-            var generation = ++state.Generation;
-            await supervisor.OpenWorkspaceAsync(new OpenWorkspaceParams(
-                DefaultWorkspaceId, _options.RootPath,
-                state.Registration.Manifest.ProjectMarkers ?? [], files), ct).ConfigureAwait(false);
-            // The offer rule (plan 3.6): the source checks the shard and its state file; the supervisor drops the
-            // baseline again unless the worker declared the capability and this is its process's first mutation.
-            var initialized = supervisor.Initialized;
-            var baseline = initialized?.Capabilities.PersistentState == true
-                ? BaselineSource?.TryGetBaseline(parserId, DefaultWorkspaceId, initialized.ParserVersion)
-                : null;
-            state.LastBaselineOutcome = null;
-            var result = await supervisor.IndexWorkspaceAsync(new IndexWorkspaceParams(
-                DefaultWorkspaceId, generation, files, baseline), ct, progressHandler).ConfigureAwait(false);
-            state.LastBaselineOutcome = result.Baseline;
-            ReplaceApprovedFiles(state, files);
+            await IndexCoreAsync(state, files, ct, progressHandler).ConfigureAwait(false);
             state.EverIndexed = true;
             state.HoldsLoadedFacts = false;
         }
         finally
         {
-            state.Lock.Release();
+            Release(state);
         }
     }
 
@@ -259,9 +349,22 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
         if (changes.Count == 0) return;
 
         var state = GetWorker(parserId);
+        Touch(state);
         await state.Lock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
+            if (state.NeedsWake)
+            {
+                // The re-index reads the files as they are now. A replacement already holds this batch. After an
+                // accepted baseline the C# worker has already re-walked what the batch changed (it restores a saved
+                // walk only when the file's SHA-256 content hash matches), but the protocol does not say how a worker
+                // decides a file is unchanged, so the batch's content changes still follow as touches; its deletions
+                // are done.
+                if (!await WakeCoreAsync(state, approvedFiles, ct).ConfigureAwait(false)) return;
+                changes = changes.Where(change => change.Type != FileChangeType.Deleted).ToList();
+                if (changes.Count == 0) return;
+            }
+
             var supervisor = EnsureSupervisor(state);
             var generation = ++state.Generation;
             var changeDtos = changes.Select(ToDto).ToList();
@@ -279,7 +382,7 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
         }
         finally
         {
-            state.Lock.Release();
+            Release(state);
         }
     }
 
@@ -315,21 +418,197 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
         }
 
         var state = GetWorker(parserId);
+        // A woken worker can hibernate again before this request takes the lock only if the idle time is shorter than
+        // the wake itself; a few attempts cover that.
+        for (var attempt = 0; ; attempt++)
+        {
+            Touch(state);
+            await state.Lock.WaitAsync(ct).ConfigureAwait(false);
+            try
+            {
+                if (!state.EverIndexed || !state.ApprovedFiles.Contains(fullPath))
+                {
+                    throw new InvalidOperationException(
+                        "The file is not part of the committed index. Wait for indexing or refresh the file first.");
+                }
+                if (!state.NeedsWake)
+                {
+                    var supervisor = EnsureSupervisor(state);
+                    return await supervisor.GetNativeSyntaxTreeAsync(new NativeSyntaxTreeParams(
+                        DefaultWorkspaceId, fullPath, start, length, maxDepth), ct).ConfigureAwait(false);
+                }
+                if (Waker is null || attempt >= 3)
+                {
+                    throw new InvalidOperationException($"The '{parserId}' worker is hibernated and could not be woken. Try again.");
+                }
+            }
+            finally
+            {
+                Release(state);
+            }
+            // The wake re-indexes, which commits, so it runs on the coordinator like every other mutation.
+            await Waker(parserId, ct).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Re-indexes a hibernated worker, on the coordinator's loop: the first operation after hibernation does this
+    /// itself; a request that does not come through the coordinator (a syntax tree) asks for it through
+    /// <see cref="Waker"/>. Does nothing for a worker that is not hibernated.
+    /// </summary>
+    internal async Task WakeAsync(string parserId, CancellationToken ct)
+    {
+        var state = GetWorker(parserId);
+        Touch(state);
         await state.Lock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            if (!state.EverIndexed || !state.ApprovedFiles.Contains(fullPath))
+            if (state.NeedsWake) await WakeCoreAsync(state, state.ApprovedFiles.ToList(), ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            Release(state);
+        }
+    }
+
+    /// <summary>
+    /// The wake, under the worker's lock: a new process indexes <paramref name="files"/>, offered the baseline its
+    /// state saved before hibernating where there is one (the start-up verification, run for one worker). True when
+    /// the worker accepted the baseline and sent only what changed; false when it replaced the workspace from the
+    /// files. Throws as an index does; the worker is then no longer hibernated (a process may run, and the session
+    /// reports the failure) but its wake is incomplete, so the next operation re-indexes again.
+    /// </summary>
+    private async Task<bool> WakeCoreAsync(WorkerState state, IReadOnlyList<string> files, CancellationToken ct)
+    {
+        var result = await IndexCoreAsync(state, files, ct).ConfigureAwait(false);
+        _logger.LogInformation("Worker '{ParserId}' woke: {Outcome}.", state.Registration.Manifest.ParserId,
+            result.Baseline == BaselineOutcomes.Accepted ? "its saved state was accepted" : "it re-read the workspace");
+        return result.Baseline == BaselineOutcomes.Accepted;
+    }
+
+    /// <summary>
+    /// One index of <paramref name="files"/>, under the worker's lock, for a scan and for a wake alike: the workspace
+    /// is opened, the baseline offered where the offer rule allows (plan 3.6: the source checks the shard and its
+    /// state file; the supervisor drops it again unless the worker declared the capability and this is its process's
+    /// first mutation), and on success the answer, the duration and the approved files are recorded.
+    /// A worker that needed a wake is no longer hibernated from the start, since a process may run whatever happens,
+    /// and its wake stays incomplete until the index succeeds, so after a failure the next operation re-indexes.
+    /// </summary>
+    private async Task<IndexWorkspaceResult> IndexCoreAsync(
+        WorkerState state, IReadOnlyList<string> files, CancellationToken ct, Action<AnalysisProgress>? progressHandler = null)
+    {
+        if (state.NeedsWake)
+        {
+            state.Hibernated = false;
+            state.WakeIncomplete = true;
+        }
+        var started = Time.GetUtcNow();
+        var supervisor = EnsureSupervisor(state);
+        var generation = ++state.Generation;
+        await supervisor.OpenWorkspaceAsync(new OpenWorkspaceParams(
+            DefaultWorkspaceId, _options.RootPath,
+            state.Registration.Manifest.ProjectMarkers ?? [], files), ct).ConfigureAwait(false);
+        var initialized = supervisor.Initialized;
+        var baseline = initialized?.Capabilities.PersistentState == true
+            ? BaselineSource?.TryGetBaseline(state.Registration.Manifest.ParserId, DefaultWorkspaceId, initialized.ParserVersion)
+            : null;
+        state.LastBaselineOutcome = null;
+        var result = await supervisor.IndexWorkspaceAsync(new IndexWorkspaceParams(
+            DefaultWorkspaceId, generation, files, baseline), ct, progressHandler).ConfigureAwait(false);
+        state.LastBaselineOutcome = result.Baseline;
+        RecordIndexDuration(state, started);
+        ReplaceApprovedFiles(state, files);
+        state.WakeIncomplete = false;
+        return result;
+    }
+
+    /// <summary>What <see cref="TryHibernateAsync"/> did.</summary>
+    internal enum HibernationOutcome
+    {
+        /// <summary>The process exited; the worker is hibernated.</summary>
+        Hibernated,
+        /// <summary>An operation ran or started within the idle time.</summary>
+        NotIdle,
+        /// <summary>No process to stop (never started, already hibernated, stopped), or a failed session.</summary>
+        NotRunning,
+        /// <summary>A worker with <c>persistentState</c> whose state is not saved with a written snapshot of its shard yet.</summary>
+        StateNotSaved,
+    }
+
+    /// <summary>
+    /// Stops the parser's worker process when it has been idle for <paramref name="idle"/> and can be woken cheaply and
+    /// correctly. Runs on the coordinator's loop, as a command between mutations, and under the worker's lock, so no
+    /// batch, scan, state save or syntax tree is in flight. A worker that declared <c>persistentState</c> stops only
+    /// when its state is recorded with its current shard, the state file exists and the snapshot on disk is current,
+    /// so its wake is offered that state; any other worker re-reads its files on wake. Writes nothing.
+    /// </summary>
+    internal async Task<HibernationOutcome> TryHibernateAsync(string parserId, TimeSpan idle, CancellationToken ct)
+    {
+        if (Volatile.Read(ref _disposed) != 0 || !_workers.TryGetValue(parserId, out var state)) return HibernationOutcome.NotRunning;
+        await state.Lock.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            if (state.Hibernated || state.Supervisor is not { IsLive: true } supervisor) return HibernationOutcome.NotRunning;
+            // A request that failed (complete:false) leaves the process up and the session failed. Stopping it would
+            // show the session as hibernated and drop the failure from status; the next operation that succeeds
+            // makes it ready, and its end arms the check again.
+            if (supervisor.Snapshot.State == ParserSessionState.Failed) return HibernationOutcome.NotRunning;
+            if (Time.GetUtcNow().UtcTicks - Interlocked.Read(ref state.LastActivityTicks) < idle.Ticks) return HibernationOutcome.NotIdle;
+            if (supervisor.DeclaresPersistentState
+                && (BaselineSource?.TryGetBaseline(parserId, DefaultWorkspaceId, supervisor.Initialized!.ParserVersion) is null
+                    || SnapshotWritten?.Invoke() != true))
             {
-                throw new InvalidOperationException(
-                    "The file is not part of the committed index. Wait for indexing or refresh the file first.");
+                return HibernationOutcome.StateNotSaved;
             }
-            var supervisor = EnsureSupervisor(state);
-            return await supervisor.GetNativeSyntaxTreeAsync(new NativeSyntaxTreeParams(
-                DefaultWorkspaceId, fullPath, start, length, maxDepth), ct).ConfigureAwait(false);
+            if (!await supervisor.HibernateAsync(ct).ConfigureAwait(false)) return HibernationOutcome.NotRunning;
+            state.Hibernated = true;
+            _logger.LogInformation("Worker '{ParserId}' hibernated after {Seconds:0} s without work.", parserId, idle.TotalSeconds);
+            return HibernationOutcome.Hibernated;
         }
         finally
         {
             state.Lock.Release();
+        }
+    }
+
+    /// <summary>When the parser's worker last started or ended an operation, or null for an unknown parser.</summary>
+    internal DateTimeOffset? LastActivity(string parserId)
+        => _workers.TryGetValue(parserId, out var state)
+            ? new DateTimeOffset(Interlocked.Read(ref state.LastActivityTicks), TimeSpan.Zero)
+            : null;
+
+    /// <summary>
+    /// How long the parser's last successful index that read its files (not one that accepted saved state) took, or
+    /// null before one: what <see cref="WorkerHibernationSettings.IdleFor"/> reads.
+    /// </summary>
+    internal TimeSpan? LastReadDuration(string parserId)
+        => _workers.TryGetValue(parserId, out var state) ? state.LastReadDuration : null;
+
+    /// <summary>Records the index that just succeeded; call after <see cref="WorkerState.LastBaselineOutcome"/> is set.</summary>
+    private void RecordIndexDuration(WorkerState state, DateTimeOffset started)
+    {
+        var elapsed = Time.GetUtcNow() - started;
+        if (elapsed < TimeSpan.Zero) elapsed = TimeSpan.Zero;
+        var restored = state.LastBaselineOutcome == BaselineOutcomes.Accepted;
+        if (!restored) state.LastReadDuration = elapsed;
+        _logger.LogInformation("Worker '{ParserId}' indexed in {Seconds:0.0} s ({How}).", state.Registration.Manifest.ParserId,
+            elapsed.TotalSeconds, restored ? "from its saved state" : "from its files");
+    }
+
+    private void Touch(WorkerState state) => Interlocked.Exchange(ref state.LastActivityTicks, Time.GetUtcNow().UtcTicks);
+
+    /// <summary>Ends an operation: stamps the activity, releases the lock, and tells hibernation.</summary>
+    private void Release(WorkerState state)
+    {
+        Touch(state);
+        state.Lock.Release();
+        try
+        {
+            ActivityEnded?.Invoke(state.Registration.Manifest.ParserId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "The activity observer failed.");
         }
     }
 

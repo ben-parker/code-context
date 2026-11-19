@@ -19,6 +19,14 @@ public interface IIndexCoordinator
     ValueTask NotifyFileChangedAsync(string fullPath, FileChangeType changeType, CancellationToken ct = default);
 
     /// <summary>
+    /// Queues a directory-level notification: <paramref name="directoryPath"/> was created, moved in, renamed
+    /// or removed, or may have been a directory when it went. The coordinator reconciles what the index
+    /// holds under it with what the selection policy now includes there, in the same coalesced batch as file
+    /// changes; one notification covers the whole subtree, however many files it holds.
+    /// </summary>
+    ValueTask NotifySubtreeChangedAsync(string directoryPath, CancellationToken ct = default);
+
+    /// <summary>
     /// Requests a full rescan. Returns the operation id observable through /api/status,
     /// or null when a scan is already running.
     /// </summary>

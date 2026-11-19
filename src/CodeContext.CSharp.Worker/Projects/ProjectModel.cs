@@ -84,6 +84,9 @@ public sealed class ProjectInfo
 public sealed class ProjectModel
 {
     private const string AssetsFileName = "project.assets.json";
+
+    /// <summary>Where a build keeps what it generates, restore data included.</summary>
+    private const string IntermediateDirectory = "obj";
     private const string DefaultConfiguration = "Debug";
 
     private static readonly StringComparer PathComparer =
@@ -106,7 +109,9 @@ public sealed class ProjectModel
         IReadOnlyList<string> unassignedFiles,
         IReadOnlyList<ProjectLoadFailure> failures,
         Dictionary<string, DateTime> inputStamps,
-        List<CompileItemSet> idleCompileItems)
+        List<CompileItemSet> idleCompileItems,
+        IReadOnlyList<string> listedDirectories,
+        IReadOnlyList<string> absentBoundaryMarkers)
     {
         _disk = disk;
         Projects = projects;
@@ -115,7 +120,25 @@ public sealed class ProjectModel
         Failures = failures;
         _inputStamps = inputStamps;
         _idleCompileItems = idleCompileItems;
+        ListedDirectories = listedDirectories;
+        AbsentBoundaryMarkers = absentBoundaryMarkers;
     }
+
+    /// <summary>
+    /// The files this model was read from, each with the time it had then: project files and what they import,
+    /// <c>Directory.Build.*</c>, <c>Directory.Packages.props</c> and <c>global.json</c> where they were looked for, restore
+    /// data. A file that was looked for and not found has the time of a missing file (<see cref="IsMissingStamp"/>).
+    /// </summary>
+    public IReadOnlyDictionary<string, DateTime> InputStamps => _inputStamps;
+
+    /// <summary>Every directory whose listing found the projects, solutions and restore data.</summary>
+    public IReadOnlyList<string> ListedDirectories { get; }
+
+    /// <summary>The <c>.git</c> markers looked for, and not found, below the directory taken as the repository's top.</summary>
+    public IReadOnlyList<string> AbsentBoundaryMarkers { get; }
+
+    /// <summary>Whether a stamp is that of a file that was not there (or was refused, which looks the same).</summary>
+    public static bool IsMissingStamp(DateTime stamp) => stamp == default || stamp == DateTime.FromFileTimeUtc(0);
 
     /// <summary>In dependency order: every project follows the projects it references.</summary>
     public IReadOnlyList<ProjectInfo> Projects { get; }
@@ -204,7 +227,10 @@ public sealed class ProjectModel
 
     private sealed class Loader(Disk disk, string root, IReadOnlyList<string> approvedFiles, ToolchainLocations toolchain, CancellationToken ct)
     {
-        private readonly string _boundary = FindBoundary(disk, root);
+        private readonly List<string> _absentMarkers = [];
+        private readonly List<string> _listed = [];
+        private string? _boundaryFound;
+        private string Boundary => _boundaryFound ??= FindBoundary(disk, root, _absentMarkers);
         private readonly Dictionary<string, Candidate> _candidates = new(PathComparer);
         private readonly List<ProjectLoadFailure> _failures = [];
         private readonly Dictionary<string, RestoreData> _restoreByProject = new(PathComparer);
@@ -212,6 +238,8 @@ public sealed class ProjectModel
 
         public ProjectModel Run()
         {
+            // Found first, so the markers looked for on the way are recorded whether or not a project is read.
+            _ = Boundary;
             var discovery = Discover();
             _solutions = discovery.Solutions;
             IndexRestoreData(discovery);
@@ -244,7 +272,7 @@ public sealed class ProjectModel
                 .Where(candidate => !infos.ContainsKey(candidate.Key))
                 .Select(candidate => candidate.Value.Evaluated.CompileItems)
                 .ToList();
-            return new ProjectModel(disk, ordered, compiledBy, unassigned, failures, inputs, idle);
+            return new ProjectModel(disk, ordered, compiledBy, unassigned, failures, inputs, idle, _listed, _absentMarkers);
         }
 
         /// <summary>
@@ -252,12 +280,13 @@ public sealed class ProjectModel
         /// subdirectory still sees the repository's <c>Directory.Build.props</c>. Without a
         /// repository it is the workspace itself, so nothing unrelated above it counts.
         /// </summary>
-        private static string FindBoundary(Disk disk, string root)
+        private static string FindBoundary(Disk disk, string root, List<string> absent)
         {
             for (string? directory = root; directory is not null; directory = Path.GetDirectoryName(directory))
             {
                 var marker = Path.Combine(directory, ".git");
                 if (disk.DirectoryExists(marker) || disk.FileExists(marker)) return directory;
+                absent.Add(marker);
             }
             return root;
         }
@@ -265,14 +294,16 @@ public sealed class ProjectModel
         private Discovery Discover()
         {
             var discovery = new Discovery([], [], []);
-            var pending = new Stack<string>();
-            pending.Push(root);
+            // With each directory, how far below an obj directory it is (0 for obj itself, -1 outside any).
+            var pending = new Stack<(string Directory, int BelowIntermediate)>();
+            pending.Push((root, -1));
             while (pending.Count > 0)
             {
                 ct.ThrowIfCancellationRequested();
-                var directory = pending.Pop();
+                var (directory, belowIntermediate) = pending.Pop();
                 try
                 {
+                    _listed.Add(directory);
                     foreach (var file in disk.Files(directory, "*"))
                     {
                         var name = Path.GetFileName(file);
@@ -282,9 +313,16 @@ public sealed class ProjectModel
                             || name.EndsWith(".slnx", StringComparison.OrdinalIgnoreCase)) discovery.Solutions.Add(file);
                     }
                     // A link can lead back here, and whatever it reaches is not this tree's.
+                    // Restore data lies in obj, or one directory down where every project shares one obj (the
+                    // artifacts layout). Below that is what a build writes: nothing here is read from it, and a
+                    // compile moves those directories' times, which listed would tell the host the index is stale.
+                    if (belowIntermediate >= 1) continue;
                     foreach (var child in disk.RealDirectories(directory))
                     {
-                        if (!SkippedDirectories.Contains(Path.GetFileName(child))) pending.Push(child);
+                        var name = Path.GetFileName(child);
+                        if (SkippedDirectories.Contains(name)) continue;
+                        pending.Push((child, belowIntermediate >= 0 ? belowIntermediate + 1
+                            : name.Equals(IntermediateDirectory, StringComparison.OrdinalIgnoreCase) ? 0 : -1));
                     }
                 }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
@@ -339,14 +377,14 @@ public sealed class ProjectModel
             {
                 ["Configuration"] = DefaultConfiguration,
             };
-            var evaluated = ProjectEvaluator.Evaluate(disk, project, _boundary, folders, globals, solution);
+            var evaluated = ProjectEvaluator.Evaluate(disk, project, Boundary, folders, globals, solution);
 
             // The IDE's active configuration: Debug, or the first a project declares without it.
             var configurations = Split(evaluated.Property("Configurations"));
             if (configurations.Count > 0 && !configurations.Contains(DefaultConfiguration, StringComparer.OrdinalIgnoreCase))
             {
                 globals["Configuration"] = configurations[0];
-                evaluated = ProjectEvaluator.Evaluate(disk, project, _boundary, folders, globals, solution);
+                evaluated = ProjectEvaluator.Evaluate(disk, project, Boundary, folders, globals, solution);
             }
 
             var frameworks = Split(evaluated.Property("TargetFrameworks"));
@@ -358,7 +396,7 @@ public sealed class ProjectModel
                 framework = frameworks[0];
                 inactive = frameworks.Skip(1).ToList();
                 globals["TargetFramework"] = framework;
-                evaluated = ProjectEvaluator.Evaluate(disk, project, _boundary, folders, globals, solution);
+                evaluated = ProjectEvaluator.Evaluate(disk, project, Boundary, folders, globals, solution);
             }
             if (framework.Length == 0)
             {
@@ -398,7 +436,7 @@ public sealed class ProjectModel
                 {
                     return directory;
                 }
-                if (MsBuildExpander.SamePath(directory, _boundary)) break;
+                if (MsBuildExpander.SamePath(directory, Boundary)) break;
             }
             return null;
         }

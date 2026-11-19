@@ -42,7 +42,9 @@ internal sealed record CacheLoadOutcome(
     ulong? SnapshotSequence = null,
     long? SizeBytes = null,
     IReadOnlyList<string>? Parsers = null,
-    long? WorkerStateBytes = null)
+    long? WorkerStateBytes = null,
+    bool SnapshotUnverified = false,
+    long SnapshotRootTimeTicks = 0)
 {
     public static CacheLoadOutcome Disabled(string reason) => new(CacheLoadKind.Disabled, reason);
 }
@@ -66,6 +68,13 @@ public sealed class CacheState : ICacheStateProvider
     public const string Verifying = "verifying";
     public const string Unverified = "unverified";
     public const string Verified = "verified";
+
+    /// <summary>
+    /// A context response's notice only, never a status state: answered by <c>codecontext query</c> in its own process
+    /// from a snapshot, with no instance running and no worker, after checking that no file it describes has a newer
+    /// modification time (<see cref="Snapshots.SnapshotFreshness"/>).
+    /// </summary>
+    public const string Snapshot = "snapshot";
 
     public const string Pending = "pending";
     public const string Baseline = "baseline";
@@ -249,7 +258,7 @@ public sealed class CacheState : ICacheStateProvider
         };
     }
 
-    private static string? FormatTicks(long? utcTicks)
+    internal static string? FormatTicks(long? utcTicks)
         => utcTicks is { } ticks && ticks >= DateTime.MinValue.Ticks && ticks <= DateTime.MaxValue.Ticks
             ? new DateTime(ticks, DateTimeKind.Utc).ToString("O", CultureInfo.InvariantCulture)
             : null;

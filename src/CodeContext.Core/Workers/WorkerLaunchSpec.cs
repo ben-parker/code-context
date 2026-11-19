@@ -1,3 +1,4 @@
+using CodeContext.Core.Memory;
 using CodeContext.Parser.Protocol;
 using Microsoft.Extensions.Configuration;
 
@@ -48,6 +49,13 @@ public sealed class ParserWorkerOptions
     /// <summary>How long a worker gets to exit after its stdin is closed before it is killed.</summary>
     public TimeSpan ExitAfterEofTimeout { get; set; } = TimeSpan.FromSeconds(5);
 
+    /// <summary>
+    /// When hibernating an idle worker: how long it gets to answer shutdown, and then to exit after stdin EOF, before
+    /// it is killed. Shorter than a stop's waits, because a hibernation holds the coordinator's loop and the worker's
+    /// lock; an idle worker has nothing in flight to lose, and a healthy one answers and exits in milliseconds.
+    /// </summary>
+    public TimeSpan HibernateStopTimeout { get; set; } = TimeSpan.FromSeconds(1);
+
     /// <summary>Unexpected-exit respawns allowed before the session is marked Unavailable.</summary>
     public int MaxRestarts { get; set; } = 3;
 
@@ -62,6 +70,13 @@ public sealed class ParserWorkerOptions
     /// lowercase (e.g. "csharp"); a key that does not match exactly is a silent no-op.
     /// </summary>
     public IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>>? WorkerEnvironment { get; set; }
+
+    /// <summary>
+    /// Environment overlays for every worker, applied after <see cref="WorkerLaunchSpec.Environment"/> and before
+    /// <see cref="WorkerEnvironment"/> (which wins on collision). Carries host settings a worker shares, such as
+    /// <c>CodeContext__MemoryTrimSeconds</c>. Null (the default) touches nothing.
+    /// </summary>
+    public IReadOnlyDictionary<string, string>? CommonEnvironment { get; set; }
 
     /// <summary>
     /// Builds options from host configuration, reading the <c>CodeContext:WorkerEnvironment</c>
@@ -91,7 +106,17 @@ public sealed class ParserWorkerOptions
                     [parserSection.Key] = environment;
             }
         }
-        return new ParserWorkerOptions { WorkerEnvironment = workerEnvironment };
+        // The host's quiet-time trim setting reaches the workers that read it (the C# worker), whichever
+        // configuration source set it; per-parser WorkerEnvironment entries still win.
+        Dictionary<string, string>? commonEnvironment = null;
+        if (configuration[QuietTimeTrimSettings.ConfigurationKey] is { } trimSeconds)
+        {
+            commonEnvironment = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                [QuietTimeTrimSettings.EnvironmentVariable] = trimSeconds,
+            };
+        }
+        return new ParserWorkerOptions { WorkerEnvironment = workerEnvironment, CommonEnvironment = commonEnvironment };
     }
 }
 

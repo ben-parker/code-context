@@ -317,7 +317,8 @@ public sealed record AnalysisProgress(
 /// <c>replacesWorkspace</c> (the host ORs it) and should repeat the full
 /// <c>replacesFiles</c> list (the host unions it). A worker that declared
 /// <see cref="WorkerCapabilities.PersistentState"/> sends <c>fingerprints</c> on the first chunk of every
-/// request; the host keeps the last set per shard and a request that carries none clears it.
+/// request; the host keeps the last set per shard and a request that carries none clears it. Any worker may send
+/// <c>inputs</c> on the first chunk (<see cref="WorkerInputs"/>), kept and cleared the same way.
 /// </summary>
 public sealed record AnalysisDelta(
     [property: JsonPropertyName("parserId")] string ParserId,
@@ -333,4 +334,15 @@ public sealed record AnalysisDelta(
     [property: JsonPropertyName("unresolvedReferences")] IReadOnlyList<UnresolvedReference>? UnresolvedReferences = null,
     [property: JsonPropertyName("diagnostics")] IReadOnlyList<ProtocolDiagnostic>? Diagnostics = null,
     [property: JsonPropertyName("coverage")] IReadOnlyList<ProjectCoverage>? Coverage = null,
-    [property: JsonPropertyName("fingerprints")] IReadOnlyList<UnitFingerprint>? Fingerprints = null);
+    [property: JsonPropertyName("fingerprints")] IReadOnlyList<UnitFingerprint>? Fingerprints = null,
+    [property: JsonPropertyName("inputs")] WorkerInputs? Inputs = null);
+
+/// <summary>
+/// What a workspace's facts depend on besides its own files, complete as of the request that sends it: files read
+/// and directories listed (<see cref="Files"/>, which exist) and paths looked for and not found (<see cref="Absent"/>),
+/// as absolute paths. The host keeps it beside the shard and in snapshots, and uses it only to decide, with no worker
+/// running, whether a snapshot is still current; never for indexing.
+/// </summary>
+public sealed record WorkerInputs(
+    [property: JsonPropertyName("files")] IReadOnlyList<string> Files,
+    [property: JsonPropertyName("absent")] IReadOnlyList<string> Absent);

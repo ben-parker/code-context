@@ -36,13 +36,19 @@ namespace CodeContext.Core.Repositories
     /// process produced the facts and through how many of its requests. Both hold only while the shard is
     /// still the <see cref="Anchor"/> they were recorded against: a foreign sweep, a prune, a legacy in-place
     /// write or a shard swap leaves the annotation alone (rule 12) but moves the shard off its anchor, which
-    /// voids both. Only <see cref="ParserVersion"/>, <see cref="Coverage"/>, <see cref="Fingerprints"/> and the
-    /// state file's name, id and hash are persisted (<see cref="SamePersisted"/>).
+    /// voids both. Only <see cref="ParserVersion"/>, <see cref="Coverage"/>, <see cref="Fingerprints"/>,
+    /// <see cref="Inputs"/> and the state file's name, id and hash are persisted (<see cref="SamePersisted"/>).
     /// </summary>
     internal sealed record ShardAnnotation(string? ParserVersion, IReadOnlyList<CodeContext.Parser.Protocol.ProjectCoverage>? Coverage)
     {
         /// <summary>The last fingerprints the producing commit carried, opaque; null when it carried none.</summary>
         public IReadOnlyList<CodeContext.Parser.Protocol.UnitFingerprint>? Fingerprints { get; init; }
+
+        /// <summary>
+        /// What the shard's facts depend on besides its files, as the producing commit reported it; null when it reported
+        /// nothing. Replaced and cleared like <see cref="Fingerprints"/>. Read only by the one-shot freshness check.
+        /// </summary>
+        public CodeContext.Parser.Protocol.WorkerInputs? Inputs { get; init; }
 
         /// <summary>The worker state file paired with the shard at <see cref="Anchor"/>, or null.</summary>
         public WorkerStateBinding? State { get; init; }
@@ -75,7 +81,17 @@ namespace CodeContext.Core.Repositories
             return string.Equals(first.ParserVersion, second.ParserVersion, StringComparison.Ordinal)
                 && InMemory.InMemoryDatabase.SameCoverage(first.Coverage, second.Coverage)
                 && SameFingerprints(first.Fingerprints, second.Fingerprints)
+                && SameInputs(first.Inputs, second.Inputs)
                 && WorkerStateBinding.SamePersisted(first.StateFor(shard), second.StateFor(shard));
+        }
+
+        /// <summary>The same inputs by value: the same paths, in the same order (a worker sends them sorted). Null equals only null.</summary>
+        internal static bool SameInputs(CodeContext.Parser.Protocol.WorkerInputs? first, CodeContext.Parser.Protocol.WorkerInputs? second)
+        {
+            if (ReferenceEquals(first, second)) return true;
+            if (first is null || second is null) return false;
+            return first.Files.SequenceEqual(second.Files, StringComparer.Ordinal)
+                && first.Absent.SequenceEqual(second.Absent, StringComparer.Ordinal);
         }
 
         /// <summary>
@@ -187,5 +203,19 @@ namespace CodeContext.Core.Repositories
 
         /// <summary>Cheap aggregate counts over the committed graph.</summary>
         GraphStatistics GetStatistics();
+    }
+
+    /// <summary>
+    /// A store that can hand back the id string a node it holds is stored with, so a writer mapping new facts
+    /// can name that node by the same instance instead of one more copy of the text.
+    /// </summary>
+    internal interface IStoredNodeIds
+    {
+        /// <summary>
+        /// The stored instance of <paramref name="id"/>, the id of a node the next commit would find (the
+        /// staged graph while a reconciliation is staged, else the published one), or null when no such node
+        /// is stored.
+        /// </summary>
+        string? FindStoredNodeId(string id);
     }
 }

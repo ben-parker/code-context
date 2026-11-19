@@ -118,6 +118,82 @@ namespace CodeContext.Core.Tests
         }
 
         [Fact]
+        public async Task LargeDirectoryMovedIn_IsOneSubtreeNotification_NotOnePerFile()
+        {
+            var baseDir = Directory.CreateTempSubdirectory("cc-watcher-tree-").FullName;
+            var tempDir = Directory.CreateDirectory(Path.Combine(baseDir, "root")).FullName;
+            var staged = Directory.CreateDirectory(Path.Combine(baseDir, "staged")).FullName;
+            for (var i = 0; i < 300; i++)
+            {
+                var folder = Directory.CreateDirectory(Path.Combine(staged, "d" + (i % 10))).FullName;
+                File.WriteAllText(Path.Combine(folder, $"F{i}.cs"), "class C { }");
+            }
+            _mockOptions.Value.Returns(new CodeContextOptions { RootPath = tempDir });
+            var subtrees = new System.Collections.Concurrent.ConcurrentQueue<string>();
+            var files = new System.Collections.Concurrent.ConcurrentQueue<string>();
+            var seen = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            _mockCoordinator.NotifySubtreeChangedAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
+                .Returns(callInfo => { subtrees.Enqueue(callInfo.ArgAt<string>(0)); seen.TrySetResult(); return ValueTask.CompletedTask; });
+            _mockCoordinator.NotifyFileChangedAsync(Arg.Any<string>(), Arg.Any<FileChangeType>(), Arg.Any<CancellationToken>())
+                .Returns(callInfo => { files.Enqueue(callInfo.ArgAt<string>(0)); return ValueTask.CompletedTask; });
+
+            var watcherService = new FileWatcherService(
+                _mockOptions, _mockLogger, _mockCoordinator, _scanState, _mockWorkerService);
+            await watcherService.StartAsync(CancellationToken.None);
+            try
+            {
+                var arrived = Path.Combine(tempDir, "arrived");
+                Directory.Move(staged, arrived);
+                await seen.Task.WaitAsync(TimeSpan.FromSeconds(10));
+                await Task.Delay(300);
+
+                Assert.Equal([arrived], subtrees.ToArray());
+                Assert.Empty(files);
+            }
+            finally
+            {
+                await watcherService.StopAsync(CancellationToken.None);
+                Directory.Delete(baseDir, recursive: true);
+            }
+        }
+
+        [Theory]
+        [InlineData("node_modules/pkg")]
+        [InlineData(".git/objects")]
+        public async Task DirectoryBelowAMandatoryExclusion_IsNotForwarded(string relative)
+        {
+            var tempDir = Directory.CreateTempSubdirectory("cc-watcher-excluded-").FullName;
+            _mockOptions.Value.Returns(new CodeContextOptions { RootPath = tempDir });
+            var seen = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var subtrees = new System.Collections.Concurrent.ConcurrentQueue<string>();
+            _mockCoordinator.NotifySubtreeChangedAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
+                .Returns(callInfo =>
+                {
+                    subtrees.Enqueue(callInfo.ArgAt<string>(0));
+                    if (Path.GetFileName(callInfo.ArgAt<string>(0)) == "marker") seen.TrySetResult(callInfo.ArgAt<string>(0));
+                    return ValueTask.CompletedTask;
+                });
+
+            var watcherService = new FileWatcherService(
+                _mockOptions, _mockLogger, _mockCoordinator, _scanState, _mockWorkerService);
+            await watcherService.StartAsync(CancellationToken.None);
+            try
+            {
+                Directory.CreateDirectory(Path.Combine(tempDir, relative));
+                Directory.Delete(Path.Combine(tempDir, relative));
+                Directory.CreateDirectory(Path.Combine(tempDir, "marker"));
+                await seen.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+                Assert.Equal([Path.Combine(tempDir, "marker")], subtrees.ToArray());
+            }
+            finally
+            {
+                await watcherService.StopAsync(CancellationToken.None);
+                Directory.Delete(tempDir, recursive: true);
+            }
+        }
+
+        [Fact]
         public async Task GitIgnoreChange_IsForwardedAsAReconciliationControlEvent()
         {
             var tempDir = Directory.CreateTempSubdirectory("cc-watcher-ignore-").FullName;

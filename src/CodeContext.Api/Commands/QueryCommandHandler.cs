@@ -5,6 +5,8 @@ using System.Text.Json;
 using CodeContext.Core.Instances;
 using CodeContext.Core.Serialization;
 using CodeContext.Core.Services;
+using CodeContext.Core.Snapshots;
+using Microsoft.Extensions.Configuration;
 
 namespace CodeContext.Api.Commands;
 
@@ -19,7 +21,9 @@ public sealed record QuerySettings(
     bool Multi,
     bool Human = false,
     int? Limit = null,
-    bool External = false);
+    bool External = false,
+    bool Start = false,
+    bool Snapshot = false);
 
 internal sealed record QueryRuntime(
     IInstanceRegistry Registry,
@@ -30,7 +34,9 @@ internal sealed record QueryRuntime(
     TimeProvider TimeProvider,
     Func<TimeSpan, CancellationToken, Task> DelayAsync,
     TimeSpan ReadinessTimeout,
-    Func<string, bool>? DirectoryExists = null);
+    Func<string, bool>? DirectoryExists = null,
+    Func<string, OneShotSnapshotOpen>? OpenSnapshot = null,
+    bool SnapshotByDefault = false);
 
 public static class QueryCommandHandler
 {
@@ -45,6 +51,7 @@ public static class QueryCommandHandler
         var registry = new InstanceRegistry();
         using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
         var orchestrator = new DetachedStartOrchestrator(registry);
+        var configuration = HostConfiguration();
         var runtime = new QueryRuntime(
             registry,
             http,
@@ -53,10 +60,36 @@ public static class QueryCommandHandler
             Console.Error,
             TimeProvider.System,
             Task.Delay,
-            TimeSpan.FromSeconds(30));
+            TimeSpan.FromSeconds(30),
+            OpenSnapshot: root => OneShotSnapshot.TryOpen(root, configuration),
+            SnapshotByDefault: SnapshotByDefault(configuration));
 
         return await ExecuteAsync(settings, runtime, ct);
     }
+
+    /// <summary>
+    /// The configuration a host started here would read for its cache switch: <c>appsettings.json</c> beside the
+    /// executable (never the repository's, see <see cref="StartCommandHandler.ContentRoot"/>) and the environment.
+    /// </summary>
+    private static IConfiguration HostConfiguration()
+    {
+        var environment = Environment.GetEnvironmentVariable("DOTNET_ENVIRONMENT")
+            ?? Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT")
+            ?? "Production";
+        return new ConfigurationBuilder()
+            .SetBasePath(StartCommandHandler.ContentRoot)
+            .AddJsonFile("appsettings.json", optional: true, reloadOnChange: false)
+            .AddJsonFile($"appsettings.{environment}.json", optional: true, reloadOnChange: false)
+            .AddEnvironmentVariables()
+            .Build();
+    }
+
+    /// <summary>The setting that makes <c>--snapshot</c> the default: <c>CodeContext:QueryFromSnapshot</c>.</summary>
+    internal const string SnapshotByDefaultKey = "CodeContext:QueryFromSnapshot";
+
+    /// <summary>Whether <see cref="SnapshotByDefaultKey"/> is set to true; anything else, or nothing, is false.</summary>
+    internal static bool SnapshotByDefault(IConfiguration configuration)
+        => bool.TryParse(configuration[SnapshotByDefaultKey], out var value) && value;
 
     internal static async Task<int> ExecuteAsync(
         QuerySettings settings,
@@ -84,6 +117,12 @@ public static class QueryCommandHandler
         if (settings.Json && settings.Human)
         {
             runtime.Error.WriteLine("--json and --human cannot be combined.");
+            return 1;
+        }
+
+        if (settings.Snapshot && settings.Start)
+        {
+            runtime.Error.WriteLine("--snapshot and --start cannot be combined.");
             return 1;
         }
 
@@ -117,6 +156,27 @@ public static class QueryCommandHandler
         }
 
         InstanceRecord instance;
+        var fromSnapshot = settings.Snapshot || (!settings.Start && runtime.SnapshotByDefault);
+        if (discovered is null && fromSnapshot && runtime.OpenSnapshot is { } openSnapshot)
+        {
+            // Asked for (--snapshot, or the setting) and no instance: answer here from the saved index when nothing
+            // it records has changed, and leave nothing running. Otherwise start one as always, which verifies.
+            var opened = openSnapshot(lookupPath);
+            if (opened.Snapshot is { } snapshot)
+            {
+                try
+                {
+                    return await AnswerFromSnapshotAsync(settings, snapshot, runtime);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    runtime.Error.WriteLine($"Query failed: {ex.Message}");
+                    return 1;
+                }
+            }
+            runtime.Error.WriteLine($"Not answering from the saved index: {opened.Reason}.");
+        }
+
         if (discovered is null)
         {
             runtime.Error.WriteLine($"No running instance found. Starting CodeContext for {lookupPath}...");
@@ -231,18 +291,8 @@ public static class QueryCommandHandler
         QueryRuntime runtime,
         CancellationToken ct)
     {
-        var requestBody = new MultiContextRequest
-        {
-            Identifiers = settings.Identifiers.ToList(),
-            Depth = settings.Depth,
-            IncludeTests = settings.IncludeTests,
-            Exact = settings.Exact ? true : null,
-            MaxRelationships = settings.Limit ?? DefaultRelationshipLimit,
-            IncludeExternal = settings.External,
-            RelationshipTypes = ParseRelations(settings.Relation),
-        };
         var body = JsonSerializer.Serialize(
-            requestBody, CodeContextJsonContext.Default.MultiContextRequest);
+            MultiRequest(settings), CodeContextJsonContext.Default.MultiContextRequest);
         using var request = new HttpRequestMessage(
             HttpMethod.Post,
             $"http://localhost:{instance.Port}/api/context/multi")
@@ -252,6 +302,50 @@ public static class QueryCommandHandler
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
         return await SendAndRenderAsync(request, settings, runtime, ct);
     }
+
+    /// <summary>
+    /// The request <see cref="ExecuteSingleAsync"/> or <see cref="ExecuteMultiAsync"/> would send, answered by the
+    /// same <see cref="IContextService"/> call the endpoint makes with the endpoint's defaults, serialized with the
+    /// API's JSON settings, then rendered by the same code as a served answer.
+    /// </summary>
+    private static async Task<int> AnswerFromSnapshotAsync(QuerySettings settings, OneShotSnapshot snapshot, QueryRuntime runtime)
+    {
+        string body;
+        if (settings.Multi)
+        {
+            // Through JSON, as the endpoint receives it, so defaults the CLI leaves out are the endpoint's.
+            var request = JsonSerializer.Deserialize(
+                JsonSerializer.Serialize(MultiRequest(settings), CodeContextJsonContext.Default.MultiContextRequest),
+                ProgramHelpers.ApiJsonOptions.GetTypeInfo(typeof(MultiContextRequest)))!;
+            var results = await snapshot.Context.GetMultipleCompactContextAsync((MultiContextRequest)request);
+            body = JsonSerializer.Serialize(results, ProgramHelpers.ApiJsonOptions.GetTypeInfo(typeof(List<CompactContextResponse>)));
+        }
+        else
+        {
+            // The defaults of GET /api/context/complete for every parameter the CLI does not send.
+            var result = await snapshot.Context.GetCompactContextAsync(
+                settings.Identifiers[0], type: null, depth: settings.Depth, includeTests: settings.IncludeTests,
+                includeContent: false, exact: settings.Exact ? true : null, includeRelated: false, includeMetrics: false,
+                maxMatches: 5, maxRelationships: settings.Limit ?? DefaultRelationshipLimit, expandAmbiguous: false,
+                maxCallSites: 3, maxTestFiles: 5, maxTestMethods: 5, containingType: null, @namespace: null,
+                signature: null, sourceFile: null,
+                relation: string.IsNullOrWhiteSpace(settings.Relation) ? null : settings.Relation,
+                includeExternal: settings.External);
+            body = JsonSerializer.Serialize(result, ProgramHelpers.ApiJsonOptions.GetTypeInfo(typeof(CompactContextResponse)));
+        }
+        return Render(body, settings, runtime);
+    }
+
+    private static MultiContextRequest MultiRequest(QuerySettings settings) => new()
+    {
+        Identifiers = settings.Identifiers.ToList(),
+        Depth = settings.Depth,
+        IncludeTests = settings.IncludeTests,
+        Exact = settings.Exact ? true : null,
+        MaxRelationships = settings.Limit ?? DefaultRelationshipLimit,
+        IncludeExternal = settings.External,
+        RelationshipTypes = ParseRelations(settings.Relation),
+    };
 
     private static async Task<int> SendAndRenderAsync(
         HttpRequestMessage request,
@@ -267,7 +361,11 @@ public static class QueryCommandHandler
                 $"Query API rejected the request ({(int)response.StatusCode} {response.ReasonPhrase}): {body}");
             return 1;
         }
+        return Render(body, settings, runtime);
+    }
 
+    private static int Render(string body, QuerySettings settings, QueryRuntime runtime)
+    {
         IReadOnlyList<CompactContextResponse> results;
         if (settings.Multi)
         {
@@ -496,8 +594,9 @@ public static class QueryCommandHandler
     }
 
     /// <summary>
-    /// The first line of an answer from a saved index not yet checked against the files. Every line
-    /// after it, a miss included, may be stale: a miss is not conclusive until the index is verified.
+    /// The first line of an answer from a saved index. While an instance re-checks it (<c>verifying</c>,
+    /// <c>unverified</c>) every line after it, a miss included, may be stale: a miss is not conclusive until
+    /// the index is verified. <c>snapshot</c> was checked only by file times, with no worker.
     /// Always four fields; the time is empty when the snapshot time is unknown.
     /// </summary>
     private static void WriteAgentCache(CacheNotice? cache, TextWriter output)
@@ -510,14 +609,21 @@ public static class QueryCommandHandler
     {
         if (cache is null) return;
         var savedAt = CacheTime(cache, "yyyy-MM-dd HH:mm:ss' UTC'") is { } at ? $"the index saved at {at}" : "the saved index";
-        output.WriteLine(cache.State == CacheState.Unverified
-            ? $"Cached, unverified: answers come from {savedAt}; checking them against the files failed."
-            : $"Cached, {cache.State}: answers come from {savedAt} and are being checked against the files.");
+        output.WriteLine(cache.State switch
+        {
+            CacheState.Unverified => $"Cached, unverified: answers come from {savedAt}; checking them against the files failed.",
+            CacheState.Snapshot => $"Cached, snapshot: answers come from {savedAt}, read without a running instance; " +
+                "by file times, nothing it was made from has changed since.",
+            _ => $"Cached, {cache.State}: answers come from {savedAt} and are being checked against the files.",
+        });
     }
 
-    private static string CacheMeaning(string state) => state == CacheState.Unverified
-        ? "answers come from the saved index; re-checking the files failed"
-        : "answers come from the saved index while files are re-checked";
+    private static string CacheMeaning(string state) => state switch
+    {
+        CacheState.Unverified => "answers come from the saved index; re-checking the files failed",
+        CacheState.Snapshot => "answers come from the saved index, read without a running instance; by file times nothing it was made from changed since",
+        _ => "answers come from the saved index while files are re-checked",
+    };
 
     private static string? CacheTime(CacheNotice cache, string format)
         => DateTimeOffset.TryParse(cache.SnapshotAt, CultureInfo.InvariantCulture,

@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Threading.Channels;
+using CodeContext.Core.Paths;
 using CodeContext.Parser.Protocol;
 using Microsoft.Extensions.Logging;
 
@@ -117,6 +118,8 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
     private readonly SemaphoreSlim _lifecycleLock = new(1, 1);
     private readonly CancellationTokenSource _shutdown = new();
     private readonly ConcurrentDictionary<long, ActiveMutation> _activeMutations = new();
+    // Which reported input paths the host may not look at, by spelling; null where none is refused (off Windows).
+    private readonly Func<string, bool>? _refusedInput;
 
     private Process? _process;
     private JsonRpcConnection? _connection;
@@ -128,6 +131,9 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
     private bool _restartPending;
     private bool _unavailable;
     private volatile bool _stopping;
+    // Set while a hibernation stops the process: its exit is deliberate, as during a stop (a worker may exit as soon
+    // as it has answered shutdown, before the pipes are closed).
+    private volatile bool _hibernating;
     private volatile bool _disposed;
     private long _incarnation;
     private long _requests;
@@ -175,6 +181,7 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
         _logger = logger;
         _registry = registry;
         _hostOptions = hostOptions ?? new CodeContextOptions();
+        _refusedInput = ReportedPaths.RefusedAsSpelled(_hostOptions.RootPath);
         _snapshot = new ParserSessionSnapshot(spec.ParserId, spec.DisplayName, ParserSessionState.Starting);
     }
 
@@ -299,6 +306,7 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
     /// Builds the <see cref="ProcessStartInfo"/> for one worker: redirected stdio, no
     /// window, working directory from the spec. Environment overlays are applied on top
     /// of the inherited host environment — first <see cref="WorkerLaunchSpec.Environment"/>,
+    /// then <see cref="ParserWorkerOptions.CommonEnvironment"/>,
     /// then <see cref="ParserWorkerOptions.WorkerEnvironment"/> for this parser id (options
     /// win on key collision). Each var is upserted (never <c>Add</c>) because names may
     /// already be present in the inherited environment and are case-insensitive on Windows.
@@ -329,6 +337,13 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
                 startInfo.Environment[key] = value;
             }
         }
+        if (options.CommonEnvironment is { } commonEnvironment)
+        {
+            foreach (var (key, value) in commonEnvironment)
+            {
+                startInfo.Environment[key] = value;
+            }
+        }
         if (options.WorkerEnvironment is { } workerEnvironment
             && workerEnvironment.TryGetValue(spec.ParserId, out var parserEnvironment))
         {
@@ -343,7 +358,8 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
 
     private async Task<InitializeResult> StartAndInitializeAsync(CancellationToken ct)
     {
-        Transition(ParserSessionState.Starting);
+        Transition(ParserSessionState.Starting,
+            _snapshot.State == ParserSessionState.Hibernated ? "waking from hibernation" : null);
 
         var startInfo = BuildStartInfo(_spec, _options);
 
@@ -501,6 +517,11 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
             }
         }
 
+        if (delta.Inputs is { } inputs)
+        {
+            delta = delta with { Inputs = InputsOfChunk(inputs, firstChunk: active.DeltasReceived == 0, delta.RequestId, _refusedInput) };
+        }
+
         var ownershipPrefix = $"{delta.ParserId}:{Uri.EscapeDataString(delta.WorkspaceId)}:";
         if (delta.Nodes.Any(node => string.IsNullOrWhiteSpace(node.Id)
                 || !node.Id.StartsWith(ownershipPrefix, StringComparison.Ordinal))
@@ -648,7 +669,7 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
             failure = $"Worker connection failed: {ex.Message}";
         }
 
-        if (_stopping || _disposed || !ReferenceEquals(process, _process))
+        if (_stopping || _disposed || _hibernating || !ReferenceEquals(process, _process))
         {
             return;
         }
@@ -1043,10 +1064,53 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
     }
 
     /// <summary>
+    /// Stops a healthy, idle worker process so it holds no memory, leaving the supervisor reusable: the next
+    /// request starts a new process (a new incarnation) without counting a restart. Same steps as
+    /// <see cref="ShutdownAsync"/> (shutdown request, stdin EOF, wait, kill as a last resort), but the supervisor is
+    /// not stopped. Returns false, doing nothing, when no initialized process is running or the supervisor is stopped,
+    /// unavailable or disposed. The caller makes sure no request is in flight (the worker service holds its lock).
+    /// </summary>
+    public async Task<bool> HibernateAsync(CancellationToken ct = default)
+    {
+        if (_disposed) return false;
+        await _lifecycleLock.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            if (_stopping || _disposed || _unavailable || !IsLive || _client is not { } client) return false;
+            _hibernating = true;
+            // Bounded by HibernateStopTimeout twice (the answer, then the exit), not a stop's waits: this runs on the
+            // coordinator's loop. The request is not cancelled (that would add the cancel grace period); closing the
+            // connection below ends it.
+            var shutdown = client.ShutdownAsync(ct);
+            try
+            {
+                await shutdown.WaitAsync(_options.HibernateStopTimeout, ct).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+            {
+                _ = shutdown.ContinueWith(static task => _ = task.Exception, CancellationToken.None,
+                    TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
+                _logger.LogInformation("[{ParserId}] shutdown request before hibernating failed ({Message}); falling back to EOF.",
+                    _spec.ParserId, ex.Message);
+            }
+
+            // Detaches the process before closing its pipes, so the connection monitor does not report the exit.
+            await CleanupProcessAsync(kill: false, _options.HibernateStopTimeout).ConfigureAwait(false);
+            Transition(ParserSessionState.Hibernated, "idle: the process exited; the next change starts it again");
+            return true;
+        }
+        finally
+        {
+            _hibernating = false;
+            _lifecycleLock.Release();
+        }
+    }
+
+    /// <summary>
     /// Closes the protocol pipes (the worker's EOF-exit signal), waits briefly, and
     /// kills the process tree if it is still alive (always when <paramref name="kill"/>).
     /// </summary>
-    private async Task CleanupProcessAsync(bool kill)
+    private async Task CleanupProcessAsync(bool kill, TimeSpan? exitWait = null)
     {
         var process = _process;
         var connection = _connection;
@@ -1071,7 +1135,8 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
         {
             if (!process.HasExited && !kill)
             {
-                using var wait = new CancellationTokenSource(_options.ExitAfterEofTimeout);
+                var waitFor = exitWait ?? _options.ExitAfterEofTimeout;
+                using var wait = new CancellationTokenSource(waitFor);
                 try
                 {
                     await process.WaitForExitAsync(wait.Token).ConfigureAwait(false);
@@ -1079,7 +1144,7 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
                 catch (OperationCanceledException)
                 {
                     _logger.LogWarning("[{ParserId}] worker ignored EOF for {Timeout}s; killing process tree.",
-                        _spec.ParserId, _options.ExitAfterEofTimeout.TotalSeconds);
+                        _spec.ParserId, waitFor.TotalSeconds);
                 }
             }
             if (!process.HasExited)
@@ -1126,4 +1191,87 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
             _shutdown.Dispose();
         }
     }
+
+    /// <summary>
+    /// The most input paths one report may list; a longer report is kept as none (the shard is then never answered
+    /// without a worker). Counted as reported, before anything is dropped.
+    /// </summary>
+    internal const int MaxInputs = 500_000;
+
+    /// <summary>
+    /// The inputs a chunk contributes to its request: the first chunk's, normalized (<see cref="NormalizeInputs"/>);
+    /// a later chunk's are not read, as the schema says, so neither checked nor sorted.
+    /// </summary>
+    internal static WorkerInputs? InputsOfChunk(WorkerInputs? reported, bool firstChunk, long requestId, Func<string, bool>? refused = null)
+    {
+        if (reported is null || !firstChunk) return null;
+        if (reported.Files is null || reported.Absent is null || reported.Files.Contains(null!) || reported.Absent.Contains(null!))
+        {
+            throw new ParserProtocolViolationException(
+                $"analysis/delta for request {requestId} carried inputs without files or absent paths, or with a null one.");
+        }
+        return NormalizeInputs(reported, refused);
+    }
+
+    /// <summary>
+    /// Inputs as the host keeps them: fully qualified paths only (the schema says the rest are ignored), each once,
+    /// in ordinal order, so that two reports of the same set compare equal; and an absent path under another listed
+    /// absent path is dropped (the schema lets a worker leave it out: it cannot exist while that one does not), so a
+    /// worker that leaves them out and one that lists every failed lookup are kept alike. Null when the report lists
+    /// more than <see cref="MaxInputs"/>, or when a path it would keep is one the host may not look at
+    /// (<paramref name="refused"/>, <see cref="ReportedPaths.RefusedAsSpelled"/>): a report is what a repository made
+    /// its worker say, and the host looks at every path it keeps, so such a report is not kept at all and its shard is
+    /// never judged current without a worker.
+    /// </summary>
+    internal static WorkerInputs? NormalizeInputs(WorkerInputs inputs, Func<string, bool>? refused = null)
+    {
+        if (inputs.Files.Count + inputs.Absent.Count > MaxInputs) return null;
+        var files = Kept(inputs.Files, dropNested: false);
+        var absent = Kept(inputs.Absent, dropNested: true);
+        if (refused is not null && (files.Exists(path => refused(path)) || absent.Exists(path => refused(path)))) return null;
+        return new WorkerInputs(files, absent);
+    }
+
+    private static List<string> Kept(IReadOnlyList<string> paths, bool dropNested)
+    {
+        var sorted = new List<string>(paths.Count);
+        foreach (var path in paths)
+        {
+            if (path.Length > 0 && !path.Contains('\0') && Path.IsPathFullyQualified(path)) sorted.Add(path);
+        }
+        sorted.Sort(StringComparer.Ordinal);
+
+        // In ordinal order the paths that start with a given path follow it without a gap, so the kept paths the
+        // current one starts with are a stack: one that the current path does not start with starts no later path.
+        var kept = new List<string>(dropNested ? Math.Min(sorted.Count, 1024) : sorted.Count);
+        var prefixes = new List<string>();
+        string? previous = null;
+        foreach (var path in sorted)
+        {
+            if (string.Equals(path, previous, StringComparison.Ordinal)) continue;
+            previous = path;
+            if (dropNested)
+            {
+                while (prefixes.Count > 0 && !path.StartsWith(prefixes[^1], StringComparison.Ordinal)) prefixes.RemoveAt(prefixes.Count - 1);
+                var nested = false;
+                foreach (var prefix in prefixes) nested |= IsUnder(path, prefix);
+                if (nested) continue;
+                prefixes.Add(path);
+            }
+            kept.Add(path);
+        }
+        return kept;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="path"/> names something inside <paramref name="directory"/>, which it starts with:
+    /// the next character is a directory separator, or the directory was written with one at its end. Ordinal, with
+    /// no other normalization.
+    /// </summary>
+    private static bool IsUnder(string path, string directory)
+        => path.Length > directory.Length
+            && (IsSeparator(path[directory.Length]) || IsSeparator(directory[^1]));
+
+    private static bool IsSeparator(char character)
+        => character == Path.DirectorySeparatorChar || character == Path.AltDirectorySeparatorChar;
 }

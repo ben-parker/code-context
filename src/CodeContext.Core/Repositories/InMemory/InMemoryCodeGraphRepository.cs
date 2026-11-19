@@ -9,7 +9,7 @@ using CodeContext.Core.Serialization;
 
 namespace CodeContext.Core.Repositories.InMemory
 {
-    public class InMemoryCodeGraphRepository : ICodeGraphRepository, IGenerationalGraphStore
+    public class InMemoryCodeGraphRepository : ICodeGraphRepository, IGenerationalGraphStore, IStoredNodeIds
     {
         private readonly InMemoryDatabase _database;
 
@@ -17,6 +17,8 @@ namespace CodeContext.Core.Repositories.InMemory
         {
             _database = database;
         }
+
+        string? IStoredNodeIds.FindStoredNodeId(string id) => _database.FindStoredNodeId(id);
 
         public long LastCommittedGeneration => _database.LastCommittedGeneration;
         public void BeginReconciliation() => _database.BeginReconciliation();

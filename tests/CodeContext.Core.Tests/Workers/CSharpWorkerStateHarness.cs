@@ -78,8 +78,9 @@ internal sealed class InProcessCSharpHost : IWorkerOutput
     /// A watcher batch, routed as the host routes it: source changes in one apply, then an empty apply
     /// when a project input changed.
     /// </summary>
-    public async Task ApplyAsync(IReadOnlyList<FileChange> changes)
+    public async Task ApplyAsync(IReadOnlyList<FileChange> changes, Action? betweenOpenAndApply = null)
     {
+        _betweenOpenAndApply = betweenOpenAndApply;
         var sources = changes.Where(change => change.Path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase))
             .Select(change => new FileChangeDto(change.Path, change.Type == FileChangeType.Deleted || !File.Exists(change.Path)
                 ? FileChangeKinds.Deleted
@@ -93,6 +94,7 @@ internal sealed class InProcessCSharpHost : IWorkerOutput
     public async Task ApplyChangesAsync(IReadOnlyList<FileChangeDto> changes)
     {
         await Session.OpenAsync(new OpenWorkspaceParams(WorkspaceId, _root, [".csproj", ".sln"], ApprovedFiles()), CancellationToken.None);
+        _betweenOpenAndApply?.Invoke();
         Begin();
         await Session.ApplyAsync(++_requestId, new ApplyChangesParams(WorkspaceId, ++_generation, changes), CancellationToken.None);
     }
@@ -111,6 +113,8 @@ internal sealed class InProcessCSharpHost : IWorkerOutput
         Assert.Equal(Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(path))), result.Sha256);
         return new IndexBaseline(path, stateId, result.Sha256!, Annotation()?.Fingerprints ?? []);
     }
+
+    private Action? _betweenOpenAndApply;
 
     public InMemoryDatabase Database => _factory.Database;
 

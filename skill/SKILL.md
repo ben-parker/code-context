@@ -33,12 +33,14 @@ codecontext query ContextService --tests    # add static test evidence (off by d
 codecontext query multi Foo Bar             # several identifiers, one round trip, in order
 ```
 
-`query` auto-discovers (or starts) the repo's instance, waits up to 30 seconds for
-indexing (exit code 3 on timeout; see [operations](references/operations.md)), and
-prints compact agent-oriented text; progress goes to stderr. Options: `--depth N`
+`query` uses the repo's running instance, or starts one and waits up to 30 seconds for
+indexing (exit code 3 on timeout; see [operations](references/operations.md)). It prints compact
+agent-oriented text; progress goes to stderr. Options: `--depth N`
 (`0` = cheap identity lookup), `--relation CALLS,REFERENCES`, `--exact`,
 `--limit N` (entries per relationship list, 1-100, default 10), `--external` (include
-library symbols), `--path DIR`, `--human`, `--json`.
+library symbols), `--path DIR`, `--human`, `--json`, `--snapshot` (with no instance
+running, answer in this process from the saved index when nothing it records changed,
+leaving nothing running; see [operations](references/operations.md)).
 
 Reading results:
 
@@ -61,6 +63,11 @@ Reading results:
   - `unverified`: the re-check failed (`indexing.status` `error`) and the answers stay
     saved ones. Do not wait: confirm with `rg -w <Name>` or by reading the file, or run
     `POST /api/index/refresh` (or restart) and query again once `ready`.
+- `cache snapshot` (only with `--snapshot`; `--json`: `"cache":{"state":"snapshot",...}`)
+  means no instance was running and the answer was read from the saved index after a
+  check by file times of what it was made from (see [operations](references/operations.md));
+  no worker re-analysed anything. It can miss a change that check cannot see. Before
+  editing on it or concluding absence, confirm with `rg` or query without `--snapshot`.
 - `relationships not loaded` means nothing was fetched: the name was ambiguous
   (re-query with a target's identifier) or the depth was 0. It says nothing about
   whether the symbol has users.

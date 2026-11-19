@@ -10,10 +10,12 @@ codecontext query ContextService
 codecontext query ContextService --tests  # when test evidence matters
 ```
 
-`query` selects the closest registered ancestor, starts a detached instance when none
-exists, waits up to 30 seconds for indexing (a restarted instance answers at once from
-its saved index, labelled `cache`, while it re-checks the files; on timeout it exits
-with code 3), and verifies contract, root, and instance identity. Tests are omitted by default; add `--tests` whenever test evidence
+`query` selects the closest registered ancestor. With none, it starts a detached instance
+(with `--snapshot`, or `CodeContext__QueryFromSnapshot=true`, it first tries to answer in its
+own process from the saved index, labelled `cache snapshot`) and waits up to 30
+seconds for indexing (a restarted instance answers at once from its saved index, labelled
+`cache`, while it re-checks the files; on timeout it exits with code 3), and verifies
+contract, root, and instance identity. Tests are omitted by default; add `--tests` whenever test evidence
 matters.
 
 Use the normalized graph for semantic questions:
@@ -74,7 +76,12 @@ rg --files -g '*.cs' -g '*.ts'
 At runtime, `WorkerCatalog` discovers compatible manifests from
 `CODECONTEXT_WORKERS_DIR`, `~/.codecontext/workers`, then the bundled `workers`
 directory. It never auto-executes repository-local manifests. `LanguageWorkerService`
-supervises discovered workers and routes files by claimed extension.
+supervises discovered workers and routes files by claimed extension. `WorkerHibernation`
+stops an idle worker (after 120 s if its last index from its files took under 5 s, else
+900 s; `CodeContext:WorkerHibernateSeconds` sets one time for all, 0 off) from a
+coordinator maintenance command; a `persistentState` worker only once its state is saved
+with a written snapshot. The next operation on it re-indexes first (offering that state),
+so hibernate and wake stay on the coordinator's ordered path.
 
 `IndexCoordinator` is the only writer-side entry point. It serializes startup scans,
 full/single-file refreshes, and coalesced `FileWatcherService` events. Workers stream
@@ -92,7 +99,10 @@ readers see its result and the label goes. A worker that declares `persistentSta
 (the C# worker) is offered the state it saved with that snapshot and sends only what
 changed while the host was down; any other worker re-walks and replaces its facts.
 `SnapshotService` writes snapshots after commits, off the commit path, and asks such
-workers to save their state when it captures.
+workers to save their state when it captures. `OneShotSnapshot` is the read-only path a
+`query` with no instance takes: it authenticates, stat-checks with `SnapshotFreshness`,
+materializes and answers through `ContextService`, writing nothing; it trusts a shard only
+as far as its worker's reported `inputs` (protocol) say what the facts were read from.
 
 ## Architecture invariants
 
@@ -112,7 +122,17 @@ workers to save their state when it captures.
   the host follows none when it walks the root, and the TypeScript worker follows one
   only to a place it would read, since package managers link packages. Both are tested
   against `tests/Shared/disk-guard-vectors.json`; a new rule goes there first. New
-  worker code that reads a file goes through the guard.
+  worker code that reads a file goes through the guard, and what it reads (or looks for
+  and does not find) besides the approved files must reach the worker's `inputs`
+  (`ProjectModel` stamps in the C# worker, `InputRecorder` in the TypeScript worker):
+  `query --snapshot` trusts a snapshot only as far as those say.
+- The same holds for the host. The paths a worker reports (protocol `inputs`) are what a
+  repository made it say, so the host looks at one only after `Paths/ReportedPaths.cs`
+  allows it: `PathGuard.cs` linked into Core as source, with the root's own share as the
+  only share and no link the repository holds followed, on any platform. A report holding
+  a path refused by its spelling is kept as none, and the freshness check answers "not
+  known" for a refused path, never "unchanged". New host code that touches a path a
+  worker named goes through it.
 - Every worker-owned node ID, edge ID, and edge source ID starts with
   `<parserId>:<workspaceId>:`. IDs are stable semantic identities, not source offsets.
   A worker must replace all facts whose meaning may change and reanalyze semantic

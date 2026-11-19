@@ -69,6 +69,9 @@ public sealed class CSharpWorkspaceAnalyzer
     private readonly string _workspaceIdPrefix;
 
     /// <summary>The projects as last read, or null when this workspace has no known root.</summary>
+    /// <summary>The runtime references, empty until a unit of this analyzer takes them.</summary>
+    private ImmutableArray<MetadataReference> _runtimeReferences = [];
+
     private ProjectModel? _model;
     private DateTime _builtAt;
 
@@ -133,6 +136,9 @@ public sealed class CSharpWorkspaceAnalyzer
     /// <summary>Set by a restore: the next settlement rebuilds every bucket, as after a first walk.</summary>
     private bool _settleEverything;
 
+    /// <summary>Whether the last settling left a node with this id in some bucket.</summary>
+    private Func<string, bool>? _settledNodes;
+
     /// <param name="workspaceId">Identity of the workspace, part of every fact id.</param>
     /// <param name="rootPath">
     /// The workspace root, where projects are looked for. Without one, every file goes in
@@ -153,7 +159,8 @@ public sealed class CSharpWorkspaceAnalyzer
     /// <summary>
     /// A file in no project is usually written for the projects around it, so it binds
     /// against them and sees their global usings. Getting that wrong costs a name clash;
-    /// the opposite mistake loses every collection and LINQ call in the file.
+    /// the opposite mistake loses every collection and LINQ call in the file. The runtime
+    /// references are taken when the first such file arrives.
     /// </summary>
     private ProjectCompilation CreateFallback(IReadOnlyList<ProjectInfo> projects)
     {
@@ -161,10 +168,24 @@ public sealed class CSharpWorkspaceAnalyzer
             .Where(line => line.StartsWith("global using", StringComparison.Ordinal))
             .Distinct(StringComparer.Ordinal));
         return new ProjectCompilation(
-            null, _workspaceIdPrefix, ProjectCompilation.ParseOptionsFor(null), SharedReferences.Value, usings)
+            null, _workspaceIdPrefix, ProjectCompilation.ParseOptionsFor(null), [], usings, RuntimeReferences)
         {
             Signature = usings,
         };
+    }
+
+    /// <summary>
+    /// The runtime's assemblies, held in memory once read, for a unit that has a file to bind. Most
+    /// workspaces put every file in a project and never need them.
+    /// </summary>
+    /// <summary>
+    /// The only way to the runtime references, so that <see cref="RuntimeReferenceLoads"/> counts every unit
+    /// that took them and nothing brings their images into memory unasked.
+    /// </summary>
+    private ImmutableArray<MetadataReference> RuntimeReferences()
+    {
+        RuntimeReferenceLoads++;
+        return _runtimeReferences = SharedReferences.Value;
     }
 
     private static ImmutableArray<MetadataReference> ResolveReferences()
@@ -280,14 +301,37 @@ public sealed class CSharpWorkspaceAnalyzer
     /// </summary>
     internal Action<WorkerState>? RestoreFault { get; init; }
 
+    /// <summary>
+    /// Says a path may not be reported as an input, in place of the disk guard. Only tests set this: off Windows
+    /// the guard refuses nothing, and this lets a test stand where Windows would.
+    /// </summary>
+    internal Func<string, bool>? RefusedInput { get; init; }
+
     /// <summary>How many times a file was parsed into a unit, by this analyzer.</summary>
     public int ParseCount { get; private set; }
 
     /// <summary>How many compilations this analyzer created for projects and files in no project.</summary>
     public int CompilationCount { get; private set; }
 
+    /// <summary>How many times a unit of this analyzer took the runtime references code with no project binds against.</summary>
+    public int RuntimeReferenceLoads { get; private set; }
+
     /// <summary>How many files the last analysis walked.</summary>
     public int LastWalkCount { get; private set; }
+
+    /// <summary>
+    /// Drops what every unit's compilation has bound, dependencies first, keeping trees and walks
+    /// (<see cref="ProjectCompilation.ReleaseBoundState"/>). No file is walked again for it: a walk belongs to
+    /// its unit, not to a compilation. Returns how many units were released.
+    /// </summary>
+    public int ReleaseBoundState()
+    {
+        foreach (var unit in _units) unit.ReleaseBoundState();
+        return _units.Count;
+    }
+
+    /// <summary>Each unit's compilation, in unit order. For tests.</summary>
+    internal IEnumerable<CSharpCompilation> Compilations() => _units.Select(unit => unit.Compilation);
 
     /// <summary>Replaces the workspace file set entirely and reparses everything.</summary>
     public void ReplaceFiles(IReadOnlyList<string> files, CancellationToken ct)
@@ -466,7 +510,7 @@ public sealed class CSharpWorkspaceAnalyzer
     private ImmutableArray<MetadataReference> ReferencesFor(ProjectInfo project)
     {
         var references = ImmutableArray.CreateBuilder<MetadataReference>();
-        if (project.State == ProjectCoverageState.Fallback) references.AddRange(SharedReferences.Value);
+        if (project.State == ProjectCoverageState.Fallback) references.AddRange(RuntimeReferences());
         foreach (var path in project.MetadataReferences)
         {
             if (AssemblyReference(path) is { } reference) references.Add(reference);
@@ -701,7 +745,10 @@ public sealed class CSharpWorkspaceAnalyzer
         var buckets = SettleOwnership(walkedNow, removed);
         var diagnostics = _pendingDiagnostics.ToList();
         _pendingDiagnostics.Clear();
-        return new AnalysisResult(diagnostics, buckets) { Coverage = BuildCoverage(), Fingerprints = Fingerprints() };
+        return new AnalysisResult(diagnostics, buckets)
+        {
+            Coverage = BuildCoverage(), Fingerprints = Fingerprints(), Inputs = Inputs(), HasNode = _settledNodes,
+        };
     }
 
     private static bool ShouldReportProgress(int processed, int total)
@@ -746,6 +793,7 @@ public sealed class CSharpWorkspaceAnalyzer
         walker.Visit(root);
         nodes.TrimExcess();
         edges.TrimExcess();
+        externals.TrimExcess();
         return new WalkedFile(unit, nodes, edges, externals, walker.UnresolvedNames)
         {
             Stamp = _stamps.GetValueOrDefault(path),
@@ -754,6 +802,9 @@ public sealed class CSharpWorkspaceAnalyzer
     }
 
     private string Share(string id) => _idStrings.GetOrAdd(id, id);
+
+    /// <summary>The edges the last walk of <paramref name="path"/> found, or null when it is not walked. For tests.</summary>
+    internal List<EdgeFact>? WalkedEdges(string path) => _walked.TryGetValue(path, out var walked) ? walked.Edges : null;
 
     /// <summary>
     /// Settles which file holds each fact, a pure function of the file SET and never of edit
@@ -832,6 +883,15 @@ public sealed class CSharpWorkspaceAnalyzer
         _sharedIds = shared;
         _contestedIdentifiers = contested;
 
+        // Every node of every bucket: each id walked has one owner, whose bucket holds it, and the rest are stubs.
+        // Settling has these tables already, so an emission asks them instead of gathering every id again.
+        var stubIds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var bucket in stubBuckets)
+        {
+            foreach (var node in bucket.Nodes) stubIds.Add(node.Id);
+        }
+        _settledNodes = id => owners.ContainsKey(id) || stubIds.Contains(id);
+
         var result = new List<FileFacts>(_buckets.Count + stubBuckets.Count);
         result.AddRange(_buckets.Values);
         result.AddRange(stubBuckets.Select(bucket => contested.Count == 0 ? bucket : bucket with { Nodes = Qualify(bucket.Nodes, contested) }));
@@ -857,10 +917,13 @@ public sealed class CSharpWorkspaceAnalyzer
         }
 
         var edges = new HashSet<EdgeFact>();
+        var allOwn = true;
         foreach (var edge in walked.Edges)
         {
             if (!owners.TryGetValue(edge.SourceId, out var owner) || owner == path) edges.Add(edge);
+            else allOwn = false;
         }
+        var fromOthers = false;
         foreach (var node in nodes)
         {
             if (!shared.TryGetValue(node.Id, out var files)) continue;
@@ -869,12 +932,16 @@ public sealed class CSharpWorkspaceAnalyzer
                 if (file == path) continue;
                 foreach (var edge in _walked[file].Edges)
                 {
-                    if (edge.SourceId == node.Id) edges.Add(edge);
+                    if (edge.SourceId == node.Id && edges.Add(edge)) fromOthers = true;
                 }
             }
         }
 
-        return new FileFacts(path, Qualify(nodes, contested), edges.ToList());
+        // Usually the bucket's edges are exactly the walk's, in the walk's order (a set enumerates in insertion order
+        // until something is removed): then the bucket shares the walk's list, which nothing changes, rather than
+        // holding a second copy of every edge for as long as the file is unchanged.
+        var bucketEdges = allOwn && !fromOthers && edges.Count == walked.Edges.Count ? walked.Edges : edges.ToList();
+        return new FileFacts(path, Qualify(nodes, contested), bucketEdges);
     }
 
     private List<ProjectCoverage> BuildCoverage()
@@ -1055,11 +1122,19 @@ public sealed class CSharpWorkspaceAnalyzer
         /// <summary>Each unit's fingerprint over the inputs these facts were walked from, in unit key order.</summary>
         public List<UnitFingerprint> Fingerprints { get; init; } = [];
 
+        /// <summary>What these facts were read from besides the approved files (see <see cref="CSharpWorkspaceAnalyzer.Inputs"/>).</summary>
+        public WorkerInputs Inputs { get; init; } = new([], []);
+
         public List<ProtocolNode> Nodes => _nodes ??= Buckets.SelectMany(bucket => bucket.Nodes).ToList();
 
         /// <summary>The wire form of every edge. Sending walks <see cref="Buckets"/> instead.</summary>
         public List<ProtocolEdge> Edges
             => _edges ??= Buckets.SelectMany(bucket => bucket.Edges).Select(edge => edge.ToProtocol()).ToList();
+
+        /// <summary>Whether a bucket holds a node with this id, from the analyzer's own tables when it gave them.</summary>
+        internal Func<string, bool>? HasNode { get; init; }
+
+        internal bool Holds(string id) => HasNode?.Invoke(id) ?? NodeIds.Contains(id);
 
         public IReadOnlySet<string> NodeIds
             => _nodeIds ??= Buckets.SelectMany(bucket => bucket.Nodes).Select(node => node.Id).ToHashSet(StringComparer.Ordinal);
@@ -1123,7 +1198,7 @@ public sealed class CSharpWorkspaceAnalyzer
         _factHashes.Clear();
         foreach (var bucket in analysis.Buckets)
         {
-            _factHashes[bucket.FilePath] = ComputeBucketHash(bucket, analysis.NodeIds);
+            _factHashes[bucket.FilePath] = ComputeBucketHash(bucket, analysis);
         }
         RecordEmission(analysis.Fingerprints);
     }
@@ -1156,7 +1231,7 @@ public sealed class CSharpWorkspaceAnalyzer
         foreach (var bucket in analysis.Buckets)
         {
             currentPaths.Add(bucket.FilePath);
-            var hash = ComputeBucketHash(bucket, analysis.NodeIds);
+            var hash = ComputeBucketHash(bucket, analysis);
             pendingHashes[bucket.FilePath] = hash;
             if (!_factHashes.TryGetValue(bucket.FilePath, out var stored)
                 || !stored.AsSpan().SequenceEqual(hash))
@@ -1207,6 +1282,40 @@ public sealed class CSharpWorkspaceAnalyzer
                 _stamps.TryGetValue(path, out var stamp) ? stamp.ContentHash : [],
                 _owners.TryGetValue(path, out var owner) ? KeyOf(owner) : string.Empty)).ToList(),
             unit.References.ConvertAll(KeyOf))));
+
+    /// <summary>
+    /// Everything the facts depend on besides the approved files, for the host's check of a snapshot without a worker:
+    /// the files the project model was read from (absent where they were looked for and not found), the directories
+    /// listed to find projects and restore data, the repository markers looked for above the root, and every assembly
+    /// a unit compiles against. These are what this worker itself checks before it reuses what it read (the model's
+    /// stamps, the references' times in each unit's signature), so a snapshot judged current by them is one this worker
+    /// would not have read differently. A path the disk guard refuses is left out: it reads as absent and stays so.
+    /// </summary>
+    private WorkerInputs Inputs()
+    {
+        var files = new HashSet<string>(PathComparer);
+        var absent = new HashSet<string>(PathComparer);
+        if (_model is { } model)
+        {
+            foreach (var (path, stamp) in model.InputStamps) (ProjectModel.IsMissingStamp(stamp) ? absent : files).Add(path);
+            files.UnionWith(model.ListedDirectories);
+            absent.UnionWith(model.AbsentBoundaryMarkers);
+            foreach (var project in model.Projects) files.UnionWith(project.MetadataReferences);
+        }
+
+        // Only once a unit has taken them: asking here would load them for a workspace that binds nothing against them.
+        files.UnionWith(_runtimeReferences.OfType<PortableExecutableReference>()
+            .Select(reference => reference.FilePath).OfType<string>());
+        files.ExceptWith(_files);
+
+        // The host looks at each of these with no guard of its own, so what this worker may not read is not named.
+        var refused = RefusedInput ?? _disk.Refuses;
+        files.RemoveWhere(path => refused(path));
+        absent.RemoveWhere(path => refused(path));
+        return new WorkerInputs(
+            files.Order(StringComparer.Ordinal).ToList(),
+            absent.Order(StringComparer.Ordinal).ToList());
+    }
 
     /// <summary>
     /// What a new process needs to emit what this one would emit next: the walks, the hashes of the facts
@@ -1375,7 +1484,7 @@ public sealed class CSharpWorkspaceAnalyzer
     /// does for an unresolved base type in the global namespace. Re-emitting it is what
     /// keeps it, and what brings it back if the host dropped it.
     /// </summary>
-    private static byte[] ComputeBucketHash(FileFacts bucket, IReadOnlySet<string> nodeIds)
+    private static byte[] ComputeBucketHash(FileFacts bucket, AnalysisResult analysis)
     {
         if (bucket.Hash is { } known) return known;
 
@@ -1414,7 +1523,7 @@ public sealed class CSharpWorkspaceAnalyzer
             hasher.Str(edge.Kind);
             hasher.Int(edge.Line);
             hasher.Int(edge.Column);
-            hasher.Int(nodeIds.Contains(edge.TargetId) ? 1 : 0);
+            hasher.Int(analysis.Holds(edge.TargetId) ? 1 : 0);
         }
         return bucket.Hash = hasher.GetHashAndReset();
     }
@@ -1423,26 +1532,48 @@ public sealed class CSharpWorkspaceAnalyzer
     /// Thin length-and-null-framed writer over <see cref="IncrementalHash"/>. Framing
     /// (a null/present marker plus a byte-length prefix on every string, a count prefix on
     /// every collection) makes the byte stream unambiguous, so two different fact sets can
-    /// never hash to the same digest by concatenation coincidence.
+    /// never hash to the same digest by concatenation coincidence. The stream is gathered in
+    /// a buffer and handed over a block at a time: a fact is a dozen small fields, and a call
+    /// into the hash for each marker, length and name cost more than the hashing. What is
+    /// hashed is the same stream byte for byte, which saved states and fingerprints rely on.
     /// </summary>
     internal sealed class FactHasher : IDisposable
     {
-        private static readonly byte[] NullMarker = [0];
-        private static readonly byte[] PresentMarker = [1];
+        private const int BufferSize = 16 * 1024;
 
         private readonly IncrementalHash _hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        private readonly byte[] _scratch = new byte[4];
+        private readonly byte[] _buffer = ArrayPool<byte>.Shared.Rent(BufferSize);
+        private int _used;
 
-        public void Int(int value)
+        /// <summary>The next <paramref name="count"/> bytes of the stream, to be written at once. At most half the buffer.</summary>
+        private Span<byte> Take(int count)
         {
-            BinaryPrimitives.WriteInt32LittleEndian(_scratch, value);
-            _hash.AppendData(_scratch);
+            if (_used + count > _buffer.Length) Flush();
+            var span = _buffer.AsSpan(_used, count);
+            _used += count;
+            return span;
         }
+
+        private void Flush()
+        {
+            _hash.AppendData(_buffer.AsSpan(0, _used));
+            _used = 0;
+        }
+
+        private void Marker(byte value) => Take(1)[0] = value;
+
+        public void Int(int value) => BinaryPrimitives.WriteInt32LittleEndian(Take(4), value);
 
         /// <summary>Length-prefixed raw bytes.</summary>
         public void Bytes(ReadOnlySpan<byte> value)
         {
             Int(value.Length);
+            if (value.Length <= BufferSize / 2)
+            {
+                value.CopyTo(Take(value.Length));
+                return;
+            }
+            Flush();
             _hash.AppendData(value);
         }
 
@@ -1450,21 +1581,28 @@ public sealed class CSharpWorkspaceAnalyzer
         {
             if (value is null)
             {
-                _hash.AppendData(NullMarker);
+                Marker(0);
                 return;
             }
-            _hash.AppendData(PresentMarker);
+            Marker(1);
             var count = Encoding.UTF8.GetByteCount(value);
             Int(count);
-            var buffer = ArrayPool<byte>.Shared.Rent(count);
+            if (count <= BufferSize / 2)
+            {
+                Encoding.UTF8.GetBytes(value, Take(count));
+                return;
+            }
+
+            var rented = ArrayPool<byte>.Shared.Rent(count);
             try
             {
-                var written = Encoding.UTF8.GetBytes(value, buffer);
-                _hash.AppendData(buffer.AsSpan(0, written));
+                var written = Encoding.UTF8.GetBytes(value, rented);
+                Flush();
+                _hash.AppendData(rented.AsSpan(0, written));
             }
             finally
             {
-                ArrayPool<byte>.Shared.Return(buffer);
+                ArrayPool<byte>.Shared.Return(rented);
             }
         }
 
@@ -1472,10 +1610,10 @@ public sealed class CSharpWorkspaceAnalyzer
         {
             if (metadata is null)
             {
-                _hash.AppendData(NullMarker);
+                Marker(0);
                 return;
             }
-            _hash.AppendData(PresentMarker);
+            Marker(1);
             Int(metadata.Count);
             foreach (var pair in metadata.OrderBy(kvp => kvp.Key, StringComparer.Ordinal))
             {
@@ -1484,9 +1622,17 @@ public sealed class CSharpWorkspaceAnalyzer
             }
         }
 
-        public byte[] GetHashAndReset() => _hash.GetHashAndReset();
+        public byte[] GetHashAndReset()
+        {
+            Flush();
+            return _hash.GetHashAndReset();
+        }
 
-        public void Dispose() => _hash.Dispose();
+        public void Dispose()
+        {
+            ArrayPool<byte>.Shared.Return(_buffer);
+            _hash.Dispose();
+        }
     }
 
     public sealed record NativeTreeResult(JsonElement Tree, bool Truncated);

@@ -79,6 +79,35 @@ public sealed class RepositoryFileSelectorTests : IDisposable
     }
 
     [Fact]
+    public void GitIgnoreThatIsALink_IsNotRead_AsGitDoesNotFollowOne()
+    {
+        // The rules would come from wherever the repository points the link: a file outside it, a share.
+        var outside = Directory.CreateTempSubdirectory("cc-ignore-target-").FullName;
+        try
+        {
+            File.WriteAllText(Path.Combine(outside, "rules"), "kept.cs\n");
+            var kept = Write("kept.cs");
+            try
+            {
+                File.CreateSymbolicLink(Path.Combine(_root, ".gitignore"), Path.Combine(outside, "rules"));
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                return; // links cannot be made here
+            }
+            var selector = CreateSelector();
+
+            Assert.True(selector.IsIncluded(kept));
+            Assert.Equal(0, selector.IgnoreSourceCount);
+            Assert.Contains(kept, selector.EnumerateIncludedFiles([".cs"]));
+        }
+        finally
+        {
+            Directory.Delete(outside, recursive: true);
+        }
+    }
+
+    [Fact]
     public void DeepPath_WithNoRules_IsIncludedAndEnumerated()
     {
         var deep = Write("a/b/c/d/e/f/g/keep.cs");

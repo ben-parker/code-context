@@ -476,6 +476,104 @@ const embeddedLanguageAdapters = new Map([
     }],
 ]);
 
+/**
+ * What a workspace's facts were read from besides its own files, for the host's check of
+ * a snapshot with no worker running (protocol `inputs`): files read, each with the time
+ * it had then, and paths looked for and not found. `changed()` says whether any of them
+ * moved since, which is how a config edit reaches the next request.
+ */
+class InputRecorder {
+    constructor() {
+        this.files = new Map(); // absolute path -> mtimeMs when read
+        this.absent = new Set();
+    }
+
+    /** A file read (or, when it is missing, looked for). */
+    read(fileName) {
+        const full = path.resolve(fileName);
+        try {
+            this.files.set(full, fs.statSync(full).mtimeMs);
+            this.absent.delete(full);
+        } catch {
+            if (!this.files.has(full)) this.absent.add(full);
+        }
+    }
+
+    /** A path asked about: read when it exists, absent otherwise. Returns `exists`. */
+    probe(fileName, exists) {
+        if (exists) this.read(fileName);
+        else if (!this.files.has(path.resolve(fileName))) this.absent.add(path.resolve(fileName));
+        return exists;
+    }
+
+    changed() {
+        for (const [fileName, stamp] of this.files) {
+            try {
+                if (fs.statSync(fileName).mtimeMs !== stamp) return true;
+            } catch {
+                return true;
+            }
+        }
+        for (const fileName of this.absent) {
+            if (fs.existsSync(fileName)) return true;
+        }
+        return false;
+    }
+}
+
+/** A config host that reads a config for its compilerOptions alone, and records what it
+ * reads. The host approves the file set, so a config's `include` is never expanded and
+ * reading one never walks a directory. */
+function recordingConfigHost(recorder) {
+    return {
+        useCaseSensitiveFileNames: ts.sys.useCaseSensitiveFileNames,
+        fileExists: fileName => recorder.probe(fileName, ts.sys.fileExists(fileName)),
+        readFile: fileName => {
+            recorder.read(fileName);
+            return ts.sys.readFile(fileName);
+        },
+        readDirectory: () => [],
+    };
+}
+
+/**
+ * The absent paths with each replaced by its highest absent directory, once: while a
+ * directory is missing so is everything in it, and the compiler lists every name it would
+ * have tried in directories it never looked into. A directory is called absent only when
+ * the disk says so here (through `fs`, so through the guard); one that holds a file that
+ * was read is there without asking. No path of the result is below another.
+ */
+function highestAbsent(absent, files) {
+    const there = new Map();
+    for (const fileName of files) {
+        for (let directory = path.dirname(fileName); !there.has(directory); directory = path.dirname(directory)) {
+            there.set(directory, true);
+        }
+    }
+    const exists = directory => {
+        let known = there.get(directory);
+        if (known === undefined) {
+            known = fs.existsSync(directory);
+            there.set(directory, known);
+        }
+        return known;
+    };
+    const highest = new Set();
+    for (const fileName of absent) {
+        let top = fileName;
+        for (let parent = path.dirname(top); parent !== top && !exists(parent); parent = path.dirname(top)) top = parent;
+        highest.add(top);
+    }
+    // A path the compiler called absent can have appeared since, with others found below it.
+    const below = fileName => {
+        for (let parent = path.dirname(fileName), last = fileName; parent !== last; last = parent, parent = path.dirname(parent)) {
+            if (highest.has(parent)) return true;
+        }
+        return false;
+    };
+    return [...highest].filter(fileName => !below(fileName));
+}
+
 class Workspace {
     constructor(rootPath) {
         this.rootPath = rootPath;
@@ -493,6 +591,13 @@ class Workspace {
         // present here with no current bucket is a removal — no separate drop-tracking is
         // needed (mirrors the C# analyzer's _factHashes / PathComparer semantics).
         this.factHashes = new Map(); // canonicalKey -> { hash: string, path: string }
+        // What each file's module resolution looked at (TypeScript's own failed and affecting
+        // locations), replaced whenever the file's imports are resolved again.
+        this.resolutionInputs = new Map(); // canonicalKey -> { files: string[], absent: string[] }
+        this.lookedLocations = new Map(); // a location as the compiler spelled it -> the same in full
+        // Directories the compiler listed or found missing while it built the program.
+        this.hostProbes = new InputRecorder();
+        this.analysisInputs = new InputRecorder();
         this.applyConfiguration(loadCompilerOptions(rootPath));
         const self = this;
         this.serviceHost = {
@@ -510,8 +615,15 @@ class Workspace {
             fileExists: fileName => self.hasFile(fileName) || ts.sys.fileExists(fileName),
             readFile: fileName => self.getScriptSource(fileName)?.text ?? ts.sys.readFile(fileName),
             readDirectory: ts.sys.readDirectory,
-            directoryExists: ts.sys.directoryExists,
-            getDirectories: ts.sys.getDirectories,
+            directoryExists: directoryName => {
+                const exists = ts.sys.directoryExists(directoryName);
+                if (!exists) self.hostProbes.probe(directoryName, false);
+                return exists;
+            },
+            getDirectories: directoryName => {
+                self.hostProbes.read(directoryName);
+                return ts.sys.getDirectories(directoryName);
+            },
             resolveModuleNames: (moduleNames, containingFile) => {
                 // Library files resolve imports too; only the workspace's are asked about.
                 const key = canonicalKey(containingFile);
@@ -520,17 +632,102 @@ class Workspace {
                     targets = new Map();
                     self.moduleTargets.set(key, targets);
                 }
-                return moduleNames.map(moduleName => {
-                    const resolved = self.resolveModule(moduleName, containingFile);
-                    targets?.set(moduleName, resolved?.resolvedFileName);
-                    return resolved;
-                });
+                const looked = { files: new Set(), absent: new Set() };
+                self.resolving = looked;
+                try {
+                    return moduleNames.map(moduleName => {
+                        const resolved = self.resolveModule(moduleName, containingFile);
+                        targets?.set(moduleName, resolved?.resolvedFileName);
+                        return resolved;
+                    });
+                } finally {
+                    self.resolving = undefined;
+                    self.resolutionInputs.set(key, { files: [...looked.files], absent: [...looked.absent] });
+                }
             },
         };
         this.service = ts.createLanguageService(this.serviceHost, ts.createDocumentRegistry());
     }
 
+    /** `ts.resolveModuleName`, with what it looked at kept for the file being resolved. */
+    resolveModuleName(moduleName, containingFile, options) {
+        const result = ts.resolveModuleName(moduleName, containingFile, options, this.serviceHost);
+        if (this.resolving) {
+            for (const location of result.failedLookupLocations ?? []) this.resolving.absent.add(this.lookedAt(location));
+            for (const location of result.affectingLocations ?? []) this.resolving.files.add(this.lookedAt(location));
+        }
+        return result.resolvedModule;
+    }
+
+    /** A location in full, as one string for as long as the configuration stands: library
+     * files look in the same node_modules folders by the thousand and every analysis names
+     * the same paths again, and a string met before costs `collectInputs` no new resolving
+     * or hashing. */
+    lookedAt(location) {
+        let full = this.lookedLocations.get(location);
+        if (full === undefined) {
+            full = path.resolve(location);
+            this.lookedLocations.set(location, full);
+        }
+        return full;
+    }
+
+    /** Reads the configs again, and starts a new language service, when one of them changed
+     * since it was read (an edit, a config that appeared where none was): aliases and
+     * options decide how every import resolves, and an unchanged file keeps its old
+     * resolutions in the old service. */
+    reloadConfigurationIfChanged() {
+        if (!this.configInputs.changed()) return false;
+        this.applyConfiguration(loadCompilerOptions(this.rootPath));
+        this.moduleTargets = new Map();
+        this.resolutionInputs = new Map();
+        this.lookedLocations = new Map();
+        this.hostProbes = new InputRecorder();
+        this.service = ts.createLanguageService(this.serviceHost, ts.createDocumentRegistry());
+        return true;
+    }
+
+    /** Everything the facts of the last analysis were read from besides the approved files,
+     * as protocol `inputs`: the configs, what module resolution looked at, the library and
+     * declaration files the program holds, and the directories the compiler listed or found
+     * missing. The compiler's own files, beside this worker, are left out, and so is every
+     * path the disk guard refuses. An absent path stands for everything below it, so only
+     * the highest absent directory of each is named (`highestAbsent`). In no order, and each
+     * path once: the host sorts what it keeps. */
+    collectInputs(program) {
+        const files = new Set();
+        const absent = new Set();
+        const own = canonicalKey(__dirname) + path.sep;
+        const keep = (set, fileName) => {
+            const full = this.lookedAt(fileName);
+            const key = process.platform === 'win32' ? full.toLowerCase() : full;
+            if (!this.files.has(key) && !key.startsWith(own)) set.add(full);
+        };
+        for (const recorder of [this.configInputs, this.hostProbes, this.analysisInputs]) {
+            for (const fileName of recorder.files.keys()) keep(files, fileName);
+            for (const fileName of recorder.absent) keep(absent, fileName);
+        }
+        const sourceFiles = program.getSourceFiles();
+        const inProgram = new Set(sourceFiles.map(file => canonicalKey(file.fileName)));
+        for (const file of sourceFiles) keep(files, file.fileName);
+        // Most of these are named by many files: gathered as they are, then judged once each.
+        const lookedFiles = new Set();
+        const lookedAbsent = new Set();
+        for (const [key, looked] of this.resolutionInputs) {
+            if (!inProgram.has(key)) continue;
+            for (const fileName of looked.files) lookedFiles.add(fileName);
+            for (const fileName of looked.absent) lookedAbsent.add(fileName);
+        }
+        for (const fileName of lookedFiles) keep(files, fileName);
+        for (const fileName of lookedAbsent) keep(absent, fileName);
+        for (const fileName of files) absent.delete(fileName);
+        // The host looks at each of these with no guard of its own, so a path this worker may
+        // not read (it looked absent, and stays so) is not named to it.
+        return { files: disk.readable([...files]), absent: disk.readable(highestAbsent(absent, files)) };
+    }
+
     applyConfiguration(loaded) {
+        this.configInputs = loaded.inputs;
         this.compilerOptions = loaded.options;
         this.configDiagnostic = loaded.diagnostic;
         // Each scope resolves with its own config's `paths`, relative to that config.
@@ -556,11 +753,11 @@ class Workspace {
         let scope;
         for (const name of ['tsconfig.json', 'jsconfig.json']) {
             const configPath = path.join(directory, name);
-            if (!fs.existsSync(configPath)) continue;
+            if (!this.configInputs.probe(configPath, fs.existsSync(configPath))) continue;
             const known = this.aliasScopes.find(
                 candidate => canonicalKey(candidate.configPath) === canonicalKey(configPath));
             try {
-                scope = known ?? readAliasConfig(configPath).scope;
+                scope = known ?? readAliasConfig(configPath, this.configInputs).scope;
             } catch {
                 scope = undefined;
             }
@@ -579,7 +776,7 @@ class Workspace {
         let scope;
         for (const name of BUNDLER_CONFIGS) {
             const configPath = path.join(directory, name);
-            if (!fs.existsSync(configPath)) continue;
+            if (!this.configInputs.probe(configPath, fs.existsSync(configPath))) continue;
             try {
                 const { paths, skipped } = readBundlerAliases(configPath);
                 if (Object.keys(paths).length > 0) {
@@ -726,8 +923,7 @@ class Workspace {
                     pattern => pattern !== '*' && matchPathPattern(pattern, moduleName) !== undefined)) {
                     continue;
                 }
-                const scoped = ts.resolveModuleName(
-                    moduleName, containingFile, scope.options, this.serviceHost).resolvedModule;
+                const scoped = this.resolveModuleName(moduleName, containingFile, scope.options);
                 if (scoped) return scoped;
             }
             return undefined;
@@ -737,7 +933,7 @@ class Workspace {
         // references. One outside the directories that hold the importing file is
         // honoured only once the root config has failed to resolve the import.
         const resolved = resolveIn(inner)
-            ?? ts.resolveModuleName(moduleName, containingFile, this.compilerOptions, this.serviceHost).resolvedModule
+            ?? this.resolveModuleName(moduleName, containingFile, this.compilerOptions)
             ?? resolveIn(outer);
         if (resolved) return resolved;
 
@@ -800,6 +996,7 @@ class Workspace {
      * declaration file generated since (one the host does not watch) is read again. */
     beginAnalysis() {
         this.directoryComponents = new Map();
+        this.analysisInputs = new InputRecorder();
     }
 
     /** The components declared by the generated files of one directory: name to the
@@ -815,8 +1012,10 @@ class Workspace {
             try {
                 stamp = fs.statSync(declarationPath).mtimeMs;
             } catch {
+                this.analysisInputs.probe(declarationPath, false);
                 continue;
             }
+            this.analysisInputs.read(declarationPath);
             const cacheKey = canonicalKey(declarationPath);
             let read = this.componentDeclarations.get(cacheKey);
             if (read?.stamp !== stamp) {
@@ -1011,15 +1210,6 @@ function matchPathPattern(pattern, moduleName) {
 const MAX_NESTED_CONFIG_DEPTH = 64;
 const MAX_REFERENCED_CONFIGS = 32;
 
-// Reads a config for its compilerOptions alone. The host approves the file set, so a
-// config's `include` is never expanded and reading one never walks a directory.
-const OPTIONS_ONLY_CONFIG_HOST = {
-    useCaseSensitiveFileNames: ts.sys.useCaseSensitiveFileNames,
-    fileExists: ts.sys.fileExists,
-    readFile: ts.sys.readFile,
-    readDirectory: () => [],
-};
-
 // The bundler configs whose `resolve.alias` is read, in the order a directory is asked.
 const BUNDLER_CONFIGS = [
     'vite.config.ts', 'vite.config.mts', 'vite.config.js', 'vite.config.mjs', 'vite.config.cjs',
@@ -1183,7 +1373,7 @@ function readGlobalComponents(declarationPath) {
  * A solution-style root config (`"files": []` plus `references`) declares no aliases of
  * its own; the projects it references do.
  */
-function loadAliasScopes(configPaths) {
+function loadAliasScopes(configPaths, recorder) {
     const scopes = [];
     const visited = new Set();
     const pending = [...configPaths];
@@ -1193,11 +1383,12 @@ function loadAliasScopes(configPaths) {
             if (fs.statSync(configPath).isDirectory()) configPath = path.join(configPath, 'tsconfig.json');
             if (visited.has(canonicalKey(configPath))) continue;
             visited.add(canonicalKey(configPath));
-            const read = readAliasConfig(configPath);
+            const read = readAliasConfig(configPath, recorder);
             if (read.scope) scopes.push(read.scope);
             pending.push(...read.references);
         } catch {
             // A reference to a missing or unreadable config declares no aliases.
+            recorder.read(configPath);
         }
     }
     return scopes;
@@ -1205,11 +1396,12 @@ function loadAliasScopes(configPaths) {
 
 /** The alias scope one config declares (undefined when it has no `paths`, its own or
  * inherited) and the configs it references. Throws when the file cannot be read. */
-function readAliasConfig(configPath) {
-    const read = ts.readConfigFile(configPath, ts.sys.readFile);
+function readAliasConfig(configPath, recorder) {
+    const host = recordingConfigHost(recorder);
+    const read = ts.readConfigFile(configPath, host.readFile);
     if (read.error) return { scope: undefined, references: [] };
     const directory = path.dirname(configPath);
-    const parsed = ts.parseJsonConfigFileContent(read.config, OPTIONS_ONLY_CONFIG_HOST, directory);
+    const parsed = ts.parseJsonConfigFileContent(read.config, host, directory);
     const scope = parsed.options.paths
         ? {
             configPath,
@@ -1236,7 +1428,10 @@ function loadCompilerOptions(rootPath) {
         noEmit: true,
     };
     let configPath = path.join(rootPath, 'tsconfig.json');
+    const inputs = new InputRecorder();
+    const host = recordingConfigHost(inputs);
     const fallbackDiagnostic = message => ({
+        inputs,
         options: defaults,
         aliasScopes: [],
         diagnostic: {
@@ -1248,21 +1443,23 @@ function loadCompilerOptions(rootPath) {
     try {
         // A JavaScript project declares its options and aliases in jsconfig.json.
         const jsConfigPath = path.join(rootPath, 'jsconfig.json');
-        if (!fs.existsSync(configPath) && fs.existsSync(jsConfigPath)) configPath = jsConfigPath;
+        if (!inputs.probe(configPath, fs.existsSync(configPath)) && inputs.probe(jsConfigPath, fs.existsSync(jsConfigPath))) {
+            configPath = jsConfigPath;
+        }
         let options = defaults;
         // Nuxt builds with aliases (`~`, `@`) that only the config it generates declares,
         // and a project need not extend or reference that config, or have one at all.
         const aliasConfigs = [path.join(rootPath, '.nuxt', 'tsconfig.json')];
         if (fs.existsSync(configPath)) {
-            const read = ts.readConfigFile(configPath, ts.sys.readFile);
+            const read = ts.readConfigFile(configPath, host.readFile);
             if (read.error) {
                 return fallbackDiagnostic(ts.flattenDiagnosticMessageText(read.error.messageText, ' '));
             }
-            const parsed = ts.parseJsonConfigFileContent(read.config, OPTIONS_ONLY_CONFIG_HOST, rootPath);
+            const parsed = ts.parseJsonConfigFileContent(read.config, host, rootPath);
             options = { ...defaults, ...parsed.options, noEmit: true };
             aliasConfigs.unshift(...(parsed.projectReferences ?? []).map(reference => reference.path));
         }
-        return { options, aliasScopes: loadAliasScopes(aliasConfigs), diagnostic: undefined };
+        return { inputs, options, aliasScopes: loadAliasScopes(aliasConfigs, inputs), diagnostic: undefined };
     } catch (error) {
         return fallbackDiagnostic(error.message);
     }
@@ -2231,7 +2428,7 @@ async function analyzeWorkspace(workspace, workspaceId, token, progressContext =
         edges: filterOwned(raw.edges, e => e.id, edgeOwner, raw.path),
     }));
 
-    return { buckets, diagnostics };
+    return { buckets, diagnostics, inputs: workspace.collectInputs(program) };
 }
 
 async function emitAnalysisProgress(requestId, workspaceId, generation,
@@ -2255,7 +2452,7 @@ async function emitAnalysisProgress(requestId, workspaceId, generation,
  * mutation), so an empty incremental batch still sends a single terminal delta carrying
  * only its replacesFiles. Diagnostics ride on the first chunk only.
  */
-async function emitDeltas(requestId, workspaceId, generation, nodes, edges, replacesWorkspace, replacesFiles, diagnostics, token) {
+async function emitDeltas(requestId, workspaceId, generation, nodes, edges, replacesWorkspace, replacesFiles, diagnostics, inputs, token) {
     const chunk = (items, size) => {
         const chunks = [];
         for (let offset = 0; offset < items.length; offset += size) {
@@ -2282,6 +2479,8 @@ async function emitDeltas(requestId, workspaceId, generation, nodes, edges, repl
             edges: edgeIndex >= 0 && edgeIndex < edgeChunks.length ? edgeChunks[edgeIndex] : [],
             isLastForRequest: i === totalChunks - 1,
             diagnostics: i === 0 && diagnostics.length > 0 ? diagnostics : undefined,
+            // What these facts were read from besides the workspace's files (protocol `inputs`).
+            inputs: i === 0 ? inputs : undefined,
         });
     }
     return totalChunks;
@@ -2348,11 +2547,12 @@ handlers.set('workspace/index', async (id, params, token) => {
     const index = requireParams(params);
     disk.forget();
     const workspace = getWorkspace(index.workspaceId);
+    workspace.reloadConfigurationIfChanged();
     workspace.replaceFiles(index.files || []);
     // Whole-workspace (index/reset) path: walk everything, seed the per-file hash
     // baseline, and replace the whole workspace (replacesWorkspace:true, empty
     // replacesFiles). The deduped buckets feed both the flat emission and the seed.
-    const { buckets, diagnostics } = await analyzeWorkspace(
+    const { buckets, diagnostics, inputs } = await analyzeWorkspace(
         workspace, index.workspaceId, token, { requestId: id, generation: index.generation });
     const nodes = [];
     const edges = [];
@@ -2361,7 +2561,7 @@ handlers.set('workspace/index', async (id, params, token) => {
         edges.push(...bucket.edges);
     }
     const deltasEmitted = await emitDeltas(
-        id, index.workspaceId, index.generation, nodes, edges, true, [], diagnostics, token);
+        id, index.workspaceId, index.generation, nodes, edges, true, [], diagnostics, inputs, token);
     // Seed only after every chunk was sent, mirroring the incremental path's
     // commit-after-send rule: a cancelled mid-index emission must not leave the
     // hash baseline claiming facts the host never received.
@@ -2378,6 +2578,8 @@ handlers.set('workspace/applyChanges', async (id, params, token) => {
     const apply = requireParams(params);
     disk.forget();
     const workspace = getWorkspace(apply.workspaceId);
+    // A config edit (routed here as an empty change list) or one noticed with a file edit.
+    workspace.reloadConfigurationIfChanged();
     workspace.applyChanges(apply.changes || []);
     // Incremental path: re-walk the whole workspace for cross-file binding correctness
     // (a one-file edit can change semantic resolution in untouched dependents — the
@@ -2388,11 +2590,11 @@ handlers.set('workspace/applyChanges', async (id, params, token) => {
     // free: an untouched dependent whose edge target changed hashes differently and joins
     // the dirty set. The hash map is committed only after every chunk is accepted, so a
     // failed send cannot desync it.
-    const { buckets, diagnostics } = await analyzeWorkspace(workspace, apply.workspaceId, token);
+    const { buckets, diagnostics, inputs } = await analyzeWorkspace(workspace, apply.workspaceId, token);
     const emission = workspace.buildIncrementalEmission(buckets);
     const deltasEmitted = await emitDeltas(
         id, apply.workspaceId, apply.generation,
-        emission.nodes, emission.edges, false, emission.replacesFiles, diagnostics, token);
+        emission.nodes, emission.edges, false, emission.replacesFiles, diagnostics, inputs, token);
     workspace.commitIncremental(emission);
     return {
         workspaceId: apply.workspaceId,

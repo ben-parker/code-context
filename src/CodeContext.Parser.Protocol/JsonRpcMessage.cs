@@ -23,7 +23,12 @@ public sealed class JsonRpcMessage
     [JsonPropertyName("params")]
     public JsonElement? Params { get; set; }
 
+    /// <summary>
+    /// The result; a JSON <c>null</c> (the schema's result of <c>shutdown</c>) is a present element of kind
+    /// <see cref="JsonValueKind.Null"/>, so a response that carries it has a result. Absent when the member is.
+    /// </summary>
     [JsonPropertyName("result")]
+    [JsonConverter(typeof(PresentNullJsonElementConverter))]
     public JsonElement? Result { get; set; }
 
     [JsonPropertyName("error")]
@@ -37,6 +42,25 @@ public sealed class JsonRpcMessage
 
     [JsonIgnore]
     public bool IsNotification => Id is null && Method is not null;
+}
+
+/// <summary>
+/// Reads a member written as JSON <c>null</c> as an element of kind <see cref="JsonValueKind.Null"/>, not as no value:
+/// for a nullable <see cref="JsonElement"/> the serializer otherwise makes the two the same, and a response's
+/// <c>"result": null</c> would read as a response with neither result nor error. A member left out stays null.
+/// </summary>
+public sealed class PresentNullJsonElementConverter : JsonConverter<JsonElement?>
+{
+    public override bool HandleNull => true;
+
+    public override JsonElement? Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+        => JsonElement.ParseValue(ref reader);
+
+    public override void Write(Utf8JsonWriter writer, JsonElement? value, JsonSerializerOptions options)
+    {
+        if (value is { } element) element.WriteTo(writer);
+        else writer.WriteNullValue();
+    }
 }
 
 public sealed class JsonRpcError

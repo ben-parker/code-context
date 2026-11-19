@@ -55,6 +55,12 @@ namespace CodeContext.Core.Snapshots
         Guid InstanceId)
     {
         public bool PathsCaseInsensitive => (Flags & SnapshotFormat.FlagPathsCaseInsensitive) != 0;
+
+        /// <summary><see cref="SnapshotFormat.FlagUnverified"/>: never answered from without a worker.</summary>
+        public bool Unverified => (Flags & SnapshotFormat.FlagUnverified) != 0;
+
+        /// <summary>The root directory's change time the writer saw after making its cache directory; 0 for none.</summary>
+        public long RootTimeTicks { get; init; }
     }
 
     /// <summary>The outcome of <see cref="SnapshotFile.Open"/>: an opened file, or the check that refused it.</summary>
@@ -494,7 +500,10 @@ namespace CodeContext.Core.Snapshots
                 SnapshotFormat.ReadU32(bytes, SnapshotFormat.HeaderShardCount),
                 // Checked against the file when the directory is validated; clamped so it stays a long.
                 (long)Math.Min(SnapshotFormat.ReadU64(bytes, SnapshotFormat.HeaderShardDirectoryOffset), long.MaxValue),
-                new Guid(bytes.Slice(SnapshotFormat.HeaderInstanceId, 16)));
+                new Guid(bytes.Slice(SnapshotFormat.HeaderInstanceId, 16)))
+            {
+                RootTimeTicks = BinaryPrimitives.ReadInt64LittleEndian(bytes[SnapshotFormat.HeaderRootTimeTicks..]),
+            };
             return null;
         }
 

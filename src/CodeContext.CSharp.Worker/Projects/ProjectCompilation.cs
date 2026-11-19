@@ -33,19 +33,26 @@ internal sealed class ProjectCompilation
     private readonly Dictionary<string, SyntaxTree> _trees = new(PathComparer);
     private SyntaxTree? _generatedTree;
     private HashSet<string> _signedFriends = new(StringComparer.Ordinal);
-    private readonly ImmutableArray<MetadataReference> _metadataReferences;
+    private ImmutableArray<MetadataReference> _metadataReferences;
+    private Func<ImmutableArray<MetadataReference>>? _deferredReferences;
 
+    /// <param name="deferredReferences">
+    /// References that go before <paramref name="metadataReferences"/> but are only taken when the first
+    /// file arrives: a unit with no files binds nothing, so until then they would only hold memory.
+    /// </param>
     public ProjectCompilation(
         ProjectInfo? project,
         string idPrefix,
         CSharpParseOptions parseOptions,
         ImmutableArray<MetadataReference> metadataReferences,
-        string fallbackUsings = "")
+        string fallbackUsings = "",
+        Func<ImmutableArray<MetadataReference>>? deferredReferences = null)
     {
         Project = project;
         IdPrefix = idPrefix;
         ParseOptions = parseOptions;
         _metadataReferences = metadataReferences;
+        _deferredReferences = deferredReferences;
         _generatedTree = (project is null ? fallbackUsings : GeneratedSource(project, _signedFriends)) is { Length: > 0 } text
             ? CSharpSyntaxTree.ParseText(text, parseOptions, path: $"{Qualifier}.Project.g.cs")
             : null;
@@ -112,6 +119,7 @@ internal sealed class ProjectCompilation
     /// </summary>
     public bool SetText(string path, SourceText text)
     {
+        TakeDeferredReferences();
         var tree = CSharpSyntaxTree.ParseText(text, ParseOptions, path);
         if (!_trees.TryGetValue(path, out var old))
         {
@@ -131,9 +139,23 @@ internal sealed class ProjectCompilation
     /// <summary>Takes over a tree parsed with these options, sparing a reparse.</summary>
     public void Adopt(string path, SyntaxTree tree)
     {
+        TakeDeferredReferences();
         Compilation = Compilation.AddSyntaxTrees(tree);
         _trees[path] = tree;
         Changed = true;
+    }
+
+    /// <summary>
+    /// Puts the deferred references in front of those the compilation has, which is where they would
+    /// have been from the start: the compilation is then the one an eager unit would hold.
+    /// </summary>
+    private void TakeDeferredReferences()
+    {
+        if (_deferredReferences is not { } deferred) return;
+        _deferredReferences = null;
+        var taken = deferred();
+        _metadataReferences = taken.AddRange(_metadataReferences);
+        Compilation = Compilation.WithReferences(taken.AddRange(Compilation.ExternalReferences));
     }
 
     public bool Remove(string path)
@@ -185,10 +207,22 @@ internal sealed class ProjectCompilation
     public void RefreshReferences()
     {
         if (References.Count == 0 || !(Changed || References.Exists(reference => reference.Changed))) return;
-        Compilation = Compilation.WithReferences(
-            _metadataReferences.AddRange(References.Select(reference => (MetadataReference)reference.Compilation.ToMetadataReference())));
+        Compilation = Compilation.WithReferences(CurrentReferences());
         Changed = true;
     }
+
+    /// <summary>
+    /// Lets go of everything the compilation has bound (declared symbols, member tables, what it read of its
+    /// references), which after a full walk is most of what a unit holds, and keeps the trees, options and
+    /// references: a compilation made over again from the same parts binds the same, when next asked. The units
+    /// this one references must have been released first, so it points at their new compilations and not at the
+    /// ones let go. Says nothing changed, because nothing a walk would see has.
+    /// </summary>
+    public void ReleaseBoundState()
+        => Compilation = References.Count == 0 ? Compilation.Clone() : Compilation.WithReferences(CurrentReferences());
+
+    private ImmutableArray<MetadataReference> CurrentReferences()
+        => _metadataReferences.AddRange(References.Select(reference => (MetadataReference)reference.Compilation.ToMetadataReference()));
 
     public void ClearChanged() => Changed = false;
 }

@@ -49,17 +49,9 @@ internal sealed class ShardReadMatrix
         identifier => shard.TryGetNodeIdByIdentifier(identifier, out var id) ? id : null,
         id => shard.TryGetEdge(id, out var edge) ? edge : null,
         shard.GetEdgesBySource, shard.GetEdgesByTarget, shard.FindNodesByName, shard.FindNodesByPath,
-        shard.GetFilePaths, shard.AddStatistics, shard.GetCrossShardEdgeIds, shard.GetAllNodes, shard.GetAllEdges);
+        shard.GetFilePaths, shard.AddStatistics, () => shard.GetCrossShardEdges().Select(edge => edge.Id!), shard.GetAllNodes, shard.GetAllEdges);
 
     /// <summary>The snapshot reader's in-place accessors, each asked directly (no materialized shard).</summary>
-    public static ShardReadMatrix Of(SnapshotShardReader reader) => new(
-        () => reader.NodeCount, () => reader.EdgeCount,
-        id => reader.TryGetNode(id, out var node) ? node : null,
-        identifier => reader.TryGetNodeIdByIdentifier(identifier, out var id) ? id : null,
-        id => reader.TryGetEdge(id, out var edge) ? edge : null,
-        reader.GetEdgesBySource, reader.GetEdgesByTarget, reader.FindNodesByName, reader.FindNodesByPath,
-        reader.GetFilePaths, reader.AddStatistics, reader.GetCrossShardEdgeIds, reader.GetAllNodes, reader.GetAllEdges);
-
     /// <summary>The vocabulary a shard's matrix asks about: its own facts, variants of them, and misses.</summary>
     public sealed record Vocabulary(
         IReadOnlyList<string> NodeIds, IReadOnlyList<string> EdgeIds, IReadOnlyList<string> Identifiers,

@@ -29,6 +29,8 @@
     <ServerGarbageCollection>false</ServerGarbageCollection>
     <!-- The worker reaches the file system only through Projects/Disk.cs: see BannedSymbols.txt. -->
     <WarningsAsErrors>$(WarningsAsErrors);RS0030</WarningsAsErrors>
+    <!-- Memory/QuietTimeTrim.cs is shared with the host; this symbol gives the worker's copy its own namespace. -->
+    <DefineConstants>$(DefineConstants);CODECONTEXT_CSHARP_WORKER</DefineConstants>
   </PropertyGroup>
 
   <ItemGroup>
@@ -52,6 +54,11 @@
 
   <ItemGroup>
     <AdditionalFiles Include="BannedSymbols.txt" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The quiet-time memory trim, one source with the host (the worker must not reference Core). -->
+    <Compile Include="..\CodeContext.Core\Memory\QuietTimeTrim.cs" Link="Memory\QuietTimeTrim.cs" />
   </ItemGroup>
 
 </Project>

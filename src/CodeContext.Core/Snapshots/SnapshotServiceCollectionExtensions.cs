@@ -1,4 +1,5 @@
 using System.Globalization;
+using CodeContext.Core.Memory;
 using CodeContext.Core.Repositories;
 using CodeContext.Core.Repositories.InMemory;
 using CodeContext.Core.Services;
@@ -44,7 +45,8 @@ namespace CodeContext.Core.Snapshots
                     sp.GetService<IAnalysisCoverageRegistry>(),
                     workers is null ? null : workers.IsIndexedParser,
                     workers is null ? null : workers.MarkLoadedFromSnapshot,
-                    sp.GetRequiredService<ILogger<SnapshotService>>());
+                    sp.GetRequiredService<ILogger<SnapshotService>>(),
+                    workers?.WorkerSetFingerprint());
             });
             services.AddSingleton(sp =>
             {
@@ -64,7 +66,12 @@ namespace CodeContext.Core.Snapshots
                 TimeProvider.System,
                 sp.GetRequiredService<ILogger<SnapshotService>>(),
                 sp.GetRequiredService<CacheState>(),
-                sp.GetService<LanguageWorkerService>()));
+                sp.GetService<LanguageWorkerService>(),
+                sp.GetService<QuietTimeTrim>(),
+                sp.GetService<LanguageWorkerService>() is { } workers
+                    ? (capturedUtc, inputs, rootTimeTicks) => SnapshotFreshness.For(
+                        sp.GetRequiredService<IOptions<CodeContextOptions>>().Value, workers, capturedUtc, inputs, rootTimeTicks)
+                    : null));
             services.AddHostedService(sp => sp.GetRequiredService<SnapshotService>());
             return services;
         }
