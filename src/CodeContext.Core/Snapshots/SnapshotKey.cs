@@ -34,7 +34,7 @@ namespace CodeContext.Core.Snapshots
         public static byte[] LoadOrCreate(string path)
         {
             ArgumentException.ThrowIfNullOrEmpty(path);
-            if (TryRead(path, out var existing)) return existing;
+            if (TryReadWhole(path, out var existing)) return existing;
 
             var directory = Path.GetDirectoryName(Path.GetFullPath(path));
             if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
@@ -43,34 +43,77 @@ namespace CodeContext.Core.Snapshots
                 else Directory.CreateDirectory(directory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
             }
 
-            // Written to a private temp name and moved into place without overwrite, so a concurrent
-            // reader never sees a short key and two creators agree on the one that won.
+            // The key file itself is created exclusively (O_CREAT | O_EXCL on Unix, CREATE_NEW on
+            // Windows), so exactly one concurrent creator, thread or process, wins and every other one
+            // reads the winner's key. A rename into place cannot promise that: .NET's
+            // File.Move(overwrite: false) on Unix checks for the destination and then calls rename(2),
+            // which replaces a file another creator published in between. A loser may open the file
+            // before the winner's single write lands; TryReadWhole waits for the whole key.
             var key = RandomNumberGenerator.GetBytes(Length);
-            var temp = $"{path}.{Guid.NewGuid():N}.tmp";
+            FileStream stream;
             try
             {
-                using (var stream = new FileStream(temp, CreateOptions()))
+                stream = new FileStream(path, CreateOptions());
+            }
+            catch (IOException) when (File.Exists(path))
+            {
+                if (TryReadWhole(path, out var winner)) return winner;
+                throw new IOException("The snapshot key could not be created.");
+            }
+            try
+            {
+                using (stream)
                 {
                     stream.Write(key);
                     stream.Flush(flushToDisk: true);
                 }
+            }
+            catch
+            {
+                // A short file left behind would be refused on every later start; take it away.
+                try { File.Delete(path); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+                throw;
+            }
+            return key;
+        }
+
+        /// <summary>How long a reader waits for a key file shorter than a key to receive the rest of it.</summary>
+        private static readonly TimeSpan PartialKeyWait = TimeSpan.FromSeconds(2);
+
+        /// <summary>
+        /// <see cref="TryRead"/>, except that a file shorter than a key may be one a concurrent first
+        /// user has just created and not yet written: it is read again until it holds a whole key or
+        /// <see cref="PartialKeyWait"/> passes, and refused after that. A file longer than a key, or one
+        /// that stays short, is not a key and is never overwritten.
+        /// </summary>
+        private static bool TryReadWhole(string path, out byte[] key)
+        {
+            var deadline = DateTime.UtcNow + PartialKeyWait;
+            while (true)
+            {
                 try
                 {
-                    File.Move(temp, path, overwrite: false);
-                    return key;
+                    return TryRead(path, out key);
                 }
-                catch (IOException) when (File.Exists(path))
+                catch (InvalidDataException) when (DateTime.UtcNow < deadline && !IsLongerThanAKey(path))
                 {
-                    // Another process created the key first; use that one.
+                    Thread.Sleep(10);
                 }
             }
-            finally
-            {
-                TryDelete(temp);
-            }
+        }
 
-            if (TryRead(path, out var winner)) return winner;
-            throw new IOException("The snapshot key could not be created.");
+        // Not "shorter than": the winner's write may land between TryRead's length check and this one,
+        // and a file that has just become a whole key is read again, not refused.
+        private static bool IsLongerThanAKey(string path)
+        {
+            try
+            {
+                return new FileInfo(path).Length > Length;
+            }
+            catch (IOException)
+            {
+                return true;
+            }
         }
 
         /// <summary>
@@ -84,7 +127,10 @@ namespace CodeContext.Core.Snapshots
         {
             key = Array.Empty<byte>();
             if (!File.Exists(path)) return false;
-            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            // FileShare.ReadWrite: on Windows a first user may still hold the file open for writing
+            // its key, and a reader that shared only reading would fail with a sharing violation
+            // instead of seeing the short file and waiting for the rest.
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
             if (!OperatingSystem.IsWindows())
             {
                 var mode = File.GetUnixFileMode(stream.SafeFileHandle);
@@ -107,24 +153,13 @@ namespace CodeContext.Core.Snapshots
             {
                 Mode = FileMode.CreateNew,
                 Access = FileAccess.Write,
-                Share = FileShare.None,
+                // Readable while it is written (see TryRead), so a concurrent first user on Windows
+                // sees a short file and waits for the rest rather than failing with a sharing violation.
+                Share = FileShare.Read,
             };
             if (!OperatingSystem.IsWindows()) options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
             return options;
         }
 
-        private static void TryDelete(string path)
-        {
-            try
-            {
-                if (File.Exists(path)) File.Delete(path);
-            }
-            catch (IOException)
-            {
-            }
-            catch (UnauthorizedAccessException)
-            {
-            }
-        }
     }
 }
