@@ -41,7 +41,8 @@ namespace CodeContext.Core.Snapshots
     /// any shard refuses the whole file; nothing is half-loaded. Refused as
     /// <see cref="SnapshotRejection.Structure"/>, besides every check of the reader: a node id, an edge id
     /// or a (non-blank) identifier in two records, of one shard or of two; and a shard that fails
-    /// <see cref="SnapshotWriter.CheckPersistable(ShardKey, IGraphShard)"/>, the writer's own rule.
+    /// <see cref="SnapshotWriter.CheckPersistable(ShardKey, IGraphShard)"/>, the writer's own rule (asked through
+    /// <see cref="SnapshotWriter.CheckLoaded"/>, which leaves out what the reader already guarantees).
     /// </summary>
     internal static class SnapshotLoader
     {
@@ -109,9 +110,9 @@ namespace CodeContext.Core.Snapshots
 
                 // The writer's own persistability rule, over the materialized facts: re-signed damage that
                 // passes every structural check (a null source, an id without the shard's prefix, a null
-                // identifier) still never becomes a published fact.
-                var reason = SnapshotWriter.CheckPersistable(
-                    reader.Key, nodes.Count, edges.Length, nodes, edges, state.TryGetNodeIdByIdentifier);
+                // identifier) still never becomes a published fact. Only the clauses the reader and the loop
+                // above do not already guarantee are asked (SnapshotWriter.CheckLoaded says which and why).
+                var reason = SnapshotWriter.CheckLoaded(reader.Key, nodes.Count, edges.Length, nodes, edges);
                 if (reason is not null)
                     throw new SnapshotCorruptException($"Shard {reader.Key} holds a fact the writer never writes: {reason}.");
                 // The next write of this shard, unchanged, need not walk every fact again (SnapshotWriter.Plan).

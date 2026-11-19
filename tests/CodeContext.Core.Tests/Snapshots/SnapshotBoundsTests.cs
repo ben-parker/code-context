@@ -335,6 +335,11 @@ public class SnapshotBoundsTests
     {
         var loaded = SnapshotLoader.Materialize(file);
         Assert.True(loaded.Loaded || loaded.Rejection == SnapshotRejection.Structure, $"{context}: refused as {loaded.Rejection}");
+        // The loader checks only what the reader does not already guarantee; whatever it lets through, the writer's
+        // whole rule, run over the loaded facts, lets through as well.
+        foreach (var published in loaded.Shards)
+            Assert.True(SnapshotWriter.CheckPersistable(published.Key, published.Shard) is null,
+                $"{context}: loaded a shard the writer would not write: {SnapshotWriter.CheckPersistable(published.Key, published.Shard)}");
         foreach (var reader in file.Shards)
         {
             for (var i = 0; i < Math.Min(reader.NodeCount, 64); i++) Read(() => reader.ReadNode(i), context);

@@ -409,6 +409,41 @@ namespace CodeContext.Core.Snapshots
             return null;
         }
 
+        /// <summary>
+        /// <see cref="CheckPersistable(ShardKey, IGraphShard)"/> for facts <see cref="SnapshotShardReader"/> has just
+        /// built from an authenticated file, with the same reasons: the clauses a damaged but re-signed file can still
+        /// break. The others hold for every fact that reader returns, so they are not asked again of each one:
+        /// metadata is always a <see cref="FactMetadata"/>, hence ordinal; its <c>parserId</c> and <c>workspaceId</c> are
+        /// the shard key's, added by the reader, which refuses a stored set that repeats them; every string was decoded
+        /// from bytes it checked to be valid UTF-8, or is a number it formatted, so none holds a lone surrogate; and a
+        /// non-blank identifier resolves to its node because the loader has just entered it in the shard's identifier
+        /// map, refusing a second holder. <c>SnapshotBoundsTests</c> runs the whole rule over everything this lets through.
+        /// </summary>
+        internal static string? CheckLoaded(ShardKey key, int nodeCount, int edgeCount, IReadOnlyList<CodeNode> nodes, CodeEdge[] edges)
+        {
+            if (key == ShardKey.Default || string.IsNullOrEmpty(key.ParserId) || string.IsNullOrEmpty(key.WorkspaceId))
+                return "the un-owned default shard is never persisted";
+            if (nodeCount == 0 && edgeCount == 0) return "the shard holds no fact";
+            if (!SnapshotFormat.IsWellFormed(key.ParserId) || !SnapshotFormat.IsWellFormed(key.WorkspaceId))
+                return "the shard key is not well-formed UTF-16";
+
+            var prefix = $"{key.ParserId}:{Uri.EscapeDataString(key.WorkspaceId)}:";
+            foreach (var node in nodes)
+            {
+                if (node.Id is null || !node.Id.StartsWith(prefix, StringComparison.Ordinal))
+                    return $"node id '{node.Id}' does not start with '{prefix}'";
+                if (node.Identifier is null) return $"node '{node.Id}' has a null identifier";
+            }
+            foreach (var edge in edges)
+            {
+                if (edge.IdKey is not { } edgeKey || !EdgeIdKeys.StartsWith(edgeKey, prefix))
+                    return $"edge id '{edge.Id}' does not start with '{prefix}'";
+                if (edge.SourceId is null || !edge.SourceId.StartsWith(prefix, StringComparison.Ordinal))
+                    return $"source '{edge.SourceId}' of edge '{edge.Id}' does not start with '{prefix}'";
+            }
+            return null;
+        }
+
         private static bool WellFormedId(object key)
             => key is EdgeId parts
                 ? SnapshotFormat.IsWellFormed(parts.Source) && SnapshotFormat.IsWellFormed(parts.Middle)
