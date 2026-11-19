@@ -185,4 +185,42 @@ public class GraphSurfaceTests
         Assert.True(result.IsError);
         Assert.StartsWith(message, Text(result));
     }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("CALLS")]
+    [InlineData("calls")]
+    [InlineData("REFERENCES")]
+    [InlineData("MOCK_CALLS")]
+    [InlineData("IMPLEMENTS")]
+    [InlineData("INHERITS")]
+    [InlineData("EXTENDS")]
+    [InlineData("IMPORTS")]
+    [InlineData("USES")]
+    [InlineData("SOMETHING_NEW")]
+    [InlineData("HAS_METHOD")]
+    [InlineData("has_method")]
+    [InlineData("HAS_PROPERTY")]
+    [InlineData("HAS_FIELD")]
+    [InlineData("CONTAINS")]
+    [InlineData("Contains")]
+    [InlineData("IMPLEMENTS_MEMBER")]
+    [InlineData("implements_member")]
+    [InlineData("OVERRIDES_MEMBER")]
+    [InlineData("Overrides_Member")]
+    public void AWalksReadingOfAnEdgeKind_IsTheContextServices(string? type)
+    {
+        // The walks tell kinds apart without the case-insensitive sets; both must give every spelling the same role.
+        var expected = type is not null && ContextService.ContainmentEdgeKinds.Contains(type) ? GraphWalk.EdgeRole.Containment
+            : type is not null && ContextService.MethodFamilyEdgeKinds.Contains(type) ? GraphWalk.EdgeRole.Family
+            : GraphWalk.EdgeRole.Usage;
+        Assert.Equal(expected, GraphWalk.Role(type));
+    }
+
+    [Fact]
+    public void EveryContainmentAndFamilyKind_HasAFastCase()
+    {
+        foreach (var kind in ContextService.ContainmentEdgeKinds) Assert.Equal(GraphWalk.EdgeRole.Containment, GraphWalk.Role(kind));
+        foreach (var kind in ContextService.MethodFamilyEdgeKinds) Assert.Equal(GraphWalk.EdgeRole.Family, GraphWalk.Role(kind));
+    }
 }
