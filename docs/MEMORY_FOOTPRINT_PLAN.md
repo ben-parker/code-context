@@ -62,7 +62,7 @@ Findings that shape the plan:
 | M2a | Quiet-time trim (aggressive compacting GC after bursts), host and C# worker | done (`23bee8a`), reviewed |
 | M2b | Snapshot writer: no re-decode of snapshot-backed shards in `CheckPersistable` | done (`cb5de1e`), reviewed |
 | M2c | C# worker: fallback runtime references only when a file falls back (-57 MB) | done (`fb0e42f`), reviewed |
-| M2d | C# worker: metadata-only or mapped reference images (-56 to -85 MB), needs a Windows file-lock answer | not scheduled |
+| M2d | C# worker: reference assemblies held as metadata only, read through a stream closed before use so no handle stays on the file (jellyfin: worker anonymous memory 417 to 368 MB; an assembly of several modules outside the repository is still handed over as a file); Windows not run | not scheduled |
 | M2e | Query path allocation (72 MB per 60 queries in three `ContextService` methods) | not scheduled |
 | M0b | Measurement script waits for the post-start snapshot write and V8 shrink before reading | done (`4cd7ffb`) |
 | M3 | Worker hibernation, both workers | done (`1d30ab1`..`8bd1ead`, follow-ups `e4f7bc2`..`ee66822`), reviewed (follow-ups too; review fixes `d714491`, `e5c38e2`, `e21b675`) |
