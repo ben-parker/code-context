@@ -293,6 +293,50 @@ public sealed class WorkerHibernationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Wake_RecordsHowTheBaselineWasAnswered()
+    {
+        var host = await StartAsync();
+        await host.WaitForStateWrittenAsync();
+        Assert.Null(host.Instance.Workers.LastBaselineOutcomeFor("fake"));
+        await host.IdleAsync();
+        File.WriteAllText(Path.Combine(Root, "c.fake"), "c");
+        await host.Instance.Coordinator.RefreshFileAsync(Path.Combine(Root, "c.fake"));
+        Assert.Equal(BaselineOutcomes.Accepted, host.Instance.Workers.LastBaselineOutcomeFor("fake"));
+    }
+
+    [Fact]
+    public async Task FailedWake_WithItsProcessAlive_IsNotReportedAsHibernated_AndTheNextChangeReIndexes()
+    {
+        var host = await StartAsync();
+        await host.WaitForStateWrittenAsync();
+        await host.IdleAsync();
+
+        File.WriteAllText(FailMarker, "fail");
+        File.WriteAllText(Path.Combine(Root, "c.fake"), "c");
+        await Assert.ThrowsAsync<ParserWorkerFailedException>(() => host.Instance.Coordinator.RefreshFileAsync(Path.Combine(Root, "c.fake")));
+        // A process runs: the worker is not hibernated, it is failed, and it reports so.
+        Assert.NotNull(host.Session.ProcessId);
+        Assert.False(host.Instance.Workers.IsHibernated("fake"));
+        Assert.Equal(ParserSessionState.Failed, host.Session.State);
+        Assert.Null(host.Instance.Workers.LastBaselineOutcomeFor("fake"));
+
+        // The wake did not complete, so the next operation re-indexes on that process (no new baseline: it is not the
+        // process's first mutation) before its own work.
+        File.Delete(FailMarker);
+        File.WriteAllText(Path.Combine(Root, "d.fake"), "d");
+        await host.Instance.Coordinator.RefreshFileAsync(Path.Combine(Root, "d.fake"));
+        Assert.Equal(ParserSessionState.Ready, host.Session.State);
+        // Only a wake that completes says so.
+        Assert.Single(host.Instance.WorkerLog.Entries, entry => entry.Message.Contains("woke:", StringComparison.Ordinal));
+        Assert.Equal(await FreshScanAsync(), Facts(host.Instance.Database));
+
+        // And it can hibernate again.
+        await host.WaitForStateWrittenAsync();
+        await host.IdleAsync();
+        Assert.True(host.Instance.Workers.IsHibernated("fake"));
+    }
+
+    [Fact]
     public async Task ExplicitRefresh_WakesTheWorker_ThroughItsSavedState()
     {
         var host = await StartAsync();

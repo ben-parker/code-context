@@ -93,6 +93,15 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
         /// </summary>
         public bool Hibernated { get; set; }
 
+        /// <summary>
+        /// A wake started and did not complete (its index failed). The process it started may still run, so the worker
+        /// is not <see cref="Hibernated"/>, but the next operation re-indexes first, as after hibernation.
+        /// </summary>
+        public bool WakeIncomplete { get; set; }
+
+        /// <summary>The next operation re-indexes before its own work.</summary>
+        public bool NeedsWake => Hibernated || WakeIncomplete;
+
         /// <summary>When an operation on this worker last started or ended, in UTC ticks of <see cref="Time"/>.</summary>
         public long LastActivityTicks;
         public HashSet<string> ApprovedFiles { get; } = new(PathComparer);
@@ -228,7 +237,7 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
             // Before a first index there is nothing to bring up to date.
             if (!state.EverIndexed) return;
             // A re-index that replaced the workspace has read the projects as they are now.
-            if (state.Hibernated && !await WakeCoreAsync(state, state.ApprovedFiles.ToList(), ct).ConfigureAwait(false)) return;
+            if (state.NeedsWake && !await WakeCoreAsync(state, state.ApprovedFiles.ToList(), ct).ConfigureAwait(false)) return;
 
             var supervisor = EnsureSupervisor(state);
             var generation = ++state.Generation;
@@ -282,6 +291,7 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
             state.HoldsLoadedFacts = false;
             // An index is the wake: it ran on a new process, with the baseline where there is one.
             state.Hibernated = false;
+            state.WakeIncomplete = false;
         }
         finally
         {
@@ -302,7 +312,7 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
         await state.Lock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            if (state.Hibernated)
+            if (state.NeedsWake)
             {
                 // The re-index reads the files as they are now. A replacement already holds this batch. After an
                 // accepted baseline the C# worker has already re-walked what the batch changed (it restores a saved
@@ -380,7 +390,7 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
                     throw new InvalidOperationException(
                         "The file is not part of the committed index. Wait for indexing or refresh the file first.");
                 }
-                if (!state.Hibernated)
+                if (!state.NeedsWake)
                 {
                     var supervisor = EnsureSupervisor(state);
                     return await supervisor.GetNativeSyntaxTreeAsync(new NativeSyntaxTreeParams(
@@ -412,7 +422,7 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
         await state.Lock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            if (state.Hibernated) await WakeCoreAsync(state, state.ApprovedFiles.ToList(), ct).ConfigureAwait(false);
+            if (state.NeedsWake) await WakeCoreAsync(state, state.ApprovedFiles.ToList(), ct).ConfigureAwait(false);
         }
         finally
         {
@@ -424,11 +434,15 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
     /// The wake, under the worker's lock: a new process indexes <paramref name="files"/>, offered the baseline its
     /// state saved before hibernating where there is one (the start-up verification, run for one worker). True when
     /// the worker accepted the baseline and sent only what changed; false when it replaced the workspace from the
-    /// files. Throws as an index does; the worker then stays hibernated in this sense, so the next operation
-    /// re-indexes again, while the session reports the failure.
+    /// files. Throws as an index does; the worker is then no longer hibernated (a process may run, and the session
+    /// reports the failure) but its wake is incomplete, so the next operation re-indexes again.
     /// </summary>
     private async Task<bool> WakeCoreAsync(WorkerState state, IReadOnlyList<string> files, CancellationToken ct)
     {
+        // From here a process may run whatever happens; until the index completes, the next operation re-indexes.
+        state.Hibernated = false;
+        state.WakeIncomplete = true;
+        state.LastBaselineOutcome = null;
         var supervisor = EnsureSupervisor(state);
         var generation = ++state.Generation;
         await supervisor.OpenWorkspaceAsync(new OpenWorkspaceParams(
@@ -441,7 +455,8 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
         var result = await supervisor.IndexWorkspaceAsync(new IndexWorkspaceParams(
             DefaultWorkspaceId, generation, files, baseline), ct).ConfigureAwait(false);
         ReplaceApprovedFiles(state, files);
-        state.Hibernated = false;
+        state.LastBaselineOutcome = result.Baseline;
+        state.WakeIncomplete = false;
         _logger.LogInformation("Worker '{ParserId}' woke: {Outcome}.", state.Registration.Manifest.ParserId,
             result.Baseline == BaselineOutcomes.Accepted ? "its saved state was accepted" : "it re-read the workspace");
         return result.Baseline == BaselineOutcomes.Accepted;
