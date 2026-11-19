@@ -56,6 +56,41 @@ public class GraphQueryCommandTests
         Assert.Equal(["--external", "--within", "--type"], hubs.Given);
     }
 
+    private static string Help(params string[] args)
+    {
+        var output = new StringWriter();
+        var exit = Program.CreateRootCommand().Parse(args).Invoke(new InvocationConfiguration { Output = output, Error = new StringWriter() });
+        Assert.Equal(0, exit);
+        return output.ToString();
+    }
+
+    [Theory]
+    // Each subcommand's help lists only the options it reads, with its own depth and limit defaults.
+    [InlineData("path", new[] { "--depth", "--relation", "--tests" }, new[] { "--exact", "--limit", "--external", "--within", "--type", "[default: 1]" })]
+    [InlineData("affected", new[] { "--depth", "--limit", "--tests" }, new[] { "--exact", "--external", "--within", "--type", "[default: 1]", "default 10" })]
+    [InlineData("hubs", new[] { "--limit", "--within", "--type", "--external" }, new[] { "--exact", "--depth", "default 10" })]
+    [InlineData("multi", new[] { "--depth", "--exact", "--limit" }, new[] { "--within", "--type" })]
+    public void SubcommandHelp_ListsOnlyTheOptionsItReads(string command, string[] listed, string[] absent)
+    {
+        var help = Help("query", command, "--help");
+
+        foreach (var option in listed) Assert.Contains(option, help);
+        foreach (var text in absent) Assert.DoesNotContain(text, help);
+    }
+
+    [Fact]
+    public void QueryHelp_DoesNotListTheHubsOnlyOptions()
+    {
+        var help = Help("query", "--help");
+
+        Assert.Contains("--exact", help);
+        Assert.DoesNotContain("--within <within>", help);
+        Assert.DoesNotContain("--type <type>", help);
+        // Rendering one subcommand's help leaves the shared options as they were.
+        Help("query", "hubs", "--help");
+        Assert.Contains("[default: 1]", Help("query", "--help"));
+    }
+
     [Theory]
     [InlineData("path")]
     [InlineData("affected")]

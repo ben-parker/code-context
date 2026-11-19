@@ -22,6 +22,27 @@ public static partial class QueryCommandHandler
         ("--type", [GraphQueryParameters.HubsQuery]),
     ];
 
+    /// <summary>Whether <paramref name="mode"/> (<c>context</c> or a graph query) reads <paramref name="option"/>.</summary>
+    internal static bool Reads(string mode, string option)
+        => Array.Find(OptionModes, entry => entry.Option == option).Modes is not { } modes || modes.Contains(mode);
+
+    /// <summary>What a graph query's help says of a shared option whose meaning or default differs there, or null.</summary>
+    internal static string? GraphOptionDescription(string mode, string option) => (mode, option) switch
+    {
+        (GraphQueryParameters.PathQuery, "--depth") =>
+            $"Most relationship hops searched (1-{GraphQueryLimits.MaxDepth}, default {GraphQueryLimits.DefaultPathDepth}).",
+        (GraphQueryParameters.AffectedQuery, "--depth") =>
+            $"Most dependency hops followed (1-{GraphQueryLimits.MaxDepth}, default {GraphQueryLimits.DefaultAffectedDepth}).",
+        (GraphQueryParameters.AffectedQuery or GraphQueryParameters.HubsQuery, "--limit") =>
+            $"Most entries listed (1-{GraphQueryLimits.MaxLimit}, default {GraphQueryLimits.DefaultLimit}).",
+        (GraphQueryParameters.PathQuery or GraphQueryParameters.AffectedQuery or GraphQueryParameters.HubsQuery, "--tests") =>
+            "Include symbols in test files (left out by default).",
+        (GraphQueryParameters.PathQuery or GraphQueryParameters.AffectedQuery or GraphQueryParameters.HubsQuery, "--relation") =>
+            "Comma-separated relationship kinds followed or counted.",
+        (GraphQueryParameters.HubsQuery, "--external") => "Rank library symbols too.",
+        _ => null,
+    };
+
     private static string ModeName(string mode) => mode == "context" ? "query" : $"query {mode}";
 
     /// <summary>The first option given that the query does not read, as an error line, or null.</summary>

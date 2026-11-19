@@ -435,6 +435,31 @@ internal sealed class QueryHelpAction(Argument<string> singleIdentifier) : Synch
         var command = parseResult.CommandResult.Command;
         var previousHidden = singleIdentifier.Hidden;
         singleIdentifier.Hidden = command.Name != "query";
+        // List only the options this query reads, described as it reads them; the options are shared, so put them back.
+        var mode = command.Name is "query" or "multi" ? "context" : command.Name;
+        var queryCommand = command.Name == "query" ? command : command.Parents.OfType<Command>().First();
+        var restore = new List<Action>();
+        foreach (var option in queryCommand.Options)
+        {
+            if (!QueryCommandHandler.Reads(mode, option.Name))
+            {
+                var hidden = option.Hidden;
+                option.Hidden = true;
+                restore.Add(() => option.Hidden = hidden);
+            }
+            else if (QueryCommandHandler.GraphOptionDescription(mode, option.Name) is { } description)
+            {
+                var previous = option.Description;
+                option.Description = description;
+                restore.Add(() => option.Description = previous);
+                if (option is Option<int> { DefaultValueFactory: { } factory } withDefault)
+                {
+                    // The graph queries' defaults are their own, given in the description.
+                    withDefault.DefaultValueFactory = null;
+                    restore.Add(() => withDefault.DefaultValueFactory = factory);
+                }
+            }
+        }
         try
         {
             using var rendered = new StringWriter();
@@ -463,6 +488,7 @@ internal sealed class QueryHelpAction(Argument<string> singleIdentifier) : Synch
         finally
         {
             singleIdentifier.Hidden = previousHidden;
+            foreach (var undo in restore) undo();
         }
     }
 
