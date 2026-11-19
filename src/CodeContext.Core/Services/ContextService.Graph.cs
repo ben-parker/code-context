@@ -169,45 +169,50 @@ namespace CodeContext.Core.Services
             var filtered = filters.Count == 0 ? string.Empty : $" with {string.Join(" and ", filters)}";
             var names = $"from {from.Endpoint.Requested} to {to.Endpoint.Requested}";
 
+            const string withoutRelation = "without the relation filter";
+            const string withTests = "with test files included (includeTests, --tests)";
             var unfilteredLimited = depthLimited;
             if (filters.Count > 0)
             {
-                var excluded = new List<string>();
-                int? length = null;
+                // Each filter is dropped on its own first: one that hides a path by itself is named by itself.
+                int? relationHops = null;
+                int? testsHops = null;
                 var limitedWithoutRelation = false;
                 var limitedWithTests = false;
                 if (walk.FiltersRelations
-                    && walk.WithoutRelationFilter().ShortestPath(from.Seeds!, goals, request.MaxDepth, out limitedWithoutRelation) is { } withoutRelation)
+                    && walk.WithoutRelationFilter().ShortestPath(from.Seeds!, goals, request.MaxDepth, out limitedWithoutRelation) is { } relationPath)
                 {
-                    excluded.Add("relation");
-                    length = UsesHops(withoutRelation);
+                    relationHops = UsesHops(relationPath);
                 }
                 if (!walk.IncludesTests
-                    && walk.WithTests().ShortestPath(from.Seeds!, goals, request.MaxDepth, out limitedWithTests) is { } withTests)
+                    && walk.WithTests().ShortestPath(from.Seeds!, goals, request.MaxDepth, out limitedWithTests) is { } testsPath)
                 {
-                    excluded.Add("tests");
-                    length = Math.Min(length ?? int.MaxValue, UsesHops(withTests));
+                    testsHops = UsesHops(testsPath);
                 }
-                if (excluded.Count == 0)
+                if (relationHops is not null && testsHops is not null)
                 {
-                    // With one filter, the search without it was the unfiltered search: it is not run again.
-                    if (walk.FiltersRelations && !walk.IncludesTests)
+                    return (["relation", "tests"],
+                        $"No path {names}{filtered}, but one of {relationHops} hop(s) exists {withoutRelation}, and one of {testsHops} "
+                        + $"hop(s) {withTests}: either change finds a path; your own filters excluded them, not the graph.");
+                }
+                if ((relationHops ?? testsHops) is { } hops)
+                {
+                    return ([relationHops is not null ? "relation" : "tests"],
+                        $"No path {names}{filtered}, but one of {hops} hop(s) exists {(relationHops is not null ? withoutRelation : withTests)}: "
+                        + "your own filter excluded it, not the graph.");
+                }
+
+                // With one filter, the search without it was the unfiltered search: it is not run again.
+                if (walk.FiltersRelations && !walk.IncludesTests)
+                {
+                    if (walk.WithoutRelationFilter().WithTests().ShortestPath(from.Seeds!, goals, request.MaxDepth, out unfilteredLimited) is { } unfiltered)
                     {
-                        if (walk.WithoutRelationFilter().WithTests().ShortestPath(from.Seeds!, goals, request.MaxDepth, out unfilteredLimited) is { } unfiltered)
-                        {
-                            excluded.AddRange(["relation", "tests"]);
-                            length = UsesHops(unfiltered);
-                        }
+                        return (["relation", "tests"],
+                            $"No path {names}{filtered}, but one of {UsesHops(unfiltered)} hop(s) exists {withoutRelation} and {withTests}: "
+                            + "your own filters excluded it, not the graph.");
                     }
-                    else unfilteredLimited = walk.FiltersRelations ? limitedWithoutRelation : limitedWithTests;
                 }
-                if (excluded.Count > 0)
-                {
-                    var remedy = string.Join(" and ", excluded.Select(filter => filter == "relation"
-                        ? "without the relation filter" : "with test files included (includeTests, --tests)"));
-                    return (excluded,
-                        $"No path {names}{filtered}, but one of {length} hop(s) exists {remedy}: your own filter excluded it, not the graph.");
-                }
+                else unfilteredLimited = walk.FiltersRelations ? limitedWithoutRelation : limitedWithTests;
             }
 
             if (depthLimited)
@@ -220,8 +225,8 @@ namespace CodeContext.Core.Services
             {
                 // The filtered search reached everything it could: only without the filters is there more past the limit.
                 var remedies = new List<string>();
-                if (walk.FiltersRelations) remedies.Add("without the relation filter");
-                if (!walk.IncludesTests) remedies.Add("with test files included (includeTests, --tests)");
+                if (walk.FiltersRelations) remedies.Add(withoutRelation);
+                if (!walk.IncludesTests) remedies.Add(withTests);
                 return (null,
                     $"No path {names}{filtered}, which reaches nothing more at any depth. Without those filters the search "
                     + $"stopped at {request.MaxDepth} hop(s) with symbols left to explore, so a longer path may exist "

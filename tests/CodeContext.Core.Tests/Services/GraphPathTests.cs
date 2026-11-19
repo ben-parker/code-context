@@ -176,6 +176,25 @@ public class GraphPathTests
 
         Assert.False(response.Found);
         Assert.Equal(["relation", "tests"], response.ExcludedBy);
+        Assert.Contains("one of 2 hop(s) exists without the relation filter and with test files included", response.Explanation);
+    }
+
+    [Fact]
+    public async Task EitherFilter_HidingAPathOfItsOwn_IsNotSaidToNeedTheOther()
+    {
+        // Two chains: one has a REFERENCES hop, the other passes through a test file. Dropping either filter finds one.
+        var service = new GraphTestGraph()
+            .Node("A").Node("B").Node("B2").Node("Helper", file: "tests/Helpers.cs").Node("C")
+            .Edge("A", "B", "REFERENCES").Edge("B", "B2").Edge("B2", "C")
+            .Edge("A", "Helper").Edge("Helper", "C")
+            .Build();
+
+        var response = await Path(service, I("A"), I("C"), relation: "CALLS");
+
+        Assert.False(response.Found);
+        Assert.Equal(["relation", "tests"], response.ExcludedBy);
+        Assert.Contains("one of 3 hop(s) exists without the relation filter, and one of 2 hop(s) with test files included", response.Explanation);
+        Assert.Contains("either change finds a path", response.Explanation);
     }
 
     [Fact]
