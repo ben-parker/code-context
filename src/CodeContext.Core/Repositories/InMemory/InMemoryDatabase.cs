@@ -345,8 +345,8 @@ namespace CodeContext.Core.Repositories.InMemory
             public IGraphShard? WithoutForeignConflicts(
                 IReadOnlySet<string> removedIds,
                 IReadOnlySet<string> removedNotReestablished,
-                IReadOnlySet<string> deltaNodeIds,
-                IReadOnlyCollection<object> deltaEdgeIds)
+                IReadOnlyList<CodeNode> deltaNodes,
+                IReadOnlyList<CodeEdge> deltaEdges)
             {
                 HashSet<object>? dropEdges = null;
 
@@ -361,17 +361,17 @@ namespace CodeContext.Core.Repositories.InMemory
                     }
                 }
 
-                if (deltaEdgeIds.Count > 0)
+                if (!Edges.IsEmpty)
                 {
-                    foreach (var id in deltaEdgeIds)
-                        if (Edges.ContainsKey(id)) (dropEdges ??= new HashSet<object>(EdgeIdKeys.Comparer)).Add(id);
+                    foreach (var edge in deltaEdges)
+                        if (edge.IdKey is { } id && Edges.ContainsKey(id)) (dropEdges ??= new HashSet<object>(EdgeIdKeys.Comparer)).Add(id);
                 }
 
                 HashSet<string>? dropNodes = null;
-                if (deltaNodeIds.Count > 0)
+                if (!Nodes.IsEmpty)
                 {
-                    foreach (var id in deltaNodeIds)
-                        if (Nodes.ContainsKey(id)) (dropNodes ??= new HashSet<string>(StringComparer.Ordinal)).Add(id);
+                    foreach (var node in deltaNodes)
+                        if (node.Id is { } id && Nodes.ContainsKey(id)) (dropNodes ??= new HashSet<string>(StringComparer.Ordinal)).Add(id);
                 }
 
                 // When a delta reclaims an id, the evicted foreign node's OWN edges die with it — including
@@ -534,11 +534,13 @@ namespace CodeContext.Core.Repositories.InMemory
             }
         }
 
-        /// <summary>Probes shards in ordinal <see cref="ShardKey"/> order (ids are globally unique).</summary>
+        /// <summary>
+        /// Probes shards in ordinal <see cref="ShardKey"/> order (ids are globally unique), over the published
+        /// map's shards as an array: every hop of a query looks a node up, and enumerating the map allocates.
+        /// </summary>
         public bool TryGetNode(string id, out CodeNode? node)
         {
-            var shards = _shards;
-            foreach (var shard in shards.Values)
+            foreach (var shard in GetAdjacency().Shards)
             {
                 if (shard.TryGetNode(id, out node)) return true;
             }
@@ -552,8 +554,7 @@ namespace CodeContext.Core.Repositories.InMemory
 
         public bool TryGetNodeIdByIdentifier(string identifier, out string? id)
         {
-            var shards = _shards;
-            foreach (var shard in shards.Values)
+            foreach (var shard in GetAdjacency().Shards)
             {
                 if (shard.TryGetNodeIdByIdentifier(identifier, out id)) return true;
             }
@@ -563,8 +564,7 @@ namespace CodeContext.Core.Repositories.InMemory
 
         public bool TryGetEdge(string id, out CodeEdge? edge)
         {
-            var shards = _shards;
-            foreach (var shard in shards.Values)
+            foreach (var shard in GetAdjacency().Shards)
             {
                 if (shard.TryGetEdge(id, out edge)) return true;
             }
@@ -983,6 +983,22 @@ namespace CodeContext.Core.Repositories.InMemory
         }
 
         /// <summary>
+        /// The id instance held by the node <paramref name="id"/> in the graph the next commit extends (the
+        /// staged map while a reconciliation is staged, else the published one), or null when there is none.
+        /// </summary>
+        internal string? FindStoredNodeId(string id)
+        {
+            lock (_commitLock)
+            {
+                foreach (var shard in (_reconciliationState ?? _shards).Values)
+                {
+                    if (shard.TryGetNode(id, out var node)) return node!.Id;
+                }
+                return null;
+            }
+        }
+
+        /// <summary>
         /// Equal entry by entry, in order, each entry field by field with its lists compared by content (a
         /// record's own equality compares list references, and each delta deserializes new lists). Null
         /// equals only null.
@@ -1374,26 +1390,15 @@ namespace CodeContext.Core.Repositories.InMemory
             var builder = current.ToBuilder();
             builder[key] = nextShard;
 
-            // Delta ids let us fold cross-shard id collisions (delta wins) into the same one-swap publish.
-            var deltaNodeIds = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var node in nodes)
-                if (node.Id is not null) deltaNodeIds.Add(node.Id);
-            var deltaEdgeIds = new HashSet<object>(EdgeIdKeys.Comparer);
-            foreach (var edge in edges)
-                if (edge.IdKey is { } id) deltaEdgeIds.Add(id);
-
             // Rebuild any foreign shard that (a) holds an edge now dangling onto a removed-and-not-
             // reestablished node, or (b) co-resides a delta id — the delta wins globally, so the stale
             // foreign copy is dropped. Both fold into this single swap; untouched shards keep their ref.
-            if (removedNodeIds.Count > 0 || deltaNodeIds.Count > 0 || deltaEdgeIds.Count > 0)
+            // Each foreign shard probes its own tables with the delta's facts: no set of the delta's ids.
+            foreach (var (otherKey, otherShard) in current)
             {
-                foreach (var (otherKey, otherShard) in current)
-                {
-                    if (otherKey == key) continue;
-                    var rebuilt = otherShard.WithoutForeignConflicts(
-                        removedNodeIds, removedNotReestablished, deltaNodeIds, deltaEdgeIds);
-                    if (rebuilt is not null) builder[otherKey] = rebuilt;
-                }
+                if (otherKey == key) continue;
+                var rebuilt = otherShard.WithoutForeignConflicts(removedNodeIds, removedNotReestablished, nodes, edges);
+                if (rebuilt is not null) builder[otherKey] = rebuilt;
             }
 
             return builder.ToImmutable();
@@ -1534,6 +1539,9 @@ namespace CodeContext.Core.Repositories.InMemory
             private IReadOnlyList<string>? _filePaths;
 
             private CompositeAdjacency(IGraphShard[] shards) => _shards = shards;
+
+            /// <summary>The shards of the map, in <see cref="ShardKey"/> order. Not to be written.</summary>
+            internal IGraphShard[] Shards => _shards;
 
             internal static CompositeAdjacency Build(ImmutableSortedDictionary<ShardKey, IGraphShard> shards)
                 => new(shards.Values.ToArray());

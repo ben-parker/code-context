@@ -96,14 +96,15 @@ namespace CodeContext.Core.Repositories.InMemory
         /// Sweeps this shard after a commit to another shard: drops edges sourced at a removed id or
         /// targeting a removed-and-not-re-established id, drops facts whose id the delta re-supplied
         /// (the delta wins globally) and every edge touching such an evicted node.
-        /// <paramref name="deltaEdgeIds"/> holds edge id keys (<see cref="CodeEdge.IdKey"/>), compared by
-        /// <see cref="EdgeIdKeys.Comparer"/>.
+        /// The delta's facts are given as committed (a fact without an id, or the same id twice, may be
+        /// among them); the shard probes its own tables with each, edges by <see cref="CodeEdge.IdKey"/>
+        /// under <see cref="EdgeIdKeys.Comparer"/>.
         /// </summary>
         IGraphShard? WithoutForeignConflicts(
             IReadOnlySet<string> removedIds,
             IReadOnlySet<string> removedNotReestablished,
-            IReadOnlySet<string> deltaNodeIds,
-            IReadOnlyCollection<object> deltaEdgeIds);
+            IReadOnlyList<CodeNode> deltaNodes,
+            IReadOnlyList<CodeEdge> deltaEdges);
 
         /// <summary>
         /// Adds to <paramref name="into"/> the id of every node whose non-empty file path is not in

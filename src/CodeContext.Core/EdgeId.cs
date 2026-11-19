@@ -1,5 +1,5 @@
+using System.Buffers;
 using System.Diagnostics.CodeAnalysis;
-using System.Numerics;
 
 namespace CodeContext.Core
 {
@@ -20,12 +20,7 @@ namespace CodeContext.Core
             Target = target;
             Tail = tail;
             Canonical = canonical;
-            var hasher = new EdgeIdKeys.Hasher();
-            hasher.Append(source);
-            hasher.Append(middle);
-            hasher.Append(target);
-            hasher.Append(tail);
-            Hash = hasher.Finish();
+            Hash = EdgeIdKeys.HashOfParts(this);
         }
 
         public string Source { get; }
@@ -209,84 +204,39 @@ namespace CodeContext.Core
         private static ReadOnlySpan<char> Segment(object key, int index)
             => key is EdgeId id ? id.Segment(index) : (string)key;
 
-        private static int Of(string text)
+        // The runtime's string hash: randomized per process, so ids a repository chooses cannot be aimed at
+        // one bucket, and the same for a span as for a string of that text.
+        private static int Of(string text) => text.GetHashCode();
+
+        /// <summary>The hash of the id's text (<see cref="Of"/>), which is written into a buffer for it; no string is made.</summary>
+        internal static int HashOfParts(EdgeId id)
         {
-            var hasher = new Hasher();
-            hasher.Append(text);
-            return hasher.Finish();
+            var length = id.Length;
+            if (length <= StackChars)
+            {
+                Span<char> buffer = stackalloc char[StackChars];
+                id.CopyTo(buffer);
+                return string.GetHashCode(buffer[..length]);
+            }
+            var rented = ArrayPool<char>.Shared.Rent(length);
+            try
+            {
+                id.CopyTo(rented);
+                return string.GetHashCode(rented.AsSpan(0, length));
+            }
+            finally
+            {
+                ArrayPool<char>.Shared.Return(rented);
+            }
         }
+
+        private const int StackChars = 512;
 
         private sealed class KeyComparer : IEqualityComparer<object>
         {
             public new bool Equals(object? x, object? y) => AreEqual(x, y);
 
             public int GetHashCode(object obj) => Hash(obj);
-        }
-
-        /// <summary>
-        /// A hash of UTF-16 text that can be fed in pieces: the same text gives the same hash however it is
-        /// split. Seeded per process, so ids a repository chooses cannot be aimed at one bucket ahead of time.
-        /// </summary>
-        internal struct Hasher
-        {
-            private const ulong Prime1 = 0x9E3779B185EBCA87UL;
-            private const ulong Prime2 = 0xC2B2AE3D27D4EB4FUL;
-            private const ulong Prime3 = 0x165667B19E3779F9UL;
-            private static readonly ulong Seed = (ulong)Random.Shared.NextInt64() ^ ((ulong)Random.Shared.NextInt64() << 1);
-
-            private ulong _state;
-            private ulong _pending;
-            private int _pendingChars;
-            private int _length;
-            private bool _started;
-
-            public void Append(ReadOnlySpan<char> text)
-            {
-                if (!_started)
-                {
-                    _state = Seed;
-                    _started = true;
-                }
-                _length += text.Length;
-                while (_pendingChars > 0 && !text.IsEmpty)
-                {
-                    _pending |= (ulong)text[0] << (16 * _pendingChars);
-                    text = text[1..];
-                    if (++_pendingChars == 4)
-                    {
-                        Mix(_pending);
-                        _pending = 0;
-                        _pendingChars = 0;
-                    }
-                }
-                var i = 0;
-                for (; i + 4 <= text.Length; i += 4)
-                    Mix(text[i] | ((ulong)text[i + 1] << 16) | ((ulong)text[i + 2] << 32) | ((ulong)text[i + 3] << 48));
-                for (; i < text.Length; i++)
-                    _pending |= (ulong)text[i] << (16 * _pendingChars++);
-            }
-
-            public int Finish()
-            {
-                if (!_started) _state = Seed;
-                if (_pendingChars > 0) Mix(_pending);
-                var hash = _state ^ (ulong)_length;
-                hash ^= hash >> 33;
-                hash *= Prime2;
-                hash ^= hash >> 29;
-                hash *= Prime3;
-                hash ^= hash >> 32;
-                return (int)hash ^ (int)(hash >> 32);
-            }
-
-            private void Mix(ulong chunk)
-            {
-                chunk *= Prime2;
-                chunk = BitOperations.RotateLeft(chunk, 31);
-                chunk *= Prime1;
-                _state ^= chunk;
-                _state = BitOperations.RotateLeft(_state, 27) * Prime1 + Prime3;
-            }
         }
     }
 }

@@ -252,6 +252,71 @@ public class DerivedEdgeIdTests
         ];
     }
 
+    [Fact]
+    public void Hash_OfPartsIsTheRuntimeHashOfTheText_WhateverTheLength()
+    {
+        // The table hash is the runtime's randomized string hash, so a key held as parts, the same id as a
+        // string and the string itself agree, on both sides of the stack buffer's size.
+        foreach (var length in new[] { 0, 1, 7, 200, 511, 512, 513, 5000 })
+        {
+            var source = P + new string('s', length / 2);
+            var target = P + new string('t', length - length / 2);
+            var parts = EdgeId.FromParts(source, "=[calls]=>", target, "@1:2");
+            var text = parts.ToString();
+            Assert.Equal(text.GetHashCode(), EdgeIdKeys.Hash(parts));
+            Assert.Equal(text.GetHashCode(), EdgeIdKeys.Hash(text));
+            Assert.Equal(text.GetHashCode(), EdgeIdKeys.Comparer.GetHashCode(parts));
+        }
+    }
+
+    [Fact]
+    public void Hash_SpreadsIdsBuiltToCollideUnderAMultiplyRotateHash()
+    {
+        // Ids a repository can choose (member names of Unicode letters) built so that a seeded
+        // multiply-rotate hash over 4-char blocks gives every one of them the same value whatever its seed:
+        // each 8-char unit has two spellings that leave such a hash in the same state. The edge tables once
+        // used such a hash; 40,000 of these ids then took 80 s to commit. The runtime's string hash, which
+        // the tables use, tells them apart.
+        const ulong prime1 = 0x9E3779B185EBCA87UL, prime2 = 0xC2B2AE3D27D4EB4FUL;
+        static ulong Inverse(ulong odd)
+        {
+            var x = odd;
+            for (var i = 0; i < 6; i++) x *= 2 - odd * x;
+            return x;
+        }
+        static ulong Mixed(ulong block) => System.Numerics.BitOperations.RotateLeft(block * prime2, 31) * prime1;
+        static ulong Unmixed(ulong mixed) => System.Numerics.BitOperations.RotateRight(mixed * Inverse(prime1), 31) * Inverse(prime2);
+        static string Block(ulong block) => new([(char)block, (char)(block >> 16), (char)(block >> 32), (char)(block >> 48)]);
+
+        var random = new Random(1);
+        var units = new (string First, string Second)[12];
+        for (var i = 0; i < units.Length;)
+        {
+            var a = (ulong)random.NextInt64();
+            var b = (ulong)random.NextInt64();
+            var first = Block(a) + Block(b);
+            var second = Block(Unmixed(Mixed(a) ^ (1UL << 36))) + Block(Unmixed(Mixed(b) ^ (1UL << 63)));
+            if (first.All(char.IsLetter) && second.All(char.IsLetter)) units[i++] = (first, second);
+        }
+
+        var source = P + "Caller";
+        var keys = new HashSet<object>(EdgeIdKeys.Comparer);
+        var hashes = new HashSet<int>();
+        for (var i = 0; i < 1 << units.Length; i++)
+        {
+            // The units start at a multiple of 4 chars into the id text (16 + 10 + 10 + 8).
+            var name = new StringBuilder(P + "Type.Mem");
+            for (var bit = 0; bit < units.Length; bit++) name.Append((i >> bit & 1) == 0 ? units[bit].First : units[bit].Second);
+            var target = name.ToString();
+            var key = EdgeId.Compose(source + "=[calls]=>" + target, source, target, static piece => piece.ToString());
+            Assert.True(keys.Add(key));
+            hashes.Add(EdgeIdKeys.Hash(key));
+        }
+
+        Assert.Equal(4096, keys.Count);
+        Assert.True(hashes.Count > 4000, $"4096 crafted ids gave only {hashes.Count} distinct hashes.");
+    }
+
     private static AnalysisDelta Delta(string parser, string workspace, long generation, List<ProtocolNode> nodes, List<ProtocolEdge> edges, bool replacesWorkspace = true)
         => new(parser, "1.0", workspace, generation, generation, replacesWorkspace,
             replacesWorkspace ? [] : nodes.Select(node => node.FilePath!).Distinct().ToList(), nodes, edges, IsLastForRequest: true);
