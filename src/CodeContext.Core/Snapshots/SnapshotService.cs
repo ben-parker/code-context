@@ -421,8 +421,6 @@ namespace CodeContext.Core.Snapshots
             return false;
         }
 
-        private static bool IsUsable(ulong sequence) => sequence is >= 1 and <= MaxSequence;
-
         /// <summary>Called on the coordinator loop after every mutation command. Cheap: O(shards), no I/O.</summary>
         internal void OnMutationCommandCompleted()
         {
@@ -900,7 +898,7 @@ namespace CodeContext.Core.Snapshots
                 foreach (var file in directory.EnumerateOwnFiles())
                 {
                     if (file.Kind == CacheFileKind.WorkerState ? referenced.Contains(file.Name)
-                        : file.Kind != CacheFileKind.WorkerStateTemp && IsUsable(file.Sequence) && file.Sequence >= sequence) continue;
+                        : file.Kind != CacheFileKind.WorkerStateTemp && SnapshotStartup.IsUsable(file.Sequence) && file.Sequence >= sequence) continue;
                     if (!CacheDirectory.TryDelete(file)) busy++;
                 }
                 if (busy > 0) _logger.LogDebug("{Count} older snapshot file(s) are in use and will be deleted later.", busy);

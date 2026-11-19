@@ -40,7 +40,7 @@ namespace CodeContext.Core.Snapshots
                 throw new SnapshotCorruptException("A shard blob is shorter than its header and section table.");
             if (_region.ReadU32(blobOffset) != SnapshotFormat.ShardMagic) throw new SnapshotCorruptException("A shard blob's magic is wrong.");
             if (_region.ReadU32(blobOffset + 4) != SnapshotFormat.SectionCount)
-                throw new SnapshotCorruptException("A shard blob does not hold the 20 sections of format version 1.");
+                throw new SnapshotCorruptException($"A shard blob does not hold the {SnapshotFormat.SectionCount} sections of format version {SnapshotFormat.FormatVersion}.");
 
             NodeCount = Count(blobOffset + 8, "node");
             EdgeCount = Count(blobOffset + 12, "edge");

@@ -32,6 +32,30 @@ namespace CodeContext.Core.Snapshots
         byte[]? Inputs = null)
     {
         public static readonly SnapshotShardInfo Empty = new();
+
+        /// <summary>
+        /// The worker's reported inputs as stored: null (and true) when the shard stores none; false with why when
+        /// what it stores is not two lists of paths.
+        /// </summary>
+        public bool TryReadInputs(out CodeContext.Parser.Protocol.WorkerInputs? inputs, out string? failure)
+        {
+            inputs = null;
+            failure = null;
+            if (Inputs is not { Length: > 0 } bytes) return true;
+            try
+            {
+                inputs = System.Text.Json.JsonSerializer.Deserialize(bytes, CodeContext.Parser.Protocol.ParserProtocolJsonContext.Default.WorkerInputs);
+            }
+            catch (System.Text.Json.JsonException exception)
+            {
+                failure = $"do not parse: {exception.Message}";
+                return false;
+            }
+            if (inputs?.Files is not null && inputs.Absent is not null && !inputs.Files.Contains(null!) && !inputs.Absent.Contains(null!)) return true;
+            inputs = null;
+            failure = "are not lists of paths";
+            return false;
+        }
     }
 
     /// <summary>One capture to write: a shard map and everything the header records.</summary>

@@ -469,9 +469,15 @@ namespace CodeContext.Core.Snapshots
             return (null, default);
         }
 
-        private bool Accept(ShardKey key)
-            => string.Equals(key.WorkspaceId, _settings.WorkspaceId, StringComparison.Ordinal)
-                && (_isIndexedParser?.Invoke(key.ParserId) ?? true);
+        private bool Accept(ShardKey key) => Accepts(key, _settings.WorkspaceId, _isIndexedParser);
+
+        /// <summary>
+        /// Which shards of a snapshot a host, or a query without one, takes: those of its own workspace whose parser
+        /// a registered worker indexes (null accepts every parser).
+        /// </summary>
+        internal static bool Accepts(ShardKey key, string workspaceId, Func<string, bool>? isIndexedParser)
+            => string.Equals(key.WorkspaceId, workspaceId, StringComparison.Ordinal)
+                && (isIndexedParser?.Invoke(key.ParserId) ?? true);
 
         /// <summary>
         /// Each loaded shard's annotation (parser version, coverage, fingerprints, worker state file) as the store
@@ -530,23 +536,10 @@ namespace CodeContext.Core.Snapshots
                         return false;
                     }
                 }
-                WorkerInputs? inputs = null;
-                if (shard.Info.Inputs is { Length: > 0 } inputBytes)
+                if (!shard.Info.TryReadInputs(out var inputs, out var inputsFailure))
                 {
-                    try
-                    {
-                        inputs = JsonSerializer.Deserialize(inputBytes, ParserProtocolJsonContext.Default.WorkerInputs);
-                    }
-                    catch (JsonException exception)
-                    {
-                        failure = $"the inputs of shard {shard.Key} do not parse: {exception.Message}";
-                        return false;
-                    }
-                    if (inputs?.Files is null || inputs.Absent is null || inputs.Files.Contains(null!) || inputs.Absent.Contains(null!))
-                    {
-                        failure = $"the inputs of shard {shard.Key} are not lists of paths";
-                        return false;
-                    }
+                    failure = $"the inputs of shard {shard.Key} {inputsFailure}";
+                    return false;
                 }
                 WorkerStateBinding? state = null;
                 if (shard.Info is { StateFileName: { } stateFile, StateId: { } stateId, StateSha256: { } sha256 }

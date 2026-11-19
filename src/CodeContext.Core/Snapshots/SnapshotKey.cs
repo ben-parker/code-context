@@ -140,7 +140,8 @@ namespace CodeContext.Core.Snapshots
                     throw new UnauthorizedAccessException(
                         $"The snapshot key file grants group or others access (mode {Convert.ToString((int)mode, 8)}); it must be user-only (0600).");
             }
-            if (stream.Length != Length) throw new InvalidDataException("The snapshot key file does not hold a key.");
+            if (stream.Length != Length) throw new InvalidDataException(
+                    "The snapshot key file does not hold a key (a first start that was interrupted can leave it empty). Delete this file and the next start makes a new key.");
             var bytes = new byte[Length];
             stream.ReadExactly(bytes);
             key = bytes;
