@@ -220,6 +220,33 @@ public class GraphQueryCommandTests
     }
 
     [Fact]
+    public void AGraphQuery_MayTakeLongerThanALookup()
+    {
+        // A context query is a lookup; a graph query walks the graph, and on a graph of millions of edges that is seconds.
+        Assert.Equal(TimeSpan.FromSeconds(5), QueryCommandHandler.RequestTimeout(Parse("query", "Thing")));
+        Assert.Equal(TimeSpan.FromSeconds(5), QueryCommandHandler.RequestTimeout(Parse("query", "multi", "A", "B")));
+        foreach (var graph in new[] { Parse("query", "hubs"), Parse("query", "affected", "A"), Parse("query", "path", "A", "B") })
+            Assert.Equal(TimeSpan.FromSeconds(60), QueryCommandHandler.RequestTimeout(graph));
+    }
+
+    [Fact]
+    public async Task AGraphQueryThatTimesOut_SaysSoAndHowToNarrowIt()
+    {
+        var handler = new RecordingHandler(request => request.RequestUri!.AbsolutePath == "/api/status"
+            ? Json(Status())
+            : throw new TaskCanceledException("The request was canceled due to the configured HttpClient.Timeout of 2 seconds elapsing.", new TimeoutException()));
+        var (runtime, output, error) = Runtime(handler);
+
+        var exit = await QueryCommandHandler.ExecuteAsync(Parse("query", "hubs", "--path", Root), runtime, CancellationToken.None);
+
+        Assert.Equal(1, exit);
+        Assert.Empty(output.ToString());
+        Assert.Equal(
+            "query hubs did not answer within 2 seconds and was stopped. On a very large graph narrow it: --within DIR or --type for hubs, a smaller --depth for path and affected.",
+            error.ToString().Trim());
+    }
+
+    [Fact]
     public async Task CopiesOfOneDeclaration_AreNamedBeforeTheAnswer()
     {
         var body = """

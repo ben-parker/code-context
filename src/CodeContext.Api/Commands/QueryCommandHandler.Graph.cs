@@ -120,7 +120,20 @@ public static partial class QueryCommandHandler
         using var request = new HttpRequestMessage(
             HttpMethod.Get,
             $"http://localhost:{instance.Port}/api/graph/{graph.Query}?{GraphQueryString(settings, graph)}");
-        using var response = await runtime.Http.SendAsync(request, ct);
+        HttpResponseMessage response;
+        try
+        {
+            response = await runtime.Http.SendAsync(request, ct);
+        }
+        catch (TaskCanceledException) when (!ct.IsCancellationRequested)
+        {
+            // The client's own timeout; the instance stops the walk when the request goes away.
+            runtime.Error.WriteLine(
+                $"{ModeName(graph.Query)} did not answer within {runtime.Http.Timeout.TotalSeconds:0} seconds and was stopped. "
+                + "On a very large graph narrow it: --within DIR or --type for hubs, a smaller --depth for path and affected.");
+            return 1;
+        }
+        using var answered = response;
         var body = await response.Content.ReadAsStringAsync(ct);
         if (!response.IsSuccessStatusCode)
         {

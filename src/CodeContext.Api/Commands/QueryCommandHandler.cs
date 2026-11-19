@@ -57,6 +57,13 @@ public static partial class QueryCommandHandler
     /// <summary>Tests only: receives the settings a command line bound, in place of running the query (this flow only).</summary>
     internal static readonly AsyncLocal<Action<QuerySettings>?> SettingsForTests = new();
 
+    /// <summary>
+    /// How long one request to the instance may take. A context query is a lookup and answers in milliseconds; a
+    /// graph query walks the graph, which takes seconds on one of millions of edges (measured: 3 to 7 s on 2,000,000).
+    /// </summary>
+    internal static TimeSpan RequestTimeout(QuerySettings settings)
+        => TimeSpan.FromSeconds(settings.Graph is null ? 5 : 60);
+
     public static async Task<int> ExecuteAsync(QuerySettings settings, CancellationToken ct)
     {
         if (SettingsForTests.Value is { } capture)
@@ -66,7 +73,7 @@ public static partial class QueryCommandHandler
         }
 
         var registry = new InstanceRegistry();
-        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+        using var http = new HttpClient { Timeout = RequestTimeout(settings) };
         var orchestrator = new DetachedStartOrchestrator(registry);
         var configuration = HostConfiguration();
         var runtime = new QueryRuntime(

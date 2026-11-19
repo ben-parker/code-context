@@ -131,6 +131,10 @@ codecontext query hubs --within src/CodeContext.Core        # the most depended-
   recognized, so check with `rg` when the split matters.
 - To query a symbol named `path`, `affected`, `hubs` or `multi`, put it after `--`:
   `codecontext query --depth 2 -- path`.
+- A graph query walks the graph on every call: milliseconds on a repository of 100,000
+  edges, seconds on one of millions. The CLI waits up to 60 seconds for one (5 for
+  `query`), then says it stopped and how to narrow the query; the instance stops the walk
+  when the caller goes away.
 - The answers are static evidence with the blind spots listed below; an empty `affected`
   or `path none` is not proof of no dependency.
 
