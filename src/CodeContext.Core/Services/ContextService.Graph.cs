@@ -264,36 +264,22 @@ namespace CodeContext.Core.Services
 
             var affected = walk.AffectedBy(seed.Seeds, request.MaxDepth, out var depthLimited);
             response.DepthLimited = depthLimited;
-            // What is hidden is only counted. The walk hands dependents over in order of distance, so the entries to
-            // return lie in the distances up to the one the limit falls in: only those are ordered, not everything found.
+            // What is hidden is only counted.
             var listed = affected;
-            if (!request.IncludeTests)
-            {
-                response.TestsHidden = listed.RemoveAll(item => item.Hidden);
-            }
+            response.TestsHidden = listed.RemoveAll(item => item.Hidden);
             var files = new HashSet<string>(StringComparer.Ordinal);
             foreach (var item in listed)
             {
                 if (!string.IsNullOrEmpty(item.Node.FilePath)) files.Add(item.Node.FilePath);
             }
-            var ordered = listed.Count;
-            if (listed.Count > request.Limit)
-            {
-                var last = listed[request.Limit - 1].Distance;
-                ordered = request.Limit;
-                while (ordered < listed.Count && listed[ordered].Distance == last) ordered++;
-            }
-            listed.Sort(0, ordered, Comparer<GraphWalk.Affected>.Create((left, right) =>
-            {
-                var order = left.Distance.CompareTo(right.Distance);
-                if (order == 0) order = GraphAdjacency.ComparePaths(left.Node.FilePath ?? string.Empty, right.Node.FilePath ?? string.Empty);
-                if (order == 0) order = left.Node.StartLine.CompareTo(right.Node.StartLine);
-                return order != 0 ? order : string.CompareOrdinal(left.Node.Id, right.Node.Id);
-            }));
 
             response.TotalCount = listed.Count;
             response.FileCount = files.Count;
-            foreach (var item in listed.Take(request.Limit))
+            foreach (var item in Leading(listed, request.Limit, static (left, right) =>
+            {
+                var order = left.Distance.CompareTo(right.Distance);
+                return order != 0 ? order : CompareByPlace(left.Node, right.Node);
+            }))
             {
                 var compact = ToCompact<GraphAffectedNode>(item.Node);
                 compact.Distance = item.Distance;
@@ -336,17 +322,13 @@ namespace CodeContext.Core.Services
                 considered++;
                 return true;
             });
-            hubs.Sort((left, right) =>
+            response.TotalCount = hubs.Count;
+            foreach (var hub in Leading(hubs, request.Limit, static (left, right) =>
             {
                 var order = right.Dependents.CompareTo(left.Dependents);
                 if (order == 0) order = right.DependentFiles.CompareTo(left.DependentFiles);
-                if (order == 0) order = GraphAdjacency.ComparePaths(left.Node.FilePath ?? string.Empty, right.Node.FilePath ?? string.Empty);
-                if (order == 0) order = left.Node.StartLine.CompareTo(right.Node.StartLine);
-                return order != 0 ? order : string.CompareOrdinal(left.Node.Id, right.Node.Id);
-            });
-
-            response.TotalCount = hubs.Count;
-            foreach (var hub in hubs.Take(request.Limit))
+                return order != 0 ? order : CompareByPlace(left.Node, right.Node);
+            }))
             {
                 var compact = ToCompact<GraphHubNode>(hub.Node);
                 compact.Dependents = hub.Dependents;
@@ -371,6 +353,32 @@ namespace CodeContext.Core.Services
         }
 
         // ---- Shared ----
+
+        /// <summary>
+        /// The first <paramref name="count"/> of <paramref name="items"/> in <paramref name="comparison"/> order, without
+        /// ordering the rest: a query that finds a hundred thousand symbols returns twenty of them.
+        /// </summary>
+        private static List<T> Leading<T>(List<T> items, int count, Comparison<T> comparison)
+        {
+            var leading = new List<T>(Math.Min(count, items.Count) + 1);
+            var comparer = Comparer<T>.Create(comparison);
+            foreach (var item in items)
+            {
+                if (leading.Count == count && comparison(item, leading[^1]) >= 0) continue;
+                var at = leading.BinarySearch(item, comparer);
+                leading.Insert(at < 0 ? ~at : at, item);
+                if (leading.Count > count) leading.RemoveAt(count);
+            }
+            return leading;
+        }
+
+        /// <summary>The order of listed symbols that tie otherwise: by file, line, then id, so every answer is deterministic.</summary>
+        private static int CompareByPlace(CodeNode left, CodeNode right)
+        {
+            var order = GraphAdjacency.ComparePaths(left.FilePath ?? string.Empty, right.FilePath ?? string.Empty);
+            if (order == 0) order = left.StartLine.CompareTo(right.StartLine);
+            return order != 0 ? order : string.CompareOrdinal(left.Id, right.Id);
+        }
 
         private sealed record ResolvedEndpoint(
             GraphEndpoint Endpoint,

@@ -275,8 +275,7 @@ namespace CodeContext.Core.Services
         public sealed record Affected(CodeNode Node, int Distance, string Relation, string Via, string? Through, bool Hidden);
 
         /// <summary>
-        /// Everything that depends on the seeds within <paramref name="maxDepth"/> hops, in order of distance (callers
-        /// rely on it), seeds excluded.
+        /// Everything that depends on the seeds within <paramref name="maxDepth"/> hops, nearest first, seeds excluded.
         /// Impact moves from a symbol to: the source of every usage edge into it (relation filter applied); without a
         /// relation filter, every implementation or override of it (it must stay compatible with the declaration); and,
         /// through dispatch, the source of every usage edge into a declaration it implements or overrides, at any height,
@@ -397,6 +396,7 @@ namespace CodeContext.Core.Services
                     if (node.Id is not { Length: > 0 } id || !accept(node)) continue;
                     sources.Clear();
                     files.Clear();
+                    var dependents = 0;
                     foreach (var other in _shards)
                     {
                         var inbound = other.GetEdgesByTarget(id);
@@ -404,13 +404,14 @@ namespace CodeContext.Core.Services
                         {
                             var edge = inbound[i];
                             if (!IsUsage(edge) || !Admits(edge) || edge.SourceId is not { Length: > 0 } source || source == id) continue;
-                            if (sources.Contains(source) || Node(source) is not { } user) continue;
+                            // Each source is judged once, whether it counts or not.
+                            if (!sources.Add(source) || Node(source) is not { } user) continue;
                             if (!_includeTests && IsTestNode(user)) continue;
-                            sources.Add(source);
+                            dependents++;
                             files.Add(user.FilePath ?? string.Empty);
                         }
                     }
-                    if (sources.Count > 0) hubs.Add(new Hub(node, sources.Count, files.Count));
+                    if (dependents > 0) hubs.Add(new Hub(node, dependents, files.Count));
                 }
             }
             return hubs;

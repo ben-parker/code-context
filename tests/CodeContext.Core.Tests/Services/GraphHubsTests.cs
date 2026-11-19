@@ -33,6 +33,36 @@ public class GraphHubsTests
         Assert.False(response.Truncated);
     }
 
+    [Theory]
+    [InlineData(1)]
+    [InlineData(4)]
+    [InlineData(17)]
+    [InlineData(40)]
+    public async Task ALimitedRanking_IsTheStartOfTheFullOne(int limit)
+    {
+        // 40 hubs whose counts tie in groups, added in an order that is not the ranked one.
+        var graph = new GraphTestGraph();
+        for (var u = 0; u < 6; u++) graph.Node($"User{u}", file: $"src/U{u % 3}.cs");
+        for (var i = 0; i < 40; i++)
+        {
+            var scrambled = (i * 13) % 40;
+            graph.Node($"Hub{scrambled}", file: $"src/H{scrambled % 5}.cs", line: 50 - scrambled);
+            for (var u = 0; u <= scrambled % 6; u++) graph.Calls($"User{u}", $"Hub{scrambled}");
+        }
+        var service = graph.Build();
+
+        var full = await Hubs(service, limit: 100);
+        var limited = await Hubs(service, limit: limit);
+
+        Assert.Equal(40, full.TotalCount);
+        Assert.Equal(40, limited.TotalCount);
+        Assert.Equal(limit < 40, limited.Truncated);
+        Assert.Equal(Ranked(full).Take(limit), Ranked(limited));
+        // The full ranking: most dependents, then most files, then file and line.
+        var keys = full.Items.Select(item => (-item.Dependents, -item.DependentFiles, item.File, item.Line)).ToList();
+        Assert.Equal(keys.OrderBy(key => key).ToList(), keys);
+    }
+
     [Fact]
     public async Task Within_KeepsOnlySymbolsUnderThatDirectory_OnSegmentBoundaries()
     {
