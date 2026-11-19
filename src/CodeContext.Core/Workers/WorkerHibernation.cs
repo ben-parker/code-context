@@ -9,7 +9,12 @@ using Microsoft.Extensions.Logging;
 
 namespace CodeContext.Core.Workers;
 
-/// <summary>When <see cref="WorkerHibernation"/> stops idle workers; immutable.</summary>
+/// <summary>
+/// When <see cref="WorkerHibernation"/> stops idle workers; immutable. By default the idle time follows the wake cost:
+/// a worker whose last index from its files took under <see cref="QuickRead"/> hibernates after <see cref="QuickIdle"/>,
+/// any other (a slower one, or one that has only restored saved state) after <see cref="Idle"/>. A configured
+/// <c>CodeContext:WorkerHibernateSeconds</c> sets one idle time for every worker; 0 turns hibernation off.
+/// </summary>
 public sealed record WorkerHibernationSettings
 {
     /// <summary>The configuration key; <c>CodeContext__WorkerHibernateSeconds</c> in the environment.</summary>
@@ -19,51 +24,82 @@ public sealed record WorkerHibernationSettings
     public const string EnvironmentVariable = "CodeContext__WorkerHibernateSeconds";
 
     /// <summary>
-    /// Fifteen minutes. A wake costs a few seconds (the C# worker restoring its saved state, the TypeScript worker
-    /// re-reading its files) on top of the change that caused it, so it should not land between edits of one working
-    /// session, which come seconds to minutes apart; after a quarter of an hour of silence the session has paused and
-    /// the workers' memory, most of an idle instance's, is worth more.
+    /// Fifteen minutes, for a worker whose wake is slow or not known to be quick. A wake costs its index on top of the
+    /// change that caused it, and the C# worker after restoring saved state then binds its compilations cold on the
+    /// first edit (jellyfin: 23.5 s against 1.1 to 3.4 s awake), so it should not land between edits of one working
+    /// session; after a quarter of an hour of silence the session has paused and the memory is worth more.
     /// </summary>
     public const int DefaultSeconds = 900;
+
+    /// <summary>
+    /// Two minutes, for a worker that reads its files in under <see cref="QuickReadSeconds"/>: its wake adds about that
+    /// read to one edit (the TypeScript worker on this repository: 2.4 s instead of 1.2 s) and returns its whole
+    /// process (about 210 MB there) for the rest of the pause.
+    /// </summary>
+    public const int QuickIdleSeconds = 120;
+
+    /// <summary>The longest index from the files that still counts as a quick wake.</summary>
+    public const int QuickReadSeconds = 5;
 
     /// <summary>The largest idle time accepted from configuration: one day.</summary>
     public const int MaxSeconds = 86_400;
 
-    /// <summary>Time a worker must spend without an operation before its process is stopped. Zero turns hibernation off.</summary>
+    /// <summary>Idle time before a worker whose wake is not known to be quick is stopped. Zero turns hibernation off.</summary>
     public TimeSpan Idle { get; init; } = TimeSpan.FromSeconds(DefaultSeconds);
+
+    /// <summary>Idle time before a worker whose last index from its files took under <see cref="QuickRead"/> is stopped.</summary>
+    public TimeSpan QuickIdle { get; init; } = TimeSpan.FromSeconds(QuickIdleSeconds);
+
+    /// <summary>See <see cref="QuickReadSeconds"/>.</summary>
+    public TimeSpan QuickRead { get; init; } = TimeSpan.FromSeconds(QuickReadSeconds);
 
     public bool Enabled => Idle > TimeSpan.Zero;
 
-    public static readonly WorkerHibernationSettings Disabled = new() { Idle = TimeSpan.Zero };
+    /// <summary>The shorter of the two idle times.</summary>
+    internal TimeSpan ShortestIdle => QuickIdle < Idle ? QuickIdle : Idle;
+
+    public static readonly WorkerHibernationSettings Disabled = Fixed(TimeSpan.Zero);
+
+    /// <summary>One idle time for every worker, whatever its wake costs, as a configured value gives.</summary>
+    public static WorkerHibernationSettings Fixed(TimeSpan idle) => new() { Idle = idle, QuickIdle = idle };
 
     /// <summary>
-    /// The settings for a configured idle time in whole seconds: absent means the default, 0 turns hibernation off, a
-    /// value above one day is one day. Anything else (negative, not an integer) is refused: null.
+    /// The idle time for a worker whose last index from its files took <paramref name="lastRead"/> (null: none yet,
+    /// for instance a worker that has only restored saved state).
+    /// </summary>
+    public TimeSpan IdleFor(TimeSpan? lastRead)
+        => Enabled && lastRead is { } read && read < QuickRead ? QuickIdle : Idle;
+
+    /// <summary>
+    /// The settings for a configured idle time in whole seconds: absent means the default policy, 0 turns hibernation
+    /// off, any other value applies to every worker, and a value above one day is one day. Anything else (negative,
+    /// not an integer) is refused: null.
     /// </summary>
     public static WorkerHibernationSettings? FromSeconds(string? text)
     {
         if (string.IsNullOrWhiteSpace(text)) return new WorkerHibernationSettings();
         if (!long.TryParse(text.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var seconds) || seconds < 0)
             return null;
-        return new WorkerHibernationSettings { Idle = TimeSpan.FromSeconds(Math.Min(seconds, MaxSeconds)) };
+        return Fixed(TimeSpan.FromSeconds(Math.Min(seconds, MaxSeconds)));
     }
 
-    /// <summary>Reads <see cref="ConfigurationKey"/>; a value that is not valid keeps the default and is logged.</summary>
+    /// <summary>Reads <see cref="ConfigurationKey"/>; a value that is not valid keeps the default policy and is logged.</summary>
     internal static WorkerHibernationSettings Read(IConfiguration? configuration, ILogger? logger = null)
     {
         var text = configuration?[ConfigurationKey];
         if (FromSeconds(text) is { } settings) return settings;
-        logger?.LogWarning("Ignoring configuration {Key} = '{Value}': not a valid value; keeping {Kept}.",
-            ConfigurationKey, text, DefaultSeconds);
+        logger?.LogWarning("Ignoring configuration {Key} = '{Value}': not a valid value; keeping the default ({Quick} s for a worker that reads its files in under {Read} s, else {Kept} s).",
+            ConfigurationKey, text, QuickIdleSeconds, QuickReadSeconds, DefaultSeconds);
         return new WorkerHibernationSettings();
     }
 }
 
 /// <summary>
-/// Stops language worker processes that have had no work for <see cref="WorkerHibernationSettings.Idle"/>, while the
-/// host keeps serving their committed facts (memory plan M3, cache plan 3.9).
+/// Stops language worker processes that have had no work for their idle time
+/// (<see cref="WorkerHibernationSettings.IdleFor"/>), while the host keeps serving their committed facts (memory plan
+/// M3, cache plan 3.9).
 ///
-/// The end of every worker operation arms one timer. When it fires, a maintenance command on the coordinator's loop
+/// The end of every worker operation arms one timer, unless it is already due sooner. When it fires, a maintenance command on the coordinator's loop
 /// asks the worker service to hibernate each worker (<see cref="LanguageWorkerService.TryHibernateAsync"/>), so the
 /// decision and the stop happen between mutations, never during a batch, scan or snapshot capture, and an operation
 /// queued meanwhile simply runs after it. The check re-reads each worker's activity under its lock, so work that
@@ -89,6 +125,7 @@ internal sealed class WorkerHibernation : IHostedService, IDisposable
     private bool _stopped;
     private bool _checking;
     private bool _activityDuringCheck;
+    private DateTimeOffset? _due;
     private int _checks;
 
     public WorkerHibernation(
@@ -111,7 +148,7 @@ internal sealed class WorkerHibernation : IHostedService, IDisposable
         workers.Time = time;
         workers.SnapshotWritten = snapshotWritten;
         workers.Waker = (parserId, ct) => coordinator.RunMutationAsync(c => workers.WakeAsync(parserId, c), ct);
-        workers.ActivityEnded = _ => OnActivityEnded();
+        workers.ActivityEnded = OnActivityEnded;
         _timer = time.CreateTimer(_ => OnTimer(), null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
     }
 
@@ -141,15 +178,33 @@ internal sealed class WorkerHibernation : IHostedService, IDisposable
         return Task.CompletedTask;
     }
 
-    private void OnActivityEnded()
+    /// <summary>The idle time of the parser's worker, from how long its last index from its files took.</summary>
+    internal TimeSpan IdleFor(string parserId) => _settings.IdleFor(_workers.LastReadDuration(parserId));
+
+    private void OnActivityEnded(string parserId)
     {
         lock (_gate)
         {
             if (_stopped) return;
             // A check in flight re-arms when it ends.
-            if (_checking) _activityDuringCheck = true;
-            else _timer?.Change(_settings.Idle, Timeout.InfiniteTimeSpan);
+            if (_checking)
+            {
+                _activityDuringCheck = true;
+                return;
+            }
+            // Workers can have different idle times, so a later activity must not postpone a check due sooner; a check
+            // that finds this worker busy again re-arms for when it will be idle.
+            var due = _time.GetUtcNow() + IdleFor(parserId);
+            if (_due is { } armed && armed <= due) return;
+            ArmLocked(due);
         }
+    }
+
+    private void ArmLocked(DateTimeOffset due)
+    {
+        _due = due;
+        var now = _time.GetUtcNow();
+        _timer?.Change(due > now ? due - now : TimeSpan.Zero, Timeout.InfiniteTimeSpan);
     }
 
     private void OnTimer()
@@ -157,6 +212,7 @@ internal sealed class WorkerHibernation : IHostedService, IDisposable
         lock (_gate)
         {
             if (_stopped || _checking) return;
+            _due = null;
             _checking = true;
             _activityDuringCheck = false;
         }
@@ -171,8 +227,9 @@ internal sealed class WorkerHibernation : IHostedService, IDisposable
                     _checks++;
                     if (_stopped) return;
                     var now = _time.GetUtcNow();
-                    if (_activityDuringCheck && (next is null || now + _settings.Idle < next)) next = now + _settings.Idle;
-                    if (next is { } due) _timer!.Change(due > now ? due - now : TimeSpan.Zero, Timeout.InfiniteTimeSpan);
+                    // Which worker had work is not recorded; the shorter idle time may check early, never late.
+                    if (_activityDuringCheck && (next is null || now + _settings.ShortestIdle < next)) next = now + _settings.ShortestIdle;
+                    if (next is { } due) ArmLocked(due);
                 }
             }, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
     }
@@ -183,15 +240,16 @@ internal sealed class WorkerHibernation : IHostedService, IDisposable
         DateTimeOffset? next = null;
         foreach (var parserId in _workers.ParserIds)
         {
-            var outcome = await _workers.TryHibernateAsync(parserId, _settings.Idle, ct).ConfigureAwait(false);
+            var idle = IdleFor(parserId);
+            var outcome = await _workers.TryHibernateAsync(parserId, idle, ct).ConfigureAwait(false);
             // Stopping a process allocates little, so the trim's allocation threshold would skip the native memory
             // it lets go (measured: about 11 MB on this repository's host).
             if (outcome == LanguageWorkerService.HibernationOutcome.Hibernated) _memoryTrim?.RequestRelease();
             DateTimeOffset? due = outcome switch
             {
-                LanguageWorkerService.HibernationOutcome.NotIdle => _workers.LastActivity(parserId) + _settings.Idle,
+                LanguageWorkerService.HibernationOutcome.NotIdle => _workers.LastActivity(parserId) + idle,
                 // The state is saved with the next snapshot, which follows a commit within the snapshot delays.
-                LanguageWorkerService.HibernationOutcome.StateNotSaved => _time.GetUtcNow() + _settings.Idle,
+                LanguageWorkerService.HibernationOutcome.StateNotSaved => _time.GetUtcNow() + idle,
                 _ => null,
             };
             if (due is { } d && (next is null || d < next)) next = d;
@@ -211,7 +269,8 @@ public static class WorkerHibernationServiceCollectionExtensions
     /// <summary>
     /// Registers worker hibernation as a hosted service. Call after the snapshot writer (it reads whether the snapshot
     /// on disk is current). The idle time is read by hand from <c>CodeContext:WorkerHibernateSeconds</c> (Native-AOT
-    /// safe): absent means <see cref="WorkerHibernationSettings.DefaultSeconds"/>, 0 turns hibernation off.
+    /// safe): absent means the default policy (<see cref="WorkerHibernationSettings"/>), a value applies to every
+    /// worker, 0 turns hibernation off.
     /// </summary>
     public static IServiceCollection AddCodeContextWorkerHibernation(this IServiceCollection services)
     {

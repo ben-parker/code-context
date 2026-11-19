@@ -458,15 +458,20 @@ public sealed class PersistentStateTests : IAsyncLifetime
     {
         public ConcurrentQueue<AnalysisDelta> Deltas { get; } = new();
 
+        /// <summary>Runs as each delta arrives, before it is applied (for instance, fake time passing during an index).</summary>
+        public Action<AnalysisDelta>? OnDelta { get; set; }
+
         public Task<bool> ApplyAsync(AnalysisDelta delta, CancellationToken ct = default)
         {
             Deltas.Enqueue(delta);
+            OnDelta?.Invoke(delta);
             return inner.ApplyAsync(delta, ct);
         }
 
         Task<bool> IAnalysisDeltaSink.ApplyAsync(AnalysisDelta delta, DeltaOrigin? origin, CancellationToken ct)
         {
             Deltas.Enqueue(delta);
+            OnDelta?.Invoke(delta);
             return inner.ApplyAsync(delta, origin, ct);
         }
     }
@@ -484,6 +489,12 @@ public sealed class PersistentStateTests : IAsyncLifetime
 
         public Instance(string root, string keyPath, RegisteredWorker worker,
             Func<SnapshotServiceSettings, SnapshotServiceSettings>? configure, bool cache)
+            : this(root, keyPath, [worker], configure, cache)
+        {
+        }
+
+        public Instance(string root, string keyPath, RegisteredWorker[] workers,
+            Func<SnapshotServiceSettings, SnapshotServiceSettings>? configure, bool cache)
         {
             Factory = new InMemoryRepositoryFactory(NullLogger<InMemoryRepositoryFactory>.Instance);
             Factory.InitializeAsync(root).Wait();
@@ -492,7 +503,7 @@ public sealed class PersistentStateTests : IAsyncLifetime
             var coverage = AnalysisCoverageRegistry.ForStore(Factory);
             var store = (IGenerationalGraphStore)Factory.CreateGraphRepository();
             Sink = new RecordingSink(new AnalysisDeltaApplier(store, NullLogger<AnalysisDeltaApplier>.Instance, coverage));
-            Workers = new LanguageWorkerService(new StaticWorkerCatalog(worker), Sink,
+            Workers = new LanguageWorkerService(new StaticWorkerCatalog(workers), Sink,
                 Sessions, options, new WorkerLogFactory(WorkerLog), TestWorkerOptions.Patient());
             var graphUpdate = new GraphUpdateService(Factory, options, NullLogger<GraphUpdateService>.Instance, metadata, Workers);
             GraphUpdate = graphUpdate;
@@ -573,19 +584,22 @@ public sealed class PersistentStateTests : IAsyncLifetime
             }
         }
 
-        private static RegisteredWorker FakeWorker(string[] args)
+        /// <summary>The fake worker; with <c>--parser-id</c> among <paramref name="args"/> it answers as that parser, claiming <c>.&lt;id&gt;</c>.</summary>
+        internal static RegisteredWorker FakeWorker(string[] args)
         {
+            var index = Array.IndexOf(args, "--parser-id");
+            var parserId = index >= 0 && index + 1 < args.Length ? args[index + 1] : "fake";
             var baseDirectory = AppContext.BaseDirectory;
             var apphost = Path.Combine(baseDirectory,
                 OperatingSystem.IsWindows() ? "CodeContext.FakeWorker.exe" : "CodeContext.FakeWorker");
             var spec = File.Exists(apphost)
-                ? new WorkerLaunchSpec("fake", "Fake Worker", apphost, args)
-                : new WorkerLaunchSpec("fake", "Fake Worker", "dotnet",
+                ? new WorkerLaunchSpec(parserId, "Fake Worker", apphost, args)
+                : new WorkerLaunchSpec(parserId, "Fake Worker", "dotnet",
                     [Path.Combine(baseDirectory, "CodeContext.FakeWorker.dll"), .. args]);
             var manifest = new WorkerManifest(
-                ManifestVersion: 1, ParserId: "fake", DisplayName: "Fake Worker", Version: "1.0.0-test",
+                ManifestVersion: 1, ParserId: parserId, DisplayName: "Fake Worker", Version: "1.0.0-test",
                 Command: "test", Args: [], MinProtocolVersion: ParserProtocol.Version, MaxProtocolVersion: ParserProtocol.Version,
-                Languages: ["fake"], Extensions: [".fake"], ProjectMarkers: ["fake.proj"]);
+                Languages: ["fake"], Extensions: ["." + parserId], ProjectMarkers: ["fake.proj"]);
             return new RegisteredWorker(manifest, spec, "<in-test>");
         }
     }

@@ -104,6 +104,13 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
 
         /// <summary>When an operation on this worker last started or ended, in UTC ticks of <see cref="Time"/>.</summary>
         public long LastActivityTicks;
+
+        /// <summary>
+        /// How long the last successful index that read the workspace from its files took (a scan or a wake, process
+        /// start included), or null before one. An index whose baseline was accepted does not count: restoring saved
+        /// state is quick because it skips the warm-up the next edit then pays.
+        /// </summary>
+        public TimeSpan? LastReadDuration { get; set; }
         public HashSet<string> ApprovedFiles { get; } = new(PathComparer);
         public SemaphoreSlim Lock { get; } = new(1, 1);
     }
@@ -271,6 +278,7 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
                 return;
             }
 
+            var started = Time.GetUtcNow();
             var supervisor = EnsureSupervisor(state);
             var generation = ++state.Generation;
             await supervisor.OpenWorkspaceAsync(new OpenWorkspaceParams(
@@ -286,6 +294,7 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
             var result = await supervisor.IndexWorkspaceAsync(new IndexWorkspaceParams(
                 DefaultWorkspaceId, generation, files, baseline), ct, progressHandler).ConfigureAwait(false);
             state.LastBaselineOutcome = result.Baseline;
+            RecordIndexDuration(state, started);
             ReplaceApprovedFiles(state, files);
             state.EverIndexed = true;
             state.HoldsLoadedFacts = false;
@@ -443,6 +452,7 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
         state.Hibernated = false;
         state.WakeIncomplete = true;
         state.LastBaselineOutcome = null;
+        var started = Time.GetUtcNow();
         var supervisor = EnsureSupervisor(state);
         var generation = ++state.Generation;
         await supervisor.OpenWorkspaceAsync(new OpenWorkspaceParams(
@@ -456,6 +466,7 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
             DefaultWorkspaceId, generation, files, baseline), ct).ConfigureAwait(false);
         ReplaceApprovedFiles(state, files);
         state.LastBaselineOutcome = result.Baseline;
+        RecordIndexDuration(state, started);
         state.WakeIncomplete = false;
         _logger.LogInformation("Worker '{ParserId}' woke: {Outcome}.", state.Registration.Manifest.ParserId,
             result.Baseline == BaselineOutcomes.Accepted ? "its saved state was accepted" : "it re-read the workspace");
@@ -516,6 +527,24 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
         => _workers.TryGetValue(parserId, out var state)
             ? new DateTimeOffset(Interlocked.Read(ref state.LastActivityTicks), TimeSpan.Zero)
             : null;
+
+    /// <summary>
+    /// How long the parser's last successful index that read its files (not one that accepted saved state) took, or
+    /// null before one: what <see cref="WorkerHibernationSettings.IdleFor"/> reads.
+    /// </summary>
+    internal TimeSpan? LastReadDuration(string parserId)
+        => _workers.TryGetValue(parserId, out var state) ? state.LastReadDuration : null;
+
+    /// <summary>Records the index that just succeeded; call after <see cref="WorkerState.LastBaselineOutcome"/> is set.</summary>
+    private void RecordIndexDuration(WorkerState state, DateTimeOffset started)
+    {
+        var elapsed = Time.GetUtcNow() - started;
+        if (elapsed < TimeSpan.Zero) elapsed = TimeSpan.Zero;
+        var restored = state.LastBaselineOutcome == BaselineOutcomes.Accepted;
+        if (!restored) state.LastReadDuration = elapsed;
+        _logger.LogInformation("Worker '{ParserId}' indexed in {Seconds:0.0} s ({How}).", state.Registration.Manifest.ParserId,
+            elapsed.TotalSeconds, restored ? "from its saved state" : "from its files");
+    }
 
     private void Touch(WorkerState state) => Interlocked.Exchange(ref state.LastActivityTicks, Time.GetUtcNow().UtcTicks);
 

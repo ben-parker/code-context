@@ -46,24 +46,31 @@ public sealed class WorkerHibernationTests : IAsyncLifetime
         Directory.Delete(_base, recursive: true);
     }
 
-    /// <summary>A host over the root with hibernation on fake time; snapshots are written 50 ms after a commit.</summary>
-    private Task<Host> StartAsync(string behavior = "persistent-state", bool cache = true, TimeSpan? snapshotQuiet = null)
+    /// <summary>
+    /// A host over the root with hibernation on fake time; snapshots are written 50 ms after a commit. The idle time is
+    /// <see cref="Idle"/> for every worker unless <paramref name="hibernation"/> says otherwise.
+    /// </summary>
+    private Task<Host> StartAsync(string behavior = "persistent-state", bool cache = true, TimeSpan? snapshotQuiet = null,
+        WorkerHibernationSettings? hibernation = null, Action<PersistentStateTests.Instance, ManualTimeProvider>? beforeStart = null)
         => StartAsync(new PersistentStateTests.Instance(Root, KeyPath, ["--behavior", behavior, "--fail-marker", FailMarker],
-            settings => settings with { QuietPeriod = snapshotQuiet ?? TimeSpan.FromMilliseconds(50) }, cache));
+            settings => settings with { QuietPeriod = snapshotQuiet ?? TimeSpan.FromMilliseconds(50) }, cache),
+            hibernation: hibernation, beforeStart: beforeStart);
 
     private Task<Host> StartAsync(RegisteredWorker worker)
         => StartAsync(new PersistentStateTests.Instance(Root, KeyPath, worker,
             settings => settings with { QuietPeriod = TimeSpan.FromMilliseconds(50) }, cache: true));
 
-    private async Task<Host> StartAsync(PersistentStateTests.Instance instance, Func<TimeProvider, QuietTimeTrim>? memoryTrim = null)
+    private async Task<Host> StartAsync(PersistentStateTests.Instance instance, Func<TimeProvider, QuietTimeTrim>? memoryTrim = null,
+        WorkerHibernationSettings? hibernation = null, Action<PersistentStateTests.Instance, ManualTimeProvider>? beforeStart = null)
     {
         var time = new ManualTimeProvider();
-        var hibernation = new WorkerHibernation(instance.Workers, instance.Coordinator, new WorkerHibernationSettings { Idle = Idle },
+        var timer = new WorkerHibernation(instance.Workers, instance.Coordinator, hibernation ?? WorkerHibernationSettings.Fixed(Idle),
             time, () => instance.Snapshots.WrittenMatchesStore, memoryTrim: memoryTrim?.Invoke(time));
-        var host = new Host(instance, hibernation, time);
+        var host = new Host(instance, timer, time);
         _started.Add(host);
+        beforeStart?.Invoke(instance, time);
         await instance.StartAsync();
-        await hibernation.StartAsync(CancellationToken.None);
+        await timer.StartAsync(CancellationToken.None);
         await instance.WaitForAsync(() => instance.ScanState.Phase == ScanPhase.Ready, "the first scan");
         return host;
     }
@@ -190,6 +197,111 @@ public sealed class WorkerHibernationTests : IAsyncLifetime
 
         _ = await host.Instance.Status.GetStatusAsync();
         await host.AdvanceAndCheckAsync(Idle);
+        Assert.True(host.Instance.Workers.IsHibernated("fake"));
+    }
+
+    [Fact]
+    public async Task ByDefault_AWorkerThatReadItsFilesQuickly_HibernatesAfterTwoMinutes()
+    {
+        var host = await StartAsync("strict", cache: false, hibernation: new WorkerHibernationSettings());
+        Assert.True(host.Instance.Workers.LastReadDuration("fake") < TimeSpan.FromSeconds(WorkerHibernationSettings.QuickReadSeconds));
+
+        await host.AdvanceAndCheckAsync(TimeSpan.FromSeconds(WorkerHibernationSettings.QuickIdleSeconds - 1));
+        Assert.False(host.Instance.Workers.IsHibernated("fake"));
+        await host.AdvanceAndCheckAsync(TimeSpan.FromSeconds(1));
+        Assert.True(host.Instance.Workers.IsHibernated("fake"));
+        Assert.Equal("hibernated", Assert.Single((await host.Instance.Status.GetStatusAsync()).Parsers.Sessions!).State);
+    }
+
+    [Fact]
+    public async Task ByDefault_LaterWorkOnAQuickWorker_MovesItsHibernationLater()
+    {
+        var host = await StartAsync("strict", cache: false, hibernation: new WorkerHibernationSettings());
+        await host.AdvanceAndCheckAsync(TimeSpan.FromSeconds(60));
+        await host.Instance.Coordinator.RefreshFileAsync(Path.Combine(Root, "a.fake"));
+
+        // The check armed by the scan runs at two minutes, finds the refresh a minute old, and waits for the rest.
+        await host.AdvanceAndCheckAsync(TimeSpan.FromSeconds(60));
+        Assert.False(host.Instance.Workers.IsHibernated("fake"));
+        await host.AdvanceAndCheckAsync(TimeSpan.FromSeconds(60));
+        Assert.True(host.Instance.Workers.IsHibernated("fake"));
+    }
+
+    [Fact]
+    public async Task ByDefault_WorkOnASlowWorker_DoesNotPostponeAQuickWorkersHibernation()
+    {
+        // A stem of its own: the fake workers name their symbols by file stem, and public identifiers must be unique.
+        File.WriteAllText(Path.Combine(Root, "s.slow"), "s");
+        // The slow worker's scan takes 10 s of fake time; the quick one's none.
+        var slowed = 0;
+        var instance = new PersistentStateTests.Instance(Root, KeyPath,
+            [PersistentStateTests.Instance.FakeWorker(["--behavior", "strict"]),
+             PersistentStateTests.Instance.FakeWorker(["--behavior", "strict", "--parser-id", "slow"])],
+            null, cache: false);
+        var host = await StartAsync(instance, hibernation: new WorkerHibernationSettings(),
+            beforeStart: (started, time) => started.Sink.OnDelta = delta =>
+            {
+                if (delta.ParserId == "slow" && Interlocked.Exchange(ref slowed, 1) == 0) time.Advance(TimeSpan.FromSeconds(10));
+            });
+        Assert.True(instance.Workers.LastReadDuration("slow") >= TimeSpan.FromSeconds(WorkerHibernationSettings.QuickReadSeconds));
+        Assert.True(instance.Workers.LastReadDuration("fake") < TimeSpan.FromSeconds(WorkerHibernationSettings.QuickReadSeconds));
+
+        // Work on the slow worker after the quick one's last work must not move the quick one's check to 15 minutes.
+        await host.AdvanceAndCheckAsync(TimeSpan.FromSeconds(30));
+        await instance.Coordinator.RefreshFileAsync(Path.Combine(Root, "s.slow"));
+        await host.AdvanceAndCheckAsync(TimeSpan.FromSeconds(WorkerHibernationSettings.QuickIdleSeconds - 30));
+        // The quick worker's scan ended at 0 or 10 s, as the two scans ran in either order.
+        await host.AdvanceAndCheckAsync(TimeSpan.FromSeconds(10));
+        Assert.True(instance.Workers.IsHibernated("fake"));
+        Assert.False(instance.Workers.IsHibernated("slow"));
+        await host.AdvanceAndCheckAsync(TimeSpan.FromSeconds(WorkerHibernationSettings.DefaultSeconds));
+        Assert.True(instance.Workers.IsHibernated("slow"));
+    }
+
+    [Fact]
+    public async Task ByDefault_AWorkerWhoseReadTookLong_WaitsFifteenMinutes()
+    {
+        // Fake time passes while the scan streams its facts: the read took 10 s.
+        var slowed = 0;
+        var host = await StartAsync("strict", cache: false, hibernation: new WorkerHibernationSettings(),
+            beforeStart: (instance, time) => instance.Sink.OnDelta = _ =>
+            {
+                if (Interlocked.Exchange(ref slowed, 1) == 0) time.Advance(TimeSpan.FromSeconds(10));
+            });
+        Assert.True(host.Instance.Workers.LastReadDuration("fake") >= TimeSpan.FromSeconds(WorkerHibernationSettings.QuickReadSeconds));
+
+        await host.AdvanceAndCheckAsync(TimeSpan.FromSeconds(WorkerHibernationSettings.QuickIdleSeconds));
+        Assert.False(host.Instance.Workers.IsHibernated("fake"));
+        await host.AdvanceAndCheckAsync(TimeSpan.FromSeconds(WorkerHibernationSettings.DefaultSeconds - WorkerHibernationSettings.QuickIdleSeconds));
+        Assert.True(host.Instance.Workers.IsHibernated("fake"));
+    }
+
+    [Fact]
+    public async Task ByDefault_AWorkerThatOnlyRestoredItsSavedState_WaitsFifteenMinutes()
+    {
+        var first = await StartAsync();
+        await first.WaitForStateWrittenAsync();
+        await first.Instance.StopAsync();
+
+        // The restore is quick because it skips the warm-up the next edit pays, so it does not count as a quick read.
+        var host = await StartAsync(hibernation: new WorkerHibernationSettings());
+        Assert.Equal(BaselineOutcomes.Accepted, host.Instance.Workers.LastBaselineOutcomeFor("fake"));
+        Assert.Null(host.Instance.Workers.LastReadDuration("fake"));
+        await host.WaitForStateWrittenAsync();
+
+        await host.AdvanceAndCheckAsync(TimeSpan.FromSeconds(WorkerHibernationSettings.QuickIdleSeconds));
+        Assert.False(host.Instance.Workers.IsHibernated("fake"));
+        await host.AdvanceAndCheckAsync(TimeSpan.FromSeconds(WorkerHibernationSettings.DefaultSeconds - WorkerHibernationSettings.QuickIdleSeconds));
+        Assert.True(host.Instance.Workers.IsHibernated("fake"));
+    }
+
+    [Fact]
+    public async Task AConfiguredIdleTime_AppliesToAQuickWorkerToo()
+    {
+        var host = await StartAsync("strict", cache: false, hibernation: WorkerHibernationSettings.FromSeconds("600"));
+        await host.AdvanceAndCheckAsync(TimeSpan.FromSeconds(WorkerHibernationSettings.QuickIdleSeconds));
+        Assert.False(host.Instance.Workers.IsHibernated("fake"));
+        await host.AdvanceAndCheckAsync(TimeSpan.FromSeconds(600 - WorkerHibernationSettings.QuickIdleSeconds));
         Assert.True(host.Instance.Workers.IsHibernated("fake"));
     }
 

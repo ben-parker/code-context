@@ -44,12 +44,15 @@ using CodeContext.Parser.Protocol;
 //   reject-with-file-scope  persistent-state that answers rejected with a file-scoped delta
 //   unsolicited-baseline normal, but answers baseline "accepted" to every workspace/index
 //
+// --parser-id <id>: answers as parser <id> claiming extension .<id> (default fake), so a test can run two fake workers.
+//
 // --fail-marker <path>: while that file exists, workspace/index and workspace/applyChanges emit their delta
 // and then answer complete:false (a request that fails after its delta committed).
 
 var behavior = GetOption(args, "--behavior") ?? "normal";
 var markerPath = GetOption(args, "--marker");
 var failMarker = GetOption(args, "--fail-marker");
+var parserId = GetOption(args, "--parser-id") ?? "fake";
 
 var stdin = Console.OpenStandardInput();
 var stdout = Console.OpenStandardOutput();
@@ -73,7 +76,7 @@ if (behavior == "stderr-flood")
     Console.Error.Flush();
 }
 
-var state = new WorkerState(behavior, markerPath, failMarker);
+var state = new WorkerState(behavior, markerPath, failMarker, parserId);
 var connection = new JsonRpcConnection(stdin, stdout);
 
 connection.AddRequestHandler(ParserProtocolMethods.Initialize, (p, ct) => state.HandleInitializeAsync(p, ct));
@@ -112,9 +115,9 @@ static string? GetOption(string[] args, string name)
     return null;
 }
 
-internal sealed class WorkerState(string behavior, string? markerPath, string? failMarker)
+internal sealed class WorkerState(string behavior, string? markerPath, string? failMarker, string parserId)
 {
-    private const string ParserId = "fake";
+    private string ParserId { get; } = parserId;
     private const string ParserVersion = "1.0.0-test";
 
     // The files whose facts this process has emitted, which is all its "state" holds.
@@ -147,7 +150,7 @@ internal sealed class WorkerState(string behavior, string? markerPath, string? f
             DisplayName: "Fake Worker",
             ProtocolVersion: version,
             Languages: ["fake"],
-            Extensions: [".fake"],
+            Extensions: ["." + ParserId],
             ProjectMarkers: ["fake.proj"],
             Capabilities: new WorkerCapabilities(
                 WorkspaceAnalysis: true, IncrementalUpdates: true,
