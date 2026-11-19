@@ -209,6 +209,12 @@ plan phase 8) goes ahead only if the host's graph memory is still the largest
 remaining cost. Its carried items (lease per read, the reproduced crash on a read
 concurrent with unmap, per-record checks) are the first steps if it does.
 
+Final review, after the gate decided against it: the snapshot sections only a mapped shard
+would read (hashes, adjacency runs, name table, cross-shard edges, histogram; 15-17% of a
+file) and the reader code and tests for them were removed with format version 3
+(`docs/perf/memory-after-m3.md`, "Snapshot format 3"). Building the mapped shard later starts
+by restoring them from history under a new format version.
+
 ### M5: daemonless query
 
 `codecontext query` answers from the newest authenticated snapshot when no instance is

@@ -238,6 +238,27 @@ Stop the memory work here; do not build phase 8 now. Go to M5 and the feature ba
   start, which also verifies the C# workspace, is ready in 7 to 8 s. Measure the
   materializing load alone first.
 
+## Snapshot format 3 (final review)
+
+Format 2 wrote ten index sections per shard for the mapped shard (id, identifier and edge-id
+hashes, by-source and by-target runs, the name table and its postings, cross-shard edges, the
+type histogram). With the mapped shard not built, nothing read them: every load materializes.
+Format 3 leaves them out, together with the folded-name strings that only the name table used.
+A format 2 file is refused at the header (`FormatVersion`), deleted by the writing host and
+rebuilt by its scan. Optimized build (`DOTNET_TieredCompilation=0`), adjacency already built,
+writing to a null stream; this machine was under load, so times are ranges over three rounds:
+
+| | this repository (90k edges) | jellyfin (297k edges) |
+|---|---|---|
+| File, format 2 to 3 | 8,332,976 to 6,922,512 bytes (-16.9%) | 24,893,888 to 20,269,616 bytes (-18.6%) |
+| Write time | 243-275 to 142-187 ms | 781-1176 to 497-616 ms |
+| Allocated per write | 40.2 to 29.4 MB (48.2 before the sections stopped being joined into one array) | 108.8 to 72.1 MB (132.5 before) |
+| Materializing load, best of 7 | about 160 to 108-149 ms | 497-594 to 430-468 ms |
+
+If a mapped shard is ever built, the sections and their reader (`SnapshotShardReader`'s keyed
+reads, the open-time checks of the name table and the runs, and their tests) are in history
+before this change; they would come back under a new format version.
+
 ## Not done or not verified
 
 - Windows, macOS, a machine with a normal L3, the AOT host and ReadyToRun worker.

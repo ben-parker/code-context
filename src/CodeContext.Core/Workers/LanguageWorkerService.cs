@@ -203,6 +203,58 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
     internal bool IsIndexedParser(string parserId) => _extensionToParser.ContainsValue(parserId);
 
     /// <summary>
+    /// What decides which files this host indexes and with what, from the manifests alone (no worker is asked):
+    /// every discovered worker's id, version, command, project markers and inputs and where its manifest is, and
+    /// which worker each extension is routed to. A snapshot records it; a query without an instance answers only
+    /// from a snapshot written under the same value, since a worker installed, removed or replaced since then
+    /// would index the tree differently. Lowercase hex SHA-256 of a canonical text.
+    /// </summary>
+    internal string WorkerSetFingerprint()
+    {
+        var text = new System.Text.StringBuilder();
+        void Field(string? value) => text.Append(value?.Length ?? -1).Append(':').Append(value).Append('\n');
+        void List(IReadOnlyList<string>? values)
+        {
+            text.Append(values?.Count ?? -1).Append('[');
+            foreach (var value in values ?? []) Field(value);
+        }
+        foreach (var worker in _workers.Values.Select(state => state.Registration).OrderBy(worker => worker.Manifest.ParserId, StringComparer.Ordinal))
+        {
+            Field(worker.Manifest.ParserId);
+            Field(worker.Manifest.Version);
+            Field(worker.Manifest.Command);
+            List(worker.Manifest.Args);
+            List(worker.Manifest.ProjectMarkers);
+            List(worker.Manifest.ProjectInputs);
+            Field(worker.ManifestPath);
+        }
+        foreach (var (extension, parserId) in _extensionToParser.OrderBy(pair => pair.Key.ToUpperInvariant(), StringComparer.Ordinal))
+        {
+            Field(extension.ToUpperInvariant());
+            Field(parserId);
+        }
+        return Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(text.ToString())));
+    }
+
+    /// <summary>
+    /// Each discovered worker's manifest and the directory it is in, where they are on disk: what a check without a
+    /// worker looks at besides the tree, so a worker updated in place (its manifest rewritten, a file added, removed
+    /// or renamed beside it) is not answered for from facts its predecessor made.
+    /// </summary>
+    internal IReadOnlyList<string> InstallationPaths()
+    {
+        var paths = new List<string>();
+        foreach (var state in _workers.Values)
+        {
+            var manifest = state.Registration.ManifestPath;
+            if (!Path.IsPathFullyQualified(manifest)) continue;
+            paths.Add(manifest);
+            if (Path.GetDirectoryName(manifest) is { Length: > 0 } directory) paths.Add(directory);
+        }
+        return paths;
+    }
+
+    /// <summary>
     /// Records, before the first scan, which parsers have facts in the store from a loaded snapshot. Their
     /// first index then runs even with no files, so a language whose files are all gone is emptied.
     /// </summary>

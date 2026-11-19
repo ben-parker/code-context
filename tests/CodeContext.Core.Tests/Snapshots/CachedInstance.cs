@@ -25,7 +25,10 @@ internal sealed class CachedInstance : IAsyncDisposable
     /// <param name="behavior">The fake worker's behaviour, or null for no worker at all.</param>
     /// <param name="instanceId">What status reports as the instance id (a query checks it against the registry).</param>
     /// <param name="inputs">What the fake worker reports as its inputs.</param>
-    public CachedInstance(string root, string keyPath, string? behavior, string? instanceId = null, string[]? inputs = null)
+    /// <param name="manifestPath">Where the fake worker's manifest is said to be; none unless given.</param>
+    /// <param name="recordWorkerSet">False for a host that records no worker set in its snapshots.</param>
+    public CachedInstance(string root, string keyPath, string? behavior, string? instanceId = null, string[]? inputs = null,
+        string? manifestPath = null, bool recordWorkerSet = true)
     {
         Factory = new InMemoryRepositoryFactory(NullLogger<InMemoryRepositoryFactory>.Instance);
         Factory.InitializeAsync(root).Wait();
@@ -35,14 +38,15 @@ internal sealed class CachedInstance : IAsyncDisposable
         var coverage = AnalysisCoverageRegistry.ForStore(Factory);
         var store = (IGenerationalGraphStore)Factory.CreateGraphRepository();
         Workers = new LanguageWorkerService(
-            behavior is null ? new StaticWorkerCatalog() : new StaticWorkerCatalog(FakeWorker(behavior, inputs ?? [])),
+            behavior is null ? new StaticWorkerCatalog()
+                : new StaticWorkerCatalog(FakeWorker(behavior, inputs ?? []) with { ManifestPath = manifestPath ?? "<in-test>" }),
             new AnalysisDeltaApplier(store, NullLogger<AnalysisDeltaApplier>.Instance, coverage),
             Sessions, options, NullLoggerFactory.Instance, TestWorkerOptions.Patient());
         var graphUpdate = new GraphUpdateService(Factory, options, NullLogger<GraphUpdateService>.Instance, metadata, Workers);
 
         var settings = SnapshotServiceSettings.From(options.Value);
         Startup = new SnapshotStartup(settings, Factory.Database, coverage, Workers.IsIndexedParser,
-            Workers.MarkLoadedFromSnapshot, NullLogger<SnapshotService>.Instance);
+            Workers.MarkLoadedFromSnapshot, NullLogger<SnapshotService>.Instance, recordWorkerSet ? Workers.WorkerSetFingerprint() : null);
         CacheState = new CacheState(settings.Enabled, Startup.Run);
         Coordinator = new IndexCoordinator(graphUpdate, ScanState, options, NullLoggerFactory.Instance, cacheState: CacheState);
         Snapshots = new SnapshotService(Coordinator, Factory.Database, ScanState, settings, Startup, TimeProvider.System,

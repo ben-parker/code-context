@@ -166,30 +166,6 @@ public class SnapshotBoundsTests
         }
     }
 
-    /// <summary>A hash table with no empty slot: every probe ends after the table's capacity.</summary>
-    [Theory]
-    [InlineData((uint)SnapshotSectionKind.IdHash)]
-    [InlineData((uint)SnapshotSectionKind.IdentifierHash)]
-    [InlineData((uint)SnapshotSectionKind.EdgeIdHash)]
-    public void FullHashTable_ProbesEnd(uint section)
-    {
-        var kind = (SnapshotSectionKind)section;
-        var (bytes, layout, _) = Single.Value;
-        var (offset, length) = layout.Shards[0].Sections[kind];
-        var damaged = Damaged(bytes, b =>
-        {
-            for (long at = 0; at < length; at += 4) BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan((int)(offset + at)), 1);
-        });
-        using var temp = new SnapshotTempDirectory();
-        var path = temp.Snapshot();
-        File.WriteAllBytes(path, damaged);
-        using var file = SnapshotFile.Open(path, Key, Expect()).File!;
-        var reader = Assert.Single(file.Shards);
-        Assert.False(reader.TryFindSid("no such id", out _));
-        Assert.False(reader.TryFindNodeByIdentifier("no such identifier", out _));
-        Assert.False(reader.TryFindEdge("no such edge", out _));
-    }
-
     // ---- Several shards (T2) ----
 
     [Fact]
@@ -335,6 +311,11 @@ public class SnapshotBoundsTests
     {
         var loaded = SnapshotLoader.Materialize(file);
         Assert.True(loaded.Loaded || loaded.Rejection == SnapshotRejection.Structure, $"{context}: refused as {loaded.Rejection}");
+        // The loader checks only what the reader does not already guarantee; whatever it lets through, the writer's
+        // whole rule, run over the loaded facts, lets through as well.
+        foreach (var published in loaded.Shards)
+            Assert.True(SnapshotWriter.CheckPersistable(published.Key, published.Shard) is null,
+                $"{context}: loaded a shard the writer would not write: {SnapshotWriter.CheckPersistable(published.Key, published.Shard)}");
         foreach (var reader in file.Shards)
         {
             for (var i = 0; i < Math.Min(reader.NodeCount, 64); i++) Read(() => reader.ReadNode(i), context);
@@ -342,27 +323,7 @@ public class SnapshotBoundsTests
             for (uint r = 0; r <= Math.Min((uint)reader.StringCount + 1, 256); r++) Read(() => reader.GetString(r), context);
             Read(() => reader.GetAllNodes(), context);
             Read(() => reader.GetAllEdges(), context);
-            Read(() => reader.GetFilePaths(), context);
-            Read(() => reader.GetCrossShardEdgeIds(), context);
             Read(() => reader.ReadInfo(), context);
-            Read(() => { reader.AddStatistics(new(), new()); return 0; }, context);
-            foreach (var vocabulary in words)
-            {
-                foreach (var id in vocabulary.NodeIds)
-                {
-                    Read(() => reader.TryGetNode(id, out _), context);
-                    Read(() => reader.GetEdgesBySource(id), context);
-                    Read(() => reader.GetEdgesByTarget(id), context);
-                }
-                foreach (var id in vocabulary.EdgeIds) Read(() => reader.TryGetEdge(id, out _), context);
-                foreach (var identifier in vocabulary.Identifiers) Read(() => reader.TryGetNodeIdByIdentifier(identifier, out _), context);
-                foreach (var name in vocabulary.Names.Take(12))
-                {
-                    Read(() => reader.FindNodesByName(name, true), context);
-                    Read(() => reader.FindNodesByName(name, false), context);
-                }
-                foreach (var requested in vocabulary.Paths.Take(12)) Read(() => reader.FindNodesByPath(requested), context);
-            }
         }
     }
 

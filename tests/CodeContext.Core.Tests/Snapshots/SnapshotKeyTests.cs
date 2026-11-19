@@ -105,7 +105,9 @@ public class SnapshotKeyTests
         // 0644 file, which the mode check refuses before the length is ever looked at.
         File.WriteAllBytes(path, new byte[5]);
         if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
-        Assert.Throws<InvalidDataException>(() => SnapshotKey.LoadOrCreate(path));
+        var refusal = Assert.Throws<InvalidDataException>(() => SnapshotKey.LoadOrCreate(path));
+        // The person reading the warning is told what to do: nothing here repairs a key file.
+        Assert.Contains("Delete this file", refusal.Message);
         Assert.Equal(5, new FileInfo(path).Length);
     }
 

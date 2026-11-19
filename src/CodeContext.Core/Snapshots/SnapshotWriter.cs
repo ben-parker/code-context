@@ -8,7 +8,15 @@ using ShardKey = CodeContext.Core.Repositories.InMemory.InMemoryDatabase.ShardKe
 namespace CodeContext.Core.Snapshots
 {
     /// <summary>What the host records about itself in a snapshot, and what a reader requires to match.</summary>
-    internal sealed record SnapshotHostMeta(string HostVersion, string RootPath, string Platform, bool PathsCaseInsensitive);
+    internal sealed record SnapshotHostMeta(string HostVersion, string RootPath, string Platform, bool PathsCaseInsensitive)
+    {
+        /// <summary>
+        /// The writer's worker set (<see cref="Workers.LanguageWorkerService.WorkerSetFingerprint"/>), recorded as host
+        /// meta <see cref="SnapshotFormat.WorkerSetKey"/>; null records none, and such a snapshot is loaded by a host
+        /// as any other and never answered from without one.
+        /// </summary>
+        public string? WorkerSet { get; init; }
+    }
 
     /// <summary>
     /// What a snapshot stores beside one shard's facts: the parser version and worker state binding
@@ -24,6 +32,30 @@ namespace CodeContext.Core.Snapshots
         byte[]? Inputs = null)
     {
         public static readonly SnapshotShardInfo Empty = new();
+
+        /// <summary>
+        /// The worker's reported inputs as stored: null (and true) when the shard stores none; false with why when
+        /// what it stores is not two lists of paths.
+        /// </summary>
+        public bool TryReadInputs(out CodeContext.Parser.Protocol.WorkerInputs? inputs, out string? failure)
+        {
+            inputs = null;
+            failure = null;
+            if (Inputs is not { Length: > 0 } bytes) return true;
+            try
+            {
+                inputs = System.Text.Json.JsonSerializer.Deserialize(bytes, CodeContext.Parser.Protocol.ParserProtocolJsonContext.Default.WorkerInputs);
+            }
+            catch (System.Text.Json.JsonException exception)
+            {
+                failure = $"do not parse: {exception.Message}";
+                return false;
+            }
+            if (inputs?.Files is not null && inputs.Absent is not null && !inputs.Files.Contains(null!) && !inputs.Absent.Contains(null!)) return true;
+            inputs = null;
+            failure = "are not lists of paths";
+            return false;
+        }
     }
 
     /// <summary>One capture to write: a shard map and everything the header records.</summary>
@@ -217,12 +249,14 @@ namespace CodeContext.Core.Snapshots
                     sectionBytes[(SnapshotSectionKind)(i + 1)] += blob.SectionLengths[i];
             }
 
-            var hostMeta = EncodeKeyValues(
+            List<(string, string)> hostEntries =
             [
                 (SnapshotFormat.HostVersionKey, input.Host.HostVersion),
                 (SnapshotFormat.RootPathKey, input.Host.RootPath),
                 (SnapshotFormat.PlatformKey, input.Host.Platform),
-            ]);
+            ];
+            if (input.Host.WorkerSet is { } workerSet) hostEntries.Add((SnapshotFormat.WorkerSetKey, workerSet));
+            var hostMeta = EncodeKeyValues(hostEntries);
 
             long hostMetaOffset = SnapshotFormat.HeaderSize;
             var directoryOffset = SnapshotFormat.Align8(hostMetaOffset + hostMeta.Length);
@@ -231,7 +265,7 @@ namespace CodeContext.Core.Snapshots
             for (var i = 0; i < blobs.Count; i++)
             {
                 blobOffsets[i] = position;
-                position = SnapshotFormat.Align8(position + blobs[i].Bytes.Length);
+                position = SnapshotFormat.Align8(position + blobs[i].Length);
             }
             var footerOffset = position;
             var fileLength = footerOffset + SnapshotFormat.FooterSize;
@@ -264,8 +298,8 @@ namespace CodeContext.Core.Snapshots
             {
                 var entry = directory.AsSpan(i * SnapshotFormat.DirectoryEntrySize, SnapshotFormat.DirectoryEntrySize);
                 BinaryPrimitives.WriteUInt64LittleEndian(entry, (ulong)blobOffsets[i]);
-                BinaryPrimitives.WriteUInt64LittleEndian(entry[8..], (ulong)blobs[i].Bytes.Length);
-                SHA256.HashData(blobs[i].Bytes, entry[16..48]);
+                BinaryPrimitives.WriteUInt64LittleEndian(entry[8..], (ulong)blobs[i].Length);
+                blobs[i].Sha256.CopyTo(entry[16..48]);
                 BinaryPrimitives.WriteUInt32LittleEndian(entry[48..], (uint)blobs[i].NodeCount);
                 BinaryPrimitives.WriteUInt32LittleEndian(entry[52..], (uint)blobs[i].EdgeCount);
             }
@@ -298,7 +332,7 @@ namespace CodeContext.Core.Snapshots
             for (var i = 0; i < plan.Blobs.Count; i++)
             {
                 sink.PadTo(plan.BlobOffsets[i]);
-                sink.Write(plan.Blobs[i].Bytes);
+                plan.Blobs[i].WriteTo(sink.Write);
             }
             sink.PadTo(plan.FooterOffset);
             sink.Write(SnapshotFormat.FooterMagic);
@@ -399,6 +433,41 @@ namespace CodeContext.Core.Snapshots
             return null;
         }
 
+        /// <summary>
+        /// <see cref="CheckPersistable(ShardKey, IGraphShard)"/> for facts <see cref="SnapshotShardReader"/> has just
+        /// built from an authenticated file, with the same reasons: the clauses a damaged but re-signed file can still
+        /// break. The others hold for every fact that reader returns, so they are not asked again of each one:
+        /// metadata is always a <see cref="FactMetadata"/>, hence ordinal; its <c>parserId</c> and <c>workspaceId</c> are
+        /// the shard key's, added by the reader, which refuses a stored set that repeats them; every string was decoded
+        /// from bytes it checked to be valid UTF-8, or is a number it formatted, so none holds a lone surrogate; and a
+        /// non-blank identifier resolves to its node because the loader has just entered it in the shard's identifier
+        /// map, refusing a second holder. <c>SnapshotBoundsTests</c> runs the whole rule over everything this lets through.
+        /// </summary>
+        internal static string? CheckLoaded(ShardKey key, int nodeCount, int edgeCount, IReadOnlyList<CodeNode> nodes, CodeEdge[] edges)
+        {
+            if (key == ShardKey.Default || string.IsNullOrEmpty(key.ParserId) || string.IsNullOrEmpty(key.WorkspaceId))
+                return "the un-owned default shard is never persisted";
+            if (nodeCount == 0 && edgeCount == 0) return "the shard holds no fact";
+            if (!SnapshotFormat.IsWellFormed(key.ParserId) || !SnapshotFormat.IsWellFormed(key.WorkspaceId))
+                return "the shard key is not well-formed UTF-16";
+
+            var prefix = $"{key.ParserId}:{Uri.EscapeDataString(key.WorkspaceId)}:";
+            foreach (var node in nodes)
+            {
+                if (node.Id is null || !node.Id.StartsWith(prefix, StringComparison.Ordinal))
+                    return $"node id '{node.Id}' does not start with '{prefix}'";
+                if (node.Identifier is null) return $"node '{node.Id}' has a null identifier";
+            }
+            foreach (var edge in edges)
+            {
+                if (edge.IdKey is not { } edgeKey || !EdgeIdKeys.StartsWith(edgeKey, prefix))
+                    return $"edge id '{edge.Id}' does not start with '{prefix}'";
+                if (edge.SourceId is null || !edge.SourceId.StartsWith(prefix, StringComparison.Ordinal))
+                    return $"source '{edge.SourceId}' of edge '{edge.Id}' does not start with '{prefix}'";
+            }
+            return null;
+        }
+
         private static bool WellFormedId(object key)
             => key is EdgeId parts
                 ? SnapshotFormat.IsWellFormed(parts.Source) && SnapshotFormat.IsWellFormed(parts.Middle)
@@ -494,12 +563,50 @@ namespace CodeContext.Core.Snapshots
             }
         }
 
+        /// <summary>Takes the next bytes of a blob, in order.</summary>
+        internal delegate void BlobSink(ReadOnlySpan<byte> bytes);
+
+        /// <summary>
+        /// One shard's blob, kept as its parts: the shard header with the section table, then the sections. The parts
+        /// are never joined into one array (a second copy of the whole shard); <see cref="WriteTo"/> lays them out,
+        /// each section at the next 8-byte boundary and the blob ending on one, for the file and for the blob's hash.
+        /// </summary>
         internal sealed class ShardBlob
         {
-            public required byte[] Bytes { get; init; }
+            private static readonly byte[] Zeros = new byte[8];
+
+            public required byte[] Head { get; init; }
+            public required byte[][] Sections { get; init; }
+
+            /// <summary>The blob's length as laid out by <see cref="WriteTo"/>.</summary>
+            public required long Length { get; init; }
+
+            /// <summary>SHA-256 of the blob's bytes, for its directory entry.</summary>
+            public required byte[] Sha256 { get; init; }
             public required int NodeCount { get; init; }
             public required int EdgeCount { get; init; }
             public required long[] SectionLengths { get; init; }
+
+            public void WriteTo(BlobSink sink)
+            {
+                sink(Head);
+                long position = Head.Length;
+                foreach (var section in Sections)
+                {
+                    position = Pad(sink, position);
+                    sink(section);
+                    position += section.Length;
+                }
+                position = Pad(sink, position);
+                if (position != Length) throw new InvalidOperationException("A shard blob's layout did not add up.");
+            }
+
+            private static long Pad(BlobSink sink, long position)
+            {
+                var aligned = SnapshotFormat.Align8(position);
+                if (aligned > position) sink(Zeros.AsSpan(0, (int)(aligned - position)));
+                return aligned;
+            }
         }
 
         /// <summary>Builds one position-independent shard blob.</summary>
@@ -556,7 +663,8 @@ namespace CodeContext.Core.Snapshots
                 Array.Fill(nodeIndexOfSid, SnapshotFormat.NoIndex);
                 for (var i = 0; i < nodes.Count; i++) nodeIndexOfSid[sidOf[nodes[i].Id!]] = (uint)i;
 
-                // Edges by (source sid, edge id); edges arrive in id order, so a stable sort on the sid.
+                // Edges by (source sid, edge id), the record order since format 1: a load enters edges into the store in
+                // record order, so it stays. Edges arrive in id order, so a stable sort on the sid.
                 // Each endpoint is looked up once (ids are long; hashing them dominates the build).
                 var sourceSidById = new int[allEdges.Count];
                 var targetSidById = new int[allEdges.Count];
@@ -577,37 +685,16 @@ namespace CodeContext.Core.Snapshots
                 var edges = new List<CodeEdge>(edgeOrder.Length);
                 var sourceSid = new int[edgeOrder.Length];
                 var targetSid = new int[edgeOrder.Length];
-                var recordOfIdOrder = new int[edgeOrder.Length];
                 for (var j = 0; j < edgeOrder.Length; j++)
                 {
                     edges.Add(allEdges[edgeOrder[j]]);
                     sourceSid[j] = sourceSidById[edgeOrder[j]];
                     targetSid[j] = targetSidById[edgeOrder[j]];
-                    recordOfIdOrder[edgeOrder[j]] = j;
                 }
 
-                // Names: folded names grouped, postings in id order (node indexes of nodes in id order).
-                var postingsByName = new Dictionary<string, List<uint>>(StringComparer.Ordinal);
-                var nodeIndexById = new Dictionary<string, uint>(nodes.Count, StringComparer.Ordinal);
-                for (var i = 0; i < nodes.Count; i++) nodeIndexById[nodes[i].Id!] = (uint)i;
-                foreach (var node in allNodes)
-                {
-                    if (node.Name is null) continue;
-                    var folded = node.Name.ToUpperInvariant();
-                    if (!postingsByName.TryGetValue(folded, out var postings)) postingsByName[folded] = postings = new List<uint>();
-                    postings.Add(nodeIndexById[node.Id!]);
-                }
-                var names = postingsByName.Keys
-                    .Select(name => (Name: name, Bytes: SnapshotFormat.StrictUtf8.GetBytes(name)))
-                    .ToList();
-                names.Sort(static (left, right) => left.Bytes.AsSpan().SequenceCompareTo(right.Bytes));
-
-                // Strings: folded names occupy the contiguous reference range from 1, in NameTable order;
-                // every other distinct string follows in ordinal order.
-                foreach (var (name, _) in names) Intern(name);
-                const uint FoldedNameFirstRef = 1;
+                // Strings: every distinct string, in ordinal order; reference 0 is null.
                 var others = new HashSet<string>(StringComparer.Ordinal);
-                void Collect(string? value) { if (value is not null && !_stringRefs.ContainsKey(value)) others.Add(value); }
+                void Collect(string? value) { if (value is not null) others.Add(value); }
 
                 foreach (var id in ids) Collect(id);
                 foreach (var (path, _) in files)
@@ -712,23 +799,19 @@ namespace CodeContext.Core.Snapshots
                 sections[0] = EncodeKeyValues(meta);
 
                 var stringOffsets = new LittleEndianBuffer((_strings.Count + 1) * 4);
-                var stringUtf8 = new byte[_strings.Count][];
                 var stringLength = 0L;
-                for (var i = 0; i < _strings.Count; i++)
+                foreach (var value in _strings) stringLength += SnapshotFormat.StrictUtf8.GetByteCount(value);
+                if (stringLength > uint.MaxValue)
                 {
-                    stringUtf8[i] = SnapshotFormat.StrictUtf8.GetBytes(_strings[i]);
-                    stringLength += stringUtf8[i].Length;
+                    reason = "the shard's strings exceed 4 GiB";
+                    return null;
                 }
+                // Encoded straight into the section: no array per string.
                 var stringBytes = new LittleEndianBuffer((int)Math.Min(stringLength, Array.MaxLength));
                 stringOffsets.WriteU32(0);
-                for (var i = 0; i < _strings.Count; i++)
+                foreach (var value in _strings)
                 {
-                    stringBytes.WriteBytes(stringUtf8[i]);
-                    if (stringBytes.Length > uint.MaxValue)
-                    {
-                        reason = "the shard's strings exceed 4 GiB";
-                        return null;
-                    }
+                    stringBytes.WriteUtf8(value);
                     stringOffsets.WriteU32((uint)stringBytes.Length);
                 }
                 sections[1] = stringOffsets.ToArray();
@@ -804,51 +887,6 @@ namespace CodeContext.Core.Snapshots
                 }
                 sections[5] = idTable.ToArray();
 
-                sections[6] = HashTable(ids.Length, s => stringUtf8[Ref(ids[s]) - 1], s => (uint)s + 1);
-
-                var identified = new List<int>();
-                for (var i = 0; i < nodes.Count; i++)
-                    if (!string.IsNullOrWhiteSpace(nodes[i].Identifier)) identified.Add(i);
-                sections[7] = HashTable(identified.Count, k => stringUtf8[Ref(nodes[identified[k]].Identifier) - 1], k => (uint)identified[k] + 1);
-
-                // Edge ids are long and not in the string table: each is encoded into one reused buffer, not an array of its own.
-                // An id kept as parts is written out into a reused char buffer first, never into a string.
-                var edgeIdBytes = new byte[256];
-                var edgeIdChars = new char[128];
-                sections[8] = HashTable(edges.Count, j =>
-                {
-                    var key = edges[j].IdKey!;
-                    var length = EdgeIdKeys.Length(key);
-                    if (edgeIdChars.Length < length) edgeIdChars = new char[Math.Max(length, 2 * edgeIdChars.Length)];
-                    var id = EdgeIdKeys.Text(key, edgeIdChars);
-                    var max = SnapshotFormat.StrictUtf8.GetMaxByteCount(id.Length);
-                    if (edgeIdBytes.Length < max) edgeIdBytes = new byte[max];
-                    return edgeIdBytes.AsSpan(0, SnapshotFormat.StrictUtf8.GetBytes(id, edgeIdBytes));
-                }, j => (uint)j + 1);
-
-                // Runs: by source over Edges (null sources would follow BySourceOffsets[S]); by target
-                // over ByTargetEdges, null targets after ByTargetOffsets[S].
-                var bySource = new uint[ids.Length + 1];
-                foreach (var sid in sourceSid) bySource[sid + 1]++;
-                for (var s = 0; s < ids.Length; s++) bySource[s + 1] += bySource[s];
-                sections[9] = U32Array(bySource);
-
-                var byTargetCounts = new uint[ids.Length + 1];
-                foreach (var sid in targetSid)
-                    if (sid >= 0) byTargetCounts[sid + 1]++;
-                for (var s = 0; s < ids.Length; s++) byTargetCounts[s + 1] += byTargetCounts[s];
-                sections[10] = U32Array(byTargetCounts);
-
-                var byTargetEdges = new uint[edges.Count];
-                var cursor = (uint[])byTargetCounts.Clone();
-                var nullTargetCursor = byTargetCounts[ids.Length];
-                foreach (var j in recordOfIdOrder)
-                {
-                    if (targetSid[j] < 0) byTargetEdges[nullTargetCursor++] = (uint)j;
-                    else byTargetEdges[cursor[targetSid[j]]++] = (uint)j;
-                }
-                sections[11] = U32Array(byTargetEdges);
-
                 var fileTable = new LittleEndianBuffer(files.Count * SnapshotFormat.FileEntrySize);
                 var firstNode = 0u;
                 foreach (var (path, bucket) in files)
@@ -861,22 +899,7 @@ namespace CodeContext.Core.Snapshots
                     fileTable.WriteU32(0);
                     firstNode += (uint)bucket.Count;
                 }
-                sections[12] = fileTable.ToArray();
-
-                var nameTable = new LittleEndianBuffer(names.Count * SnapshotFormat.NameEntrySize);
-                var namePostings = new LittleEndianBuffer();
-                var postingStart = 0u;
-                for (var k = 0; k < names.Count; k++)
-                {
-                    var postings = postingsByName[names[k].Name];
-                    nameTable.WriteU32(FoldedNameFirstRef + (uint)k);
-                    nameTable.WriteU32(postingStart);
-                    nameTable.WriteU32((uint)postings.Count);
-                    foreach (var index in postings) namePostings.WriteU32(index);
-                    postingStart += (uint)postings.Count;
-                }
-                sections[13] = nameTable.ToArray();
-                sections[14] = namePostings.ToArray();
+                sections[6] = fileTable.ToArray();
 
                 var metadata = new LittleEndianBuffer();
                 metadata.WriteU32((uint)setList.Count);
@@ -897,68 +920,61 @@ namespace CodeContext.Core.Snapshots
                     reason = "the shard's metadata sets exceed 4 GiB";
                     return null;
                 }
-                sections[15] = metadata.ToArray();
+                sections[7] = metadata.ToArray();
 
-                var cross = new LittleEndianBuffer();
-                for (var j = 0; j < edges.Count; j++)
-                {
-                    if (nodeIndexOfSid[sourceSid[j]] == SnapshotFormat.NoIndex
-                        || (targetSid[j] >= 0 && nodeIndexOfSid[targetSid[j]] == SnapshotFormat.NoIndex))
-                        cross.WriteU32((uint)j);
-                }
-                sections[16] = cross.ToArray();
+                sections[8] = info.Coverage ?? Array.Empty<byte>();
+                sections[9] = info.Fingerprints ?? Array.Empty<byte>();
+                sections[10] = info.Inputs ?? Array.Empty<byte>();
 
-                var histogram = new LittleEndianBuffer();
-                WriteHistogram(histogram, nodes.Select(node => node.Type));
-                WriteHistogram(histogram, edges.Select(edge => edge.Type));
-                sections[17] = histogram.ToArray();
+                // ---- Blob ----: the header and the section table, then the sections as they are; never one array.
+                var head = new LittleEndianBuffer(SnapshotFormat.ShardHeaderSize + SnapshotFormat.SectionCount * SnapshotFormat.SectionEntrySize);
+                head.WriteU32(SnapshotFormat.ShardMagic);
+                head.WriteU32(SnapshotFormat.SectionCount);
+                head.WriteU32((uint)nodes.Count);
+                head.WriteU32((uint)edges.Count);
+                head.WriteU32((uint)ids.Length);
+                head.WriteU32((uint)_strings.Count);
+                head.WriteU32((uint)files.Count);
+                // Reserved (format 2 held the name count and the first folded-name reference here).
+                head.WriteU32(0);
+                head.WriteU32(0);
+                head.WriteU32(0);
+                head.PadTo(SnapshotFormat.ShardHeaderSize);
 
-                sections[18] = info.Coverage ?? Array.Empty<byte>();
-                sections[19] = info.Fingerprints ?? Array.Empty<byte>();
-                sections[20] = info.Inputs ?? Array.Empty<byte>();
-
-                // ---- Blob ----, sized exactly: the layout below, computed first.
-                var blobLength = (long)SnapshotFormat.ShardHeaderSize + SnapshotFormat.SectionCount * SnapshotFormat.SectionEntrySize;
-                foreach (var section in sections) blobLength = SnapshotFormat.Align8(blobLength) + section.Length;
-                blobLength = SnapshotFormat.Align8(blobLength);
-                var blob = new LittleEndianBuffer((int)Math.Min(blobLength, Array.MaxLength));
-                blob.WriteU32(SnapshotFormat.ShardMagic);
-                blob.WriteU32(SnapshotFormat.SectionCount);
-                blob.WriteU32((uint)nodes.Count);
-                blob.WriteU32((uint)edges.Count);
-                blob.WriteU32((uint)ids.Length);
-                blob.WriteU32((uint)_strings.Count);
-                blob.WriteU32((uint)files.Count);
-                blob.WriteU32((uint)names.Count);
-                blob.WriteU32(FoldedNameFirstRef);
-                blob.WriteU32(0);
-                blob.PadTo(SnapshotFormat.ShardHeaderSize);
-
-                var tableOffset = blob.Length;
-                blob.PadTo(tableOffset + SnapshotFormat.SectionCount * SnapshotFormat.SectionEntrySize);
+                var tableOffset = head.Length;
+                head.PadTo(tableOffset + SnapshotFormat.SectionCount * SnapshotFormat.SectionEntrySize);
                 var lengths = new long[SnapshotFormat.SectionCount];
+                var blobLength = head.Length;
                 for (var i = 0; i < SnapshotFormat.SectionCount; i++)
                 {
-                    blob.PadTo(SnapshotFormat.Align8(blob.Length));
-                    var offset = blob.Length;
-                    blob.WriteBytes(sections[i]);
+                    var offset = SnapshotFormat.Align8(blobLength);
+                    blobLength = offset + sections[i].Length;
                     lengths[i] = sections[i].Length;
                     var kind = (SnapshotSectionKind)(i + 1);
                     var entry = tableOffset + i * SnapshotFormat.SectionEntrySize;
-                    blob.PatchU32(entry, (uint)kind);
-                    blob.PatchU32(entry + 4, SnapshotFormat.ElementSize(kind));
-                    blob.PatchU64(entry + 8, (ulong)offset);
-                    blob.PatchU64(entry + 16, (ulong)sections[i].Length);
+                    head.PatchU32(entry, (uint)kind);
+                    head.PatchU32(entry + 4, SnapshotFormat.ElementSize(kind));
+                    head.PatchU64(entry + 8, (ulong)offset);
+                    head.PatchU64(entry + 16, (ulong)sections[i].Length);
                 }
-                blob.PadTo(SnapshotFormat.Align8(blob.Length));
+                blobLength = SnapshotFormat.Align8(blobLength);
+                // A reader maps a blob as one range: the limit a single array gave it stays.
+                EnsureSectionFits(blobLength);
 
-                return new ShardBlob
+                var blob = new ShardBlob
                 {
-                    Bytes = blob.ToArray(),
+                    Head = head.ToArray(),
+                    Sections = sections,
+                    Length = blobLength,
+                    Sha256 = new byte[SHA256.HashSizeInBytes],
                     NodeCount = nodes.Count,
                     EdgeCount = edges.Count,
                     SectionLengths = lengths,
                 };
+                using var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+                blob.WriteTo(sha.AppendData);
+                sha.GetHashAndReset(blob.Sha256);
+                return blob;
             }
 
             private void Intern(string value)
@@ -1023,43 +1039,6 @@ namespace CodeContext.Core.Snapshots
                     && !(inRecord is { } held
                         && ((held.Line && key == SnapshotFormat.LineKey) || (held.Column && key == SnapshotFormat.ColumnKey)));
 
-            private void WriteHistogram(LittleEndianBuffer buffer, IEnumerable<string?> types)
-            {
-                var counts = new SortedDictionary<string, uint>(StringComparer.Ordinal);
-                foreach (var type in types)
-                    if (!string.IsNullOrEmpty(type)) counts[type] = counts.GetValueOrDefault(type) + 1;
-                buffer.WriteU32((uint)counts.Count);
-                foreach (var (type, n) in counts)
-                {
-                    buffer.WriteU32(Ref(type));
-                    buffer.WriteU32(n);
-                }
-            }
-
-            private delegate ReadOnlySpan<byte> KeyBytes(int index);
-
-            private static byte[] HashTable(int count, KeyBytes keyOf, Func<int, uint> valueOf)
-            {
-                var capacity = SnapshotFormat.HashCapacity(count);
-                EnsureSectionFits(capacity * 4);
-                var table = new uint[capacity];
-                for (var i = 0; i < count; i++)
-                {
-                    var slot = SnapshotFormat.Slot(Fnv1a.Hash(keyOf(i)), capacity);
-                    while (table[slot] != 0) slot = (slot + 1) & (capacity - 1);
-                    table[slot] = valueOf(i);
-                }
-                return U32Array(table);
-            }
-
-            private static byte[] U32Array(uint[] values)
-            {
-                EnsureSectionFits(values.Length * 4L);
-                var bytes = new byte[values.Length * 4L];
-                for (var i = 0; i < values.Length; i++)
-                    BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan((int)(i * 4L)), values[i]);
-                return bytes;
-            }
         }
 
         /// <summary>
@@ -1105,6 +1084,10 @@ namespace CodeContext.Core.Snapshots
         public void WriteI32(int value) => BinaryPrimitives.WriteInt32LittleEndian(Reserve(4), value);
 
         public void WriteBytes(ReadOnlySpan<byte> bytes) => bytes.CopyTo(Reserve(bytes.Length));
+
+        /// <summary>Appends <paramref name="value"/> as strict UTF-8 (the caller has checked it is well-formed).</summary>
+        public void WriteUtf8(string value)
+            => SnapshotFormat.StrictUtf8.GetBytes(value, Reserve(SnapshotFormat.StrictUtf8.GetByteCount(value)));
 
         public void PadTo(long length)
         {

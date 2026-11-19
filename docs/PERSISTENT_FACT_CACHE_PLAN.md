@@ -278,6 +278,14 @@ carry a condition or a note because they touch something the brief wrote down.
 
 ### 3.2 Snapshot file format, version 1
 
+Format version 3 (final review of the memory work) is this layout without the sections of
+kinds 7 to 12, 14, 15, 17 and 18 below, which only the mapped shard of phase 8 would read and
+no code did: a shard blob holds 11 sections, numbered 1 ShardMeta, 2 StringOffsets,
+3 StringBytes, 4 Nodes, 5 Edges, 6 IdTable, 7 Files, 8 Metadata, 9 Coverage, 10 Fingerprints,
+11 Inputs. The shard header's `nameCount` and `foldedNameFirstRef` are reserved zeros, and the
+folded names are no longer in the string table. Versions 1 and 2 are refused at the header and
+rebuilt. What follows describes version 2 and the reads planned over it.
+
 All integers little-endian. Offsets in the file header and shard directory are absolute;
 offsets inside a shard blob are relative to the blob start. Every blob and section starts on
 an 8-byte boundary.
@@ -291,7 +299,7 @@ Header, 256 bytes:
 | Offset | Type | Field |
 |---|---|---|
 | 0 | 8 bytes | magic `43 43 53 4E 41 50 0D 0A` ("CCSNAP\r\n") |
-| 8 | u32 | formatVersion = 2 (1 had no Inputs section, no bit 1, no root time; refused like any other version) |
+| 8 | u32 | formatVersion = 3 (1 had no Inputs section, no bit 1, no root time; 2 held ten more sections per shard; both refused like any other version) |
 | 12 | u32 | endianTag = 0x01020304 |
 | 16 | u32 | headerSize = 256 |
 | 20 | u32 | flags; bit 0 = paths compared case-insensitively by the writer; bit 1 = written while no scan had verified the store (never answered from without a worker) |

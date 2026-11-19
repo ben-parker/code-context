@@ -113,17 +113,22 @@ namespace CodeContext.Core.Snapshots
                     return Unavailable($"{candidate.Name} was written while the index was unverified");
                 if (file.Header.CreatedUtcTicks < DateTime.MinValue.Ticks || file.Header.CreatedUtcTicks > DateTime.MaxValue.Ticks)
                     return Unavailable($"{candidate.Name}: the capture time is not a time");
+                // Which files are indexed, and by what, is the worker set's: a worker installed, removed or replaced since
+                // the snapshot would index the tree differently, and only an instance finds out how.
+                if (!file.HostMeta.TryGetValue(SnapshotFormat.WorkerSetKey, out var writtenBy))
+                    return Unavailable($"{candidate.Name} records no set of workers");
+                if (!string.Equals(writtenBy, workers.WorkerSetFingerprint(), StringComparison.Ordinal))
+                    return Unavailable($"{candidate.Name} was written with another set of workers");
                 var capturedUtc = new DateTime(file.Header.CreatedUtcTicks, DateTimeKind.Utc);
                 var snapshotAt = CacheState.FormatTicks(file.Header.CreatedUtcTicks);
-                bool Accept(InMemoryDatabase.ShardKey shard)
-                    => string.Equals(shard.WorkspaceId, settings.WorkspaceId, StringComparison.Ordinal) && workers.IsIndexedParser(shard.ParserId);
+                bool Accept(InMemoryDatabase.ShardKey shard) => SnapshotStartup.Accepts(shard, settings.WorkspaceId, workers.IsIndexedParser);
 
                 // What every shard read besides its files, as its worker reported it: without that report nothing says
                 // whether the shard is current, and only an instance (whose worker re-reads) may answer from it.
                 var inputs = new List<WorkerInputs>();
                 foreach (var shard in file.Shards.Where(shard => Accept(shard.Key)))
                 {
-                    if (ReadInputs(shard.ReadInfo()) is not { } reported)
+                    if (!shard.ReadInfo().TryReadInputs(out var reported, out _) || reported is null)
                         return Unavailable($"{candidate.Name}: the worker of shard {shard.Key} reported no inputs for it");
                     inputs.Add(reported);
                 }
@@ -151,21 +156,6 @@ namespace CodeContext.Core.Snapshots
                     new OneShotSnapshot(context, capturedUtc,
                         new OneShotTimings(keyAndDirectory, open, freshness.Elapsed, freshness.Checked, materialize)),
                     null);
-            }
-        }
-
-        /// <summary>A shard's reported inputs, or null when its worker sent none or they do not read as two lists of paths.</summary>
-        private static WorkerInputs? ReadInputs(SnapshotShardInfo info)
-        {
-            if (info.Inputs is not { Length: > 0 } bytes) return null;
-            try
-            {
-                var inputs = System.Text.Json.JsonSerializer.Deserialize(bytes, ParserProtocolJsonContext.Default.WorkerInputs);
-                return inputs?.Files is null || inputs.Absent is null || inputs.Files.Contains(null!) || inputs.Absent.Contains(null!) ? null : inputs;
-            }
-            catch (System.Text.Json.JsonException)
-            {
-                return null;
             }
         }
 

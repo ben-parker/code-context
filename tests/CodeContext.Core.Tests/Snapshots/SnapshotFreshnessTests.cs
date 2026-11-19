@@ -222,6 +222,38 @@ public sealed class SnapshotFreshnessTests : IDisposable
     }
 
     [Theory]
+    [InlineData(".gitignore", ".*\n")]
+    [InlineData(".gitignore", ".gitignore\n")]
+    [InlineData("src/.gitignore", "*\n!*.cs\n")]
+    public void GitignoreThatIgnoresItself_Edited_HasMoved(string relative, string rules)
+    {
+        Build();
+        Write(relative, rules);
+        var captured = Capture();
+        Assert.True(Check(captured).Unchanged, Check(captured).FirstMoved);
+
+        File.AppendAllText(PathOf(relative), "b.cs\n");
+
+        Assert.Equal(relative, Check(captured).FirstMoved);
+    }
+
+    [Fact]
+    public void ACaptureTimeAfterThePresent_IsNeverCurrent()
+    {
+        // The clock was set back since the capture: anything edited since reads as older than the snapshot.
+        BuildAndCapture();
+        var now = DateTime.UtcNow;
+
+        var ahead = Check(now + SnapshotFreshness.Tolerance + TimeSpan.FromSeconds(1), now: now);
+        var within = Check(now + SnapshotFreshness.Tolerance - TimeSpan.FromSeconds(1), now: now);
+
+        Assert.False(ahead.Unchanged);
+        Assert.Contains("clock", ahead.Why);
+        Assert.False(ahead.InFuture);
+        Assert.True(within.Unchanged, within.FirstMoved);
+    }
+
+    [Theory]
     [InlineData("src/Lib.csproj")]
     [InlineData("src/obj/project.assets.json")]
     [InlineData("web/tsconfig.json")]

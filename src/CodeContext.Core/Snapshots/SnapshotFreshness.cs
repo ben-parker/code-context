@@ -32,7 +32,8 @@ namespace CodeContext.Core.Snapshots
     /// <list type="bullet">
     /// <item>what the scan selects, walked with the scan's own selection (<see cref="RepositoryFileSelector"/>: mandatory
     /// exclusions, configured patterns, <c>.gitignore</c> rules): every included directory (its time moves when an entry
-    /// is added, removed or renamed in it), every included file a worker claims by extension, every <c>.gitignore</c>;</item>
+    /// is added, removed or renamed in it), every included file a worker claims by extension, and the <c>.gitignore</c>
+    /// of the root and of every included directory, whether or not its own rules ignore it;</item>
     /// <item>what each shard's worker reported it read besides those files (<see cref="WorkerInputs"/>, stored in the
     /// snapshot): each file or directory listed there must still exist and be no newer, each absent path must still be
     /// absent. A shard without a report is not checked here: the caller refuses it. A reported path is what a repository
@@ -45,11 +46,15 @@ namespace CodeContext.Core.Snapshots
     /// times to a second or two). The root is the exception for one time: the one its writer recorded once its cache
     /// directory existed, since making <c>.codecontext/</c> moves the root's time just before the first capture.
     /// A time more than <see cref="Tolerance"/> ahead of now counts as changed, flagged <see cref="SnapshotFreshnessResult.InFuture"/>.
+    /// A capture time that far ahead of now is never current: the clock was set back, and times say nothing.
     /// </summary>
     internal static class SnapshotFreshness
     {
         /// <summary>Times within this much before the capture count as after it; times this much ahead of now are not believed.</summary>
         public static readonly TimeSpan Tolerance = TimeSpan.FromSeconds(2);
+
+        /// <summary>The ignore file the selection policy reads in each directory (<see cref="RepositoryFileSelector"/>).</summary>
+        private const string IgnoreFileName = ".gitignore";
 
         /// <param name="claimsExtension">Whether a worker indexes files with this extension.</param>
         /// <param name="inputs">Each loaded shard's reported inputs.</param>
@@ -111,6 +116,15 @@ namespace CodeContext.Core.Snapshots
                 return true;
             }
 
+            // A capture later than the present: the clock was set back since, and whatever was edited meanwhile has a
+            // time before the capture. Nothing by time can be said then. Not flagged InFuture: a host writes again,
+            // with the time its clock has now.
+            if (capturedUtc > ahead)
+            {
+                (moved, why) = (".", "is not checked: the saved index is dated after the present time (the clock was set back)");
+                return Result();
+            }
+
             checkedCount++;
             if (!FileChangeTime.TryRead(root, out var rootTime))
             {
@@ -119,10 +133,26 @@ namespace CodeContext.Core.Snapshots
             }
             if (!(rootTimeTicks != 0 && rootTime.Ticks == rootTimeTicks) && Changed(root, rootTime)) return Result();
 
+            // Each directory's ignore file is read whatever its own inclusion (its rules may ignore it), so it is looked
+            // at directly, not as an entry of the walk. One that is not there is covered by its directory's time.
+            bool IgnoreFileChanged(string directory)
+            {
+                var ignoreFile = Path.Combine(directory, IgnoreFileName);
+                return FileChangeTime.TryRead(ignoreFile, out var time) && Changed(ignoreFile, time);
+            }
+
+            if (IgnoreFileChanged(root)) return Result();
             var changeTimes = FileChangeTime.ReadsChangeTime;
             selector.WalkIncluded(withTimes: !changeTimes, entry =>
             {
-                if (!entry.IsDirectory && !claimsExtension(Path.GetExtension(entry.Path)) && !selector.IsIgnoreFile(entry.Path)) return true;
+                if (entry.IsDirectory)
+                {
+                    if (IgnoreFileChanged(entry.Path)) return false;
+                }
+                else if (!claimsExtension(Path.GetExtension(entry.Path)))
+                {
+                    return true;
+                }
                 DateTime time;
                 if (!changeTimes) time = entry.LastWriteTimeUtc > entry.CreationTimeUtc ? entry.LastWriteTimeUtc : entry.CreationTimeUtc;
                 else if (!FileChangeTime.TryRead(entry.Path, out time))
@@ -163,7 +193,8 @@ namespace CodeContext.Core.Snapshots
 
         /// <summary>
         /// The check as a host's routing defines it: extensions from the workers, the selection policy from
-        /// <paramref name="options"/> (a selector of its own, so a scan's selector is never invalidated).
+        /// <paramref name="options"/> (a selector of its own, so a scan's selector is never invalidated), and besides
+        /// what the shards' workers reported, where the workers themselves are installed.
         /// </summary>
         internal static SnapshotFreshnessResult For(
             CodeContextOptions options, LanguageWorkerService workers, DateTime capturedUtc, IEnumerable<WorkerInputs> inputs,
@@ -171,6 +202,6 @@ namespace CodeContext.Core.Snapshots
             => Check(
                 new RepositoryFileSelector(Options.Create(options)), options.RootPath, capturedUtc,
                 extension => workers.TryGetParserForExtension(extension, out _),
-                inputs, rootTimeTicks, tolerance: tolerance);
+                inputs.Append(new WorkerInputs(workers.InstallationPaths(), [])), rootTimeTicks, tolerance: tolerance);
     }
 }
