@@ -88,6 +88,29 @@ public sealed class RepositoryFileSelector : IRepositoryFileSelector
             .ToFrozenSet(StringComparer.OrdinalIgnoreCase);
         var extensionLookup = extensions.GetAlternateLookup<ReadOnlySpan<char>>();
         var files = new List<string>();
+        Walk(withTimes: false, entry =>
+        {
+            if (!entry.IsDirectory && extensionLookup.Contains(Path.GetExtension(entry.Path.AsSpan())))
+                files.Add(entry.Path);
+            return true;
+        });
+        return files;
+    }
+
+    /// <summary>
+    /// Every file and directory under the root that this policy includes, whatever its extension, with
+    /// its last write and creation times (UTC): the walk <see cref="EnumerateIncludedFiles"/> makes, so a
+    /// caller that checks files against a saved index sees exactly the files a scan would. The root
+    /// itself is not visited. The walk stops when <paramref name="visit"/> returns false.
+    /// </summary>
+    internal void WalkIncludedWithTimes(Func<ScannedEntry, bool> visit)
+    {
+        Invalidate();
+        Walk(withTimes: true, visit);
+    }
+
+    private void Walk(bool withTimes, Func<ScannedEntry, bool> visit)
+    {
         var directories = new Stack<string>();
         directories.Push(_rootPath);
 
@@ -105,11 +128,18 @@ public sealed class RepositoryFileSelector : IRepositoryFileSelector
         while (directories.TryPop(out var directory))
         {
             RulesFor(directory);
-            var entries = new FileSystemEnumerable<ScannedEntry>(
-                directory,
-                static (ref FileSystemEntry entry) =>
-                    new ScannedEntry(entry.ToFullPath(), entry.IsDirectory, entry.Attributes),
-                enumerationOptions);
+            var entries = withTimes
+                ? new FileSystemEnumerable<ScannedEntry>(
+                    directory,
+                    static (ref FileSystemEntry entry) => new ScannedEntry(
+                        entry.ToFullPath(), entry.IsDirectory, entry.Attributes,
+                        entry.LastWriteTimeUtc.UtcDateTime, entry.CreationTimeUtc.UtcDateTime),
+                    enumerationOptions)
+                : new FileSystemEnumerable<ScannedEntry>(
+                    directory,
+                    static (ref FileSystemEntry entry) =>
+                        new ScannedEntry(entry.ToFullPath(), entry.IsDirectory, entry.Attributes),
+                    enumerationOptions);
 
             try
             {
@@ -123,14 +153,8 @@ public sealed class RepositoryFileSelector : IRepositoryFileSelector
                         continue;
                     }
 
-                    if (entry.IsDirectory)
-                    {
-                        directories.Push(entry.Path);
-                    }
-                    else if (extensionLookup.Contains(Path.GetExtension(entry.Path.AsSpan())))
-                    {
-                        files.Add(entry.Path);
-                    }
+                    if (entry.IsDirectory) directories.Push(entry.Path);
+                    if (!visit(entry)) return;
                 }
             }
             catch (UnauthorizedAccessException)
@@ -142,11 +166,11 @@ public sealed class RepositoryFileSelector : IRepositoryFileSelector
                 // Broken links and disappearing directories do not fail the scan.
             }
         }
-
-        return files;
     }
 
-    private readonly record struct ScannedEntry(string Path, bool IsDirectory, FileAttributes Attributes);
+    internal readonly record struct ScannedEntry(
+        string Path, bool IsDirectory, FileAttributes Attributes,
+        DateTime LastWriteTimeUtc = default, DateTime CreationTimeUtc = default);
 
     public bool IsIncluded(string path, bool isDirectory = false)
     {
