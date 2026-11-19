@@ -5,8 +5,10 @@
 If results look stale or startup/readiness fails, run `codecontext status --path .`.
 Before trusting an unexpected empty result, confirm contract version 1, the intended
 root and instance, indexing readiness, and the relevant parser session. A `hibernated`
-session is healthy: its worker exited while idle, answers come from the current index,
-and the next change or refresh restarts it. `failed` or `unavailable` is not.
+session is healthy: its worker exited while idle (after 2 minutes if it re-reads its files
+in under 5 seconds, else 15; `CodeContext__WorkerHibernateSeconds` sets one time for all,
+`0` off), answers come from the current index, and the next change or refresh restarts it.
+`failed` or `unavailable` is not.
 
 Use `codecontext list --json` to inspect registrations. Only after that, use
 `codecontext start --detach --path .` for manual lifecycle troubleshooting.
