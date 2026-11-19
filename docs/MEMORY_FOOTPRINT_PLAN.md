@@ -199,6 +199,12 @@ cache, without starting workers. Needs a staleness statement that is honest: at 
 snapshot time and whether any indexed file's size or mtime moved. Depends on M4's
 outcome for whether it reads a mapped or a materialized shard.
 
+## Closing steps and review process (agreed 2026-11-19)
+
+1. Finish M3c (branch `m3c`, worktree `/home/user/cc-m3c`) and M5, each with an independent review.
+2. Final adversarial and simplification pass over every commit on this branch since the plan started: correctness, allocation efficiency, hot paths, abstraction and re-use. Done by the strongest available review agents, one per area (host store and edge ids; snapshot writer, loader and key; trim and hibernation; C# worker; CLI and daemonless query). The coordinator verifies each finding; the same agent then fixes the agreed ones test-first, with before and after numbers for any allocation or hot-path claim. Close with the full suite, `Category=ExternalTooling` and both SDK suites.
+3. Then the feature backlog, one feature at a time: implementers and reviewers as for the memory items, and for each feature a final comprehensive review by the strongest available review agent, which also fixes what the coordinator agrees with.
+
 ## Feature backlog (after the memory items)
 
 | Id | Item | Notes |
