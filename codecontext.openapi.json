@@ -427,7 +427,7 @@
           "codecontext"
         ],
         "summary": "List what depends on a symbol, transitively",
-        "description": "Returns the symbols that use the identifier, then their users, up to maxDepth hops, nearest first: users through every usage kind, implementations and overrides of a declaration, and callers of a declaration the symbol implements or overrides ('through'), unless the call is statically bound. Nothing is added by containment or proximity. Symbols in test files are counted in 'testsHidden' and listed only with includeTests. A relation filter limits which uses carry impact.",
+        "description": "Returns the symbols that use the identifier, then their users, up to maxDepth hops, nearest first: users through every usage kind, implementations and overrides of a declaration, and callers of a declaration the symbol implements or overrides ('through'), unless the call is statically bound. Nothing is added by containment or proximity. Symbols in test files are counted in 'testsHidden' and, unless includeTests lists them, impact does not move on from them. A relation filter limits which uses carry impact.",
         "operationId": "GetAffected",
         "parameters": [
           {

@@ -58,7 +58,10 @@ namespace CodeContext.Core.Services
         /// <summary>Comma-separated relationship kinds that carry impact; null means every usage kind plus implementations.</summary>
         public string? Relation { get; set; }
 
-        /// <summary>Whether symbols in test files are listed (they are always counted).</summary>
+        /// <summary>
+        /// Whether symbols in test files are listed and impact moves on from them; without it, those reached are only
+        /// counted (<see cref="GraphAffectedResponse.TestsHidden"/>).
+        /// </summary>
         public bool IncludeTests { get; set; }
 
         /// <summary>Most entries returned, 1 to <see cref="GraphQueryLimits.MaxLimit"/>.</summary>
@@ -207,7 +210,7 @@ namespace CodeContext.Core.Services
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
         public bool DepthLimited { get; set; }
 
-        /// <summary>Affected symbols in test files, not listed unless tests are included.</summary>
+        /// <summary>Affected symbols in test files, not listed (nor moved on from) unless tests are included.</summary>
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
         public int TestsHidden { get; set; }
 

@@ -328,8 +328,8 @@ Decisions where the backlog was silent:
    implementation or override of it (it must stay compatible with a changed declaration); and to each source of a
    non-static usage edge into a declaration it implements or overrides, at any height (`through` names it). Not to
    siblings implementing the same declaration, the declaration itself, containers or neighbours. Seeds (a type's
-   members included) are never listed. Test-file symbols are traversed and counted (`testsHidden`), listed with
-   `includeTests`.
+   members included) are never listed. Unless `includeTests`, test-file symbols are counted (`testsHidden`), not
+   listed, and not moved on from, as a path does not pass through them.
 5. Hubs: distinct other symbols with a counted usage edge into the symbol, then their distinct files; no dispatch
    or member aggregation (a type's count is uses of the type). Test files are neither ranked nor counted unless
    `includeTests`; library symbols are ranked only with `includeExternal`, never under `within`. `within` is a

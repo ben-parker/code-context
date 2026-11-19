@@ -348,7 +348,7 @@
             "default": null
           },
           "includeTests": {
-            "description": "Whether affected symbols in test files are listed (they are always counted)",
+            "description": "Whether affected symbols in test files are listed and impact moves on from them (without it they are only counted)",
             "type": "boolean",
             "default": false
           },

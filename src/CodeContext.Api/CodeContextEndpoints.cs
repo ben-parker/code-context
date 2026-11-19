@@ -178,7 +178,7 @@ public static class CodeContextEndpoints
                         "users through every usage kind, implementations and overrides of a declaration, and callers of a " +
                         "declaration the symbol implements or overrides ('through'), unless the call is statically bound. " +
                         "Nothing is added by containment or proximity. Symbols in test files are counted in 'testsHidden' " +
-                        "and listed only with includeTests. A relation filter limits which uses carry impact.")
+                        "and, unless includeTests lists them, impact does not move on from them. A relation filter limits which uses carry impact.")
         .Produces<GraphAffectedResponse>(StatusCodes.Status200OK)
         .Produces(StatusCodes.Status400BadRequest)
         .Produces(StatusCodes.Status503ServiceUnavailable);

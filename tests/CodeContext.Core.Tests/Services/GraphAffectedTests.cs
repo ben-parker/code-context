@@ -161,6 +161,28 @@ public class GraphAffectedTests
     }
 
     [Fact]
+    public async Task WithTestsExcluded_ImpactDoesNotMoveThroughATestDouble()
+    {
+        // StubSaver.Save (a test double) touches Seed and implements ISaver.Save, which production code calls: the
+        // call reaches Seed only by dispatching to the stub, so with test files excluded it is not affected, as no path
+        // from it to Seed passes through test files either.
+        var service = new GraphTestGraph()
+            .Node("Seed").Node("StubSaver.Save", file: "tests/StubSaver.cs").Node("ISaver.Save").Node("Service.Run")
+            .Node("StubTests.Check", file: "tests/StubTests.cs")
+            .Calls("StubSaver.Save", "Seed").Edge("StubSaver.Save", "ISaver.Save", "IMPLEMENTS_MEMBER")
+            .Calls("Service.Run", "ISaver.Save").Calls("StubTests.Check", "StubSaver.Save")
+            .Build();
+
+        var hidden = await Affected(service, I("Seed"));
+        Assert.Empty(hidden.Items);
+        Assert.Equal(1, hidden.TestsHidden);
+        Assert.False((await service.FindPathAsync(new GraphPathRequest { From = I("Service.Run"), To = I("Seed") })).Found);
+
+        var listed = await Affected(service, I("Seed"), includeTests: true);
+        Assert.Equal(["StubSaver.Save@1", "Service.Run@2", "StubTests.Check@2"], Listed(listed));
+    }
+
+    [Fact]
     public async Task ATypeSeed_IsItsMembersToo_WhichAreNotListedAsAffected()
     {
         var service = new GraphTestGraph()

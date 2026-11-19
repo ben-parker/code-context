@@ -109,7 +109,8 @@ codecontext query hubs --within src/CodeContext.Core        # the most depended-
   moves to siblings, containers, or same-file or same-namespace symbols. `--depth N`
   (1-20, default 5; `more beyond` says the limit cut it off), `--limit N` (1-100, default
   20; `truncated` with the total), `--tests` lists the test-file dependents counted in
-  `testsHidden`.
+  `testsHidden` and lets impact move on from them (without it, a test double never makes
+  its callers' callers affected).
 - **`hubs`** ranks symbols by distinct direct dependents, then by their files. A type's
   count is uses of the type itself, not of its members (`--type Method` ranks members).
   `--within DIR` (repository-relative), `--type`, `--limit`, `--relation` (kinds counted),

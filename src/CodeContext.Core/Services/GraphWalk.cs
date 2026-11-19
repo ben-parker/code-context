@@ -235,7 +235,8 @@ namespace CodeContext.Core.Services
         /// relation filter, every implementation or override of it (it must stay compatible with the declaration); and,
         /// through dispatch, the source of every usage edge into a declaration it implements or overrides, at any height,
         /// unless that call is statically bound. Siblings that implement the same declaration are not affected, and
-        /// nothing moves along containment or proximity.
+        /// nothing moves along containment or proximity. Unless tests are included, impact reaches a symbol in a test
+        /// file but moves no further from it.
         /// </summary>
         public List<Affected> AffectedBy(IReadOnlyList<string> seeds, int maxDepth, out bool depthLimited)
         {
@@ -298,11 +299,14 @@ namespace CodeContext.Core.Services
                 bool Add(CodeEdge edge, string via, string? through)
                 {
                     if (edge.SourceId is not { Length: > 0 } source || visited.Contains(source)) return false;
-                    if (Node(source) is null) return false;
+                    if (Node(source) is not { } user) return false;
                     if (probe) return true;
                     visited.Add(source);
                     results.Add(new Affected(source, distance, Kind(edge), via, through));
-                    next!.Add(source);
+                    // Unless tests are included, a test-file symbol is affected but carries impact no further, as a path
+                    // does not pass through one: a test double implementing a declaration must not make that
+                    // declaration's production callers depend on what the double touches.
+                    if (_includeTests || !IsTestNode(user)) next!.Add(source);
                     return false;
                 }
             }
