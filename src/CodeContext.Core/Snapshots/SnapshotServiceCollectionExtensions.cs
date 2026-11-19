@@ -45,7 +45,8 @@ namespace CodeContext.Core.Snapshots
                     sp.GetService<IAnalysisCoverageRegistry>(),
                     workers is null ? null : workers.IsIndexedParser,
                     workers is null ? null : workers.MarkLoadedFromSnapshot,
-                    sp.GetRequiredService<ILogger<SnapshotService>>());
+                    sp.GetRequiredService<ILogger<SnapshotService>>(),
+                    workers?.WorkerSetFingerprint());
             });
             services.AddSingleton(sp =>
             {

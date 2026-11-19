@@ -57,6 +57,7 @@ namespace CodeContext.Core.Snapshots
         private readonly Func<string, bool>? _isIndexedParser;
         private readonly Action<IReadOnlyCollection<string>>? _onLoaded;
         private readonly ILogger _logger;
+        private readonly string? _workerSet;
 
         private readonly object _gate = new();
         private readonly List<Action<SnapshotStartupResult>> _waiters = [];
@@ -68,14 +69,17 @@ namespace CodeContext.Core.Snapshots
 
         /// <param name="isIndexedParser">Whether a registered worker indexes this parser id; null accepts every parser.</param>
         /// <param name="onLoaded">Told which parsers have published facts, before the first scan.</param>
+        /// <param name="workerSet">The host's worker set, recorded in every snapshot it writes (<see cref="SnapshotHostMeta.WorkerSet"/>).</param>
         public SnapshotStartup(
             SnapshotServiceSettings settings,
             InMemoryDatabase? database,
             IAnalysisCoverageRegistry? coverage,
             Func<string, bool>? isIndexedParser,
             Action<IReadOnlyCollection<string>>? onLoaded,
-            ILogger logger)
+            ILogger logger,
+            string? workerSet = null)
         {
+            _workerSet = workerSet;
             _settings = settings;
             _database = database;
             _coverage = coverage;
@@ -244,7 +248,7 @@ namespace CodeContext.Core.Snapshots
 
             var host = new SnapshotHostMeta(
                 _settings.HostVersion, Path.GetFullPath(_settings.RootPath), RuntimeInformation.RuntimeIdentifier,
-                OperatingSystem.IsWindows());
+                OperatingSystem.IsWindows()) { WorkerSet = _workerSet };
             // Checked again before anything is deleted (see CacheDirectory.RecheckLevels).
             if (writer && directory.RecheckLevels() is { } chainRefusal) return Disable(chainRefusal);
 

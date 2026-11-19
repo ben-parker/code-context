@@ -137,6 +137,9 @@ namespace CodeContext.Core.Snapshots
         public const string RootPathKey = "rootPath";
         public const string PlatformKey = "platform";
 
+        /// <summary>Optional: the writer's worker set. Read only by a query without an instance.</summary>
+        public const string WorkerSetKey = "workerSet";
+
         // Shard meta keys.
         public const string ParserIdKey = "parserId";
         public const string WorkspaceIdKey = "workspaceId";

@@ -353,6 +353,99 @@ public sealed class QueryFromSnapshotTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task AWorkerInstalledSinceTheSnapshot_FallsBack()
+    {
+        var root = await WriteSnapshotAsync("worker-added", "normal");
+        Age();
+        var other = CachedInstance.FakeWorker("normal");
+        other = other with { Manifest = other.Manifest with { ParserId = "other", Extensions = [".other"] } };
+
+        var result = OneShotSnapshot.TryOpen(
+            new CodeContextOptions { RootPath = root, CacheKeyPath = KeyPath },
+            new StaticWorkerCatalog(CachedInstance.FakeWorker("normal"), other), _checkAgainst);
+
+        Assert.Null(result.Snapshot);
+        Assert.Contains("another set of workers", result.Reason);
+    }
+
+    [Theory]
+    [InlineData("version")]
+    [InlineData("extensions")]
+    [InlineData("projectInputs")]
+    public async Task AWorkerWhoseManifestChanged_FallsBack(string what)
+    {
+        var root = await WriteSnapshotAsync($"worker-{what}", "normal");
+        Age();
+        var worker = CachedInstance.FakeWorker("normal");
+        worker = worker with
+        {
+            Manifest = what switch
+            {
+                "version" => worker.Manifest with { Version = "2.0.0-test" },
+                "extensions" => worker.Manifest with { Extensions = [".fake", ".fake2"] },
+                _ => worker.Manifest with { ProjectInputs = [".props"] },
+            },
+        };
+
+        var result = OneShotSnapshot.TryOpen(
+            new CodeContextOptions { RootPath = root, CacheKeyPath = KeyPath }, new StaticWorkerCatalog(worker), _checkAgainst);
+
+        Assert.Null(result.Snapshot);
+        Assert.Contains("another set of workers", result.Reason);
+    }
+
+    [Fact]
+    public async Task ASnapshotThatRecordsNoWorkerSet_IsNeverAnsweredFromWithoutAnInstance()
+    {
+        var root = Directory.CreateDirectory(Path.Combine(_base, "no-worker-set")).FullName;
+        File.WriteAllText(Path.Combine(root, "a.fake"), "a");
+        await using (var instance = new CachedInstance(root, KeyPath, "normal", recordWorkerSet: false))
+        {
+            await instance.StartAsync();
+            await instance.WaitForAsync(() => instance.ScanState.Phase == ScanPhase.Ready, "the scan");
+            await instance.StopAsync();
+        }
+        Age();
+
+        var result = OneShotSnapshot.TryOpen(
+            new CodeContextOptions { RootPath = root, CacheKeyPath = KeyPath }, new StaticWorkerCatalog(CachedInstance.FakeWorker("normal")), _checkAgainst);
+
+        Assert.Null(result.Snapshot);
+        Assert.Contains("records no set of workers", result.Reason);
+    }
+
+    [Theory]
+    [InlineData("manifest")]
+    [InlineData("sibling")]
+    public async Task AWorkerInstallationTouchedSinceTheSnapshot_FallsBack(string what)
+    {
+        var install = Directory.CreateDirectory(Path.Combine(_base, $"install-{what}")).FullName;
+        var manifestPath = Path.Combine(install, "worker-manifest.json");
+        File.WriteAllText(manifestPath, "{}");
+        var root = Directory.CreateDirectory(Path.Combine(_base, $"touched-{what}")).FullName;
+        File.WriteAllText(Path.Combine(root, "a.fake"), "a");
+        await using (var instance = new CachedInstance(root, KeyPath, "normal", manifestPath: manifestPath))
+        {
+            await instance.StartAsync();
+            await instance.WaitForAsync(() => instance.ScanState.Phase == ScanPhase.Ready, "the scan");
+            await instance.StopAsync();
+        }
+        Age();
+        var worker = CachedInstance.FakeWorker("normal") with { ManifestPath = manifestPath };
+        OneShotSnapshotOpen Open() => OneShotSnapshot.TryOpen(
+            new CodeContextOptions { RootPath = root, CacheKeyPath = KeyPath }, new StaticWorkerCatalog(worker), _checkAgainst);
+        Assert.True(Open().Snapshot is not null, Open().Reason);
+
+        // The manifest rewritten with the same content, or a file added beside it (a worker's binary replaced).
+        if (what == "manifest") File.WriteAllText(manifestPath, "{}");
+        else File.WriteAllText(Path.Combine(install, "worker.dll"), "new");
+
+        var result = Open();
+        Assert.Null(result.Snapshot);
+        Assert.Contains(install, result.Reason);
+    }
+
+    [Fact]
     public async Task TheFirstSnapshotOfASmallRepository_IsUsableAtOnce()
     {
         // The review's case: making .codecontext/ moves the root's time inside the slack before the first capture.

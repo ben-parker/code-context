@@ -140,7 +140,8 @@ namespace CodeContext.Core.Snapshots
 
         /// <summary>
         /// The check as a host's routing defines it: extensions from the workers, the selection policy from
-        /// <paramref name="options"/> (a selector of its own, so a scan's selector is never invalidated).
+        /// <paramref name="options"/> (a selector of its own, so a scan's selector is never invalidated), and besides
+        /// what the shards' workers reported, where the workers themselves are installed.
         /// </summary>
         internal static SnapshotFreshnessResult For(
             CodeContextOptions options, LanguageWorkerService workers, DateTime capturedUtc, IEnumerable<WorkerInputs> inputs,
@@ -148,6 +149,6 @@ namespace CodeContext.Core.Snapshots
             => Check(
                 new RepositoryFileSelector(Options.Create(options)), options.RootPath, capturedUtc,
                 extension => workers.TryGetParserForExtension(extension, out _),
-                inputs, rootTimeTicks, tolerance: tolerance);
+                inputs.Append(new WorkerInputs(workers.InstallationPaths(), [])), rootTimeTicks, tolerance: tolerance);
     }
 }

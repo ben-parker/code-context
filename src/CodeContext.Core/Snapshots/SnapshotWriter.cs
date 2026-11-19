@@ -8,7 +8,15 @@ using ShardKey = CodeContext.Core.Repositories.InMemory.InMemoryDatabase.ShardKe
 namespace CodeContext.Core.Snapshots
 {
     /// <summary>What the host records about itself in a snapshot, and what a reader requires to match.</summary>
-    internal sealed record SnapshotHostMeta(string HostVersion, string RootPath, string Platform, bool PathsCaseInsensitive);
+    internal sealed record SnapshotHostMeta(string HostVersion, string RootPath, string Platform, bool PathsCaseInsensitive)
+    {
+        /// <summary>
+        /// The writer's worker set (<see cref="Workers.LanguageWorkerService.WorkerSetFingerprint"/>), recorded as host
+        /// meta <see cref="SnapshotFormat.WorkerSetKey"/>; null records none, and such a snapshot is loaded by a host
+        /// as any other and never answered from without one.
+        /// </summary>
+        public string? WorkerSet { get; init; }
+    }
 
     /// <summary>
     /// What a snapshot stores beside one shard's facts: the parser version and worker state binding
@@ -217,12 +225,14 @@ namespace CodeContext.Core.Snapshots
                     sectionBytes[(SnapshotSectionKind)(i + 1)] += blob.SectionLengths[i];
             }
 
-            var hostMeta = EncodeKeyValues(
+            List<(string, string)> hostEntries =
             [
                 (SnapshotFormat.HostVersionKey, input.Host.HostVersion),
                 (SnapshotFormat.RootPathKey, input.Host.RootPath),
                 (SnapshotFormat.PlatformKey, input.Host.Platform),
-            ]);
+            ];
+            if (input.Host.WorkerSet is { } workerSet) hostEntries.Add((SnapshotFormat.WorkerSetKey, workerSet));
+            var hostMeta = EncodeKeyValues(hostEntries);
 
             long hostMetaOffset = SnapshotFormat.HeaderSize;
             var directoryOffset = SnapshotFormat.Align8(hostMetaOffset + hostMeta.Length);

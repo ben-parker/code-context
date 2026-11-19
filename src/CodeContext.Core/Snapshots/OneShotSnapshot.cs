@@ -113,6 +113,12 @@ namespace CodeContext.Core.Snapshots
                     return Unavailable($"{candidate.Name} was written while the index was unverified");
                 if (file.Header.CreatedUtcTicks < DateTime.MinValue.Ticks || file.Header.CreatedUtcTicks > DateTime.MaxValue.Ticks)
                     return Unavailable($"{candidate.Name}: the capture time is not a time");
+                // Which files are indexed, and by what, is the worker set's: a worker installed, removed or replaced since
+                // the snapshot would index the tree differently, and only an instance finds out how.
+                if (!file.HostMeta.TryGetValue(SnapshotFormat.WorkerSetKey, out var writtenBy))
+                    return Unavailable($"{candidate.Name} records no set of workers");
+                if (!string.Equals(writtenBy, workers.WorkerSetFingerprint(), StringComparison.Ordinal))
+                    return Unavailable($"{candidate.Name} was written with another set of workers");
                 var capturedUtc = new DateTime(file.Header.CreatedUtcTicks, DateTimeKind.Utc);
                 var snapshotAt = CacheState.FormatTicks(file.Header.CreatedUtcTicks);
                 bool Accept(InMemoryDatabase.ShardKey shard)

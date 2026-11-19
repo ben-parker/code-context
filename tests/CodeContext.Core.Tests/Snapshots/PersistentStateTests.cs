@@ -617,7 +617,7 @@ public sealed class PersistentStateTests : IAsyncLifetime
             var settings = SnapshotServiceSettings.From(options.Value);
             settings = configure?.Invoke(settings) ?? settings;
             Startup = new SnapshotStartup(settings, Factory.Database, coverage, Workers.IsIndexedParser,
-                Workers.MarkLoadedFromSnapshot, SnapshotLog);
+                Workers.MarkLoadedFromSnapshot, SnapshotLog, Workers.WorkerSetFingerprint());
             CacheState = new CacheState(settings.Enabled, Startup.Run);
             SnapshotServiceCollectionExtensions.ConnectWorkers(Workers, CacheState, Startup, Factory.Database);
             Coordinator = new IndexCoordinator(graphUpdate, ScanState, options, NullLoggerFactory.Instance, cacheState: CacheState);
