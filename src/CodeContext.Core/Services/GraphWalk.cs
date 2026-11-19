@@ -1,4 +1,5 @@
 using CodeContext.Core.Repositories.InMemory;
+using System.Runtime.InteropServices;
 using CodeContext.Parser.Protocol;
 
 namespace CodeContext.Core.Services
@@ -148,12 +149,14 @@ namespace CodeContext.Core.Services
             // `affected` lists the callers of such a declaration as reaching what its implementations call. Relationship
             // hops cost one and dispatch hops nothing, so this is a breadth-first search in which a state may still move
             // to an earlier level while that level is open (a dispatch hop finding what a relationship hop found first).
-            var distance = new Dictionary<(string Id, bool Dispatch), int>();
-            var parents = new Dictionary<(string Id, bool Dispatch), (string Id, bool Dispatch, CodeEdge Edge, string Hop)>();
+            // One table holds what is known of each state: how far it is and how it was reached, or that it may not be
+            // entered at all (no such node, or a test file the path may not pass through), so that every later edge
+            // into it costs one lookup.
+            var states = new Dictionary<(string Id, bool Dispatch), Reached>();
             var level = new List<(string Id, bool Dispatch)>();
             foreach (var start in starts)
             {
-                if (Node(start) is not null && distance.TryAdd((start, true), 0)) level.Add((start, true));
+                if (Node(start) is not null && states.TryAdd((start, true), default)) level.Add((start, true));
             }
 
             // Past the limit the search goes on without looking for goals, only to learn whether anything lies beyond.
@@ -163,9 +166,9 @@ namespace CodeContext.Core.Services
                 if (depth == maxDepth + 1)
                 {
                     reachedWithin = new HashSet<string>(StringComparer.Ordinal);
-                    foreach (var (state, at) in distance)
+                    foreach (var (state, reached) in states)
                     {
-                        if (at <= maxDepth) reachedWithin.Add(state.Id);
+                        if (reached.Distance >= 0 && reached.Distance <= maxDepth) reachedWithin.Add(state.Id);
                     }
                 }
                 var next = new List<(string Id, bool Dispatch)>();
@@ -174,10 +177,10 @@ namespace CodeContext.Core.Services
                     Visit();
                     var state = level[index];
                     // A state that moved to an earlier level was taken there.
-                    if (distance[state] != depth) continue;
+                    if (states[state].Distance != depth) continue;
                     if (depth <= maxDepth)
                     {
-                        if (goals.Contains(state.Id)) return Reconstruct(state, parents);
+                        if (goals.Contains(state.Id)) return Reconstruct(state, states);
                     }
                     else if (!reachedWithin!.Contains(state.Id))
                     {
@@ -194,7 +197,7 @@ namespace CodeContext.Core.Services
                             {
                                 var edge = inbound[i];
                                 if (IsFamily(edge) && edge.SourceId is { Length: > 0 } implementation)
-                                    Enter((implementation, true), depth, state, edge, "dispatch", level);
+                                    Enter((implementation, true), depth, state, edge, byDispatch: true, level);
                             }
                         }
                     }
@@ -206,7 +209,7 @@ namespace CodeContext.Core.Services
                         {
                             var edge = outbound[i];
                             if (IsUsage(edge) && Admits(edge) && edge.TargetId is { Length: > 0 } target)
-                                Enter((target, !IsStaticDispatch(edge)), depth + 1, state, edge, "uses", next);
+                                Enter((target, !IsStaticDispatch(edge)), depth + 1, state, edge, byDispatch: false, next);
                         }
                     }
                 }
@@ -214,30 +217,48 @@ namespace CodeContext.Core.Services
             }
             return null;
 
-            void Enter((string Id, bool Dispatch) reached, int at, (string Id, bool Dispatch) from, CodeEdge edge, string hop, List<(string, bool)> into)
+            void Enter((string Id, bool Dispatch) reached, int at, (string Id, bool Dispatch) from, CodeEdge edge, bool byDispatch, List<(string, bool)> into)
             {
-                if (distance.TryGetValue(reached, out var known) && known <= at) return;
                 // A node reached with dispatch covers the same node reached without it, no later.
-                if (!reached.Dispatch && distance.TryGetValue((reached.Id, true), out var covering) && covering <= at) return;
-                var node = Node(reached.Id);
-                if (node is null) return;
-                if (!_includeTests && !goals.Contains(reached.Id) && IsTestNode(node)) return;
-                distance[reached] = at;
-                parents[reached] = (from.Id, from.Dispatch, edge, hop);
+                if (!reached.Dispatch && states.TryGetValue((reached.Id, true), out var covering)
+                    && covering.Distance >= 0 && covering.Distance <= at)
+                {
+                    return;
+                }
+                ref var known = ref CollectionsMarshal.GetValueRefOrAddDefault(states, reached, out var seen);
+                // Reached no later already, or refused (a refusal never changes during one search).
+                if (seen && known.Distance <= at) return;
+                if (!seen && (Node(reached.Id) is not { } node || (!_includeTests && !goals.Contains(reached.Id) && IsTestNode(node))))
+                {
+                    known.Distance = Reached.Refused;
+                    return;
+                }
+                known = new Reached { Distance = at, ParentId = from.Id, ParentDispatch = from.Dispatch, Edge = edge, ByDispatch = byDispatch };
                 into.Add(reached);
             }
         }
 
-        private static List<PathStep> Reconstruct(
-            (string Id, bool Dispatch) goal,
-            Dictionary<(string Id, bool Dispatch), (string Id, bool Dispatch, CodeEdge Edge, string Hop)> parents)
+        /// <summary>What a path search knows of a state: its distance and the step that reached it (none for a start).</summary>
+        private struct Reached
+        {
+            /// <summary>The distance of a state that may not be entered.</summary>
+            public const int Refused = -1;
+
+            public int Distance;
+            public bool ParentDispatch;
+            public bool ByDispatch;
+            public string? ParentId;
+            public CodeEdge? Edge;
+        }
+
+        private static List<PathStep> Reconstruct((string Id, bool Dispatch) goal, Dictionary<(string Id, bool Dispatch), Reached> states)
         {
             var steps = new List<PathStep>();
             var current = goal;
-            while (parents.TryGetValue(current, out var parent))
+            while (states[current] is { ParentId: { } parent } reached)
             {
-                steps.Add(new PathStep(current.Id, parent.Hop, parent.Edge));
-                current = (parent.Id, parent.Dispatch);
+                steps.Add(new PathStep(current.Id, reached.ByDispatch ? "dispatch" : "uses", reached.Edge));
+                current = (parent, reached.ParentDispatch);
             }
             steps.Add(new PathStep(current.Id, "start", null));
             steps.Reverse();
