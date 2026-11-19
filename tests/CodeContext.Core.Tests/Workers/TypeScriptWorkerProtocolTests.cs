@@ -1182,6 +1182,27 @@ namespace Mixed { public class Service { public string Run() => ""ok""; } }");
     }
 
     [Fact]
+    public async Task ACallThroughSuper_IsMarkedStaticallyBound()
+    {
+        await WriteFileAsync("save.ts", """
+            export class Base { save(): void { } }
+            export class Derived extends Base {
+                save(): void { super.save(); }
+                again(other: Base): void { other.save(); }
+            }
+            """);
+        await _pipeline.GraphUpdateService.PerformInitialScanAsync(_tempDir, null, CancellationToken.None);
+
+        var edges = (await _pipeline.RepositoryFactory.CreateEdgeRepository().GetAllAsync())
+            .Where(edge => edge.Type == "CALLS" && edge.TargetId!.EndsWith("#Base.save()", StringComparison.Ordinal))
+            .ToList();
+        var superCall = Assert.Single(edges, edge => edge.SourceId!.EndsWith("#Derived.save()", StringComparison.Ordinal));
+        Assert.Equal(EdgeDispatch.Static, superCall.Metadata![EdgeMetadataKeys.Dispatch]);
+        var dispatching = Assert.Single(edges, edge => edge.SourceId!.Contains("#Derived.again", StringComparison.Ordinal));
+        Assert.False(dispatching.Metadata!.ContainsKey(EdgeMetadataKeys.Dispatch));
+    }
+
+    [Fact]
     public async Task TopLevelInvocation_HasARealModuleScopeCaller()
     {
         await WriteFileAsync("entry.ts",

@@ -57,7 +57,7 @@ internal sealed class WorkerStateFormatException(string message) : Exception(mes
 /// from a count the remaining bytes could not hold, and never naming a type to create. A path in the file
 /// is a key only: it is matched against the files the host approved, never opened.
 ///
-/// Layout, little-endian (format version 1):
+/// Layout, little-endian (format version 2):
 /// <code>
 /// header      "CCWSTATE", u32 version, u32 reserved (0), u64 file length,
 ///             str workerIdentity, str stateId, str workspaceId, str rootPath   (str: u32 length, UTF-8)
@@ -72,12 +72,13 @@ internal sealed class WorkerStateFormatException(string message) : Exception(mes
 /// node        ref id, identifier, name, kind, language, filePath; i32 start line, end line, start column,
 ///             end column; ref namespace, visibility, signature, returnType, parameters, modifiers;
 ///             u32 metadata count or 0xFFFFFFFF, then count × (ref key, ref value)
-/// edge        ref source, ref target, ref kind, i32 line, i32 column   (both -1: no place in the source)
+/// edge        ref source, ref target, ref kind, i32 line, i32 column   (both -1: no place in the source),
+///             u8 flags (1 statically bound)
 /// </code>
 /// </summary>
 internal static class WorkerStateFile
 {
-    public const int FormatVersion = 1;
+    public const int FormatVersion = 2;
 
     /// <summary>A state file longer than this is refused before a byte is read.</summary>
     public const long MaxFileLength = 1L << 30;
@@ -88,6 +89,7 @@ internal static class WorkerStateFile
     private const int HashSize = 32;
     private const byte RacyFlag = 1;
     private const byte DirectivesFlag = 2;
+    private const byte StaticallyBoundFlag = 1;
 
     private static ReadOnlySpan<byte> Magic => "CCWSTATE"u8;
 
@@ -313,7 +315,7 @@ internal static class WorkerStateFile
             strings.Ref(edge.TargetId);
             strings.Ref(edge.Kind);
         }
-        return 4L + 20L * edges.Count;
+        return 4L + 21L * edges.Count;
     }
 
     private static void WriteFacts(HashingWriter facts, StringTable strings, WalkedFileState file)
@@ -380,6 +382,7 @@ internal static class WorkerStateFile
             facts.U32(strings.Ref(edge.Kind));
             facts.I32(edge.Line);
             facts.I32(edge.Column);
+            facts.U8(edge.StaticallyBound ? StaticallyBoundFlag : (byte)0);
         }
     }
 
@@ -546,11 +549,14 @@ internal static class WorkerStateFile
 
     private static List<EdgeFact> ReadEdges(ref Reader reader, string[] strings)
     {
-        var count = reader.Count(minimumSize: 20);
+        var count = reader.Count(minimumSize: 21);
         var edges = new List<EdgeFact>(count);
         for (var index = 0; index < count; index++)
         {
-            var edge = new EdgeFact(reader.Ref(strings), reader.Ref(strings), reader.Ref(strings), reader.I32(), reader.I32());
+            var (source, target, kind, line, column) = (reader.Ref(strings), reader.Ref(strings), reader.Ref(strings), reader.I32(), reader.I32());
+            var flags = reader.U8();
+            if ((flags & ~StaticallyBoundFlag) != 0) throw new WorkerStateFormatException("unknown edge flags");
+            var edge = new EdgeFact(source, target, kind, line, column, (flags & StaticallyBoundFlag) != 0);
             // An edge with no place in the source holds -1 for both.
             if (edge.Line < -1 || edge.Column < -1 || (edge.Line < 0) != (edge.Column < 0))
             {

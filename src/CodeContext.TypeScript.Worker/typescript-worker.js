@@ -1926,6 +1926,11 @@ function analyzeFile(workspace, workspaceId, program, checker, fileName, diagnos
                             column: String(position.character + 1),
                         };
                         if (!targetDecl) metadata.unresolved = 'true';
+                        // `super.m()` calls the base implementation itself, never an override of it.
+                        if (ts.isPropertyAccessExpression(expression)
+                            && expression.expression.kind === ts.SyntaxKind.SuperKeyword) {
+                            metadata.dispatch = 'static';
+                        }
                         addEdge(enclosingDeclarationId(tsNode), targetId, 'CALLS', metadata);
                     }
                 }

@@ -104,6 +104,29 @@ public class CSharpWorkerAnalyzerTests : IDisposable
     }
 
     [Fact]
+    public void Analyze_MarksACallThroughBaseAsStaticallyBound()
+    {
+        var result = Analyze(("Calls.cs", """
+            public class Base { public virtual void Run() { } }
+            public class Derived : Base
+            {
+                public override void Run() { base.Run(); }
+                public void Again(Base other) { other.Run(); }
+            }
+            """));
+
+        var calls = result.Edges
+            .Where(edge => edge.Kind == "CALLS" && edge.TargetId == Id("Base.Run()"))
+            .ToDictionary(edge => edge.SourceId);
+
+        var baseCall = calls[Id("Derived.Run()")];
+        Assert.Equal(EdgeDispatch.Static, baseCall.Metadata![EdgeMetadataKeys.Dispatch]);
+        Assert.Equal("3", baseCall.Metadata["line"]);
+        var dispatching = calls[Id("Derived.Again(Base)")];
+        Assert.False(dispatching.Metadata!.ContainsKey(EdgeMetadataKeys.Dispatch));
+    }
+
+    [Fact]
     public void Analyze_ShouldIdentifyInterfaceAndCreateCorrectNode()
     {
         var result = AnalyzeTestClassFile(out _);

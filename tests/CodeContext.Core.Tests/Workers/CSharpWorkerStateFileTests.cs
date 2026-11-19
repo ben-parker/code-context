@@ -89,7 +89,11 @@ public sealed class CSharpWorkerStateFileTests : IDisposable
                         new ProtocolNode("csharp:default:u:B", "csharp:B", "B", "Class", "csharp", "C:\\r\\a.cs", 0, 0, 0, 0,
                             "N", "public", "sig", "ret", "p", "m", new Dictionary<string, string>()),
                     ],
-                    Edges = [new EdgeFact("csharp:default:u:A", "t", "CALLS"), new EdgeFact("csharp:default:u:A", "t", "CALLS", 5, 6)],
+                    Edges =
+                    [
+                        new EdgeFact("csharp:default:u:A", "t", "CALLS"), new EdgeFact("csharp:default:u:A", "t", "CALLS", 5, 6),
+                        new EdgeFact("csharp:default:u:A", "t", "CALLS", 7, 8, StaticallyBound: true),
+                    ],
                     StubNodes = [], StubEdges = [], UnresolvedNames = [],
                 },
                 new WalkedFileState
@@ -109,6 +113,7 @@ public sealed class CSharpWorkerStateFileTests : IDisposable
         Assert.Empty(read.Files[0].Nodes[1].Metadata!);
         Assert.Equal(state.Files[0].Nodes[1] with { Metadata = null }, read.Files[0].Nodes[1] with { Metadata = null });
         Assert.Equal(state.Files[0].Edges, read.Files[0].Edges);
+        Assert.Equal([false, false, true], read.Files[0].Edges.Select(edge => edge.StaticallyBound));
         Assert.Equal(new FileStamp(10, 20, true, hash).Size, read.Files[0].Stamp.Size);
         Assert.True(read.Files[0].Stamp.Racy && read.Files[0].ContainsDirectives);
         Assert.NotNull(read.Files[0].UnresolvedNames);
