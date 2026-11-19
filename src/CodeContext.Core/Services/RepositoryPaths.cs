@@ -14,17 +14,53 @@ namespace CodeContext.Core.Services
             OperatingSystem.IsLinux() ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
 
         /// <summary>
-        /// Whether <paramref name="path"/> is a test file: its root-relative form contains <c>test</c> or <c>spec</c>,
-        /// ignoring case. This is the rule <c>--tests</c> evidence and ranking have always used, now applied to the part
-        /// of the path inside the repository. It is a name rule: <c>latest.ts</c> and <c>inspector.ts</c> match too.
+        /// Whether <paramref name="path"/> is a test file, by the naming conventions test runners themselves discover
+        /// tests with, applied to the part of the path under the root. Each directory name, and the file name without
+        /// its extension, is read as the pieces between <c>.</c>, <c>-</c> and <c>_</c>; the path is a test file when a
+        /// piece
+        /// <list type="bullet">
+        /// <item>is <c>test</c>, <c>tests</c>, <c>spec</c> or <c>specs</c> in any letter case: directories
+        /// <c>test/</c>, <c>tests/</c>, <c>spec/</c>, <c>specs/</c>, <c>__tests__/</c>, <c>Widget.Tests/</c>,
+        /// <c>e2e-tests/</c>; files <c>widget.test.ts</c>, <c>widget.spec.tsx</c>, <c>widget_test.go</c>,
+        /// <c>test_widget.py</c>, <c>widget_spec.rb</c>, <c>widget-test.js</c>, <c>test.js</c>;</item>
+        /// <item>ends in <c>Test</c> or <c>Tests</c> written so (the camel-case suffix): <c>WidgetTests.cs</c>,
+        /// <c>WidgetTest.java</c>, <c>Widget.UnitTests/</c>, <c>IntegrationTests/</c>;</item>
+        /// <item>or the file is pytest's <c>conftest</c>.</item>
+        /// </list>
+        /// A word that merely contains those letters is not a test (<c>Latest.cs</c>, <c>inspector.ts</c>,
+        /// <c>Contest.cs</c>, <c>aspects/</c>), and neither is a camel-case <c>Spec</c> suffix or <c>Test</c> prefix,
+        /// which production code uses for specifications and for verbs (<c>WorkerLaunchSpec.cs</c>,
+        /// <c>TestConnection.cs</c>). The check allocates nothing.
         /// </summary>
         public static bool IsTestFile(string? path, string? rootPath)
         {
             if (string.IsNullOrEmpty(path)) return false;
             var relative = RootRelative(path, rootPath);
-            return relative.Contains("test", StringComparison.OrdinalIgnoreCase)
-                || relative.Contains("spec", StringComparison.OrdinalIgnoreCase);
+
+            // The file name is read without its extension; a name that starts with its only dot has none.
+            var nameStart = relative.LastIndexOfAny('/', '\\') + 1;
+            var name = relative[nameStart..];
+            var extension = name.LastIndexOf('.');
+            var end = extension > 0 ? nameStart + extension : relative.Length;
+            if (name[..(end - nameStart)].Equals("conftest", StringComparison.OrdinalIgnoreCase)) return true;
+
+            var pieceStart = 0;
+            for (var i = 0; i <= end; i++)
+            {
+                if (i < end && relative[i] is not ('/' or '\\' or '.' or '-' or '_')) continue;
+                if (IsTestWord(relative[pieceStart..i])) return true;
+                pieceStart = i + 1;
+            }
+            return false;
         }
+
+        private static bool IsTestWord(ReadOnlySpan<char> piece) => piece.Length switch
+        {
+            < 4 => false,
+            4 => piece.Equals("test", StringComparison.OrdinalIgnoreCase) || piece.Equals("spec", StringComparison.OrdinalIgnoreCase),
+            5 when piece.Equals("tests", StringComparison.OrdinalIgnoreCase) || piece.Equals("specs", StringComparison.OrdinalIgnoreCase) => true,
+            _ => piece.EndsWith("Test", StringComparison.Ordinal) || piece.EndsWith("Tests", StringComparison.Ordinal),
+        };
 
         /// <summary>
         /// The part of <paramref name="path"/> after <paramref name="rootPath"/> and one separator, or the whole path when it

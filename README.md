@@ -112,7 +112,12 @@ nothing running. It checks by file time the files a scan walks and what each wor
 reported it read; see [operations](skill/references/operations.md) for what that misses. Compact,
 line-oriented agent text is the default. Use `--human` for expanded human-readable
 output or `--json` for the exact API response; progress stays on stderr. Test evidence
-is omitted by default, so add `--tests` whenever it matters. Other options include
+is omitted by default, so add `--tests` whenever it matters. A test file is recognized by
+name, on its path under the root: a directory or file-name part that is `test`, `tests`,
+`spec` or `specs` (`tests/`, `__tests__/`, `Widget.Tests/`, `widget.test.ts`,
+`widget_test.go`, `test_widget.py`) or ends in `Test` or `Tests` (`WidgetTests.cs`), or
+`conftest.py`; a name that merely contains those letters (`Latest.cs`,
+`WorkerLaunchSpec.cs`) is not one. Other options include
 `--path DIR`, `--depth N`, `--relation CSV`, `--exact`, `--limit N`, and `--external` to
 include library symbols.
 

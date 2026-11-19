@@ -117,8 +117,15 @@ codecontext query hubs --within src/CodeContext.Core        # the most depended-
   `--tests` (rank test files and count their uses), `--external` (rank library symbols).
 - `--relation` takes CALLS, MOCK_CALLS, REFERENCES, IMPLEMENTS, INHERITS, EXTENDS, IMPORTS,
   USES; dispatch is followed whatever it says. An option a subcommand does not read
-  (`--exact`, `--within` on `path`, ...) is refused. A test file is one whose path under the
-  root contains `test` or `spec`, as for `--tests`.
+  (`--exact`, `--within` on `path`, ...) is refused.
+- A test file, here and for `--tests` evidence, is one named as test runners expect, judged
+  on its path under the root: a directory or file-name part (between `.`, `-`, `_`) that
+  is `test`, `tests`, `spec` or `specs` (`tests/`, `__tests__/`, `Widget.Tests/`,
+  `widget.test.ts`, `widget.spec.ts`, `widget_test.go`, `test_widget.py`), or that ends in
+  `Test` or `Tests` (`WidgetTests.cs`, `Widget.UnitTests/`), or `conftest.py`. A name that
+  only contains the letters (`Latest.cs`, `WorkerLaunchSpec.cs`, `inspector.ts`) is not
+  one; test code named otherwise (`TestHelpers.cs` outside a test directory) is not
+  recognized, so check with `rg` when the split matters.
 - To query a symbol named `path`, `affected`, `hubs` or `multi`, put it after `--`:
   `codecontext query --depth 2 -- path`.
 - The answers are static evidence with the blind spots listed below; an empty `affected`

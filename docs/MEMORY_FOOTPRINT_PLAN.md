@@ -343,10 +343,21 @@ Decisions where the backlog was silent:
    binding, 400 `INVALID_GRAPH_QUERY`; MCP: unknown names, wrong JSON kinds and missing required arguments are
    `isError`, unlike the lenient context tools; CLI: an option the subcommand does not read, exit 1). `query -- path`
    queries a symbol named like a subcommand.
-8. The test-file rule (root-relative path contains `test` or `spec`) is one function, `RepositoryPaths.IsTestFile`,
-   now also used by `--tests` evidence, test-file discovery and candidate ranking, which matched the absolute path
-   before: a checkout under a folder named `tests` made every file a test. That is the only change to existing
-   answers, and only for such roots. The name rule itself is unchanged (`WorkerLaunchSpec.cs` counts as a test).
+8. The test-file rule is one function, `RepositoryPaths.IsTestFile`, used by the graph queries and by `--tests`
+   evidence, test-file discovery and candidate ranking. It judges the root-relative path (those matched the absolute
+   path before: a checkout under a folder named `tests` made every file a test) by the names test runners discover
+   tests with, not by substring: each directory name, and the file name without its extension, is split at `.`, `-`
+   and `_`, and the file is a test when a piece is `test`, `tests`, `spec` or `specs` in any case (`tests/`,
+   `__tests__/`, `Widget.Tests/`, `widget.test.ts`, `widget.spec.ts`, `widget_test.go`, `test_widget.py`,
+   `widget_spec.rb`), ends in camel-case `Test` or `Tests` (`WidgetTests.cs`, `WidgetTest.java`,
+   `Widget.UnitTests/`), or the file is pytest's `conftest`. Covered: .NET (xunit/NUnit/MSTest project and class
+   names), Jest/Vitest/Jasmine/Mocha, Go, pytest/unittest, RSpec/minitest, Maven and Gradle layouts. Left out on
+   purpose: a camel-case `Spec` suffix and `Test` prefix, which production code uses (`WorkerLaunchSpec.cs`,
+   `TestConnection.cs`); `testing/`, `testdata/`, `fixtures/`, `__mocks__/`, `*.cy.ts`, `*IT.java`. This changes
+   existing `--tests` answers: a file that only contained the letters (`WorkerLaunchSpec.cs`, `Inspector.cs`,
+   `Latest.ts`) is no longer test evidence, a candidate test file, or ranked after production code, and with the
+   graph queries it is ranked by `hubs` and passed through by `path`. On this repository one file changes side
+   (`src/CodeContext.Core/Workers/WorkerLaunchSpec.cs`).
 
 ## Log
 

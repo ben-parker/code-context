@@ -22,6 +22,68 @@ public class RepositoryPathsTests
         => Assert.Equal(expected, RepositoryPaths.IsTestFile(path, root));
 
     [Theory]
+    // Directories test runners and project layouts use.
+    [InlineData("test/widget.js", true)]
+    [InlineData("Tests/Widget.cs", true)]
+    [InlineData("spec/widget.rb", true)]
+    [InlineData("specs/widget.rb", true)]
+    [InlineData("src/__tests__/widget.ts", true)]
+    [InlineData("src/main/test/java/Widget.java", true)]
+    [InlineData("src/Widget.Tests/Helpers.cs", true)]
+    [InlineData("src/Widget.UnitTests/Helpers.cs", true)]
+    [InlineData("src\\Widget.IntegrationTests\\Helpers.cs", true)]
+    [InlineData("e2e-tests/login.ts", true)]
+    [InlineData("WidgetTests/Helpers.cs", true)]
+    // File names.
+    [InlineData("src/widget.test.ts", true)]
+    [InlineData("src/widget.spec.tsx", true)]
+    [InlineData("src/widget.e2e-spec.ts", true)]
+    [InlineData("src/widget.test-d.ts", true)]
+    [InlineData("src/WidgetTests.cs", true)]
+    [InlineData("src/WidgetTest.cs", true)]
+    [InlineData("src/WidgetTests.Helpers.cs", true)]
+    [InlineData("pkg/widget_test.go", true)]
+    [InlineData("pkg/test_widget.py", true)]
+    [InlineData("lib/widget_spec.rb", true)]
+    [InlineData("src/widget-test.js", true)]
+    [InlineData("test.js", true)]
+    [InlineData("conftest.py", true)]
+    [InlineData("pkg/conftest.py", true)]
+    // Words that only contain the letters, and what production code names so.
+    [InlineData("src/Workers/WorkerLaunchSpec.cs", false)]
+    [InlineData("src/Inspector.cs", false)]
+    [InlineData("src/inspector/latest.ts", false)]
+    [InlineData("src/Latest.cs", false)]
+    [InlineData("src/Aspects/Aspect.cs", false)]
+    [InlineData("src/Contest.cs", false)]
+    [InlineData("src/contests/Entry.cs", false)]
+    [InlineData("src/Specification/Rule.cs", false)]
+    [InlineData("src/TestConnectionCommand.cs", false)]
+    [InlineData("src/Attestation.cs", false)]
+    [InlineData("src/respects.ts", false)]
+    [InlineData("src/Widget.cs", false)]
+    [InlineData("src/widget.spec", false)]
+    [InlineData("src/.test", true)]
+    [InlineData("", false)]
+    public void IsTestFile_FollowsNamingConventions_NotSubstrings(string path, bool expected)
+        => Assert.Equal(expected, RepositoryPaths.IsTestFile(path, null));
+
+    [Fact]
+    public void IsTestFile_AllocatesNothing()
+    {
+        const string path = "/repo/src/CodeContext.Core/Services/Widgets/WidgetLaunchSpecification.cs";
+        RepositoryPaths.IsTestFile(path, "/repo");
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        var tests = 0;
+        for (var i = 0; i < 1000; i++)
+        {
+            if (RepositoryPaths.IsTestFile(path, "/repo")) tests++;
+        }
+        Assert.Equal(0, GC.GetAllocatedBytesForCurrentThread() - before);
+        Assert.Equal(0, tests);
+    }
+
+    [Theory]
     [InlineData("/repo/src/Core/A.cs", "src/Core", true)]
     [InlineData("/repo/src/Core", "src/Core", true)]
     [InlineData("/repo/src/CoreExtra/A.cs", "src/Core", false)]
