@@ -109,6 +109,8 @@ public static class ProgramHelpers
         // order, so the final capture runs while the coordinator loop and the workers are alive.
         // On by default; `start --no-cache` (TurnCacheOff) or CodeContext:CacheEnabled=false turn it off.
         services.AddCodeContextSnapshots();
+        // Stops workers idle for CodeContext:WorkerHibernateSeconds; the next change wakes them through the coordinator.
+        services.AddCodeContextWorkerHibernation();
         services.AddHostedService<FileWatcherService>();
     }
 

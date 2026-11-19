@@ -2,6 +2,7 @@ using System;
 using System.Runtime.CompilerServices;
 using CodeContext.Core.Memory;
 using CodeContext.Core.Snapshots;
+using CodeContext.Core.Workers;
 
 namespace CodeContext.Core.Tests;
 
@@ -30,4 +31,12 @@ internal static class TestAssemblyGuards
     [ModuleInitializer]
     internal static void TurnTheQuietTimeTrimOff()
         => Environment.SetEnvironmentVariable(QuietTimeTrimSettings.EnvironmentVariable, "0");
+
+    /// <summary>
+    /// Worker hibernation is on by default with a long idle time on real time; a host a test composes must not stop its
+    /// workers in the middle of an unrelated test. Off for every host the tests build; hibernation's own tests set it.
+    /// </summary>
+    [ModuleInitializer]
+    internal static void TurnWorkerHibernationOff()
+        => Environment.SetEnvironmentVariable(WorkerHibernationSettings.EnvironmentVariable, "0");
 }

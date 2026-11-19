@@ -71,6 +71,33 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
         public override void Abandon() => Completion.TrySetResult(null);
     }
 
+    /// <summary>Maintenance work handed in as a delegate (a worker hibernation check). The loop waits for it.</summary>
+    private sealed record DelegateMaintenanceCommand(Func<CancellationToken, Task> Work, TaskCompletionSource Completion)
+        : MaintenanceCommand
+    {
+        public override async Task RunAsync(CancellationToken ct)
+        {
+            try
+            {
+                await Work(ct).ConfigureAwait(false);
+                Completion.TrySetResult();
+            }
+            catch (OperationCanceledException)
+            {
+                Completion.TrySetCanceled();
+            }
+            catch (Exception ex)
+            {
+                Completion.TrySetException(ex);
+            }
+        }
+
+        public override void Abandon() => Completion.TrySetCanceled();
+    }
+
+    /// <summary>A mutation handed in as a delegate (a worker's wake re-index): indexing work, ordered with the rest.</summary>
+    private sealed record DelegateMutationCommand(Func<CancellationToken, Task> Work, TaskCompletionSource Completion) : Command;
+
     private readonly Channel<Command> _commands = Channel.CreateBounded<Command>(
         new BoundedChannelOptions(4096)
         {
@@ -150,6 +177,31 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
         if (_commands.Writer.TryWrite(command)) Interlocked.Increment(ref _queuedMaintenance);
         else command.Abandon();
         return command.Completion.Task;
+    }
+
+    /// <summary>
+    /// Queues <paramref name="work"/> to run on the loop between commands, as maintenance: it never makes
+    /// <see cref="IsBusy"/> true and is not followed by the mutation observer, so it must not change the store. One that
+    /// arrives while a file batch is being coalesced runs after that batch. Completes with the work; cancelled when the
+    /// coordinator has stopped or its queue is full.
+    /// </summary>
+    internal Task RunMaintenanceAsync(Func<CancellationToken, Task> work)
+    {
+        var command = new DelegateMaintenanceCommand(work, new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously));
+        if (_commands.Writer.TryWrite(command)) Interlocked.Increment(ref _queuedMaintenance);
+        else command.Abandon();
+        return command.Completion.Task;
+    }
+
+    /// <summary>
+    /// Queues <paramref name="work"/>, which may commit, as a mutation command: ordered with scans, batches and refreshes,
+    /// busy while it runs, and followed by the mutation observer. Completes with the work.
+    /// </summary>
+    internal async Task RunMutationAsync(Func<CancellationToken, Task> work, CancellationToken ct = default)
+    {
+        var command = new DelegateMutationCommand(work, new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously));
+        await _commands.Writer.WriteAsync(command, ct);
+        await command.Completion.Task.WaitAsync(ct);
     }
 
     public async ValueTask NotifyFileChangedAsync(string fullPath, FileChangeType changeType, CancellationToken ct = default)
@@ -249,6 +301,10 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
                 {
                     refresh.Completion.TrySetCanceled();
                 }
+                else if (remaining is DelegateMutationCommand mutation)
+                {
+                    mutation.Completion.TrySetCanceled();
+                }
                 else if (remaining is MaintenanceCommand maintenance)
                 {
                     Interlocked.Decrement(ref _queuedMaintenance);
@@ -309,6 +365,25 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
                     catch (Exception ex)
                     {
                         refresh.Completion.TrySetException(ex);
+                    }
+                    return null;
+
+                case DelegateMutationCommand mutation:
+                    try
+                    {
+                        await mutation.Work(ct);
+                        notified = true;
+                        NotifyMutationObserver();
+                        mutation.Completion.TrySetResult();
+                    }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                    {
+                        mutation.Completion.TrySetCanceled(ct);
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        mutation.Completion.TrySetException(ex);
                     }
                     return null;
 

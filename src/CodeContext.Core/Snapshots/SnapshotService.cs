@@ -242,6 +242,21 @@ namespace CodeContext.Core.Snapshots
             get { lock (_gate) return !_captureRequested && !_writing; }
         }
 
+        /// <summary>
+        /// This instance writes snapshots, none is being captured or written, and the newest one it wrote (or loaded)
+        /// holds the committed store as it is now, worker state bindings included. Read on the coordinator loop by
+        /// worker hibernation, so no commit can land between the answer and its use.
+        /// </summary>
+        internal bool WrittenMatchesStore
+        {
+            get
+            {
+                var view = Observe();
+                lock (_gate)
+                    return _status.Mode == SnapshotCacheMode.Writer && !_stopping && !_captureRequested && !_writing && view.SameAs(_written);
+            }
+        }
+
         /// <summary>A capture was requested from the coordinator and its result not yet handled. For tests.</summary>
         internal bool IsCaptureRequested
         {
