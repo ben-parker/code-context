@@ -166,8 +166,23 @@ touches. A syntax tree wakes through a coordinator mutation command (busy while 
 Waking shows as `starting` with the message `waking from hibernation`; there is no `waking`
 cache label (answers while hibernated are current, not cached). Not built: crash restart from
 the last capture. The supervisor race of section 9 was not reproduced; hibernation found that
-the host's JSON-RPC reader refuses the `"result": null` every worker answers to `shutdown`,
-which stop and hibernate both mask.
+the host's JSON-RPC reader refused the `"result": null` every worker answers to `shutdown`
+(masked by stop and hibernate, both of which fell back to EOF); the reader now accepts it.
+
+Follow-ups after the M3 review: a failed session (a request answered `complete: false`, the
+process still up) does not hibernate, so status keeps `failed` and its error; a wake whose
+index fails leaves the worker not hibernated but with its wake incomplete, so the next
+operation re-indexes, and a wake records its baseline answer as an index does. A hibernation
+waits 1 s for the `shutdown` answer and 1 s for the exit after EOF, then kills
+(`HibernateStopTimeout`; a stop keeps its 5 s waits). Host memory after hibernating: the
+excess was not hibernation's own but replaced shards kept alive by the start-up step's
+loaded view and by the composite adjacency cache, plus glibc arena memory; both holders
+are dropped, the quiet-time trim calls `malloc_trim(0)` on Linux (host only), and a
+hibernation requests a trim although it allocates little. This repository, host RSS MB,
+idle then two awake edits and a hibernation: 134 to 165 before, 125 to 132 after. The
+convergence walk with hibernate and wake before every step is
+`CSharpWorker_HibernateAndWakeBetweenEveryStep_EqualsAFreshScan` (real C# worker, 16
+steps, about 24 s).
 
 ### M4: gate
 
