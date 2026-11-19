@@ -181,6 +181,22 @@ public sealed class SnapshotFreshnessTests : IDisposable
     }
 
     [Theory]
+    [InlineData(".gitignore", ".*\n")]
+    [InlineData(".gitignore", ".gitignore\n")]
+    [InlineData("src/.gitignore", "*\n!*.cs\n")]
+    public void GitignoreThatIgnoresItself_Edited_HasMoved(string relative, string rules)
+    {
+        Build();
+        Write(relative, rules);
+        var captured = Capture();
+        Assert.True(Check(captured).Unchanged, Check(captured).FirstMoved);
+
+        File.AppendAllText(PathOf(relative), "b.cs\n");
+
+        Assert.Equal(relative, Check(captured).FirstMoved);
+    }
+
+    [Theory]
     [InlineData("src/Lib.csproj")]
     [InlineData("src/obj/project.assets.json")]
     [InlineData("web/tsconfig.json")]

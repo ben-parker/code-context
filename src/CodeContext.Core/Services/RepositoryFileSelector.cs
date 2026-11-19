@@ -255,6 +255,18 @@ public sealed class RepositoryFileSelector : IRepositoryFileSelector
         return included;
     }
 
+    private static bool IsLink(string path)
+    {
+        try
+        {
+            return (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return true;
+        }
+    }
+
     private IEnumerable<string> AncestorDirectories(string directory)
     {
         var chain = new Stack<string>();
@@ -283,7 +295,9 @@ public sealed class RepositoryFileSelector : IRepositoryFileSelector
             if (_rulesByDirectory.TryGetValue(directory, out var loaded)) return loaded;
             var ignoreFile = Path.Combine(directory, ".gitignore");
             var rules = new List<IgnorePattern>();
-            if (File.Exists(ignoreFile))
+            // A link is not read, as Git reads none for .gitignore: the rules would be whatever the repository points
+            // it at, outside the tree or on a share, and no scan follows a link.
+            if (File.Exists(ignoreFile) && !IsLink(ignoreFile))
             {
                 try
                 {
