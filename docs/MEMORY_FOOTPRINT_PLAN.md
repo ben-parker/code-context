@@ -57,11 +57,11 @@ Findings that shape the plan:
 |---|---|---|
 | M0 | Repeatable memory measurement script | done, `6036848` |
 | M1 | Compact host heap representation, steps 1 to 3 | done (`3a8b0d4`, `4c1623b`), reviewed |
-| M1b | Derived edge ids (about -44 MB live), then frozen tables (-3 to -4 MB) | not started |
+| M1b | Derived edge ids (about -44 MB live); frozen tables skipped (3-4 MB for a second shard type) | done (`79f6304`, `5c372a7`, `dc2c654`), review pending |
 | M2 | Trace the non-live resident memory | done, [perf/memory-non-live.md](perf/memory-non-live.md) |
-| M2a | Quiet-time trim (aggressive compacting GC after bursts), host and C# worker | done (`23bee8a`), review pending |
-| M2b | Snapshot writer: no re-decode of snapshot-backed shards in `CheckPersistable` | done (`cb5de1e`), review pending |
-| M2c | C# worker: fallback runtime references only when a file falls back (-57 MB) | done (`fb0e42f`), review pending |
+| M2a | Quiet-time trim (aggressive compacting GC after bursts), host and C# worker | done (`23bee8a`), reviewed |
+| M2b | Snapshot writer: no re-decode of snapshot-backed shards in `CheckPersistable` | done (`cb5de1e`), reviewed |
+| M2c | C# worker: fallback runtime references only when a file falls back (-57 MB) | done (`fb0e42f`), reviewed |
 | M2d | C# worker: metadata-only or mapped reference images (-56 to -85 MB), needs a Windows file-lock answer | not scheduled |
 | M2e | Query path allocation (72 MB per 60 queries in three `ContextService` methods) | not scheduled |
 | M0b | Measurement script waits for the post-start snapshot write and V8 shrink before reading | done (`4cd7ffb`) |
@@ -69,7 +69,7 @@ Findings that shape the plan:
 | M4 | Gate: mapped shard (cache plan phase 8) or stop | not started |
 | M5 | Daemonless `query` from the snapshot | not started |
 
-Order: M1b (with the M1 review's findings and moving `scripts/bench/gcdump-types.cs` out of the index) and a review of M2a/M2b/M2c, then M3.
+Order: review of M1b, then M3.
 
 M1 review findings carried into M1b: build the metadata `string[]` directly on the commit path (5-10% slower large commits measured); a duplicate metadata key must not drop the request; the snapshot reader's sharing tables need a bound before readers are kept alive (M4).
 
@@ -192,3 +192,5 @@ outcome for whether it reads a mapped or a materialized shard.
 | 2026-11-18 | M2b | The trace's attribution was wrong: no re-decode. Per write: adjacency 12 MB, check 4 MB, building the file 116 MB. Check skipped for a shard already checked at its version; file build copies less. Allocation per write, cached start: 139-146 to 62 MB; after an uncached start 186 to 158 MB. File bytes unchanged |
 | 2026-11-18 | M2a | `QuietTimeTrim` (`src/CodeContext.Core/Memory/`, also compiled into the worker): 15 s after the last activity, at least 30 s apart, only after 32 MB allocated; `CodeContext:MemoryTrimSeconds` (0 = off). RSS/anon MB off to on: host cached idle 254-265/180-191 to 167/92, after queries 264-274 to 175-177; host uncached idle 280 to 161-164; csharp cached idle 252/186 to 204/138, uncached 510-547 to 313-320. Pause host 34-106 ms, worker 66-212 ms. Next-edit latency unchanged (651-879 ms on, 638-920 ms off). Not run: AOT publish, Windows, normal L3 |
 | 2026-11-18 | M2c | Fallback runtime references load with the fallback's first file. Worker anon, cached, tree with no loose C# file: 186 to 130 MB; answers identical. No saving on this repository while `scripts/bench/gcdump-types.cs` is in no project. Not lazy: a project with an unresolvable framework; references stay once loaded |
+| 2026-11-19 | M2a/M2b/M2c review | No correctness bug; snapshot bytes identical by SHA-256. Low findings: test hosts ran the real trim (fixed, `5c372a7`: test assembly sets `CodeContext__MemoryTrimSeconds=0`); some background work is not counted as activity (latency only, accepted); allocation outside activity never triggers a trim (accepted) |
+| 2026-11-19 | M1b | `gcdump-types.cs` renamed `.csx` (`3c7dbaf`): C# worker cached idle RSS/anon 215/150 to 157/92 MB on this repository. Derived edge ids (`dc2c654`): an id is held as parts only when it is exactly source + piece + target + piece, otherwise as the string sent; all 101,934 edges here decompose. Host live heap cached 80.6 to 40.0 MB, no-cache 80.3 to 41.3; idle RSS cached 177 to 135, no-cache 171 to 131. Answers and snapshot bytes identical; queries p50/p95 unchanged or slightly better. Repeated metadata key keeps last value (`79f6304`). Cost: synthetic 200k-node/800k-edge commit 1.4 s before M1, 2.7 s after M1, 2.55 s now (endpoint interning about 0.45 s, metadata sharing about 0.5 s, id splitting). Open: snapshot reader sharing tables still unbounded (bound before M4). Not run: ExternalTooling, SDK suites, Windows, AOT, other repositories |
