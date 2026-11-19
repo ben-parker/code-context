@@ -25,7 +25,7 @@ namespace CodeContext.Core.Services
             RequireRange(request.MaxDepth, 1, GraphQueryLimits.MaxDepth, "maxDepth");
             var relations = ParseRelationFilter(request.Relation);
             return ReadOneGenerationAsync(shards => FindPathOnceAsync(
-                request, new GraphWalk(shards, relations, request.IncludeTests, _rootPath)), cancellationToken);
+                request, new GraphWalk(shards, relations, request.IncludeTests, _rootPath, cancellationToken)), cancellationToken);
         }
 
         public Task<GraphAffectedResponse> GetAffectedAsync(GraphAffectedRequest request, CancellationToken cancellationToken = default)
@@ -36,7 +36,7 @@ namespace CodeContext.Core.Services
             RequireRange(request.Limit, 1, GraphQueryLimits.MaxLimit, "limit");
             var relations = ParseRelationFilter(request.Relation);
             return ReadOneGenerationAsync(shards => GetAffectedOnceAsync(
-                request, new GraphWalk(shards, relations, request.IncludeTests, _rootPath)), cancellationToken);
+                request, new GraphWalk(shards, relations, request.IncludeTests, _rootPath, cancellationToken)), cancellationToken);
         }
 
         public Task<GraphHubsResponse> GetHubsAsync(GraphHubsRequest request, CancellationToken cancellationToken = default)
@@ -47,7 +47,7 @@ namespace CodeContext.Core.Services
             var scope = RepositoryPaths.NormalizeScope(request.Within, _rootPath);
             var type = string.IsNullOrWhiteSpace(request.Type) ? null : request.Type.Trim();
             return ReadOneGenerationAsync(shards => Task.FromResult(GetHubsOnce(
-                request, new GraphWalk(shards, relations, request.IncludeTests, _rootPath), scope, type)), cancellationToken);
+                request, new GraphWalk(shards, relations, request.IncludeTests, _rootPath, cancellationToken), scope, type)), cancellationToken);
         }
 
         /// <summary>

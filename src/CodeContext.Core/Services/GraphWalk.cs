@@ -29,17 +29,34 @@ namespace CodeContext.Core.Services
         private readonly HashSet<string>? _relations;
         private readonly bool _includeTests;
         private readonly string? _rootPath;
+        private readonly CancellationToken _cancellation;
+        private int _visits;
 
-        public GraphWalk(IGraphShard[] shards, HashSet<string>? relations, bool includeTests, string? rootPath)
+        public GraphWalk(
+            IGraphShard[] shards, HashSet<string>? relations, bool includeTests, string? rootPath,
+            CancellationToken cancellation = default)
         {
             _shards = shards;
             _relations = relations;
             _includeTests = includeTests;
             _rootPath = rootPath;
+            _cancellation = cancellation;
         }
 
         public GraphWalk With(HashSet<string>? relations, bool includeTests)
-            => new(_shards, relations, includeTests, _rootPath);
+            => new(_shards, relations, includeTests, _rootPath, _cancellation);
+
+        /// <summary>Symbols visited between two looks at the cancellation token.</summary>
+        internal const int VisitsPerCancellationCheck = 1024;
+
+        /// <summary>
+        /// Counts a visited symbol and, once in <see cref="VisitsPerCancellationCheck"/>, stops the walk if the caller
+        /// has gone away: a query over a large graph does not run on for nobody, and the walk pays an increment.
+        /// </summary>
+        private void Visit()
+        {
+            if ((++_visits & (VisitsPerCancellationCheck - 1)) == 0) _cancellation.ThrowIfCancellationRequested();
+        }
 
         public bool FiltersRelations => _relations is not null;
 
@@ -92,6 +109,7 @@ namespace CodeContext.Core.Services
             var seen = new HashSet<string>(ordered, StringComparer.Ordinal);
             for (var index = 0; index < ordered.Count; index++)
             {
+                Visit();
                 var current = ordered[index];
                 foreach (var shard in _shards)
                 {
@@ -153,6 +171,7 @@ namespace CodeContext.Core.Services
                 var next = new List<(string Id, bool Dispatch)>();
                 for (var index = 0; index < level.Count; index++)
                 {
+                    Visit();
                     var state = level[index];
                     // A state that moved to an earlier level was taken there.
                     if (distance[state] != depth) continue;
@@ -261,6 +280,7 @@ namespace CodeContext.Core.Services
             // Adds what id affects at distance; in a probe, adds nothing and says whether there is anything to add.
             bool Expand(string id, int distance, List<string>? next, bool probe)
             {
+                Visit();
                 foreach (var shard in _shards)
                 {
                     var inbound = shard.GetEdgesByTarget(id);
@@ -344,6 +364,7 @@ namespace CodeContext.Core.Services
                 var nodes = shard.GetAllNodes();
                 for (var n = 0; n < nodes.Count; n++)
                 {
+                    Visit();
                     var node = nodes[n];
                     if (node.Id is not { Length: > 0 } id || !accept(node)) continue;
                     sources.Clear();
