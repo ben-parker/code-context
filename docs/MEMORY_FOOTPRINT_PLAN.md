@@ -57,7 +57,7 @@ Findings that shape the plan:
 |---|---|---|
 | M0 | Repeatable memory measurement script | done, `6036848` |
 | M1 | Compact host heap representation, steps 1 to 3 | done (`3a8b0d4`, `4c1623b`), reviewed |
-| M1b | Derived edge ids (about -44 MB live); frozen tables skipped (3-4 MB for a second shard type) | done (`79f6304`, `5c372a7`, `dc2c654`), review pending |
+| M1b | Derived edge ids (about -44 MB live); frozen tables skipped (3-4 MB for a second shard type) | done (`79f6304`, `5c372a7`, `dc2c654`, review fix `6709999`), reviewed |
 | M2 | Trace the non-live resident memory | done, [perf/memory-non-live.md](perf/memory-non-live.md) |
 | M2a | Quiet-time trim (aggressive compacting GC after bursts), host and C# worker | done (`23bee8a`), reviewed |
 | M2b | Snapshot writer: no re-decode of snapshot-backed shards in `CheckPersistable` | done (`cb5de1e`), reviewed |
@@ -65,11 +65,11 @@ Findings that shape the plan:
 | M2d | C# worker: metadata-only or mapped reference images (-56 to -85 MB), needs a Windows file-lock answer | not scheduled |
 | M2e | Query path allocation (72 MB per 60 queries in three `ContextService` methods) | not scheduled |
 | M0b | Measurement script waits for the post-start snapshot write and V8 shrink before reading | done (`4cd7ffb`) |
-| M3 | Worker hibernation, both workers | not started |
+| M3 | Worker hibernation, both workers | done (`1d30ab1`, `55a940c`, `4fa3a13`, `1f66c6f`, `8bd1ead`), review pending |
 | M4 | Gate: mapped shard (cache plan phase 8) or stop | not started |
 | M5 | Daemonless `query` from the snapshot | not started |
 
-Order: review of M1b, then M3.
+Order: review of M3 and its follow-ups (host trim after workers exit, `"result": null` on `shutdown`, convergence run with hibernate and wake), then the M4 gate.
 
 M1 review findings carried into M1b: build the metadata `string[]` directly on the commit path (5-10% slower large commits measured); a duplicate metadata key must not drop the request; the snapshot reader's sharing tables need a bound before readers are kept alive (M4).
 
@@ -210,3 +210,5 @@ outcome for whether it reads a mapped or a materialized shard.
 | 2026-11-18 | M2c | Fallback runtime references load with the fallback's first file. Worker anon, cached, tree with no loose C# file: 186 to 130 MB; answers identical. No saving on this repository while `scripts/bench/gcdump-types.cs` is in no project. Not lazy: a project with an unresolvable framework; references stay once loaded |
 | 2026-11-19 | M2a/M2b/M2c review | No correctness bug; snapshot bytes identical by SHA-256. Low findings: test hosts ran the real trim (fixed, `5c372a7`: test assembly sets `CodeContext__MemoryTrimSeconds=0`); some background work is not counted as activity (latency only, accepted); allocation outside activity never triggers a trim (accepted) |
 | 2026-11-19 | M1b | `gcdump-types.cs` renamed `.csx` (`3c7dbaf`): C# worker cached idle RSS/anon 215/150 to 157/92 MB on this repository. Derived edge ids (`dc2c654`): an id is held as parts only when it is exactly source + piece + target + piece, otherwise as the string sent; all 101,934 edges here decompose. Host live heap cached 80.6 to 40.0 MB, no-cache 80.3 to 41.3; idle RSS cached 177 to 135, no-cache 171 to 131. Answers and snapshot bytes identical; queries p50/p95 unchanged or slightly better. Repeated metadata key keeps last value (`79f6304`). Cost: synthetic 200k-node/800k-edge commit 1.4 s before M1, 2.7 s after M1, 2.55 s now (endpoint interning about 0.45 s, metadata sharing about 0.5 s, id splitting). Open: snapshot reader sharing tables still unbounded (bound before M4). Not run: ExternalTooling, SDK suites, Windows, AOT, other repositories |
+| 2026-11-19 | M1b review | Bytes, JSON output and id-shape independence hold; 200k-id randomized check of hash, equality, order and prefix passed. One latent bug: two keys with the same text and different splits compared unequal (only reachable through a non-canonical split from the snapshot reader); fixed in `6709999`. Notes, no action: edge tables use a seeded custom hash, not the runtime's string hash; no composed-host test runs on the real 15 s trim default; `SnapshotKeyTests.ConcurrentFirstUse_AgreesOnOneKey` failed once under a parallel run |
+| 2026-11-19 | M3 | `WorkerHibernation` arms a timer after each worker operation and queues a maintenance command on `IndexCoordinator`; `LanguageWorkerService.TryHibernateAsync` re-checks under the worker's lock. A `persistentState` worker stops only when its saved state matches the written snapshot (so not with `--no-cache` or read-only); others always may. Next operation, refresh or syntax-tree request wakes it. Status `hibernated`; no cache label on queries. `CodeContext:WorkerHibernateSeconds`, default 900, 0 = off. No protocol or DTO change. This repository, one run, RSS MB host/C#/TS/total: awake 134/158/210/503, hibernated 163/-/-/163, after wake 175/258/212/645. Edit to answer awake vs hibernated: C# 11.2 vs 13.0 s, TypeScript 1.2 vs 2.4 s. Open: host 29 MB above its idle reading when hibernated (trim after exit not checked); host reader rejects `"result": null` on `shutdown`; restart of a crashed worker from saved state not built; no CLI flag; convergence run with hibernate and wake not added; not measured on jellyfin |
