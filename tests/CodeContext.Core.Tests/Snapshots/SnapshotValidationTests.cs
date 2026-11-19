@@ -101,6 +101,63 @@ public class SnapshotValidationTests
         Assert.Null(value);
     }
 
+    // ---- Metadata sets are read in the writer's key order: a repeated or misplaced key is corrupt ----
+
+    /// <summary>One node whose stored set is (a, b); returns the file and the absolute offset of the set's first key reference.</summary>
+    private static (byte[] Bytes, long FirstKey) TwoKeySet()
+    {
+        var database = Commit((Shard,
+            [new CodeNode { Id = "csharp:default:A", Identifier = "A", Metadata = Owned(Shard, ("a", "1"), ("b", "2")) }],
+            []));
+        var bytes = WriteBytes(Input(ShardsOf(database)));
+        var metadata = LayoutOf(bytes).Shards[0].Sections[SnapshotSectionKind.Metadata].Offset;
+        Assert.Equal(1u, U32(bytes, metadata));
+        var set = metadata + U32(bytes, metadata + 4);
+        Assert.Equal(2u, U32(bytes, set));
+        return (bytes, set + 4);
+    }
+
+    [Fact]
+    public void MetadataSetWithItsKeysOutOfOrder_IsRefused()
+    {
+        var (bytes, firstKey) = TwoKeySet();
+        var damaged = Damaged(bytes, b =>
+        {
+            var (a, b2) = (U32(b, firstKey), U32(b, firstKey + 8));
+            W32(b, firstKey, b2);
+            W32(b, firstKey + 8, a);
+        });
+        AssertRefusedOnRead(damaged, "Metadata key 'a' is out of order");
+    }
+
+    [Fact]
+    public void MetadataSetWithAKeyTwice_IsRefused()
+    {
+        var (bytes, firstKey) = TwoKeySet();
+        var damaged = Damaged(bytes, b => W32(b, firstKey + 8, U32(b, firstKey)));
+        AssertRefusedOnRead(damaged, "Metadata key 'a' appears twice");
+    }
+
+    [Fact]
+    public void MetadataSetHoldingAKeyTheRecordSupplies_IsRefused()
+    {
+        // The edge's canonical line is held in its record; its set holds "lina", which one changed byte makes "line".
+        var database = Commit((Shard,
+            [new CodeNode { Id = "csharp:default:A", Identifier = "A", Metadata = Owned(Shard) }],
+            [new CodeEdge { Id = "csharp:default:e", SourceId = "csharp:default:A", TargetId = "x", Type = "CALLS", Metadata = Owned(Shard, ("lina", "v"), ("line", "3")) }]));
+        var bytes = WriteBytes(Input(ShardsOf(database)));
+        var layout = LayoutOf(bytes).Shards[0];
+        var damaged = Damaged(bytes, b => b[StringStart(b, layout, "lina") + 3] = (byte)'e');
+        AssertRefusedOnRead(damaged, "Metadata key 'line' appears twice");
+    }
+
+    private static void AssertRefusedOnRead(byte[] damaged, string reason)
+    {
+        var loaded = LoadInMemory(damaged);
+        Assert.Equal(SnapshotRejection.Structure, loaded.Rejection);
+        Assert.Contains(reason, loaded.Reason, StringComparison.Ordinal);
+    }
+
     // ---- T1: an id, an edge id or an identifier in two shards ----
 
     [Fact]

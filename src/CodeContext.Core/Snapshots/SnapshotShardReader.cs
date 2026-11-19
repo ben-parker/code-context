@@ -816,7 +816,8 @@ namespace CodeContext.Core.Snapshots
         /// <summary>
         /// A fact's metadata: the stored set (in the writer's ordinal key order) merged with the keys the
         /// writer moved out of it, <c>column</c>, <c>line</c>, <c>parserId</c> and <c>workspaceId</c> (in
-        /// that ordinal order), so the map enumerates in ordinal key order. A repeated key is corrupt.
+        /// that ordinal order), so the map enumerates in ordinal key order. A repeated key, or a set that is not in
+        /// that order, is corrupt.
         /// Every fact of this shard with the same content shares one immutable instance; the set, the
         /// record's column and line, and the shard fix the content, so a repeated three is answered at once.
         /// </summary>
@@ -840,13 +841,6 @@ namespace CodeContext.Core.Snapshots
 
         private string[] BuildMetadata(uint setRef, string? column, string? line)
         {
-            var extraTotal = 0;
-            var extras = new (string Key, string Value)[4];
-            if (column is not null) extras[extraTotal++] = (SnapshotFormat.ColumnKey, column);
-            if (line is not null) extras[extraTotal++] = (SnapshotFormat.LineKey, line);
-            extras[extraTotal++] = (SnapshotFormat.ParserIdKey, Key.ParserId);
-            extras[extraTotal++] = (SnapshotFormat.WorkspaceIdKey, Key.WorkspaceId);
-
             long pairCount = 0, pairs = 0;
             if (setRef != 0)
             {
@@ -861,26 +855,50 @@ namespace CodeContext.Core.Snapshots
                 pairs += 4;
             }
 
-            var keys = new HashSet<string>((int)pairCount + extraTotal, StringComparer.Ordinal);
-            var flat = new string[2 * ((int)pairCount + extraTotal)];
+            // The stored pairs and the four keys the writer moved out of the set, merged: both are in ordinal key
+            // order, so the result is, and a key is repeated exactly when it does not sort after the one before it.
+            // No set, list or delegate per fact: this runs once for every distinct metadata of a load.
+            var flat = new string[2 * ((int)pairCount + 2 + (column is null ? 0 : 1) + (line is null ? 0 : 1))];
             var filled = 0;
-            var next = 0;
+            var extra = column is not null ? 0 : line is not null ? 1 : 2;
             for (long p = 0; p < pairCount; p++)
             {
                 var at = pairs + 8 * p;
                 var key = GetString(_region.ReadU32(at)) ?? throw new SnapshotCorruptException("A metadata key is null.");
-                while (next < extraTotal && string.CompareOrdinal(extras[next].Key, key) < 0) Add(extras[next].Key, extras[next++].Value);
-                Add(key, GetString(_region.ReadU32(at + 4))!);
+                while (extra < 4 && string.CompareOrdinal(ExtraKey(extra), key) < 0) AddExtra(flat, ref filled, ref extra, column, line);
+                Add(flat, ref filled, key, GetString(_region.ReadU32(at + 4))!);
             }
-            while (next < extraTotal) Add(extras[next].Key, extras[next++].Value);
+            while (extra < 4) AddExtra(flat, ref filled, ref extra, column, line);
             return flat;
+        }
 
-            void Add(string key, string value)
+        /// <summary>The keys the writer holds outside a stored set, in ordinal order: column, line, parserId, workspaceId.</summary>
+        private static string ExtraKey(int index) => index switch
+        {
+            0 => SnapshotFormat.ColumnKey,
+            1 => SnapshotFormat.LineKey,
+            2 => SnapshotFormat.ParserIdKey,
+            _ => SnapshotFormat.WorkspaceIdKey,
+        };
+
+        /// <summary>Adds extra key <paramref name="extra"/> and moves to the next one the fact has (a null column or line is absent).</summary>
+        private void AddExtra(string[] flat, ref int filled, ref int extra, string? column, string? line)
+        {
+            Add(flat, ref filled, ExtraKey(extra), extra switch { 0 => column!, 1 => line!, 2 => Key.ParserId, _ => Key.WorkspaceId });
+            extra++;
+            if (extra == 1 && line is null) extra = 2;
+        }
+
+        private static void Add(string[] flat, ref int filled, string key, string value)
+        {
+            if (filled > 0)
             {
-                if (!keys.Add(key)) throw new SnapshotCorruptException($"Metadata key '{key}' appears twice.");
-                flat[filled++] = key;
-                flat[filled++] = value;
+                var order = string.CompareOrdinal(flat[filled - 2], key);
+                if (order == 0) throw new SnapshotCorruptException($"Metadata key '{key}' appears twice.");
+                if (order > 0) throw new SnapshotCorruptException($"Metadata key '{key}' is out of order.");
             }
+            flat[filled++] = key;
+            flat[filled++] = value;
         }
 
         private void ReadHistogram(Dictionary<string, int> into, ref long position)
