@@ -13,8 +13,8 @@ using ShardKey = InMemoryDatabase.ShardKey;
 
 /// <summary>
 /// What an authenticated file must also be before anything is answered from it: the open-time
-/// checks of the name table, the file buckets and the section layout (cheap: names and files, never
-/// per node or edge), the read-time rule that no result holds a fact twice, and the loader's use of
+/// checks of the file buckets and the section layout (cheap: files, never per node or edge), the
+/// read-time rule that no result holds a fact twice, and the loader's use of
 /// the writer's own persistability rule. Every damaged file here is re-signed, so it passes
 /// authentication, as a writer bug would.
 /// </summary>
@@ -213,62 +213,6 @@ public class SnapshotValidationTests
     // ---- P4: index ranges are checked at open, and no result holds a fact twice ----
 
     [Fact]
-    public void NameEntriesSharingOnePostingsRange_AreRefusedAtOpen()
-    {
-        // The reviewer's amplification: 2,000 names all pointing at the whole postings section made one
-        // substring query cost names x nodes and return 1.2M duplicates.
-        var nodes = Enumerable.Range(0, 2000).Select(i => new CodeNode
-        {
-            Id = $"csharp:default:n{i}", Name = $"Q{i}", Identifier = $"ident{i}", FilePath = "/repo/a.cs", Type = "Method", Metadata = Owned(Shard),
-        }).ToList();
-        var bytes = WriteBytes(Input(ShardsOf(Commit((Shard, nodes, Array.Empty<CodeEdge>())))));
-        var layout = LayoutOf(bytes).Shards[0];
-        var (names, length) = layout.Sections[SnapshotSectionKind.NameTable];
-        var postings = layout.Sections[SnapshotSectionKind.NamePostings].Length / 4;
-        AssertRefusedAtOpen(Damaged(bytes, b =>
-        {
-            for (var at = names; at < names + length; at += SnapshotFormat.NameEntrySize)
-            {
-                W32(b, at + 4, 0);
-                W32(b, at + 8, (uint)postings);
-            }
-        }), "postings do not follow");
-    }
-
-    [Fact]
-    public void NamePostingsThatDoNotCoverTheSection_AreRefusedAtOpen()
-    {
-        var (bytes, layout) = Small();
-        var (names, length) = layout.Sections[SnapshotSectionKind.NameTable];
-        var last = names + length - SnapshotFormat.NameEntrySize;
-        AssertRefusedAtOpen(Damaged(bytes, b => W32(b, last + 8, U32(b, last + 8) + 1)), "cover the postings section");
-        AssertRefusedAtOpen(Damaged(bytes, b => W32(b, names + 8, 0)), "postings do not follow");
-    }
-
-    [Fact]
-    public void NameEntryNamingAnotherString_IsRefusedAtOpen()
-    {
-        var (bytes, layout) = Small();
-        var names = layout.Sections[SnapshotSectionKind.NameTable].Offset;
-        AssertRefusedAtOpen(Damaged(bytes, b => W32(b, names + SnapshotFormat.NameEntrySize, U32(b, names))), "does not name folded-name string");
-    }
-
-    [Fact]
-    public void NamesOutOfByteOrder_AreRefusedAtOpen()
-    {
-        var database = Commit((Shard,
-            [
-                new CodeNode { Id = "csharp:default:1", Identifier = "1", Name = "AB", Metadata = Owned(Shard) },
-                new CodeNode { Id = "csharp:default:2", Identifier = "2", Name = "BA", Metadata = Owned(Shard) },
-            ],
-            []));
-        var bytes = WriteBytes(Input(ShardsOf(database)));
-        var strings = LayoutOf(bytes).Shards[0].Sections[SnapshotSectionKind.StringBytes].Offset;
-        Assert.Equal("ABBA", Encoding.UTF8.GetString(bytes, strings, 4));   // folded names are strings 1 and 2
-        AssertRefusedAtOpen(Damaged(bytes, b => Encoding.UTF8.GetBytes("BAAB").CopyTo(b, strings)), "byte order");
-    }
-
-    [Fact]
     public void FileRangesThatOverlapOrDoNotCoverTheNodes_AreRefusedAtOpen()
     {
         var (bytes, layout) = Small();
@@ -299,56 +243,11 @@ public class SnapshotValidationTests
     public void LengthsTiedToCounts_AreChecked()
     {
         var (bytes, layout) = Small();
-        // Every edge has a source: the by-source runs end exactly at the edge count.
-        var sources = layout.Sections[SnapshotSectionKind.BySourceOffsets];
-        AssertRefusedAtOpen(Damaged(bytes, b => W32(b, sources.Offset + sources.Length - 4, U32(b, sources.Offset + sources.Length - 4) - 1)), "by-source runs");
-        // The histogram's length follows from its two kind counts.
-        AssertRefusedAtOpen(Damaged(bytes, b => W32(b, layout.Sections[SnapshotSectionKind.TypeHistogram].Offset, 0)), "type histogram");
+        // One id entry per id: an id table a record short no longer matches the id count.
+        var idEntry = layout.Blob + SnapshotFormat.ShardHeaderSize + ((int)SnapshotSectionKind.IdTable - 1) * SnapshotFormat.SectionEntrySize;
+        AssertRefusedAtOpen(Damaged(bytes, b => W32(b, layout.Blob + 16, U32(b, layout.Blob + 16) + 1)), "its counts need");
         // Sections are dense: one that starts 8 bytes late leaves a gap.
-        var crossEntry = layout.Blob + SnapshotFormat.ShardHeaderSize + ((int)SnapshotSectionKind.CrossShardEdges - 1) * SnapshotFormat.SectionEntrySize;
-        AssertRefusedAtOpen(Damaged(bytes, b => W64(b, crossEntry + 8, U32(b, crossEntry + 8) + 8UL)), "does not start where the previous one ends");
-    }
-
-    [Fact]
-    public void PostingListedTwiceInARun_IsReturnedOnce()
-    {
-        var (bytes, layout) = Small();
-        // Folded names: ALPHA (A and B), GAMMA (C). ALPHA's run is postings 0 and 1.
-        var postings = layout.Sections[SnapshotSectionKind.NamePostings].Offset;
-        var damaged = Damaged(bytes, b => W32(b, postings + 4, U32(b, postings)));
-        var opened = OpenInMemory(damaged);
-        using var file = opened.File ?? throw new InvalidOperationException(opened.Reason);
-        var reader = file.Shards[0];
-        foreach (var exact in new[] { true, false })
-        {
-            var ids = reader.FindNodesByName("alpha", exact).Select(node => node.Id).ToList();
-            Assert.Equal(ids.Distinct().Count(), ids.Count);
-            Assert.Equal(reader.FindNameCandidates("alpha", exact).Distinct().Count(), reader.FindNameCandidates("alpha", exact).Count);
-        }
-    }
-
-    [Fact]
-    public void EdgeListedTwiceInAByTargetRun_IsCorrupt_NotADuplicate()
-    {
-        var (bytes, layout) = Small();
-        var opened = OpenInMemory(bytes);
-        uint sid;
-        using (var file = opened.File!) Assert.True(file.Shards[0].TryFindSid("csharp:default:B", out sid));
-        var run = (long)U32(bytes, layout.Sections[SnapshotSectionKind.ByTargetOffsets].Offset + 4 * sid);
-        var entries = layout.Sections[SnapshotSectionKind.ByTargetEdges].Offset;
-        var damaged = Damaged(bytes, b => W32(b, entries + 4 * (run + 1), U32(b, entries + 4 * run)));
-        using var damagedFile = OpenInMemory(damaged).File!;
-        Assert.Throws<SnapshotCorruptException>(() => damagedFile.Shards[0].GetEdgesByTarget("csharp:default:B"));
-    }
-
-    [Fact]
-    public void CrossShardEdgeListedTwice_IsCorrupt_NotADuplicate()
-    {
-        var (bytes, layout) = Small();
-        var (cross, length) = layout.Sections[SnapshotSectionKind.CrossShardEdges];
-        Assert.True(length >= 8);
-        using var file = OpenInMemory(Damaged(bytes, b => W32(b, cross + 4, U32(b, cross)))).File!;
-        Assert.Throws<SnapshotCorruptException>(() => file.Shards[0].GetCrossShardEdgeIds());
+        AssertRefusedAtOpen(Damaged(bytes, b => W64(b, idEntry + 8, U32(b, idEntry + 8) + 8UL)), "does not start where the previous one ends");
     }
 
     [Fact]
@@ -356,13 +255,10 @@ public class SnapshotValidationTests
     {
         var (bytes, layout) = Small();
         // Sid of "elsewhere:X" (no node) pointed at node record 0.
-        var opened = OpenInMemory(bytes);
-        uint sid;
-        using (var file = opened.File!) Assert.True(file.Shards[0].TryFindSid("elsewhere:X", out sid));
+        var sid = SidOf(bytes, layout, "elsewhere:X");
         var damaged = Damaged(bytes, b => W32(b, layout.Sections[SnapshotSectionKind.IdTable].Offset + 8 * sid + 4, 0));
         using var damagedFile = OpenInMemory(damaged).File!;
         var reader = damagedFile.Shards[0];
-        Assert.Throws<SnapshotCorruptException>(() => reader.TryGetNode("elsewhere:X", out _));
         Assert.Throws<SnapshotCorruptException>(() => reader.GetAllNodes());
         Assert.Equal(SnapshotRejection.Structure, LoadInMemory(damaged).Rejection);
     }
@@ -399,7 +295,7 @@ public class SnapshotValidationTests
     /// <summary>
     /// NodeRecord flag bit 0 is set exactly for the nodes the store's own rule exempts from a prune
     /// (<c>GraphState.CollectNodesOutside</c>): <c>external</c> is the ordinal string "true", so "True",
-    /// "TRUE" and "false" are not external. The reader exposes the bit, and a record whose bit disagrees
+    /// "TRUE" and "false" are not external. A record whose bit disagrees
     /// with its metadata is corrupt.
     /// </summary>
     [Fact]
@@ -420,7 +316,10 @@ public class SnapshotValidationTests
         using (var file = OpenInMemory(bytes).File!)
         {
             var reader = file.Shards[0];
-            var external = Enumerable.Range(0, reader.NodeCount).Where(reader.IsExternal).Select(i => reader.ReadNode(i).Id).ToList();
+            var flags = LayoutOf(bytes).Shards[0].Sections[SnapshotSectionKind.Nodes].Offset + 72;
+            var external = Enumerable.Range(0, reader.NodeCount)
+                .Where(i => (U32(bytes, flags + i * SnapshotFormat.NodeRecordSize) & SnapshotFormat.NodeFlagExternal) != 0)
+                .Select(i => reader.ReadNode(i).Id).ToList();
             Assert.Equal(["csharp:default:N0"], external);
             Assert.Equal(nodes.Select(node => node.Id).Where(id => !pruned.Contains(id!)), external);
         }
@@ -461,8 +360,21 @@ public class SnapshotValidationTests
     {
         using var file = OpenInMemory(bytes).File!;
         var reader = file.Shards[0];
-        Assert.True(reader.TryFindEdge(id, out var index));
+        var index = Enumerable.Range(0, reader.EdgeCount).Single(j => reader.ReadEdge(j).Id == id);
         return layout.Sections[SnapshotSectionKind.Edges].Offset + (long)index * SnapshotFormat.EdgeRecordSize;
+    }
+
+    /// <summary>The sid of <paramref name="id"/>: the id table entry naming its string.</summary>
+    private static uint SidOf(byte[] bytes, ShardLayout layout, string id)
+    {
+        var (offsets, _) = layout.Sections[SnapshotSectionKind.StringOffsets];
+        var start = StringStart(bytes, layout, id) - layout.Sections[SnapshotSectionKind.StringBytes].Offset;
+        var reference = 1u;
+        while (U32(bytes, offsets + 4 * (reference - 1)) != start) reference++;
+        var (table, length) = layout.Sections[SnapshotSectionKind.IdTable];
+        for (uint sid = 0; sid < length / SnapshotFormat.IdEntrySize; sid++)
+            if (U32(bytes, table + SnapshotFormat.IdEntrySize * sid) == reference) return sid;
+        throw new InvalidOperationException($"'{id}' is no id of the shard");
     }
 
     /// <summary>The absolute offset of the first byte of the string <paramref name="value"/> in StringBytes.</summary>

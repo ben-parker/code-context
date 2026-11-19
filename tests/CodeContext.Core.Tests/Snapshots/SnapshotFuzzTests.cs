@@ -261,51 +261,19 @@ public class SnapshotFuzzTests
                 Fail("Materialize", exception);
             }
 
-            var ids = words.SelectMany(w => w.NodeIds).Concat(HostileQueries).ToArray();
-            var edgeIds = words.SelectMany(w => w.EdgeIds).Concat(HostileQueries).ToArray();
-            var identifiers = words.SelectMany(w => w.Identifiers).Concat(HostileQueries).ToArray();
-            var names = words.SelectMany(w => w.Names).Distinct().Take(10).Concat(HostileQueries).ToArray();
-            var paths = words.SelectMany(w => w.Paths).Distinct().Take(10).Concat(HostileQueries).ToArray();
             foreach (var reader in file.Shards)
             {
                 for (var i = -1; i <= Math.Min(reader.NodeCount, 64); i++)
                 {
                     var k = i;
                     Read("ReadNode", () => reader.ReadNode(k));
-                    Read("IsExternal", () => reader.IsExternal(k));
                 }
                 for (var j = -1; j <= Math.Min(reader.EdgeCount, 160); j++) { var k = j; Read("ReadEdge", () => reader.ReadEdge(k)); }
                 foreach (var r in new uint[] { 0, 1, (uint)reader.StringCount, (uint)reader.StringCount + 1, 0xFFFFFFFF, 0x80000000 })
                     Read("GetString", () => reader.GetString(r));
                 Read("GetAllNodes", () => reader.GetAllNodes());
                 Read("GetAllEdges", () => reader.GetAllEdges());
-                Read("GetFilePaths", () => reader.GetFilePaths());
-                Read("GetCrossShardEdgeIds", () => reader.GetCrossShardEdgeIds());
                 Read("ReadInfo", () => reader.ReadInfo());
-                Read("AddStatistics", () => reader.AddStatistics(new(), new()));
-                foreach (var id in ids)
-                {
-                    Read("TryGetNode", () => reader.TryGetNode(id, out _));
-                    Read("GetEdgesBySource", () => reader.GetEdgesBySource(id));
-                    Read("GetEdgesByTarget", () => reader.GetEdgesByTarget(id));
-                }
-                foreach (var id in edgeIds) Read("TryGetEdge", () => reader.TryGetEdge(id, out _));
-                foreach (var identifier in identifiers) Read("TryGetNodeIdByIdentifier", () => reader.TryGetNodeIdByIdentifier(identifier, out _));
-                foreach (var name in names)
-                {
-                    Read("FindNodesByName exact", () => reader.FindNodesByName(name, true));
-                    Read("FindNodesByName substring", () => reader.FindNodesByName(name, false));
-                }
-                foreach (var requested in paths) Read("FindNodesByPath", () => reader.FindNodesByPath(requested));
-
-                Read("TryGetNode(null)", () => reader.TryGetNode(null!, out _), nullArgument: true);
-                Read("TryGetEdge(null)", () => reader.TryGetEdge(null!, out _), nullArgument: true);
-                Read("TryGetNodeIdByIdentifier(null)", () => reader.TryGetNodeIdByIdentifier(null!, out _), nullArgument: true);
-                Read("GetEdgesBySource(null)", () => reader.GetEdgesBySource(null!), nullArgument: true);
-                Read("GetEdgesByTarget(null)", () => reader.GetEdgesByTarget(null!), nullArgument: true);
-                Read("FindNodesByName(null, exact)", () => reader.FindNodesByName(null!, true), nullArgument: true);
-                Read("FindNodesByName(null, substring)", () => reader.FindNodesByName(null!, false), nullArgument: true);
-                Read("FindNodesByPath(null)", () => reader.FindNodesByPath(null!), nullArgument: true);
             }
         }
         return true;

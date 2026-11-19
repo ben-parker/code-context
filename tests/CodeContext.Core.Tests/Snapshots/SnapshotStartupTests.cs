@@ -188,6 +188,38 @@ public class SnapshotStartupTests
         }
     }
 
+    [Fact]
+    public async Task SnapshotOfFormatVersion2_IsRefusedBeforeItIsRead_Deleted_AndTheStartScansAfresh()
+    {
+        var basePath = NewBase();
+        try
+        {
+            var name = await WriteFirstRunAsync(basePath);
+            await using var second = new SnapshotServiceHarness(basePath);
+            var path = Path.Combine(second.WorkspacePath, name);
+            // What an earlier build left: the same header with version 2. Nothing after the header is looked at.
+            var bytes = File.ReadAllBytes(path);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(SnapshotFormat.HeaderFormatVersion), 2);
+            File.WriteAllBytes(path, bytes);
+
+            await second.Coordinator.StartAsync(CancellationToken.None);
+            await SnapshotServiceHarness.WaitUntilAsync(() => second.ScanState.Phase == ScanPhase.Ready, "the scan");
+
+            var status = second.CacheState.GetStatus()!;
+            Assert.Null(status.SnapshotSequence);
+            Assert.Equal(0, second.Database.NodeCount);
+            Assert.False(File.Exists(path));
+            // The scan of a start with nothing loaded, not the verification of a loaded snapshot.
+            await second.GraphUpdate.Received(1).PerformResumableScanAsync(Arg.Any<string>(), Arg.Any<IScanProgressReporter?>(), Arg.Any<CancellationToken>());
+            await second.GraphUpdate.DidNotReceive().PerformInitialScanAsync(Arg.Any<string>(), Arg.Any<IScanProgressReporter?>(), Arg.Any<CancellationToken>());
+            Assert.Equal(SnapshotRejection.FormatVersion, SnapshotFile.Precheck(bytes, name, second.Key(), second.Expectations()).Rejection);
+        }
+        finally
+        {
+            Directory.Delete(basePath, recursive: true);
+        }
+    }
+
     [Theory]
     [InlineData(nameof(SnapshotRejection.RootPath))]
     [InlineData(nameof(SnapshotRejection.HostVersion))]
