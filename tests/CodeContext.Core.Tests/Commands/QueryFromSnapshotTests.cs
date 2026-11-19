@@ -48,6 +48,10 @@ public sealed class QueryFromSnapshotTests : IAsyncLifetime
         ["multi", "aClass", "bMethod", "--json"],
         ["multi", "aClass", "bMethod", "--human"],
         ["Method"],
+        // Characters the API writes as themselves and a default encoder would escape.
+        ["O'Brien+é&Class", "--json"],
+        ["multi", "O'Brien+é&Method", "aClass", "--json"],
+        ["O'Brien+é&Class", "--human"],
     ];
 
     public async Task InitializeAsync()
@@ -55,6 +59,7 @@ public sealed class QueryFromSnapshotTests : IAsyncLifetime
         Directory.CreateDirectory(Root);
         File.WriteAllText(Path.Combine(Root, "a.fake"), "a");
         File.WriteAllText(Path.Combine(Root, "b.fake"), "b");
+        File.WriteAllText(Path.Combine(Root, "O'Brien+é&.fake"), "o");
         File.WriteAllText(Path.Combine(Root, "notes.txt"), "not indexed");
 
         // A first start scans and writes a snapshot; a second, cached start verifies it and serves.
@@ -104,6 +109,7 @@ public sealed class QueryFromSnapshotTests : IAsyncLifetime
             Assert.Equal(served, WithoutLabel(output, query));
             Assert.NotEqual(served, output);
         }
+        Assert.Contains("O'Brien+é&Class", _served[Key(["O'Brien+é&Class", "--json"])]);
     }
 
     [Fact]

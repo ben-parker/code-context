@@ -57,8 +57,9 @@ public static class ProgramHelpers
 
     private static JsonSerializerOptions CreateApiJsonOptions()
     {
-        // ASP.NET's JsonOptions start from the web defaults.
-        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        // ASP.NET's own starting point, not a copy of it: the web defaults plus its relaxed encoder (an apostrophe,
+        // '+', '&' or a letter past ASCII is written as itself), so the bytes are the API's.
+        var options = new JsonSerializerOptions(new Microsoft.AspNetCore.Http.Json.JsonOptions().SerializerOptions);
         ConfigureApiJson(options);
         options.MakeReadOnly();
         return options;
