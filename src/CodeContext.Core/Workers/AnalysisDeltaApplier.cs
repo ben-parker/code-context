@@ -232,7 +232,10 @@ public sealed class AnalysisDeltaApplier : IAnalysisDeltaSink
             _parserId = _pool.Intern(delta.ParserId);
             _workspaceId = _pool.Intern(delta.WorkspaceId);
             _ownershipOnly = _pool.Get([ParserIdKey, _parserId, WorkspaceIdKey, _workspaceId]);
+            _share = piece => _pool.Intern(piece);
         }
+
+        private readonly Func<ReadOnlySpan<char>, string> _share;
 
         // The fact's metadata: the source's entries in their order, with the two ownership keys set to the
         // delta's values (in place where the source has them, appended in this order where it does not), so
@@ -363,13 +366,21 @@ public sealed class AnalysisDeltaApplier : IAnalysisDeltaSink
             Metadata = OwnedMetadata(node.Metadata),
         };
 
-        public CodeEdge ToCodeEdge(ProtocolEdge edge) => new()
+        // The id is kept as parts (the endpoint instances and two pooled pieces) when it is exactly its
+        // source + a piece + its target + a piece, and as the string sent otherwise (EdgeId.Compose).
+        public CodeEdge ToCodeEdge(ProtocolEdge edge)
         {
-            Id = edge.Id,
-            SourceId = InternSource(edge.SourceId),
-            TargetId = _pool.Intern(edge.TargetId),
-            Type = _pool.Intern(edge.Kind),
-            Metadata = OwnedMetadata(edge.Metadata),
-        };
+            var source = InternSource(edge.SourceId);
+            var target = _pool.Intern(edge.TargetId);
+            var stored = new CodeEdge
+            {
+                SourceId = source,
+                TargetId = target,
+                Type = _pool.Intern(edge.Kind),
+                Metadata = OwnedMetadata(edge.Metadata),
+            };
+            stored.UseIdKey(EdgeId.Compose(edge.Id, source, target, _share));
+            return stored;
+        }
     }
 }

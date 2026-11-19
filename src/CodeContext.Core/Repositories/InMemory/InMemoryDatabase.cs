@@ -82,11 +82,15 @@ namespace CodeContext.Core.Repositories.InMemory
         {
             public ConcurrentDictionary<string, CodeNode> Nodes { get; }
             public ConcurrentDictionary<string, string> Identifiers { get; }
-            public ConcurrentDictionary<string, CodeEdge> Edges { get; }
+            /// <summary>
+            /// Edges by id key (<see cref="CodeEdge.IdKey"/>: the id text, or its parts), compared by id text
+            /// (<see cref="EdgeIdKeys.Comparer"/>), so a string probe finds an edge kept as parts.
+            /// </summary>
+            public ConcurrentDictionary<object, CodeEdge> Edges { get; }
 
             private long _version;
             private volatile CachedAdjacency? _adjacency;
-            private volatile HashSet<string>? _crossShardEdgeIds;
+            private volatile List<CodeEdge>? _crossShardEdges;
             private volatile CachedHistogram? _histogram;
 
             private sealed record CachedAdjacency(long Version, GraphAdjacency Value);
@@ -115,7 +119,7 @@ namespace CodeContext.Core.Repositories.InMemory
             {
                 Nodes = new ConcurrentDictionary<string, CodeNode>();
                 Identifiers = new ConcurrentDictionary<string, string>(StringComparer.Ordinal);
-                Edges = new ConcurrentDictionary<string, CodeEdge>();
+                Edges = new ConcurrentDictionary<object, CodeEdge>(EdgeIdKeys.Comparer);
             }
 
             // Rebuild ctor: a fresh shard is populated by a single writer, so one concurrency
@@ -126,8 +130,8 @@ namespace CodeContext.Core.Repositories.InMemory
                     concurrencyLevel: 1, capacity: Math.Max(0, nodeCapacity));
                 Identifiers = new ConcurrentDictionary<string, string>(
                     concurrencyLevel: 1, capacity: Math.Max(0, nodeCapacity), StringComparer.Ordinal);
-                Edges = new ConcurrentDictionary<string, CodeEdge>(
-                    concurrencyLevel: 1, capacity: Math.Max(0, edgeCapacity));
+                Edges = new ConcurrentDictionary<object, CodeEdge>(
+                    concurrencyLevel: 1, capacity: Math.Max(0, edgeCapacity), EdgeIdKeys.Comparer);
             }
 
             /// <summary>A heap copy of any shard, for the legacy in-place mutation paths.</summary>
@@ -141,7 +145,7 @@ namespace CodeContext.Core.Repositories.InMemory
                     copy.Nodes[node.Id!] = node;
                     if (!string.IsNullOrWhiteSpace(node.Identifier)) copy.Identifiers[node.Identifier] = node.Id!;
                 }
-                foreach (var edge in edges) copy.Edges[edge.Id!] = edge;
+                foreach (var edge in edges) copy.Edges[edge.IdKey!] = edge;
                 return copy;
             }
 
@@ -151,7 +155,7 @@ namespace CodeContext.Core.Repositories.InMemory
             public void BumpVersion()
             {
                 Interlocked.Increment(ref _version);
-                _crossShardEdgeIds = null;
+                _crossShardEdges = null;
             }
 
             // ---- Read members ----
@@ -224,24 +228,24 @@ namespace CodeContext.Core.Repositories.InMemory
             }
 
             /// <summary>
-            /// Ids of edges with at least one endpoint that is NOT a node of this shard — the only
+            /// Edges with at least one endpoint that is NOT a node of this shard — the only
             /// edges a removal in ANOTHER shard could dangle. A cheap, id-convention-independent
             /// superset of the cross-shard sweep candidates (built once per shard version).
             /// </summary>
-            public IReadOnlyCollection<string> GetCrossShardEdgeIds()
+            public IReadOnlyCollection<CodeEdge> GetCrossShardEdges()
             {
-                var cached = _crossShardEdgeIds;
+                var cached = _crossShardEdges;
                 if (cached is not null) return cached;
-                var set = new HashSet<string>(StringComparer.Ordinal);
+                var list = new List<CodeEdge>();
                 foreach (var edge in Edges.Values)
                 {
-                    if (edge.Id is null) continue;
+                    if (edge.IdKey is null) continue;
                     var sourceForeign = edge.SourceId is not null && !Nodes.ContainsKey(edge.SourceId);
                     var targetForeign = edge.TargetId is not null && !Nodes.ContainsKey(edge.TargetId);
-                    if (sourceForeign || targetForeign) set.Add(edge.Id);
+                    if (sourceForeign || targetForeign) list.Add(edge);
                 }
-                _crossShardEdgeIds = set;
-                return set;
+                _crossShardEdges = list;
+                return list;
             }
 
             /// <summary>Version-stamped adjacency snapshot of this shard, rebuilt only when its version changes.</summary>
@@ -282,7 +286,7 @@ namespace CodeContext.Core.Repositories.InMemory
 
                 // Nothing removed and nothing supplied: the shard is unchanged, so the caller keeps
                 // this reference (and its caches) and only the generation advances.
-                if (removedIds.Count == 0 && !HasId(nodes, static node => node.Id) && !HasId(edges, static edge => edge.Id))
+                if (removedIds.Count == 0 && !HasId(nodes, static node => node.Id) && !HasId(edges, static edge => edge.IdKey))
                     return null;
 
                 var next = new GraphState(Nodes.Count + nodes.Count, Edges.Count + edges.Count);
@@ -311,18 +315,18 @@ namespace CodeContext.Core.Repositories.InMemory
                 // target — otherwise it would dangle.
                 foreach (var edge in Edges.Values)
                 {
-                    if (edge.Id is null) continue;
+                    if (edge.IdKey is not { } id) continue;
                     if (edge.SourceId is not null && removedIds.Contains(edge.SourceId)) continue;
                     if (edge.TargetId is not null
                         && removedIds.Contains(edge.TargetId)
                         && !next.Nodes.ContainsKey(edge.TargetId)) continue;
-                    next.Edges.TryAdd(edge.Id, edge);
+                    next.Edges.TryAdd(id, edge);
                 }
 
                 foreach (var edge in edges)
                 {
-                    if (edge.Id is null) continue;
-                    next.Edges[edge.Id] = edge;
+                    if (edge.IdKey is not { } id) continue;
+                    next.Edges[id] = edge;
                 }
 
                 foreach (var id in removedIds)
@@ -342,25 +346,25 @@ namespace CodeContext.Core.Repositories.InMemory
                 IReadOnlySet<string> removedIds,
                 IReadOnlySet<string> removedNotReestablished,
                 IReadOnlySet<string> deltaNodeIds,
-                IReadOnlySet<string> deltaEdgeIds)
+                IReadOnlyCollection<object> deltaEdgeIds)
             {
-                HashSet<string>? dropEdges = null;
+                HashSet<object>? dropEdges = null;
 
                 if (removedIds.Count > 0)
                 {
-                    foreach (var edgeId in GetCrossShardEdgeIds())
+                    foreach (var edge in GetCrossShardEdges())
                     {
-                        if (!Edges.TryGetValue(edgeId, out var edge) || edge.Id is null) continue;
+                        if (edge.IdKey is not { } id) continue;
                         var dangles = (edge.SourceId is not null && removedIds.Contains(edge.SourceId))
                             || (edge.TargetId is not null && removedNotReestablished.Contains(edge.TargetId));
-                        if (dangles) (dropEdges ??= new HashSet<string>(StringComparer.Ordinal)).Add(edge.Id);
+                        if (dangles) (dropEdges ??= new HashSet<object>(EdgeIdKeys.Comparer)).Add(id);
                     }
                 }
 
                 if (deltaEdgeIds.Count > 0)
                 {
                     foreach (var id in deltaEdgeIds)
-                        if (Edges.ContainsKey(id)) (dropEdges ??= new HashSet<string>(StringComparer.Ordinal)).Add(id);
+                        if (Edges.ContainsKey(id)) (dropEdges ??= new HashSet<object>(EdgeIdKeys.Comparer)).Add(id);
                 }
 
                 HashSet<string>? dropNodes = null;
@@ -379,11 +383,11 @@ namespace CodeContext.Core.Repositories.InMemory
                 {
                     foreach (var edge in Edges.Values)
                     {
-                        if (edge.Id is null) continue;
+                        if (edge.IdKey is not { } id) continue;
                         if ((edge.SourceId is not null && dropNodes.Contains(edge.SourceId))
                             || (edge.TargetId is not null && dropNodes.Contains(edge.TargetId)))
                         {
-                            (dropEdges ??= new HashSet<string>(StringComparer.Ordinal)).Add(edge.Id);
+                            (dropEdges ??= new HashSet<object>(EdgeIdKeys.Comparer)).Add(id);
                         }
                     }
                 }
@@ -430,9 +434,8 @@ namespace CodeContext.Core.Repositories.InMemory
                 if (!hasNodeRemoval)
                 {
                     // No local node removals: only cross-shard edges can be affected.
-                    foreach (var edgeId in GetCrossShardEdgeIds())
+                    foreach (var edge in GetCrossShardEdges())
                     {
-                        if (!Edges.TryGetValue(edgeId, out var edge)) continue;
                         if ((edge.SourceId is not null && removedIds.Contains(edge.SourceId))
                             || (edge.TargetId is not null && removedIds.Contains(edge.TargetId)))
                         {
@@ -453,15 +456,15 @@ namespace CodeContext.Core.Repositories.InMemory
                 }
                 foreach (var edge in Edges.Values)
                 {
-                    if (edge.Id is null) continue;
+                    if (edge.IdKey is not { } id) continue;
                     if (edge.SourceId is not null && removedIds.Contains(edge.SourceId)) continue;
                     if (edge.TargetId is not null && removedIds.Contains(edge.TargetId)) continue;
-                    next.Edges.TryAdd(edge.Id, edge);
+                    next.Edges.TryAdd(id, edge);
                 }
                 return next;
             }
 
-            private static bool HasId<T>(IReadOnlyList<T> items, Func<T, string?> idOf)
+            private static bool HasId<T>(IReadOnlyList<T> items, Func<T, object?> idOf)
             {
                 foreach (var item in items)
                     if (idOf(item) is not null) return true;
@@ -652,13 +655,13 @@ namespace CodeContext.Core.Repositories.InMemory
         /// <summary>In-place edge upsert routed to the edge's metadata-derived shard (created if absent).</summary>
         public void UpsertEdge(CodeEdge edge)
         {
-            if (edge.Id is null) throw new ArgumentException("Edge must have an Id", nameof(edge));
+            if (edge.IdKey is not { } id) throw new ArgumentException("Edge must have an Id", nameof(edge));
             lock (_commitLock)
             {
                 var shard = EnsureHeapShard(ShardKey.ForEdge(edge));
-                shard.Edges[edge.Id] = edge;
+                shard.Edges[id] = edge;
                 // Global last-write-wins for the edge id across shards.
-                PurgeEdgeFromOtherShards(shard, edge.Id);
+                PurgeEdgeFromOtherShards(shard, edge.Id!);
                 shard.BumpVersion();
                 NotifyMutation();
             }
@@ -709,7 +712,7 @@ namespace CodeContext.Core.Repositories.InMemory
                     var shard = AsHeapShard(key, candidate);
                     var toRemove = shard.Edges.Values
                         .Where(e => e.SourceId == nodeId || e.TargetId == nodeId)
-                        .Select(e => e.Id)
+                        .Select(e => e.IdKey)
                         .Where(id => id != null)
                         .ToList();
                     foreach (var edgeId in toRemove)
@@ -1267,10 +1270,11 @@ namespace CodeContext.Core.Repositories.InMemory
         // ---- Shard construction ----
 
         /// <summary>Deduplicates by id (null ids skipped): last occurrence wins, first-seen order kept.</summary>
-        private static IEnumerable<T> Deduplicate<T>(IEnumerable<T> items, Func<T, string?> idOf)
+        private static IEnumerable<T> Deduplicate<T, TKey>(IEnumerable<T> items, Func<T, TKey?> idOf, IEqualityComparer<TKey> comparer)
+            where TKey : class
         {
-            var last = new Dictionary<string, T>(StringComparer.Ordinal);
-            var order = new List<string>();
+            var last = new Dictionary<TKey, T>(comparer);
+            var order = new List<TKey>();
             foreach (var item in items)
             {
                 var id = idOf(item);
@@ -1289,7 +1293,7 @@ namespace CodeContext.Core.Repositories.InMemory
             // the old single dictionary's `Nodes[id] = node` last-write-wins even when two copies carry
             // different ownership metadata (they would otherwise land in different shards).
             var nodesByShard = new Dictionary<ShardKey, List<CodeNode>>();
-            foreach (var node in Deduplicate(nodes, n => n.Id))
+            foreach (var node in Deduplicate(nodes, n => n.Id, StringComparer.Ordinal))
             {
                 var key = ShardKey.ForNode(node);
                 if (!nodesByShard.TryGetValue(key, out var bucket))
@@ -1298,7 +1302,7 @@ namespace CodeContext.Core.Repositories.InMemory
             }
 
             var edgesByShard = new Dictionary<ShardKey, List<CodeEdge>>();
-            foreach (var edge in Deduplicate(edges, e => e.Id))
+            foreach (var edge in Deduplicate(edges, e => e.IdKey, EdgeIdKeys.Comparer))
             {
                 var key = ShardKey.ForEdge(edge);
                 if (!edgesByShard.TryGetValue(key, out var bucket))
@@ -1323,7 +1327,7 @@ namespace CodeContext.Core.Repositories.InMemory
                     }
                 if (shardEdges is not null)
                     foreach (var edge in shardEdges)
-                        shard.Edges[edge.Id!] = edge;
+                        shard.Edges[edge.IdKey!] = edge;
                 builder.Add(key, shard);
             }
             return builder.ToImmutable();
@@ -1364,9 +1368,9 @@ namespace CodeContext.Core.Repositories.InMemory
             var deltaNodeIds = new HashSet<string>(StringComparer.Ordinal);
             foreach (var node in nodes)
                 if (node.Id is not null) deltaNodeIds.Add(node.Id);
-            var deltaEdgeIds = new HashSet<string>(StringComparer.Ordinal);
+            var deltaEdgeIds = new HashSet<object>(EdgeIdKeys.Comparer);
             foreach (var edge in edges)
-                if (edge.Id is not null) deltaEdgeIds.Add(edge.Id);
+                if (edge.IdKey is { } id) deltaEdgeIds.Add(id);
 
             // Rebuild any foreign shard that (a) holds an edge now dangling onto a removed-and-not-
             // reestablished node, or (b) co-resides a delta id — the delta wins globally, so the stale

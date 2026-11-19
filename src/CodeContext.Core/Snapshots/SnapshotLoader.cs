@@ -75,7 +75,7 @@ namespace CodeContext.Core.Snapshots
             // The store's global invariants, which PublishLoadedShards leaves to the loader: an id, an
             // edge id and an identifier live in at most one shard.
             var nodeIds = new HashSet<string>(StringComparer.Ordinal);
-            var edgeIds = new HashSet<string>(StringComparer.Ordinal);
+            var edgeIds = new HashSet<object>(EdgeIdKeys.Comparer);
             var identifiers = new HashSet<string>(StringComparer.Ordinal);
 
             foreach (var reader in file.Shards)
@@ -103,7 +103,7 @@ namespace CodeContext.Core.Snapshots
                 for (var j = 0; j < edges.Length; j++)
                 {
                     var edge = edges[j] = reader.ReadEdge(j);
-                    if (!edgeIds.Add(edge.Id!) || !state.Edges.TryAdd(edge.Id!, edge))
+                    if (!edgeIds.Add(edge.IdKey!) || !state.Edges.TryAdd(edge.IdKey!, edge))
                         throw new SnapshotCorruptException($"Edge id '{edge.Id}' appears twice.");
                 }
 

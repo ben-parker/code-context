@@ -297,14 +297,16 @@ namespace CodeContext.Core.Snapshots
             var target = targetSid == SnapshotFormat.NoIndex ? null : Id(targetSid);
             var metaAndForm = _region.ReadU32(record + 28);
             var metadata = Metadata(metaAndForm >> 2, _region.ReadI32(record + 24), _region.ReadI32(record + 20));
-            return new CodeEdge
+            var edge = new CodeEdge
             {
-                Id = EdgeId(record, metaAndForm, source, target),
                 SourceId = source,
                 TargetId = target,
                 Type = GetString(_region.ReadU32(record + 8)),
                 Metadata = metadata,
             };
+            // A composed id stays parts (the endpoint ids and two strings of the table); its text is never built.
+            edge.UseIdKey(EdgeIdKey(record, metaAndForm, source, target));
+            return edge;
         }
 
         // ---- Keyed reads (the in-place accessors) ----
@@ -435,7 +437,7 @@ namespace CodeContext.Core.Snapshots
         /// <summary>Appends an edge to a run that must be in strictly increasing edge id order (so no edge twice).</summary>
         private static void AddInIdOrder(List<CodeEdge> run, CodeEdge edge)
         {
-            if (run.Count > 0 && string.CompareOrdinal(run[^1].Id, edge.Id) >= 0)
+            if (run.Count > 0 && EdgeIdKeys.Compare(run[^1].IdKey, edge.IdKey) >= 0)
                 throw new SnapshotCorruptException($"Edge '{edge.Id}' is out of id order in its run.");
             run.Add(edge);
         }
@@ -603,9 +605,9 @@ namespace CodeContext.Core.Snapshots
                 var record = Element(SnapshotSectionKind.Edges, j, SnapshotFormat.EdgeRecordSize);
                 var sourceSid = _region.ReadU32(record);
                 var targetSid = _region.ReadU32(record + 4);
-                result.Add(EdgeId(record, _region.ReadU32(record + 28),
+                result.Add(EdgeIdKey(record, _region.ReadU32(record + 28),
                     sourceSid == SnapshotFormat.NoIndex ? null : Id(sourceSid),
-                    targetSid == SnapshotFormat.NoIndex ? null : Id(targetSid)));
+                    targetSid == SnapshotFormat.NoIndex ? null : Id(targetSid)).ToString()!);
             }
             return result;
         }
@@ -634,7 +636,7 @@ namespace CodeContext.Core.Snapshots
             for (var j = 0; j < EdgeCount; j++) result.Add(ReadEdge(j));
             result.Sort(GraphAdjacency.EdgeById);
             for (var j = 1; j < result.Count; j++)
-                if (string.CompareOrdinal(result[j - 1].Id, result[j].Id) == 0)
+                if (EdgeIdKeys.Compare(result[j - 1].IdKey, result[j].IdKey) == 0)
                     throw new SnapshotCorruptException($"Edge id '{result[j].Id}' appears twice.");
             return result;
         }
@@ -751,7 +753,8 @@ namespace CodeContext.Core.Snapshots
             return keys;
         }
 
-        private string EdgeId(long record, uint metaAndForm, string? source, string? target)
+        /// <summary>The edge's id key (<see cref="CodeEdge.IdKey"/>): the whole string, or the parts of a composed id.</summary>
+        private object EdgeIdKey(long record, uint metaAndForm, string? source, string? target)
         {
             var a = GetString(_region.ReadU32(record + 12));
             switch (metaAndForm & SnapshotFormat.EdgeIdFormMask)
@@ -762,7 +765,7 @@ namespace CodeContext.Core.Snapshots
                     var b = GetString(_region.ReadU32(record + 16));
                     if (source is null || target is null || a is null || b is null)
                         throw new SnapshotCorruptException("A composed edge id lacks a part.");
-                    return string.Concat(source, a, target, b);
+                    return Core.EdgeId.FromParts(source, a, target, b);
                 default:
                     throw new SnapshotCorruptException("An edge has an unknown id form.");
             }

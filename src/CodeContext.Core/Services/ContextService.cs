@@ -1087,9 +1087,12 @@ namespace CodeContext.Core.Services
         // order), so expansion inputs must be ordered on a stable key before iteration to
         // keep the output byte-identical across builds. Edge Ids are worker-assigned stable
         // strings; the extra keys are pure tie-breakers for null/duplicate Ids.
+        // Ordinal order of the id text, compared on the parts of an id the store keeps as parts.
+        private static readonly IComparer<object> EdgeIdOrder = Comparer<object>.Create(EdgeIdKeys.Compare);
+
         private static IEnumerable<CodeEdge> OrderForTraversal(IEnumerable<CodeEdge> edges)
             => edges
-                .OrderBy(edge => edge.Id ?? string.Empty, StringComparer.Ordinal)
+                .OrderBy(edge => edge.IdKey ?? string.Empty, EdgeIdOrder)
                 .ThenBy(edge => edge.SourceId ?? string.Empty, StringComparer.Ordinal)
                 .ThenBy(edge => edge.TargetId ?? string.Empty, StringComparer.Ordinal)
                 .ThenBy(edge => edge.Type ?? string.Empty, StringComparer.Ordinal);

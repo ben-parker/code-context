@@ -49,7 +49,7 @@ internal sealed class ShardReadMatrix
         identifier => shard.TryGetNodeIdByIdentifier(identifier, out var id) ? id : null,
         id => shard.TryGetEdge(id, out var edge) ? edge : null,
         shard.GetEdgesBySource, shard.GetEdgesByTarget, shard.FindNodesByName, shard.FindNodesByPath,
-        shard.GetFilePaths, shard.AddStatistics, shard.GetCrossShardEdgeIds, shard.GetAllNodes, shard.GetAllEdges);
+        shard.GetFilePaths, shard.AddStatistics, () => shard.GetCrossShardEdges().Select(edge => edge.Id!), shard.GetAllNodes, shard.GetAllEdges);
 
     /// <summary>The snapshot reader's in-place accessors, each asked directly (no materialized shard).</summary>
     public static ShardReadMatrix Of(SnapshotShardReader reader) => new(

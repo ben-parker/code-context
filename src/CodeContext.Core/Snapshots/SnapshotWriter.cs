@@ -374,19 +374,27 @@ namespace CodeContext.Core.Snapshots
             }
             foreach (var edge in edges)
             {
-                if (edge.Id is null || !edge.Id.StartsWith(prefix, StringComparison.Ordinal))
+                if (edge.IdKey is not { } edgeKey || !EdgeIdKeys.StartsWith(edgeKey, prefix))
                     return $"edge id '{edge.Id}' does not start with '{prefix}'";
                 if (edge.SourceId is null || !edge.SourceId.StartsWith(prefix, StringComparison.Ordinal))
                     return $"source '{edge.SourceId}' of edge '{edge.Id}' does not start with '{prefix}'";
                 if (!OrdinalMetadata(edge.Metadata)) return $"edge '{edge.Id}' has metadata that does not compare keys ordinally";
                 if (!OwnedBy(edge.Metadata, key)) return $"edge '{edge.Id}' carries ownership metadata of another shard";
-                if (!SnapshotFormat.IsWellFormed(edge.Id) || !SnapshotFormat.IsWellFormed(edge.SourceId)
+                // An id kept as parts is well-formed where its parts are: with well-formed endpoints, no pair
+                // can straddle a part boundary, so this decides as the text would.
+                if (!WellFormedId(edgeKey) || !SnapshotFormat.IsWellFormed(edge.SourceId)
                     || !SnapshotFormat.IsWellFormed(edge.TargetId) || !SnapshotFormat.IsWellFormed(edge.Type)
                     || !WellFormed(edge.Metadata))
                     return $"edge '{edge.Id}' holds a string with a lone surrogate";
             }
             return null;
         }
+
+        private static bool WellFormedId(object key)
+            => key is EdgeId parts
+                ? SnapshotFormat.IsWellFormed(parts.Source) && SnapshotFormat.IsWellFormed(parts.Middle)
+                    && SnapshotFormat.IsWellFormed(parts.Target) && SnapshotFormat.IsWellFormed(parts.Tail)
+                : SnapshotFormat.IsWellFormed((string)key);
 
         private static bool OrdinalMetadata(IReadOnlyDictionary<string, string>? metadata)
             => metadata is FactMetadata
@@ -613,24 +621,42 @@ namespace CodeContext.Core.Snapshots
                 var edgeParts = new List<(uint Form, string A, string? B, int Line, int Column, string[] Set)>(edges.Count);
                 // The middles and tails of composed edge ids repeat across edges: each distinct one is allocated once.
                 var pieces = new HashSet<string>(StringComparer.Ordinal).GetAlternateLookup<ReadOnlySpan<char>>();
-                string Piece(ReadOnlySpan<char> text)
+                string Piece(ReadOnlySpan<char> text, string? instance = null)
                 {
                     if (pieces.TryGetValue(text, out var existing)) return existing;
-                    var created = text.ToString();
+                    var created = instance ?? text.ToString();
                     pieces.Add(created);
                     return created;
                 }
                 foreach (var edge in edges)
                 {
                     Collect(edge.Type);
-                    var id = edge.Id!;
                     var source = edge.SourceId!;
                     var target = edge.TargetId;
                     uint form = SnapshotFormat.EdgeIdFormWhole;
-                    string a = id;
+                    string a;
                     string? b = null;
-                    if (target is not null && id.StartsWith(source, StringComparison.Ordinal))
+                    // An id the store keeps as parts, split where this writer splits the text (target at its
+                    // first occurrence after source), gives the same pieces without building the text.
+                    if (edge.IdKey is EdgeId parts && parts.Canonical
+                        && string.Equals(parts.Source, source, StringComparison.Ordinal)
+                        && string.Equals(parts.Target, target, StringComparison.Ordinal))
                     {
+                        form = SnapshotFormat.EdgeIdFormComposed;
+                        a = Piece(parts.Middle, parts.Middle);
+                        b = Piece(parts.Tail, parts.Tail);
+                    }
+                    else if (edge.Id is not { } id)
+                    {
+                        throw new InvalidOperationException("An edge without an id cannot be written.");
+                    }
+                    else if (target is null || !id.StartsWith(source, StringComparison.Ordinal))
+                    {
+                        a = id;
+                    }
+                    else
+                    {
+                        a = id;
                         var at = id.IndexOf(target, source.Length, StringComparison.Ordinal);
                         if (at >= 0)
                         {
@@ -777,10 +803,15 @@ namespace CodeContext.Core.Snapshots
                 sections[7] = HashTable(identified.Count, k => stringUtf8[Ref(nodes[identified[k]].Identifier) - 1], k => (uint)identified[k] + 1);
 
                 // Edge ids are long and not in the string table: each is encoded into one reused buffer, not an array of its own.
+                // An id kept as parts is written out into a reused char buffer first, never into a string.
                 var edgeIdBytes = new byte[256];
+                var edgeIdChars = new char[128];
                 sections[8] = HashTable(edges.Count, j =>
                 {
-                    var id = edges[j].Id!;
+                    var key = edges[j].IdKey!;
+                    var length = EdgeIdKeys.Length(key);
+                    if (edgeIdChars.Length < length) edgeIdChars = new char[Math.Max(length, 2 * edgeIdChars.Length)];
+                    var id = EdgeIdKeys.Text(key, edgeIdChars);
                     var max = SnapshotFormat.StrictUtf8.GetMaxByteCount(id.Length);
                     if (edgeIdBytes.Length < max) edgeIdBytes = new byte[max];
                     return edgeIdBytes.AsSpan(0, SnapshotFormat.StrictUtf8.GetBytes(id, edgeIdBytes));

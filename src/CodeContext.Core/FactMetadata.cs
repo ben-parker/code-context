@@ -128,6 +128,16 @@ namespace CodeContext.Core
 
         public int DistinctSets => _sets.Count;
 
+        /// <summary>The pooled instance of <paramref name="text"/>'s content, allocated only when new.</summary>
+        public string Intern(ReadOnlySpan<char> text)
+        {
+            var lookup = _strings.GetAlternateLookup<ReadOnlySpan<char>>();
+            if (lookup.TryGetValue(text, out var pooled)) return pooled;
+            var created = text.ToString();
+            _strings.Add(created, created);
+            return created;
+        }
+
         /// <summary>The pooled instance of <paramref name="value"/>, which becomes the pooled one when new.</summary>
         [return: NotNullIfNotNull(nameof(value))]
         public string? Intern(string? value)

@@ -48,7 +48,7 @@ internal sealed class DelegatingShard : IGraphShard
     public void AddStatistics(Dictionary<string, int> nodesByType, Dictionary<string, int> edgesByType)
         => _inner.AddStatistics(nodesByType, edgesByType);
 
-    public IReadOnlyCollection<string> GetCrossShardEdgeIds() => _inner.GetCrossShardEdgeIds();
+    public IReadOnlyCollection<CodeEdge> GetCrossShardEdges() => _inner.GetCrossShardEdges();
 
     public IGraphShard? ApplyScoped(
         IReadOnlyList<CodeNode> nodes,
@@ -63,7 +63,7 @@ internal sealed class DelegatingShard : IGraphShard
         IReadOnlySet<string> removedIds,
         IReadOnlySet<string> removedNotReestablished,
         IReadOnlySet<string> deltaNodeIds,
-        IReadOnlySet<string> deltaEdgeIds)
+        IReadOnlyCollection<object> deltaEdgeIds)
         => Wrap(_inner.WithoutForeignConflicts(removedIds, removedNotReestablished, deltaNodeIds, deltaEdgeIds));
 
     public void CollectNodesOutside(IReadOnlySet<string> keepPaths, HashSet<string> into)

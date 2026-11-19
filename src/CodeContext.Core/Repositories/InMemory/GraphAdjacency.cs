@@ -28,8 +28,9 @@ namespace CodeContext.Core.Repositories.InMemory
         internal static readonly Comparison<CodeNode> ById =
             static (left, right) => string.CompareOrdinal(left.Id, right.Id);
 
+        // Ordinal order of the id text, compared on the parts of an id kept as parts (no text is produced).
         internal static readonly Comparison<CodeEdge> EdgeById =
-            static (left, right) => string.CompareOrdinal(left.Id, right.Id);
+            static (left, right) => EdgeIdKeys.Compare(left.IdKey, right.IdKey);
 
         // Sorting is deferred to first use everywhere: the edit path (commit, then a keyed query)
         // rebuilds this snapshot and should sort only what it reads.
