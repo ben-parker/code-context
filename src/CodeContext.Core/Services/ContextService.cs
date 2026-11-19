@@ -1,4 +1,5 @@
 using CodeContext.Core.Repositories;
+using CodeContext.Core.Repositories.InMemory;
 using CodeContext.Core.Workers;
 using CodeContext.Parser.Protocol;
 using Microsoft.Extensions.Options;
@@ -24,6 +25,9 @@ namespace CodeContext.Core.Services
         private readonly IAnalysisCoverageRegistry? _coverage;
         private readonly ICacheStateProvider? _cacheState;
 
+        /// <summary>The store behind in-memory repositories, which the graph queries traverse directly; null for others.</summary>
+        private readonly InMemoryDatabase? _database;
+
         private const int MaxCoverageNames = 5;
 
         public ContextService(
@@ -42,6 +46,7 @@ namespace CodeContext.Core.Services
             _workerService = workerService;
             _coverage = coverage;
             _cacheState = cacheState;
+            _database = (edgeRepository as InMemoryEdgeRepository)?.Database;
         }
 
         /// <summary>The worst state among projects.</summary>
@@ -59,19 +64,7 @@ namespace CodeContext.Core.Services
             var nothingFound = response.TotalMatches == 0
                 || response.Matches.Exists(match => match.Relationships is { } relationships
                     && (relationships.UsedByCount ?? 0) == 0);
-            if (!nothingFound || _coverage is null) return null;
-
-            var projects = _coverage.GetProjects();
-            var incomplete = projects.Where(project => project.State != ProjectCoverageStates.Complete).ToList();
-            return incomplete.Count == 0
-                ? null
-                : new CoverageSummary
-                {
-                    State = OverallState(projects),
-                    IncompleteProjects = incomplete.Count,
-                    TotalProjects = projects.Count,
-                    Names = incomplete.Take(MaxCoverageNames).Select(project => project.Name).ToList(),
-                };
+            return nothingFound ? CoverageForEmptyAnswer() : null;
         }
 
         public async Task<CompleteContextResponse> GetCompleteContextAsync(
@@ -547,7 +540,7 @@ namespace CodeContext.Core.Services
             testing.TestFilesReturnedCount = testing.TestFiles.Count;
         }
 
-        private static IOrderedEnumerable<CodeNode> RankCandidates(
+        private IOrderedEnumerable<CodeNode> RankCandidates(
             IEnumerable<CodeNode> candidates,
             string identifier)
             => candidates
@@ -839,7 +832,10 @@ namespace CodeContext.Core.Services
             return compact;
         }
 
-        private CompactCodeNode ToCompactNode(CodeNode node)
+        private CompactCodeNode ToCompactNode(CodeNode node) => ToCompact<CompactCodeNode>(node);
+
+        /// <summary>A node's compact form, as <typeparamref name="T"/> (a compact node with fields of its own).</summary>
+        private T ToCompact<T>(CodeNode node) where T : CompactCodeNode, new()
             => new()
             {
                 Name = node.Name,
@@ -978,9 +974,8 @@ namespace CodeContext.Core.Services
             return WhitespaceRegex().Replace(signature.Trim(), " ");
         }
 
-        private static bool IsTestPath(string? path)
-            => path?.Contains("test", StringComparison.OrdinalIgnoreCase) == true ||
-               path?.Contains("spec", StringComparison.OrdinalIgnoreCase) == true;
+        /// <summary>The one test-file rule, on the part of the path under the root (see <see cref="RepositoryPaths.IsTestFile"/>).</summary>
+        private bool IsTestPath(string? path) => RepositoryPaths.IsTestFile(path, _rootPath);
 
         // Case-insensitive rank tables: an OrdinalIgnoreCase lookup avoids the per-node/per-edge
         // ToLower/ToUpper string allocation the switch statements used to force.
@@ -1634,16 +1629,14 @@ namespace CodeContext.Core.Services
 
         /// <summary>
         /// Files that may test <paramref name="targetNode"/> by name alone: the distinct node file
-        /// paths containing "Test" or "Spec", ordered OrdinalIgnoreCase then Ordinal, and of those
+        /// paths that are test files (<see cref="IsTestPath"/>), ordered OrdinalIgnoreCase then Ordinal, and of those
         /// the first ten for which <see cref="MightContainTestsForTargetAsync"/> holds.
         /// </summary>
         private async Task<List<string>> FindTestFilesAsync(CodeNode targetNode)
         {
             var testFiles = new List<string>();
             // The repository returns the paths distinct and already in this order.
-            var paths = ((await _nodeRepository.GetFilePathsAsync()) ?? [])
-                .Where(path => path.Contains("Test", StringComparison.OrdinalIgnoreCase)
-                    || path.Contains("Spec", StringComparison.OrdinalIgnoreCase));
+            var paths = ((await _nodeRepository.GetFilePathsAsync()) ?? []).Where(IsTestPath);
 
             foreach (var path in paths)
             {
