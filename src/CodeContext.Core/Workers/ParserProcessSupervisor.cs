@@ -515,12 +515,7 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
 
         if (delta.Inputs is { } inputs)
         {
-            if (inputs.Files is null || inputs.Absent is null || inputs.Files.Contains(null!) || inputs.Absent.Contains(null!))
-            {
-                throw new ParserProtocolViolationException(
-                    $"analysis/delta for request {delta.RequestId} carried inputs without files or absent paths, or with a null one.");
-            }
-            delta = delta with { Inputs = NormalizeInputs(inputs) };
+            delta = delta with { Inputs = InputsOfChunk(inputs, firstChunk: active.DeltasReceived == 0, delta.RequestId) };
         }
 
         var ownershipPrefix = $"{delta.ParserId}:{Uri.EscapeDataString(delta.WorkspaceId)}:";
@@ -1193,22 +1188,80 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
         }
     }
 
-    /// <summary>The most input paths kept for one shard; a longer report is kept as none (the shard is then never answered without a worker).</summary>
+    /// <summary>
+    /// The most input paths one report may list; a longer report is kept as none (the shard is then never answered
+    /// without a worker). Counted as reported, before anything is dropped.
+    /// </summary>
     internal const int MaxInputs = 500_000;
 
     /// <summary>
+    /// The inputs a chunk contributes to its request: the first chunk's, normalized (<see cref="NormalizeInputs"/>);
+    /// a later chunk's are not read, as the schema says, so neither checked nor sorted.
+    /// </summary>
+    internal static WorkerInputs? InputsOfChunk(WorkerInputs? reported, bool firstChunk, long requestId)
+    {
+        if (reported is null || !firstChunk) return null;
+        if (reported.Files is null || reported.Absent is null || reported.Files.Contains(null!) || reported.Absent.Contains(null!))
+        {
+            throw new ParserProtocolViolationException(
+                $"analysis/delta for request {requestId} carried inputs without files or absent paths, or with a null one.");
+        }
+        return NormalizeInputs(reported);
+    }
+
+    /// <summary>
     /// Inputs as the host keeps them: fully qualified paths only (the schema says the rest are ignored), each once,
-    /// in ordinal order, so that two reports of the same set compare equal. Null when there are more than
-    /// <see cref="MaxInputs"/>.
+    /// in ordinal order, so that two reports of the same set compare equal; and an absent path under another listed
+    /// absent path is dropped (the schema lets a worker leave it out: it cannot exist while that one does not), so a
+    /// worker that leaves them out and one that lists every failed lookup are kept alike. Null when the report lists
+    /// more than <see cref="MaxInputs"/>.
     /// </summary>
     internal static WorkerInputs? NormalizeInputs(WorkerInputs inputs)
     {
         if (inputs.Files.Count + inputs.Absent.Count > MaxInputs) return null;
-        static List<string> Kept(IEnumerable<string> paths)
-            => paths.Where(path => path.Length > 0 && !path.Contains('\0') && Path.IsPathFullyQualified(path))
-                .Distinct(StringComparer.Ordinal)
-                .Order(StringComparer.Ordinal)
-                .ToList();
-        return new WorkerInputs(Kept(inputs.Files), Kept(inputs.Absent));
+        return new WorkerInputs(Kept(inputs.Files, dropNested: false), Kept(inputs.Absent, dropNested: true));
     }
+
+    private static List<string> Kept(IReadOnlyList<string> paths, bool dropNested)
+    {
+        var sorted = new List<string>(paths.Count);
+        foreach (var path in paths)
+        {
+            if (path.Length > 0 && !path.Contains('\0') && Path.IsPathFullyQualified(path)) sorted.Add(path);
+        }
+        sorted.Sort(StringComparer.Ordinal);
+
+        // In ordinal order the paths that start with a given path follow it without a gap, so the kept paths the
+        // current one starts with are a stack: one that the current path does not start with starts no later path.
+        var kept = new List<string>(dropNested ? Math.Min(sorted.Count, 1024) : sorted.Count);
+        var prefixes = new List<string>();
+        string? previous = null;
+        foreach (var path in sorted)
+        {
+            if (string.Equals(path, previous, StringComparison.Ordinal)) continue;
+            previous = path;
+            if (dropNested)
+            {
+                while (prefixes.Count > 0 && !path.StartsWith(prefixes[^1], StringComparison.Ordinal)) prefixes.RemoveAt(prefixes.Count - 1);
+                var nested = false;
+                foreach (var prefix in prefixes) nested |= IsUnder(path, prefix);
+                if (nested) continue;
+                prefixes.Add(path);
+            }
+            kept.Add(path);
+        }
+        return kept;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="path"/> names something inside <paramref name="directory"/>, which it starts with:
+    /// the next character is a directory separator, or the directory was written with one at its end. Ordinal, with
+    /// no other normalization.
+    /// </summary>
+    private static bool IsUnder(string path, string directory)
+        => path.Length > directory.Length
+            && (IsSeparator(path[directory.Length]) || IsSeparator(directory[^1]));
+
+    private static bool IsSeparator(char character)
+        => character == Path.DirectorySeparatorChar || character == Path.AltDirectorySeparatorChar;
 }
