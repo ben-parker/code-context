@@ -21,14 +21,19 @@ read, and nothing of that changed since by file time: the files and folders a sc
 every file a worker read outside them (project files, configs, restore data, referenced
 assemblies, declaration files, also above the root) still there and no newer, and every
 path a worker looked for and did not find still absent. On Linux the time is the status
-change time, which `tar -x`, `cp -p` or `touch -d` cannot set back. Otherwise stderr says
+change time, which `tar -x`, `cp -p` or `touch -d` cannot set back. Each folder's `.gitignore`
+is looked at whether or not its own rules ignore it. The saved index must also have been
+written with the workers installed now (same ids, versions, extensions and manifest
+locations, manifests untouched since), and must not be dated after the present time.
+Otherwise stderr says
 why (`Not answering from the saved index: ...`) and it starts an instance. It writes
 nothing and starts no worker. `CodeContext__CacheEnabled=false` turns it off with the cache.
 
 Not seen: on Windows and macOS, content rewritten in place with an older modification
 time set afterwards; an edit landing between a worker's read and the save when the
-instance stops before noticing it; a change of configured ignore patterns or of the
-installed workers.
+instance stops before noticing it; a worker's own files rewritten in place without its
+manifest or its folder's listing changing; edits made while the clock was set back, once
+the clock has passed the saved index's time again.
 
 `query` waits at most 30 seconds for indexing. On timeout it prints "Indexing did not
 become ready within 30 seconds" and exits with code 3; check `codecontext status --path .`

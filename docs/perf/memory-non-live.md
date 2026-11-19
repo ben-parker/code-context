@@ -96,6 +96,7 @@ Allocations (sampled), cached start:
 | Phase | Allocated | Main sources |
 |---|---|---|
 | Snapshot load (`SnapshotLoader.Materialize`) | 231 MB | edge ids, metadata dictionaries; ~100 MB of it stays live |
+| (caveat, final review) | | Measured on a JIT build: the persistability check allocates about 1.4 KB per edge in tier-0 code (126 MB here) and 3.6 MB once optimized (`DOTNET_TieredCompilation=0`, the stand-in for the AOT host, where a load allocated 57 MB). The same holds for a write's check after an uncached start |
 | Snapshot write (`SnapshotService.Write`) | 218 MB for an 8.3 MB file | `SnapshotWriter.CheckPersistable` 185 MB: it walks every edge of a shard still backed by the loaded snapshot, which decodes each edge again (`SnapshotShardReader.ReadEdge` 90, `EdgeId` 47, `Metadata` 41) only to check strings for lone surrogates; boxed `IReadOnlyDictionary` enumerators 17 MB. The sampler attributes 174 MB to `SnapshotFormat.IsWellFormed`, which does not allocate; that is inlined string allocation in the decode path. |
 | 60 queries | ~56 MB of gen0 garbage, 0 MB more live (108 MB before and after) | per-request allocation; nothing retained |
 
