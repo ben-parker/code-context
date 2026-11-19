@@ -66,6 +66,29 @@ Implement this sequence:
 7. Optional: `workspace/saveState` and the `baseline` of `workspace/index`, only after
    declaring `persistentState` — see "Persist state across restarts" below.
 
+### Expect to be stopped while idle
+
+The host stops a worker process that has had no request for a while and starts a new one
+when the next change, refresh or syntax-tree request needs it. By default that is after 2
+minutes for a worker whose last `workspace/index` from its files took under 5 seconds and
+after 15 minutes for any other; `CodeContext:WorkerHibernateSeconds` sets one time for
+every worker, and `0` turns it off. A worker that declared `persistentState` is stopped
+only once its state is saved with a written snapshot. Nothing is in flight when it happens.
+
+- The stop is the ordinary one, with shorter waits: `shutdown`, then stdin EOF. A worker
+  that has not answered within 1 second, or not exited within 1 second of EOF, is killed,
+  so do not start long work on `shutdown`, and keep nothing that only an orderly exit
+  would write.
+- The new process is a first start: `initialize`, `workspace/open` with the approved
+  files as they are now, then `workspace/index` (with the `baseline` it saved, for a
+  `persistentState` worker). That index reads the files as they are, so it already covers
+  the change that caused the start; only a worker that accepted its baseline is then also
+  sent that change as `workspace/applyChanges`. Files deleted meanwhile are simply missing
+  from the approved set.
+- Do not rely on memory of an earlier process, and do not treat the stop as a failure:
+  the host does not count it as a restart, and it keeps answering queries from the facts
+  the worker already sent.
+
 The [canonical schema](../src/CodeContext.Parser.Protocol/protocol/parser-protocol.schema.json)
 ships in releases as `protocol/parser-protocol.schema.json`. Helper packages are
 released as `CodeContext.Worker.Protocol`, `@codecontext/worker-sdk`, and
@@ -201,6 +224,16 @@ shard and in its snapshots, and uses it for one thing: `codecontext query --snap
 no instance running answers from a snapshot only when none of these files changed, none is
 gone and no absent path exists. A worker that never sends `inputs` is still indexed as
 before; its facts are simply never answered without an instance.
+
+Keep the list small, because it travels with every request. Leave out of `absent` every
+path under another path you list there (one that starts with that path followed by a
+directory separator, compared as written): it cannot exist while that path does not. A
+module resolver that records each failed lookup under a missing `node_modules` otherwise
+reports tens of thousands of paths for a few hundred directories. The host drops such
+paths itself, so listing them changes nothing but the size of the message. A report of
+more than 500,000 paths (`files` and `absent` together, as sent) is kept as none: the
+request is indexed as usual, and the shard is treated like one whose worker sends no
+`inputs`.
 
 ## Persist state across restarts (optional)
 

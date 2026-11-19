@@ -21,6 +21,13 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- The C# worker's rule for which paths may be touched, as source: the host applies it to the
+         paths a worker reports (Paths/ReportedPaths.cs). The file uses nothing of the worker's, so
+         this adds no dependency on it or on a language toolchain. -->
+    <Compile Include="..\CodeContext.CSharp.Worker\Projects\PathGuard.cs" Link="Paths\PathGuard.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- GraphContractTests references ContextService's edge-kind sets directly so the
          producer/consumer contract is checked against the real consumed lists, not a
          hand-copied duplicate. -->

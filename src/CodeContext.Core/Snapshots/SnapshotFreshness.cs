@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using CodeContext.Core.Paths;
 using CodeContext.Core.Services;
 using CodeContext.Core.Workers;
 using CodeContext.Parser.Protocol;
@@ -13,7 +14,9 @@ namespace CodeContext.Core.Snapshots
     /// <param name="Why">What about <paramref name="FirstMoved"/> counts as a change.</param>
     /// <param name="InFuture">The entry's time is later than the clock allows (<see cref="SnapshotFreshness.Tolerance"/>
     /// ahead of now): no snapshot written now could be newer, so a host does not rewrite one for it.</param>
-    internal sealed record SnapshotFreshnessResult(int Checked, string? FirstMoved, string? Why, bool InFuture, TimeSpan Elapsed)
+    /// <param name="NotChecked"><paramref name="FirstMoved"/> is a reported path the host may not look at
+    /// (<see cref="ReportedPaths"/>): whether the snapshot is current is not known, and writing it again would not help.</param>
+    internal sealed record SnapshotFreshnessResult(int Checked, string? FirstMoved, string? Why, bool InFuture, TimeSpan Elapsed, bool NotChecked = false)
     {
         public bool Unchanged => FirstMoved is null;
 
@@ -32,7 +35,11 @@ namespace CodeContext.Core.Snapshots
     /// is added, removed or renamed in it), every included file a worker claims by extension, every <c>.gitignore</c>;</item>
     /// <item>what each shard's worker reported it read besides those files (<see cref="WorkerInputs"/>, stored in the
     /// snapshot): each file or directory listed there must still exist and be no newer, each absent path must still be
-    /// absent. A shard without a report is not checked here: the caller refuses it.</item>
+    /// absent. A shard without a report is not checked here: the caller refuses it. A reported path is what a repository
+    /// made its worker say, so each is put to <see cref="ReportedPaths.RefusedOnDisk"/> first: one on a share nobody
+    /// chose, or behind a link the repository holds, is not looked at, and the answer is then "not known"
+    /// (<see cref="SnapshotFreshnessResult.NotChecked"/>), which is never "unchanged". A snapshot written before reports
+    /// were filtered as they arrive is covered by the same check here.</item>
     /// </list>
     /// An entry has changed when its time is after the capture time less <see cref="Tolerance"/> (file systems keeping
     /// times to a second or two). The root is the exception for one time: the one its writer recorded once its cache
@@ -49,6 +56,7 @@ namespace CodeContext.Core.Snapshots
         /// <param name="rootTimeTicks">The root's time its writer recorded (<see cref="SnapshotHeader.RootTimeTicks"/>); 0 for none.</param>
         /// <param name="nowUtc">The clock; <see cref="DateTime.UtcNow"/> unless given (tests).</param>
         /// <param name="tolerance"><see cref="Tolerance"/> unless given (tests).</param>
+        /// <param name="refused">Which reported paths may not be looked at; <see cref="ReportedPaths.RefusedOnDisk"/> for the root unless given (tests).</param>
         public static SnapshotFreshnessResult Check(
             RepositoryFileSelector selector,
             string rootPath,
@@ -57,7 +65,8 @@ namespace CodeContext.Core.Snapshots
             IEnumerable<WorkerInputs> inputs,
             long rootTimeTicks = 0,
             DateTime? nowUtc = null,
-            TimeSpan? tolerance = null)
+            TimeSpan? tolerance = null,
+            Func<string, bool>? refused = null)
         {
             var started = Stopwatch.GetTimestamp();
             var root = Path.GetFullPath(rootPath);
@@ -68,6 +77,8 @@ namespace CodeContext.Core.Snapshots
             string? moved = null;
             string? why = null;
             var future = false;
+            var notChecked = false;
+            var mayNotLook = refused ?? ReportedPaths.RefusedOnDisk(root);
 
             string Shown(string path)
             {
@@ -88,7 +99,17 @@ namespace CodeContext.Core.Snapshots
                 return true;
             }
 
-            SnapshotFreshnessResult Result() => new(checkedCount, moved, why, future, Stopwatch.GetElapsedTime(started));
+            SnapshotFreshnessResult Result() => new(checkedCount, moved, why, future, Stopwatch.GetElapsedTime(started), notChecked);
+
+            // Before anything else is done with a reported path: even writing it relative to the root can ask the disk
+            // about it (Windows expands a short name), so a refused one is named as it was reported.
+            bool Refused(string path)
+            {
+                if (!mayNotLook(path)) return false;
+                checkedCount++;
+                (moved, why, notChecked) = (path, "was reported by a worker and is not looked at (a share nobody chose, or behind a link in the repository)", true);
+                return true;
+            }
 
             checkedCount++;
             if (!FileChangeTime.TryRead(root, out var rootTime))
@@ -119,6 +140,7 @@ namespace CodeContext.Core.Snapshots
             {
                 foreach (var file in reported.Files)
                 {
+                    if (Refused(file)) return Result();
                     if (!FileChangeTime.TryRead(file, out var time))
                     {
                         checkedCount++;
@@ -129,6 +151,7 @@ namespace CodeContext.Core.Snapshots
                 }
                 foreach (var absent in reported.Absent)
                 {
+                    if (Refused(absent)) return Result();
                     checkedCount++;
                     if (!FileChangeTime.TryRead(absent, out _)) continue;
                     (moved, why) = (Shown(absent), "was looked for and absent when the index was saved, and exists now");

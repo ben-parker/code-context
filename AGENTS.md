@@ -126,6 +126,13 @@ as far as its worker's reported `inputs` (protocol) say what the facts were read
   and does not find) besides the approved files must reach the worker's `inputs`
   (`ProjectModel` stamps in the C# worker, `InputRecorder` in the TypeScript worker):
   `query --snapshot` trusts a snapshot only as far as those say.
+- The same holds for the host. The paths a worker reports (protocol `inputs`) are what a
+  repository made it say, so the host looks at one only after `Paths/ReportedPaths.cs`
+  allows it: `PathGuard.cs` linked into Core as source, with the root's own share as the
+  only share and no link the repository holds followed, on any platform. A report holding
+  a path refused by its spelling is kept as none, and the freshness check answers "not
+  known" for a refused path, never "unchanged". New host code that touches a path a
+  worker named goes through it.
 - Every worker-owned node ID, edge ID, and edge source ID starts with
   `<parserId>:<workspaceId>:`. IDs are stable semantic identities, not source offsets.
   A worker must replace all facts whose meaning may change and reanalyze semantic

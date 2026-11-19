@@ -247,6 +247,67 @@ public class AnalysisDeltaApplierTests
     }
 
     [Fact]
+    public void Inputs_AbsentPathsUnderAListedAbsentPath_AreDropped_SoCollapsedAndFullReportsAreTheSame()
+    {
+        var root = OperatingSystem.IsWindows() ? @"C:\repo\" : "/repo/";
+        var s = Path.DirectorySeparatorChar;
+        string[] full =
+        [
+            root + $"b{s}node_modules{s}@types{s}x{s}index.d.ts",
+            root + $"a{s}node_modules{s}x.js",
+            root + $"a{s}node_modules",
+            root + $"a{s}node_modules{s}x{s}package.json",
+            // Not under it: the name only starts the same way.
+            root + $"a{s}node_modules.bak",
+            root + $"a{s}node_modules-x{s}y",
+            root + $"b{s}node_modules{s}",
+            root + "c",
+            root + $"c{s}d",
+        ];
+        string[] collapsed =
+            [root + $"a{s}node_modules", root + $"a{s}node_modules-x{s}y", root + $"a{s}node_modules.bak", root + $"b{s}node_modules{s}", root + "c"];
+        // A file is never dropped, whatever is listed as absent above it.
+        string[] files = [root + $"c{s}d{s}read.txt"];
+
+        var fromFull = ParserProcessSupervisor.NormalizeInputs(new WorkerInputs(files, full))!;
+        var fromCollapsed = ParserProcessSupervisor.NormalizeInputs(new WorkerInputs(files, collapsed.Reverse().ToList()))!;
+
+        Assert.Equal(collapsed, fromFull.Absent);
+        Assert.Equal(files, fromFull.Files);
+        Assert.True(ShardAnnotation.SameInputs(fromFull, fromCollapsed));
+    }
+
+    [Fact]
+    public void Inputs_WithAPathTheHostMayNotLookAt_AreKeptAsNone()
+    {
+        var root = OperatingSystem.IsWindows() ? @"C:\repo\" : "/repo/";
+        var bad = root + "refused";
+
+        // Wherever it is listed: the shard is then never answered without a worker, rather than checked without it.
+        Assert.Null(ParserProcessSupervisor.NormalizeInputs(new WorkerInputs([root + "a", bad], []), path => path == bad));
+        Assert.Null(ParserProcessSupervisor.NormalizeInputs(new WorkerInputs([root + "a"], [bad]), path => path == bad));
+        Assert.NotNull(ParserProcessSupervisor.NormalizeInputs(new WorkerInputs([root + "a"], [root + "b"]), path => path == bad));
+        // One that the host drops anyway refuses nothing.
+        Assert.NotNull(ParserProcessSupervisor.NormalizeInputs(new WorkerInputs([root + "a"], [root + "b", bad + "x", root + "b" + Path.DirectorySeparatorChar + "refused"]),
+            path => path.EndsWith("refused", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public void Inputs_AreTakenFromARequestsFirstChunkOnly()
+    {
+        var root = OperatingSystem.IsWindows() ? @"C:\repo\" : "/repo/";
+        var reported = new WorkerInputs([root + "b", root + "a"], []);
+
+        Assert.Equal([root + "a", root + "b"], ParserProcessSupervisor.InputsOfChunk(reported, firstChunk: true, requestId: 1)!.Files);
+        // A later chunk's are not read at all, so not checked either.
+        Assert.Null(ParserProcessSupervisor.InputsOfChunk(reported, firstChunk: false, requestId: 1));
+        Assert.Null(ParserProcessSupervisor.InputsOfChunk(new WorkerInputs(null!, null!), firstChunk: false, requestId: 1));
+        Assert.Null(ParserProcessSupervisor.InputsOfChunk(null, firstChunk: true, requestId: 1));
+        Assert.Throws<ParserProtocolViolationException>(
+            () => ParserProcessSupervisor.InputsOfChunk(new WorkerInputs([null!], []), firstChunk: true, requestId: 1));
+    }
+
+    [Fact]
     public async Task Origin_BecomesTheCommitsLineage_EstablishingOnAReplacementOrABaseline()
     {
         var sink = (IAnalysisDeltaSink)_applier;

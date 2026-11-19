@@ -65,7 +65,8 @@ public sealed class WorkerHibernationTests : IAsyncLifetime
     {
         var time = new ManualTimeProvider();
         var timer = new WorkerHibernation(instance.Workers, instance.Coordinator, hibernation ?? WorkerHibernationSettings.Fixed(Idle),
-            time, () => instance.Snapshots.WrittenMatchesStore, memoryTrim: memoryTrim?.Invoke(time));
+            time, () => instance.Snapshots.WrittenMatchesStore, memoryTrim: memoryTrim?.Invoke(time),
+            writesSnapshots: () => instance.Snapshots.WritesSnapshots);
         var host = new Host(instance, timer, time);
         _started.Add(host);
         beforeStart?.Invoke(instance, time);
@@ -152,6 +153,38 @@ public sealed class WorkerHibernationTests : IAsyncLifetime
         await host.IdleAsync();
         Assert.False(host.Instance.Workers.IsHibernated("fake"));
         Assert.Equal(Outcome.StateNotSaved, await host.TryHibernateNowAsync());
+
+        // Its state can never be saved, so nothing looks again until the worker has work.
+        var checks = host.Hibernation.Checks;
+        await host.AdvanceAndCheckAsync(Idle + Idle);
+        Assert.Equal(checks, host.Hibernation.Checks);
+    }
+
+    /// <summary>
+    /// Another worker's commit a second before the persistent worker's idle time is up leaves the snapshot pending when
+    /// the check runs. The check comes back once the snapshot can have been written, not a whole idle time later.
+    /// </summary>
+    [Fact]
+    public async Task PersistentWorker_CheckedWhileASnapshotIsPending_HibernatesSoonAfterItIsWritten()
+    {
+        File.WriteAllText(Path.Combine(Root, "o.other"), "o");
+        var instance = new PersistentStateTests.Instance(Root, KeyPath,
+            [PersistentStateTests.Instance.FakeWorker(["--behavior", "persistent-state"]),
+             PersistentStateTests.Instance.FakeWorker(["--behavior", "strict", "--parser-id", "other"])],
+            settings => settings with { QuietPeriod = TimeSpan.FromMilliseconds(1500) }, cache: true);
+        var host = await StartAsync(instance);
+        await host.WaitForStateWrittenAsync();
+        await host.AdvanceAndCheckAsync(Idle - TimeSpan.FromSeconds(1));
+        File.WriteAllText(Path.Combine(Root, "o.other"), "o2");
+        await instance.Coordinator.RefreshFileAsync(Path.Combine(Root, "o.other"));
+
+        await host.AdvanceAndCheckAsync(TimeSpan.FromSeconds(1));
+        Assert.False(instance.Workers.IsHibernated("fake"));
+        await host.WaitForStateWrittenAsync();
+
+        await host.AdvanceAndCheckAsync(WorkerHibernation.StateRetry);
+        Assert.True(instance.Workers.IsHibernated("fake"));
+        Assert.False(instance.Workers.IsHibernated("other"));
     }
 
     [Fact]
@@ -443,6 +476,32 @@ public sealed class WorkerHibernationTests : IAsyncLifetime
         Assert.Equal(await FreshScanAsync(), Facts(host.Instance.Database));
 
         // And it can hibernate again.
+        await host.WaitForStateWrittenAsync();
+        await host.IdleAsync();
+        Assert.True(host.Instance.Workers.IsHibernated("fake"));
+    }
+
+    /// <summary>A full rescan is a wake too: when it fails with the process up, the worker is not hibernated, and the next change re-indexes.</summary>
+    [Fact]
+    public async Task FailedRescanOfAHibernatedWorker_IsNotReportedAsHibernated_AndTheNextChangeReIndexes()
+    {
+        var host = await StartAsync();
+        await host.WaitForStateWrittenAsync();
+        await host.IdleAsync();
+        Assert.True(host.Instance.Workers.IsHibernated("fake"));
+
+        File.WriteAllText(FailMarker, "fail");
+        Assert.NotNull(await host.Instance.Coordinator.TryRequestFullRescanAsync());
+        await host.Instance.WaitForAsync(() => host.Session.State == ParserSessionState.Failed && !host.Instance.Coordinator.IsBusy, "the failed rescan");
+        Assert.NotNull(host.Session.ProcessId);
+        Assert.False(host.Instance.Workers.IsHibernated("fake"));
+
+        File.Delete(FailMarker);
+        File.WriteAllText(Path.Combine(Root, "d.fake"), "d");
+        await host.Instance.Coordinator.RefreshFileAsync(Path.Combine(Root, "d.fake"));
+        Assert.Equal(ParserSessionState.Ready, host.Session.State);
+        Assert.Equal(await FreshScanAsync(), Facts(host.Instance.Database));
+
         await host.WaitForStateWrittenAsync();
         await host.IdleAsync();
         Assert.True(host.Instance.Workers.IsHibernated("fake"));

@@ -278,29 +278,9 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
                 return;
             }
 
-            var started = Time.GetUtcNow();
-            var supervisor = EnsureSupervisor(state);
-            var generation = ++state.Generation;
-            await supervisor.OpenWorkspaceAsync(new OpenWorkspaceParams(
-                DefaultWorkspaceId, _options.RootPath,
-                state.Registration.Manifest.ProjectMarkers ?? [], files), ct).ConfigureAwait(false);
-            // The offer rule (plan 3.6): the source checks the shard and its state file; the supervisor drops the
-            // baseline again unless the worker declared the capability and this is its process's first mutation.
-            var initialized = supervisor.Initialized;
-            var baseline = initialized?.Capabilities.PersistentState == true
-                ? BaselineSource?.TryGetBaseline(parserId, DefaultWorkspaceId, initialized.ParserVersion)
-                : null;
-            state.LastBaselineOutcome = null;
-            var result = await supervisor.IndexWorkspaceAsync(new IndexWorkspaceParams(
-                DefaultWorkspaceId, generation, files, baseline), ct, progressHandler).ConfigureAwait(false);
-            state.LastBaselineOutcome = result.Baseline;
-            RecordIndexDuration(state, started);
-            ReplaceApprovedFiles(state, files);
+            await IndexCoreAsync(state, files, ct, progressHandler).ConfigureAwait(false);
             state.EverIndexed = true;
             state.HoldsLoadedFacts = false;
-            // An index is the wake: it ran on a new process, with the baseline where there is one.
-            state.Hibernated = false;
-            state.WakeIncomplete = false;
         }
         finally
         {
@@ -448,10 +428,28 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
     /// </summary>
     private async Task<bool> WakeCoreAsync(WorkerState state, IReadOnlyList<string> files, CancellationToken ct)
     {
-        // From here a process may run whatever happens; until the index completes, the next operation re-indexes.
-        state.Hibernated = false;
-        state.WakeIncomplete = true;
-        state.LastBaselineOutcome = null;
+        var result = await IndexCoreAsync(state, files, ct).ConfigureAwait(false);
+        _logger.LogInformation("Worker '{ParserId}' woke: {Outcome}.", state.Registration.Manifest.ParserId,
+            result.Baseline == BaselineOutcomes.Accepted ? "its saved state was accepted" : "it re-read the workspace");
+        return result.Baseline == BaselineOutcomes.Accepted;
+    }
+
+    /// <summary>
+    /// One index of <paramref name="files"/>, under the worker's lock, for a scan and for a wake alike: the workspace
+    /// is opened, the baseline offered where the offer rule allows (plan 3.6: the source checks the shard and its
+    /// state file; the supervisor drops it again unless the worker declared the capability and this is its process's
+    /// first mutation), and on success the answer, the duration and the approved files are recorded.
+    /// A worker that needed a wake is no longer hibernated from the start, since a process may run whatever happens,
+    /// and its wake stays incomplete until the index succeeds, so after a failure the next operation re-indexes.
+    /// </summary>
+    private async Task<IndexWorkspaceResult> IndexCoreAsync(
+        WorkerState state, IReadOnlyList<string> files, CancellationToken ct, Action<AnalysisProgress>? progressHandler = null)
+    {
+        if (state.NeedsWake)
+        {
+            state.Hibernated = false;
+            state.WakeIncomplete = true;
+        }
         var started = Time.GetUtcNow();
         var supervisor = EnsureSupervisor(state);
         var generation = ++state.Generation;
@@ -462,15 +460,14 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
         var baseline = initialized?.Capabilities.PersistentState == true
             ? BaselineSource?.TryGetBaseline(state.Registration.Manifest.ParserId, DefaultWorkspaceId, initialized.ParserVersion)
             : null;
+        state.LastBaselineOutcome = null;
         var result = await supervisor.IndexWorkspaceAsync(new IndexWorkspaceParams(
-            DefaultWorkspaceId, generation, files, baseline), ct).ConfigureAwait(false);
-        ReplaceApprovedFiles(state, files);
+            DefaultWorkspaceId, generation, files, baseline), ct, progressHandler).ConfigureAwait(false);
         state.LastBaselineOutcome = result.Baseline;
         RecordIndexDuration(state, started);
+        ReplaceApprovedFiles(state, files);
         state.WakeIncomplete = false;
-        _logger.LogInformation("Worker '{ParserId}' woke: {Outcome}.", state.Registration.Manifest.ParserId,
-            result.Baseline == BaselineOutcomes.Accepted ? "its saved state was accepted" : "it re-read the workspace");
-        return result.Baseline == BaselineOutcomes.Accepted;
+        return result;
     }
 
     /// <summary>What <see cref="TryHibernateAsync"/> did.</summary>

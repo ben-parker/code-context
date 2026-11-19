@@ -265,7 +265,7 @@ namespace CodeContext.Core.Snapshots
                 try
                 {
                     var result = filesSince(capturedUtc, inputs!, rootTimeTicks);
-                    if (result.Unchanged || result.InFuture) return;
+                    if (result.Unchanged || result.InFuture || result.NotChecked) return;
                     _logger.LogInformation(
                         "'{Path}' {Why}; the verified graph will be written again for one-shot queries.", result.FirstMoved, result.Why);
                     lock (_gate)
@@ -307,6 +307,12 @@ namespace CodeContext.Core.Snapshots
                 lock (_gate)
                     return _status.Mode == SnapshotCacheMode.Writer && !_stopping && !_captureRequested && !_writing && view.SameAs(_written);
             }
+        }
+
+        /// <summary>This instance writes snapshots (it holds the writer lock and is not stopping), so a worker's state can come to be saved.</summary>
+        internal bool WritesSnapshots
+        {
+            get { lock (_gate) return _status.Mode == SnapshotCacheMode.Writer && !_stopping; }
         }
 
         /// <summary>A capture was requested from the coordinator and its result not yet handled. For tests.</summary>
