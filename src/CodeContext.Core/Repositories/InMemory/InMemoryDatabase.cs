@@ -791,16 +791,16 @@ namespace CodeContext.Core.Repositories.InMemory
         }
 
         /// <summary>
-        /// Invalidates cached statistics/adjacency; called after every committed mutation. The composite adjacency is
-        /// also dropped, not only made stale: it references every shard of the map it was built over, so a stale one
-        /// would keep a replaced generation's shards alive until the next read (an idle host would hold two copies).
-        /// </summary>
-        /// <summary>
         /// Moves with every published change (a commit, a reconciliation, a prune, a legacy in-place write). A reader that
         /// sees the same value before and after its reads read one generation.
         /// </summary>
         internal long MutationVersion => Interlocked.Read(ref _version);
 
+        /// <summary>
+        /// Invalidates cached statistics/adjacency; called after every committed mutation. The composite adjacency is
+        /// also dropped, not only made stale: it references every shard of the map it was built over, so a stale one
+        /// would keep a replaced generation's shards alive until the next read (an idle host would hold two copies).
+        /// </summary>
         public void NotifyMutation()
         {
             Interlocked.Increment(ref _version);
