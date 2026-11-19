@@ -588,6 +588,42 @@ public sealed class WorkerHibernationTests : IAsyncLifetime
     }
 
     /// <summary>
+    /// The real C# worker: a call through <c>base</c> keeps its dispatch marker across hibernation, and an edit made
+    /// while it is down that changes only whether the call goes through <c>base</c> (same caller, callee, line and
+    /// column) wakes it through its saved state and is re-emitted: the graph equals a fresh scan, both ways.
+    /// </summary>
+    [Fact]
+    public async Task CSharpWorker_BaseCallBecomesThisCallWhileHibernated_WakesAndEqualsAFreshScan()
+    {
+        foreach (var name in new[] { "a.fake", "b.fake" }) File.Delete(Path.Combine(Root, name));
+        File.WriteAllText(Path.Combine(Root, "Folder.cs"), "namespace Demo; public class Folder { public virtual int Validate() => 1; }\n");
+        var plain = Path.Combine(Root, "Plain.cs");
+        string Source(string receiver) => $"namespace Demo; public class Plain : Folder {{ public int Quietly() => {receiver}.Validate(); }}\n";
+        File.WriteAllText(plain, Source("base"));
+        var host = await StartAsync(CSharpWorkerPipeline.CSharpWorkerRegistration());
+        Assert.Contains(host.Instance.Database.EnumerateEdges(),
+            edge => edge.Metadata?.GetValueOrDefault(EdgeMetadataKeys.Dispatch) == EdgeDispatch.Static);
+
+        foreach (var receiver in new[] { "this", "base" })
+        {
+            await host.WaitForStateWrittenAsync("csharp");
+            await host.IdleAsync();
+            Assert.True(host.Instance.Workers.IsHibernated("csharp"));
+
+            File.WriteAllText(plain, Source(receiver));
+            await host.Instance.Coordinator.NotifyFileChangedAsync(plain, FileChangeType.Changed);
+            await host.Instance.Coordinator.RunMutationAsync(_ => Task.CompletedTask);
+            Assert.False(host.Instance.Workers.IsHibernated("csharp"));
+            Assert.Equal(receiver == "base", host.Instance.Database.EnumerateEdges()
+                .Any(edge => edge.Metadata?.GetValueOrDefault(EdgeMetadataKeys.Dispatch) == EdgeDispatch.Static));
+            Assert.Equal(await FreshScanAsync(new PersistentStateTests.Instance(Root, KeyPath, CSharpWorkerPipeline.CSharpWorkerRegistration(), null, cache: false)),
+                Facts(host.Instance.Database));
+        }
+        Assert.All(host.Instance.WorkerLog.Entries.Where(entry => entry.Message.Contains("woke:", StringComparison.Ordinal)),
+            wake => Assert.Contains("woke: its saved state was accepted", wake.Message, StringComparison.Ordinal));
+    }
+
+    /// <summary>
     /// The convergence walk with hibernation: the real C# worker, a seeded extended <see cref="EditWalk"/> (files
     /// created, edited in a body and in a declaration, renamed, deleted; project constants, references and
     /// <c>Directory.Build.props</c>), and before every step the worker hibernates once its state is written. The step's

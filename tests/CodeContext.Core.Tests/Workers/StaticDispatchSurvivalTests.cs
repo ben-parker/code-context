@@ -6,6 +6,7 @@ using CodeContext.Core.Services;
 using CodeContext.Core.Snapshots;
 using CodeContext.Core.Tests.Snapshots;
 using CodeContext.Core.Workers;
+using CodeContext.CSharp.Worker;
 using CodeContext.Parser.Protocol;
 using Microsoft.Extensions.Options;
 
@@ -15,8 +16,9 @@ namespace CodeContext.Core.Tests.Workers;
 /// A call through <c>base</c> is marked statically bound (<see cref="EdgeMetadataKeys.Dispatch"/>), and
 /// <see cref="ContextService"/> lists it only for the method it names. The marker is a per-edge fact, so it must
 /// survive everything that stores, saves or rebuilds edges: the host's compact store, a snapshot written and loaded
-/// on a cached restart (with the C# worker's saved state accepted, so the facts are the snapshot's), and the one-shot
-/// <c>query --snapshot</c> path. Each is asked the same question, with the real C# worker.
+/// on a cached restart (with the C# worker's saved state accepted, so the facts are the snapshot's), the one-shot
+/// <c>query --snapshot</c> path, and the C# worker's own saved state and incremental re-emission. Each is asked the
+/// same question, with the real C# worker.
 /// </summary>
 public sealed class StaticDispatchSurvivalTests : IDisposable
 {
@@ -26,6 +28,7 @@ public sealed class StaticDispatchSurvivalTests : IDisposable
     private readonly string _base = Directory.CreateTempSubdirectory("cc-dispatch-").FullName;
     private string Root => Path.Combine(_base, "repo");
     private string KeyPath => Path.Combine(_base, "home", "cache.key");
+    private string StateDirectory => Path.Combine(Root, ".codecontext", "cache", "default");
 
     public StaticDispatchSurvivalTests()
     {
@@ -83,6 +86,60 @@ public sealed class StaticDispatchSurvivalTests : IDisposable
             DateTime.UtcNow + SnapshotFreshness.Tolerance);
         Assert.True(opened.Snapshot is not null, opened.Reason);
         Assert.Equal(served, await AnswersAsync(opened.Snapshot!.Context, expectCache: CacheState.Snapshot));
+    }
+
+    /// <summary>
+    /// The worker's saved state carries the marker into a restored process (as a wake from hibernation restores one), and
+    /// an edit that changes only whether a call goes through <c>base</c> (same caller, callee, line and column) is
+    /// re-emitted, live and after a restore: the graph equals a fresh scan's after each.
+    /// </summary>
+    [Fact]
+    public async Task OnlyTheBindingChanges_IsReEmitted_LiveAndAfterARestore()
+    {
+        // Plain overrides nothing, so `base.Validate()` and `this.Validate()` both bind to Folder.Validate.
+        var plain = Write("Plain.cs", PlainSource("base"));
+        Directory.CreateDirectory(StateDirectory);
+
+        var host = new InProcessCSharpHost(Root);
+        await host.IndexAsync();
+        Assert.Contains(host.Facts(), fact => fact.Contains("Plain.Quietly()", StringComparison.Ordinal) && IsStatic(fact));
+        await AssertSameAsFreshAsync(host, "after the first index");
+
+        File.WriteAllText(plain, PlainSource("this"));
+        await host.ApplyChangesAsync([new FileChangeDto(plain, FileChangeKinds.Changed)]);
+        await AssertSameAsFreshAsync(host, "after base became this");
+
+        var baseline = await host.SaveAsync(StateDirectory);
+        host.Restart();
+        File.WriteAllText(plain, PlainSource("base"));
+        var result = await host.IndexAsync(baseline);
+        Assert.Equal(BaselineOutcomes.Accepted, result.Baseline);
+        await AssertSameAsFreshAsync(host, "after a restore with this become base while down");
+
+        baseline = await host.SaveAsync(StateDirectory);
+        host.Restart();
+        result = await host.IndexAsync(baseline);
+        Assert.Equal(BaselineOutcomes.Accepted, result.Baseline);
+        Assert.Contains(host.Facts(), fact => fact.Contains("Plain.Quietly()", StringComparison.Ordinal) && IsStatic(fact));
+        await AssertSameAsFreshAsync(host, "after a restore");
+
+        File.WriteAllText(plain, PlainSource("this"));
+        await host.ApplyChangesAsync([new FileChangeDto(plain, FileChangeKinds.Changed)]);
+        await AssertSameAsFreshAsync(host, "after base became this in the restored worker");
+    }
+
+    private static string PlainSource(string receiver)
+        => $"namespace Demo; public class Plain : Folder {{ public int Quietly() => {receiver}.Validate(); }}\n";
+
+    private static bool IsStatic(string fact) => fact.Contains($"\"{EdgeMetadataKeys.Dispatch}\":\"{EdgeDispatch.Static}\"", StringComparison.Ordinal);
+
+    private async Task AssertSameAsFreshAsync(InProcessCSharpHost host, string when)
+    {
+        var fresh = new InProcessCSharpHost(Root);
+        await fresh.IndexAsync();
+        var (expected, actual) = (fresh.Facts(), host.Facts());
+        Assert.True(expected.SequenceEqual(actual),
+            $"{when}: missing {string.Join(" ; ", expected.Except(actual).Take(3))}; stale {string.Join(" ; ", actual.Except(expected).Take(3))}");
     }
 
     private PersistentStateTests.Instance Start(bool cache)

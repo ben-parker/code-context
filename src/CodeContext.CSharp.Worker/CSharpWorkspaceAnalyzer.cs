@@ -1523,7 +1523,10 @@ public sealed class CSharpWorkspaceAnalyzer
             hasher.Str(edge.Kind);
             hasher.Int(edge.Line);
             hasher.Int(edge.Column);
-            hasher.Int(analysis.Holds(edge.TargetId) ? 1 : 0);
+            // Whether the call is statically bound is emitted (edge metadata "dispatch") and can change alone, as
+            // when base.M() becomes this.M() in a method that does not override M. It shares this field with the
+            // target's presence so that a bucket with no such call hashes as it always did.
+            hasher.Int((analysis.Holds(edge.TargetId) ? 1 : 0) | (edge.StaticallyBound ? 2 : 0));
         }
         return bucket.Hash = hasher.GetHashAndReset();
     }
