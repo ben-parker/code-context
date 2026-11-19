@@ -69,6 +69,9 @@ public sealed class CSharpWorkspaceAnalyzer
     private readonly string _workspaceIdPrefix;
 
     /// <summary>The projects as last read, or null when this workspace has no known root.</summary>
+    /// <summary>The runtime references, empty until a unit of this analyzer takes them.</summary>
+    private ImmutableArray<MetadataReference> _runtimeReferences = [];
+
     private ProjectModel? _model;
     private DateTime _builtAt;
 
@@ -172,10 +175,14 @@ public sealed class CSharpWorkspaceAnalyzer
     /// The runtime's assemblies, held in memory once read, for a unit that has a file to bind. Most
     /// workspaces put every file in a project and never need them.
     /// </summary>
+    /// <summary>
+    /// The only way to the runtime references, so that <see cref="RuntimeReferenceLoads"/> counts every unit
+    /// that took them and nothing brings their images into memory unasked.
+    /// </summary>
     private ImmutableArray<MetadataReference> RuntimeReferences()
     {
         RuntimeReferenceLoads++;
-        return SharedReferences.Value;
+        return _runtimeReferences = SharedReferences.Value;
     }
 
     private static ImmutableArray<MetadataReference> ResolveReferences()
@@ -1257,11 +1264,10 @@ public sealed class CSharpWorkspaceAnalyzer
             absent.UnionWith(model.AbsentBoundaryMarkers);
             foreach (var project in model.Projects) files.UnionWith(project.MetadataReferences);
         }
-        if (_units.Exists(unit => unit.Project is not { } project || project.State == ProjectCoverageState.Fallback))
-        {
-            files.UnionWith(SharedReferences.Value.OfType<PortableExecutableReference>()
-                .Select(reference => reference.FilePath).OfType<string>());
-        }
+
+        // Only once a unit has taken them: asking here would load them for a workspace that binds nothing against them.
+        files.UnionWith(_runtimeReferences.OfType<PortableExecutableReference>()
+            .Select(reference => reference.FilePath).OfType<string>());
         files.ExceptWith(_files);
 
         // The host looks at each of these with no guard of its own, so what this worker may not read is not named.
