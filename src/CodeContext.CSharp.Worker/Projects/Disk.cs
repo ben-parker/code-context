@@ -3,6 +3,7 @@
 // guard sits. A test fails if the suppression appears anywhere else.
 #pragma warning disable RS0030
 
+using System.Reflection.PortableExecutable;
 using System.Xml;
 using System.Xml.Linq;
 using Microsoft.CodeAnalysis;
@@ -133,18 +134,38 @@ public sealed class Disk
     }
 
     /// <summary>
-    /// An assembly to compile against. Given a file, Roslyn opens any further modules of the
-    /// assembly itself, later, by a plain file name beside it, and asks nobody. Beside a file
-    /// in the repository that name could be a link, so such an assembly is read whole here and
-    /// Roslyn is given the bytes, from which it can open nothing.
+    /// An assembly to compile against, held as its metadata alone: binding reads nothing else, and the
+    /// rest of the image (the code, most of an implementation assembly) would only take up memory. The
+    /// metadata is read here and the file closed before this returns, so no handle is kept on it.
+    ///
+    /// Given a file, Roslyn opens any further modules of the assembly itself, later, by a plain file
+    /// name beside it, and asks nobody. Beside a file in the repository that name could be a link, so
+    /// there Roslyn is given only what was read here, from which it can open nothing. Outside the
+    /// repository an assembly that has further modules is handed over as a file, as before, so they bind.
     /// </summary>
     /// <exception cref="FileNotFoundException">The file is missing or refused.</exception>
     public MetadataReference Reference(string path)
     {
         if (Refused(path)) throw Absent(path);
-        return _guard.InRepository(path)
-            ? MetadataReference.CreateFromImage(File.ReadAllBytes(path), filePath: path)
-            : MetadataReference.CreateFromFile(path);
+        ModuleMetadata module;
+        using (var stream = File.OpenRead(path))
+        {
+            module = ModuleMetadata.CreateFromStream(stream, PEStreamOptions.PrefetchMetadata);
+        }
+        try
+        {
+            if (module.GetModuleNames().IsEmpty || _guard.InRepository(path))
+            {
+                return AssemblyMetadata.Create(module).GetReference(filePath: path);
+            }
+        }
+        catch
+        {
+            module.Dispose();
+            throw;
+        }
+        module.Dispose();
+        return MetadataReference.CreateFromFile(path);
     }
 
     /// <summary>
