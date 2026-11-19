@@ -196,6 +196,22 @@ public sealed class SnapshotFreshnessTests : IDisposable
         Assert.Equal(relative, Check(captured).FirstMoved);
     }
 
+    [Fact]
+    public void ACaptureTimeAfterThePresent_IsNeverCurrent()
+    {
+        // The clock was set back since the capture: anything edited since reads as older than the snapshot.
+        BuildAndCapture();
+        var now = DateTime.UtcNow;
+
+        var ahead = Check(now + SnapshotFreshness.Tolerance + TimeSpan.FromSeconds(1), now: now);
+        var within = Check(now + SnapshotFreshness.Tolerance - TimeSpan.FromSeconds(1), now: now);
+
+        Assert.False(ahead.Unchanged);
+        Assert.Contains("clock", ahead.Why);
+        Assert.False(ahead.InFuture);
+        Assert.True(within.Unchanged, within.FirstMoved);
+    }
+
     [Theory]
     [InlineData("src/Lib.csproj")]
     [InlineData("src/obj/project.assets.json")]

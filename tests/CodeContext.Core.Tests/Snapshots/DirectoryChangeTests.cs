@@ -152,7 +152,7 @@ public sealed class DirectoryChangeTests : IAsyncLifetime
         var opened = OneShotSnapshot.TryOpen(
             new CodeContextOptions { RootPath = Root, CacheKeyPath = KeyPath },
             new StaticWorkerCatalog(CachedInstance.FakeWorker("normal")),
-            checkAgainst: DateTime.UtcNow + SnapshotFreshness.Tolerance + TimeSpan.FromSeconds(1));
+            checkAgainst: DateTime.UtcNow + SnapshotFreshness.Tolerance);
 
         Assert.True(opened.Snapshot is not null, opened.Reason);
         Assert.True(Same(await FindAsync(opened.Snapshot!.Context, "freshClass"), "fresh/deep/fresh.fake"));

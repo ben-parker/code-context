@@ -39,6 +39,7 @@ namespace CodeContext.Core.Snapshots
     /// times to a second or two). The root is the exception for one time: the one its writer recorded once its cache
     /// directory existed, since making <c>.codecontext/</c> moves the root's time just before the first capture.
     /// A time more than <see cref="Tolerance"/> ahead of now counts as changed, flagged <see cref="SnapshotFreshnessResult.InFuture"/>.
+    /// A capture time that far ahead of now is never current: the clock was set back, and times say nothing.
     /// </summary>
     internal static class SnapshotFreshness
     {
@@ -93,6 +94,15 @@ namespace CodeContext.Core.Snapshots
             }
 
             SnapshotFreshnessResult Result() => new(checkedCount, moved, why, future, Stopwatch.GetElapsedTime(started));
+
+            // A capture later than the present: the clock was set back since, and whatever was edited meanwhile has a
+            // time before the capture. Nothing by time can be said then. Not flagged InFuture: a host writes again,
+            // with the time its clock has now.
+            if (capturedUtc > ahead)
+            {
+                (moved, why) = (".", "is not checked: the saved index is dated after the present time (the clock was set back)");
+                return Result();
+            }
 
             checkedCount++;
             if (!FileChangeTime.TryRead(root, out var rootTime))
