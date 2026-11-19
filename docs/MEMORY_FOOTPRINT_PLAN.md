@@ -119,6 +119,23 @@ Tests: a store test that facts with equal metadata share one instance after a lo
 after a commit; the existing snapshot round-trip, convergence and byte-identical
 response tests stay green.
 
+### M1b: derived edge ids, and the next density step
+
+As built: see the log. Not built, and the next step if the host's graph has to shrink again (measured in the
+final review on a synthetic shard of 200,000 nodes and 800,000 edges, and by counting fields):
+
+An edge costs 168 bytes before its strings and metadata: `CodeEdge` 56, `EdgeId` 56, a `ConcurrentDictionary`
+node 48 and its bucket slot 8. Two changes take about 65 of them. (1) Plain `Dictionary` tables for a committed
+shard, about 24 bytes per edge and 20 per node. The tables are concurrent only for the legacy in-place
+mutators (`UpsertNode`, `UpsertEdge`, `RemoveNode`, `RemoveEdgesTouchingNode`, `ReplaceAll`, `AsHeapShard`),
+which no production path calls; they go first, or become copy-on-write. This is also what makes a one-file
+commit cheap: today it copies the whole shard into new tables, 0.9 s and 76 MB allocated for that shard, where a
+`Dictionary` can be cloned without rehashing. (2) Folding `EdgeId` into `CodeEdge` (the two pieces, the hash
+and the canonical flag beside the endpoint ids it already holds), about 40 bytes per edge; the table key is
+then the edge or a string, and the snapshot reader and writer, which build and read the parts, change with
+it. Edge metadata is the other large share and has no cheap cut: line and column make it nearly unique per
+edge (40,721 instances for 90,263 edges on this repository).
+
 ### M2: trace the non-live memory
 
 Investigation, read-only apart from throwaway instrumentation. Questions: what the
