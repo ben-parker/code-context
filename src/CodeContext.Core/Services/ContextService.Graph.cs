@@ -264,27 +264,38 @@ namespace CodeContext.Core.Services
 
             var affected = walk.AffectedBy(seed.Seeds, request.MaxDepth, out var depthLimited);
             response.DepthLimited = depthLimited;
-            var listed = new List<(GraphWalk.Affected Item, CodeNode Node)>(affected.Count);
-            foreach (var item in affected)
+            // What is hidden is only counted. The walk hands dependents over in order of distance, so the entries to
+            // return lie in the distances up to the one the limit falls in: only those are ordered, not everything found.
+            var listed = affected;
+            if (!request.IncludeTests)
             {
-                var node = walk.Node(item.NodeId)!;
-                if (!request.IncludeTests && walk.IsTestNode(node)) response.TestsHidden++;
-                else listed.Add((item, node));
+                response.TestsHidden = listed.RemoveAll(item => item.Hidden);
             }
-            listed.Sort((left, right) =>
+            var files = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var item in listed)
             {
-                var order = left.Item.Distance.CompareTo(right.Item.Distance);
+                if (!string.IsNullOrEmpty(item.Node.FilePath)) files.Add(item.Node.FilePath);
+            }
+            var ordered = listed.Count;
+            if (listed.Count > request.Limit)
+            {
+                var last = listed[request.Limit - 1].Distance;
+                ordered = request.Limit;
+                while (ordered < listed.Count && listed[ordered].Distance == last) ordered++;
+            }
+            listed.Sort(0, ordered, Comparer<GraphWalk.Affected>.Create((left, right) =>
+            {
+                var order = left.Distance.CompareTo(right.Distance);
                 if (order == 0) order = GraphAdjacency.ComparePaths(left.Node.FilePath ?? string.Empty, right.Node.FilePath ?? string.Empty);
                 if (order == 0) order = left.Node.StartLine.CompareTo(right.Node.StartLine);
                 return order != 0 ? order : string.CompareOrdinal(left.Node.Id, right.Node.Id);
-            });
+            }));
 
             response.TotalCount = listed.Count;
-            response.FileCount = listed.Select(entry => entry.Node.FilePath).Where(path => !string.IsNullOrEmpty(path))
-                .Distinct(StringComparer.Ordinal).Count();
-            foreach (var (item, node) in listed.Take(request.Limit))
+            response.FileCount = files.Count;
+            foreach (var item in listed.Take(request.Limit))
             {
-                var compact = ToCompact<GraphAffectedNode>(node);
+                var compact = ToCompact<GraphAffectedNode>(item.Node);
                 compact.Distance = item.Distance;
                 compact.Relation = item.Relation;
                 compact.Via = PublicIdentifier(walk.Node(item.Via)!);

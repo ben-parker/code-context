@@ -267,10 +267,16 @@ namespace CodeContext.Core.Services
 
         // ---- Affected ----
 
-        public sealed record Affected(string NodeId, int Distance, string Relation, string Via, string? Through);
+        /// <summary>
+        /// A dependent: its node, how far it is, the edge kind that carries the impact, the id of the symbol it uses
+        /// (<paramref name="Via"/>), the id of the declaration a dispatching use names (<paramref name="Through"/>), and
+        /// whether it is in a test file the query leaves out (then it is counted, and impact goes no further).
+        /// </summary>
+        public sealed record Affected(CodeNode Node, int Distance, string Relation, string Via, string? Through, bool Hidden);
 
         /// <summary>
-        /// Everything that depends on the seeds within <paramref name="maxDepth"/> hops, nearest first, seeds excluded.
+        /// Everything that depends on the seeds within <paramref name="maxDepth"/> hops, in order of distance (callers
+        /// rely on it), seeds excluded.
         /// Impact moves from a symbol to: the source of every usage edge into it (relation filter applied); without a
         /// relation filter, every implementation or override of it (it must stay compatible with the declaration); and,
         /// through dispatch, the source of every usage edge into a declaration it implements or overrides, at any height,
@@ -339,15 +345,16 @@ namespace CodeContext.Core.Services
 
                 bool Add(CodeEdge edge, string via, string? through)
                 {
-                    if (edge.SourceId is not { Length: > 0 } source || visited.Contains(source)) return false;
-                    if (Node(source) is not { } user) return false;
-                    if (probe) return true;
-                    visited.Add(source);
-                    results.Add(new Affected(source, distance, Kind(edge), via, through));
+                    if (edge.SourceId is not { Length: > 0 } source) return false;
+                    if (probe) return !visited.Contains(source) && Node(source) is not null;
+                    // A source with no node is remembered too: it is refused once, not at every edge from it.
+                    if (!visited.Add(source) || Node(source) is not { } user) return false;
                     // Unless tests are included, a test-file symbol is affected but carries impact no further, as a path
                     // does not pass through one: a test double implementing a declaration must not make that
                     // declaration's production callers depend on what the double touches.
-                    if (_includeTests || !IsTestNode(user)) next!.Add(source);
+                    var hidden = !_includeTests && IsTestNode(user);
+                    results.Add(new Affected(user, distance, Kind(edge), via, through, hidden));
+                    if (!hidden) next!.Add(source);
                     return false;
                 }
             }

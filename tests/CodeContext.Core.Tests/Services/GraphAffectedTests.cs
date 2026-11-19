@@ -36,6 +36,38 @@ public class GraphAffectedTests
         Assert.False(response.DepthLimited);
     }
 
+    [Theory]
+    [InlineData(1)]
+    [InlineData(5)]
+    [InlineData(30)]
+    [InlineData(31)]
+    [InlineData(47)]
+    [InlineData(60)]
+    public async Task ALimitedList_IsTheStartOfTheFullOne(int limit)
+    {
+        // 30 direct dependents and 30 of theirs, added in an order that is not the listed one (file, then line).
+        var graph = new GraphTestGraph().Node("Seed");
+        for (var i = 0; i < 30; i++)
+        {
+            var scrambled = (i * 7) % 30;
+            graph.Node($"Near{scrambled}", file: $"src/N{scrambled % 4}.cs", line: 100 - scrambled).Edge($"Near{scrambled}", "Seed");
+            graph.Node($"Far{scrambled}", file: $"src/F{scrambled % 3}.cs", line: scrambled).Edge($"Far{scrambled}", $"Near{(scrambled * 11) % 30}");
+        }
+        var service = graph.Build();
+
+        var full = await Affected(service, I("Seed"), limit: 100);
+        var limited = await Affected(service, I("Seed"), limit: limit);
+
+        Assert.Equal(60, full.TotalCount);
+        Assert.Equal(60, limited.TotalCount);
+        Assert.Equal(7, limited.FileCount);
+        Assert.Equal(limit < 60, limited.Truncated);
+        Assert.Equal(Listed(full).Take(limit), Listed(limited));
+        // The full list is by distance, then file, then line.
+        var keys = full.Items.Select(item => (item.Distance, item.File, item.Line)).ToList();
+        Assert.Equal(keys.OrderBy(key => key).ToList(), keys);
+    }
+
     [Fact]
     public async Task WhatMerelySitsNearTheSeed_IsNotAffected()
     {
