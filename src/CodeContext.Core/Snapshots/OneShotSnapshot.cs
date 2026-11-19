@@ -115,11 +115,7 @@ namespace CodeContext.Core.Snapshots
                     var open = Stopwatch.GetElapsedTime(openedAt);
                     var capturedUtc = new DateTime(file.Header.CreatedUtcTicks, DateTimeKind.Utc);
                     // The newest authentic snapshot decides: an older one is never fresher.
-                    var freshness = SnapshotFreshness.Check(
-                        new RepositoryFileSelector(Options.Create(options)), root, capturedUtc,
-                        extension => workers.TryGetParserForExtension(extension, out _),
-                        (path, included) => workers.TryGetParserForProjectInput(path, included, out _),
-                        ExactProjectInputNames(catalog));
+                    var freshness = SnapshotFreshness.For(options, workers, catalog)(capturedUtc);
                     if (!freshness.Unchanged)
                         return Unavailable($"'{freshness.FirstMoved}' changed after the saved index of {CacheState.FormatTicks(file.Header.CreatedUtcTicks)}");
 
@@ -129,6 +125,11 @@ namespace CodeContext.Core.Snapshots
                     if (!loaded.Loaded) return Unavailable($"{candidate.Name}: {loaded.Rejection}: {loaded.Reason}");
                     if (!SnapshotStartup.TryAnnotations(loaded, directory, out var annotations, out _, out var failure))
                         return Unavailable($"{candidate.Name}: {failure}");
+                    // A worker that keeps saved state (it sends fingerprints) has its state bound to every shard a
+                    // verified store wrote. One without it was written after a verification failed, a save failed or the
+                    // pairing broke: facts no worker confirmed, which only an instance may serve, labelled.
+                    if (annotations.FirstOrDefault(pair => pair.Value is { Fingerprints.Count: > 0, State: null }) is { Key: var unpaired, Value: not null })
+                        return Unavailable($"{candidate.Name}: shard {unpaired} was saved without its worker's state");
                     factory.Database.PublishLoadedShards(loaded.ForPublish(), annotations);
                     var materialize = Stopwatch.GetElapsedTime(materializedAt);
 
@@ -146,12 +147,6 @@ namespace CodeContext.Core.Snapshots
         }
 
         private static OneShotSnapshotOpen Unavailable(string reason) => new(null, reason);
-
-        private static IReadOnlyCollection<string> ExactProjectInputNames(IWorkerCatalog catalog)
-            => catalog.Workers.SelectMany(worker => worker.Manifest.ProjectInputs ?? [])
-                .Where(input => !input.StartsWith('.'))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToList();
 
         /// <summary>Every answer carries the same notice: it comes from the snapshot, and nothing here ever verifies it.</summary>
         private sealed class FixedNotice(CacheNotice notice) : ICacheStateProvider

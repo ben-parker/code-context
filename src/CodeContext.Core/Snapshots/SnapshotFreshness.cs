@@ -1,5 +1,7 @@
 using System.Diagnostics;
 using CodeContext.Core.Services;
+using CodeContext.Core.Workers;
+using Microsoft.Extensions.Options;
 
 namespace CodeContext.Core.Snapshots
 {
@@ -99,6 +101,25 @@ namespace CodeContext.Core.Snapshots
                 }
             }
             return new SnapshotFreshnessResult(checkedCount, 0, null, Stopwatch.GetElapsedTime(started));
+        }
+
+        /// <summary>
+        /// The check as a host's routing defines it: extensions and project inputs from the workers, exact project
+        /// input names from their manifests, the selection policy from <paramref name="options"/> (a selector of its
+        /// own, so a scan's selector is never invalidated).
+        /// </summary>
+        internal static Func<DateTime, SnapshotFreshnessResult> For(
+            CodeContextOptions options, LanguageWorkerService workers, IWorkerCatalog catalog, TimeSpan? tolerance = null)
+        {
+            var exactNames = catalog.Workers.SelectMany(worker => worker.Manifest.ProjectInputs ?? [])
+                .Where(input => !input.StartsWith('.'))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            return capturedUtc => Check(
+                new RepositoryFileSelector(Options.Create(options)), options.RootPath, capturedUtc,
+                extension => workers.TryGetParserForExtension(extension, out _),
+                (path, included) => workers.TryGetParserForProjectInput(path, included, out _),
+                exactNames, tolerance);
         }
 
         private static bool TryTimes(string path, out DateTime lastWrite, out DateTime creation)

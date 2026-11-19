@@ -207,6 +207,12 @@ namespace CodeContext.Core.Snapshots
         private readonly HashSet<string> _loggedSkips = new(StringComparer.Ordinal);
         private SnapshotServiceStatus _status = new(SnapshotCacheMode.Starting);
 
+        // What a one-shot query checks before answering from a snapshot (SnapshotFreshness); null skips the check.
+        private readonly Func<DateTime, SnapshotFreshnessResult>? _filesSince;
+        // Guarded by _gate. The loaded snapshot is older than a file it describes: once a scan has verified the store
+        // (ScanPhase.Ready), it counts as unwritten. Never before: an unverified store must not get a newer capture time.
+        private bool _rewriteWhenVerified;
+
         public SnapshotService(
             IndexCoordinator coordinator,
             InMemoryDatabase? database,
@@ -217,9 +223,11 @@ namespace CodeContext.Core.Snapshots
             ILogger<SnapshotService> logger,
             CacheState? cacheState = null,
             IWorkerStateSaver? workers = null,
-            QuietTimeTrim? memoryTrim = null)
+            QuietTimeTrim? memoryTrim = null,
+            Func<DateTime, SnapshotFreshnessResult>? filesSince = null)
         {
             _memoryTrim = memoryTrim;
+            _filesSince = filesSince;
             _coordinator = coordinator;
             _database = database;
             _scanState = scanState;
@@ -229,6 +237,30 @@ namespace CodeContext.Core.Snapshots
             _logger = logger;
             _workers = workers;
             cacheState?.AttachWriter(() => Status);
+        }
+
+        /// <summary>
+        /// Whether the loaded snapshot is older than a file it describes (by <see cref="SnapshotFreshness"/>), so the
+        /// store is written again once a scan has verified it, even when its facts did not change. Without this a file touched with the
+        /// same content (a checkout and back) would keep every later one-shot query from using the snapshot, since an
+        /// unchanged store is never rewritten.
+        /// </summary>
+        private bool LoadedSnapshotOlderThanFiles(CacheLoadOutcome outcome)
+        {
+            if (_filesSince is null || outcome.Kind != CacheLoadKind.Loaded || outcome.SnapshotCreatedUtcTicks is not { } ticks) return false;
+            try
+            {
+                var result = _filesSince(new DateTime(ticks, DateTimeKind.Utc));
+                if (result.Unchanged) return false;
+                _logger.LogInformation(
+                    "'{Path}' is newer than the loaded snapshot; the verified graph will be written again for one-shot queries.",
+                    result.FirstMoved);
+                return true;
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException)
+            {
+                return true;
+            }
         }
 
         public SnapshotServiceStatus Status
@@ -314,6 +346,7 @@ namespace CodeContext.Core.Snapshots
 
             try
             {
+                var rewriteLoaded = LoadedSnapshotOlderThanFiles(result.Outcome);
                 lock (_gate)
                 {
                     // Stopped before the step ran: the step's own Dispose releases the lock.
@@ -324,6 +357,7 @@ namespace CodeContext.Core.Snapshots
                     _host = result.Host;
                     _nextSequence = result.NextSequence;
                     _written = _startup.TakeLoadedView() ?? SnapshotView.Empty;
+                    _rewriteWhenVerified = rewriteLoaded;
                     _otherSnapshotState.UnionWith(result.DroppedStateFiles ?? []);
                     _lastSeen = _written;
                 }
@@ -375,6 +409,12 @@ namespace CodeContext.Core.Snapshots
                 {
                     if (_status.Mode != SnapshotCacheMode.Writer || _stopping) return;
                     var now = _time.GetUtcNow();
+                    if (_rewriteWhenVerified && _scanState.Phase == ScanPhase.Ready)
+                    {
+                        _rewriteWhenVerified = false;
+                        _written = SnapshotView.Empty;
+                        _lastChangeAt = now;
+                    }
                     if (!view.SameAs(_lastSeen))
                     {
                         _lastSeen = view;
