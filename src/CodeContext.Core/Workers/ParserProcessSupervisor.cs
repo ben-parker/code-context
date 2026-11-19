@@ -128,6 +128,9 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
     private bool _restartPending;
     private bool _unavailable;
     private volatile bool _stopping;
+    // Set while a hibernation stops the process: its exit is deliberate, as during a stop. The connection can also
+    // end early: the host's reader refuses the `"result": null` answer workers give to shutdown.
+    private volatile bool _hibernating;
     private volatile bool _disposed;
     private long _incarnation;
     private long _requests;
@@ -351,7 +354,8 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
 
     private async Task<InitializeResult> StartAndInitializeAsync(CancellationToken ct)
     {
-        Transition(ParserSessionState.Starting);
+        Transition(ParserSessionState.Starting,
+            _snapshot.State == ParserSessionState.Hibernated ? "waking from hibernation" : null);
 
         var startInfo = BuildStartInfo(_spec, _options);
 
@@ -656,7 +660,7 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
             failure = $"Worker connection failed: {ex.Message}";
         }
 
-        if (_stopping || _disposed || !ReferenceEquals(process, _process))
+        if (_stopping || _disposed || _hibernating || !ReferenceEquals(process, _process))
         {
             return;
         }
@@ -1046,6 +1050,45 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
         }
         finally
         {
+            _lifecycleLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Stops a healthy, idle worker process so it holds no memory, leaving the supervisor reusable: the next
+    /// request starts a new process (a new incarnation) without counting a restart. Same steps as
+    /// <see cref="ShutdownAsync"/> (shutdown request, stdin EOF, wait, kill as a last resort), but the supervisor is
+    /// not stopped. Returns false, doing nothing, when no initialized process is running or the supervisor is stopped,
+    /// unavailable or disposed. The caller makes sure no request is in flight (the worker service holds its lock).
+    /// </summary>
+    public async Task<bool> HibernateAsync(CancellationToken ct = default)
+    {
+        if (_disposed) return false;
+        await _lifecycleLock.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            if (_stopping || _disposed || _unavailable || !IsLive || _client is not { } client) return false;
+            _hibernating = true;
+            try
+            {
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                timeout.CancelAfter(_options.ShutdownTimeout);
+                await client.ShutdownAsync(timeout.Token).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+            {
+                _logger.LogDebug("[{ParserId}] shutdown request before hibernating failed ({Message}); falling back to EOF.",
+                    _spec.ParserId, ex.Message);
+            }
+
+            // Detaches the process before closing its pipes, so the connection monitor does not report the exit.
+            await CleanupProcessAsync(kill: false).ConfigureAwait(false);
+            Transition(ParserSessionState.Hibernated, "idle: the process exited; the next change starts it again");
+            return true;
+        }
+        finally
+        {
+            _hibernating = false;
             _lifecycleLock.Release();
         }
     }

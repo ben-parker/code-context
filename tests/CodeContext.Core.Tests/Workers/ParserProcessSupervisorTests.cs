@@ -326,6 +326,94 @@ public class ParserProcessSupervisorTests
     }
 
     [Fact]
+    public async Task Hibernate_StopsTheProcessWithoutCountingARestart()
+    {
+        var registry = new ParserSessionRegistry();
+        await using var supervisor = CreateSupervisor(FakeWorkerSpec(), registry: registry);
+        supervisor.DeltaHandler = (_, _) => Task.FromResult(true);
+        await supervisor.IndexWorkspaceAsync(new IndexWorkspaceParams("ws-1", 1, ["a.fake"]));
+        var pid = supervisor.Snapshot.ProcessId!.Value;
+
+        Assert.True(await supervisor.HibernateAsync());
+
+        Assert.True(HasProcessExited(pid), "The worker process should have exited.");
+        var session = Assert.Single(registry.GetSnapshots());
+        Assert.True(session.State == ParserSessionState.Hibernated, $"{session.State}: {session.LastError}");
+        Assert.Null(session.ProcessId);
+        Assert.Null(session.LastError);
+        Assert.Equal(0, session.RestartCount);
+        Assert.False(supervisor.IsLive);
+        // Nothing left to stop: a second hibernate does nothing.
+        Assert.False(await supervisor.HibernateAsync());
+    }
+
+    [Fact]
+    public async Task RequestAfterHibernate_StartsANewProcess()
+    {
+        await using var supervisor = CreateSupervisor(FakeWorkerSpec());
+        supervisor.DeltaHandler = (_, _) => Task.FromResult(true);
+        await supervisor.IndexWorkspaceAsync(new IndexWorkspaceParams("ws-1", 1, ["a.fake"]));
+        var pid = supervisor.Snapshot.ProcessId;
+        var incarnation = supervisor.Incarnation;
+        Assert.True(await supervisor.HibernateAsync());
+
+        var result = await supervisor.IndexWorkspaceAsync(new IndexWorkspaceParams("ws-1", 2, ["a.fake"]));
+
+        Assert.True(result.Complete);
+        Assert.Equal(ParserSessionState.Ready, supervisor.Snapshot.State);
+        Assert.NotEqual(pid, supervisor.Snapshot.ProcessId);
+        Assert.NotEqual(incarnation, supervisor.Incarnation);
+        Assert.Equal(0, supervisor.Snapshot.RestartCount);
+    }
+
+    [Fact]
+    public async Task CrashAfterAWake_StillCountsAgainstTheRestartBudget()
+    {
+        var marker = Path.Combine(Path.GetTempPath(), $"cc-crash-once-{Guid.NewGuid():N}");
+        try
+        {
+            await using var supervisor = CreateSupervisor(FakeWorkerSpec("--behavior", "crash-once", "--marker", marker));
+            supervisor.DeltaHandler = (_, _) => Task.FromResult(true);
+            await supervisor.EnsureInitializedAsync();
+            Assert.True(await supervisor.HibernateAsync());
+
+            // The woken process crashes: a failure like any other, then a counted restart.
+            await Assert.ThrowsAsync<ParserWorkerFailedException>(
+                () => supervisor.IndexWorkspaceAsync(new IndexWorkspaceParams("ws-1", 1, ["a.fake"])));
+            Assert.Equal(ParserSessionState.Failed, supervisor.Snapshot.State);
+            await supervisor.IndexWorkspaceAsync(new IndexWorkspaceParams("ws-1", 2, ["a.fake"]));
+            Assert.Equal(1, supervisor.Snapshot.RestartCount);
+            Assert.Equal(ParserSessionState.Ready, supervisor.Snapshot.State);
+        }
+        finally
+        {
+            File.Delete(marker);
+        }
+    }
+
+    [Fact]
+    public async Task Hibernate_DoesNothingBeforeAStartOrAfterAStop()
+    {
+        await using var supervisor = CreateSupervisor(FakeWorkerSpec());
+        Assert.False(await supervisor.HibernateAsync());
+        await supervisor.EnsureInitializedAsync();
+        await supervisor.ShutdownAsync();
+        Assert.False(await supervisor.HibernateAsync());
+        Assert.Equal(ParserSessionState.Stopped, supervisor.Snapshot.State);
+    }
+
+    [Fact]
+    public async Task ShutdownOfAHibernatedWorker_Stops()
+    {
+        await using var supervisor = CreateSupervisor(FakeWorkerSpec());
+        await supervisor.EnsureInitializedAsync();
+        Assert.True(await supervisor.HibernateAsync());
+        await supervisor.ShutdownAsync();
+        Assert.Equal(ParserSessionState.Stopped, supervisor.Snapshot.State);
+        await Assert.ThrowsAsync<ParserWorkerUnavailableException>(() => supervisor.EnsureInitializedAsync());
+    }
+
+    [Fact]
     public async Task StdinEof_MakesWorkerExitOnItsOwn()
     {
         // Spawned directly (no supervisor) so nothing can kill the process for us:
