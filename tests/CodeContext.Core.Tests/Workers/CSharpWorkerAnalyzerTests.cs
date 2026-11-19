@@ -112,6 +112,8 @@ public class CSharpWorkerAnalyzerTests : IDisposable
             {
                 public override void Run() { base.Run(); }
                 public void Again(Base other) { other.Run(); }
+                public System.Action Later() => base.Run;
+                public System.Action Bound(Base other) => other.Run;
             }
             """));
 
@@ -124,6 +126,13 @@ public class CSharpWorkerAnalyzerTests : IDisposable
         Assert.Equal("3", baseCall.Metadata["line"]);
         var dispatching = calls[Id("Derived.Again(Base)")];
         Assert.False(dispatching.Metadata!.ContainsKey(EdgeMetadataKeys.Dispatch));
+
+        // A method group taken through base is bound to the base method as a call through it is.
+        var references = result.Edges
+            .Where(edge => edge.Kind == "REFERENCES" && edge.TargetId == Id("Base.Run()"))
+            .ToDictionary(edge => edge.SourceId);
+        Assert.Equal(EdgeDispatch.Static, references[Id("Derived.Later()")].Metadata![EdgeMetadataKeys.Dispatch]);
+        Assert.False(references[Id("Derived.Bound(Base)")].Metadata!.ContainsKey(EdgeMetadataKeys.Dispatch));
     }
 
     [Fact]

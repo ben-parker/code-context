@@ -1189,6 +1189,7 @@ namespace Mixed { public class Service { public string Run() => ""ok""; } }");
             export class Derived extends Base {
                 save(): void { super.save(); }
                 again(other: Base): void { other.save(); }
+                later(): unknown[] { return [super.save]; }
             }
             """);
         await _pipeline.GraphUpdateService.PerformInitialScanAsync(_tempDir, null, CancellationToken.None);
@@ -1200,6 +1201,13 @@ namespace Mixed { public class Service { public string Run() => ""ok""; } }");
         Assert.Equal(EdgeDispatch.Static, superCall.Metadata![EdgeMetadataKeys.Dispatch]);
         var dispatching = Assert.Single(edges, edge => edge.SourceId!.Contains("#Derived.again", StringComparison.Ordinal));
         Assert.False(dispatching.Metadata!.ContainsKey(EdgeMetadataKeys.Dispatch));
+
+        // The method itself taken through super is bound to the base method as a call is.
+        var captured = Assert.Single(
+            (await _pipeline.RepositoryFactory.CreateEdgeRepository().GetAllAsync()),
+            edge => edge.Type == "REFERENCES" && edge.TargetId!.EndsWith("#Base.save()", StringComparison.Ordinal)
+                && edge.SourceId!.Contains("#Derived.later", StringComparison.Ordinal));
+        Assert.Equal(EdgeDispatch.Static, captured.Metadata![EdgeMetadataKeys.Dispatch]);
     }
 
     [Fact]

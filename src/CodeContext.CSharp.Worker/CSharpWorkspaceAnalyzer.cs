@@ -2324,8 +2324,11 @@ public sealed class CSharpWorkspaceAnalyzer
             }
 
             var targetId = NodeId(member);
+            // `base.M` taken as a method group, like `base.M()`, is bound to the base member.
+            var staticallyBound = node.Parent is MemberAccessExpressionSyntax { Expression: BaseExpressionSyntax } access
+                && access.Name == node;
             if (sourceId != targetId)
-                AddLocatedEdge(sourceId, targetId, "REFERENCES", node);
+                AddLocatedEdge(sourceId, targetId, "REFERENCES", node, staticallyBound);
         }
 
         private void AddLocatedEdge(string sourceId, string targetId, string kind, SyntaxNode location, bool staticallyBound = false)

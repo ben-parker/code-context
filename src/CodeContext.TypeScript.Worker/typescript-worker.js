@@ -1697,10 +1697,15 @@ function analyzeFile(workspace, workspaceId, program, checker, fileName, diagnos
         }
         if (!targetId) return;
         const position = sourceFile.getLineAndCharacterOfPosition(expression.getStart(sourceFile));
-        addEdge(enclosingDeclarationId(expression), targetId, 'REFERENCES', {
+        const metadata = {
             line: String(position.line + 1),
             column: String(position.character + 1),
-        });
+        };
+        // `super.m` taken as a value, like `super.m()`, is bound to the base method.
+        if (ts.isPropertyAccessExpression(expression) && expression.expression.kind === ts.SyntaxKind.SuperKeyword) {
+            metadata.dispatch = 'static';
+        }
+        addEdge(enclosingDeclarationId(expression), targetId, 'REFERENCES', metadata);
     };
 
     // Options API: what a component declares under `methods` and `computed` is in scope
