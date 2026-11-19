@@ -342,6 +342,62 @@ public sealed class WorkerHibernationTests : IAsyncLifetime
             Facts(host.Instance.Database));
     }
 
+    /// <summary>
+    /// The convergence walk with hibernation: the real C# worker, a seeded extended <see cref="EditWalk"/> (files
+    /// created, edited in a body and in a declaration, renamed, deleted; project constants, references and
+    /// <c>Directory.Build.props</c>), and before every step the worker hibernates once its state is written. The step's
+    /// edits reach the disk while it is down and are delivered as a watcher would; the first of them wakes it (through
+    /// its saved state, or by re-reading), and after each wake the graph equals a fresh scan.
+    /// </summary>
+    [Theory]
+    [InlineData(20261119)]
+    public async Task CSharpWorker_HibernateAndWakeBetweenEveryStep_EqualsAFreshScan(int seed)
+    {
+        const int steps = 16;
+        foreach (var name in new[] { "a.fake", "b.fake" }) File.Delete(Path.Combine(Root, name));
+        var walk = new EditWalk(Root, seed, extended: true);
+        walk.WriteAll();
+        await using var fresh = new CSharpWorkerPipeline(Root);
+        var host = await StartAsync(CSharpWorkerPipeline.CSharpWorkerRegistration());
+        await AssertConvergedAsync("the first scan");
+
+        for (var step = 1; step <= steps; step++)
+        {
+            await host.WaitForStateWrittenAsync("csharp");
+            await host.IdleAsync();
+            Assert.True(host.Instance.Workers.IsHibernated("csharp"), $"Seed {seed}, step {step}: the worker did not hibernate.");
+
+            var changes = walk.TakeStep();
+            foreach (var change in changes) await host.Instance.Coordinator.NotifyFileChangedAsync(change.Path, change.Type);
+            // Ordered after the batch the changes make.
+            await host.Instance.Coordinator.RunMutationAsync(_ => Task.CompletedTask);
+            Assert.False(host.Instance.Workers.IsHibernated("csharp"), $"Seed {seed}, step {step}: the changes did not wake the worker.");
+            Assert.Equal(ParserSessionState.Ready, host.Session.State);
+            await AssertConvergedAsync($"step {step}");
+        }
+
+        var wakes = host.Instance.WorkerLog.Entries.Count(entry => entry.Message.Contains("woke:", StringComparison.Ordinal));
+        Assert.Equal(steps, wakes);
+        Assert.Contains(host.Instance.WorkerLog.Entries, entry => entry.Message.Contains("woke: its saved state was accepted", StringComparison.Ordinal));
+        foreach (var kind in new[] { "body", "top-level", "add file", "delete file", "rename file" })
+            Assert.True(walk.Kinds.GetValueOrDefault(kind) > 0, $"Seed {seed}: no '{kind}' edit in {steps} steps.");
+        Assert.True(walk.Kinds.GetValueOrDefault("project constant") + walk.Kinds.GetValueOrDefault("project reference")
+            + walk.Kinds.GetValueOrDefault("Directory.Build.props") > 0, $"Seed {seed}: no project-input edit in {steps} steps.");
+
+        async Task AssertConvergedAsync(string when)
+        {
+            await fresh.GraphUpdateService.PerformInitialScanAsync(Root, null, CancellationToken.None);
+            var expected = Facts(fresh.RepositoryFactory.Database);
+            var actual = Facts(host.Instance.Database);
+            if (expected.SequenceEqual(actual)) return;
+            var message = new System.Text.StringBuilder($"Seed {seed} diverged after {when}.\n");
+            message.AppendLine("Recent edits:").AppendJoin('\n', walk.History.TakeLast(6)).AppendLine();
+            message.AppendLine("Missing:").AppendJoin('\n', expected.Except(actual).Take(10)).AppendLine();
+            message.AppendLine("Stale:").AppendJoin('\n', actual.Except(expected).Take(10));
+            Assert.Fail(message.ToString());
+        }
+    }
+
     /// <summary>The real TypeScript worker: hibernated without saved state, an edit wakes it, it re-reads, and the graph equals a fresh scan.</summary>
     [Fact]
     [Trait("Category", "ExternalTooling")]
