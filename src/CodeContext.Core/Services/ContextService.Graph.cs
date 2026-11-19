@@ -389,7 +389,9 @@ namespace CodeContext.Core.Services
                 endpoint.MatchMode = "exact";
                 endpoint.Ambiguous = true;
                 endpoint.Candidates = ranked.Take(MaxGraphCandidates).Select(candidate => ToCompactNode(candidate)).ToList();
-                endpoint.Hint = BuildDisambiguationHint(ranked, substringMatch: false);
+                // Graph queries take no narrowing filters: the way to one symbol is its identifier.
+                endpoint.Hint = $"'{identifier}' names {ranked.Count} symbols. Pass one of the candidates' identifiers unchanged"
+                    + (ranked.Count > MaxGraphCandidates ? $" (the first {MaxGraphCandidates} are listed; `query {identifier}` narrows by type, namespace or file)." : ".");
                 return new ResolvedEndpoint(endpoint, null, none);
             }
             else

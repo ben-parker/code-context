@@ -208,6 +208,8 @@ public class GraphPathTests
         Assert.Equal(2, ambiguous.From.TotalMatches);
         Assert.Equal([I("X.Run"), I("Y.Run")], ambiguous.From.Candidates!.Select(node => node.Identifier).Order());
         Assert.Null(ambiguous.Path);
+        // Graph queries take no narrowing filters, so the hint must not suggest any.
+        Assert.Equal("'Run' names 2 symbols. Pass one of the candidates' identifiers unchanged.", ambiguous.From.Hint);
     }
 
     [Fact]
