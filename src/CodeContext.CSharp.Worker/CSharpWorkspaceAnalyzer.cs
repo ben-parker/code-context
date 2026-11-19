@@ -319,6 +319,20 @@ public sealed class CSharpWorkspaceAnalyzer
     /// <summary>How many files the last analysis walked.</summary>
     public int LastWalkCount { get; private set; }
 
+    /// <summary>
+    /// Drops what every unit's compilation has bound, dependencies first, keeping trees and walks
+    /// (<see cref="ProjectCompilation.ReleaseBoundState"/>). No file is walked again for it: a walk belongs to
+    /// its unit, not to a compilation. Returns how many units were released.
+    /// </summary>
+    public int ReleaseBoundState()
+    {
+        foreach (var unit in _units) unit.ReleaseBoundState();
+        return _units.Count;
+    }
+
+    /// <summary>Each unit's compilation, in unit order. For tests.</summary>
+    internal IEnumerable<CSharpCompilation> Compilations() => _units.Select(unit => unit.Compilation);
+
     /// <summary>Replaces the workspace file set entirely and reparses everything.</summary>
     public void ReplaceFiles(IReadOnlyList<string> files, CancellationToken ct)
     {
