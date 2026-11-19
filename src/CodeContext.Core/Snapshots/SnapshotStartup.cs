@@ -252,7 +252,7 @@ namespace CodeContext.Core.Snapshots
 
         private sealed record Refusal(CacheFile File, SnapshotRejection Rejection, string? Reason);
 
-        private static bool IsUsable(ulong sequence) => sequence is >= 1 and <= SnapshotService.MaxSequence;
+        internal static bool IsUsable(ulong sequence) => sequence is >= 1 and <= SnapshotService.MaxSequence;
 
         /// <summary>A refusal at or after authentication, which costs a full read and hash of the file.</summary>
         internal static bool IsCostly(SnapshotRejection rejection, bool passedHostMeta)
@@ -455,7 +455,7 @@ namespace CodeContext.Core.Snapshots
         /// is in the cache directory now; otherwise the shard is loaded without one. No lineage: no worker
         /// process of this run has produced it.
         /// </summary>
-        private static bool TryAnnotations(
+        internal static bool TryAnnotations(
             SnapshotLoadResult result,
             CacheDirectory directory,
             out List<KeyValuePair<ShardKey, ShardAnnotation>> annotations,

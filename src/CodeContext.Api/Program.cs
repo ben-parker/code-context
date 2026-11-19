@@ -164,8 +164,9 @@ public class Program
 
         var queryCommand = new Command(
             "query",
-            "Discovers or starts an instance, waits for indexing (or answers at once from the saved index, " +
-            "labelled cache, while it is re-checked), and queries one identifier.");
+            "Queries one identifier. Uses the running instance; with none, answers in this process from the saved " +
+            "index when no indexed file changed since (labelled cache snapshot), else starts an instance and waits for " +
+            "indexing (or answers at once from the saved index, labelled cache, while it is re-checked).");
         Argument<string> queryIdentifierArgument = new("identifier")
         {
             Description = "A symbol name, canonical identifier, or source file path.",
@@ -182,6 +183,10 @@ public class Program
         {
             Description = "Includes library symbols, which are left out of name matches and uses by default.",
         };
+        Option<bool> queryStartOption = new("--start")
+        {
+            Description = "With no instance running, start one instead of answering from the saved index in this process.",
+        };
         foreach (var option in new Option[]
                  {
                      queryPathOption,
@@ -193,6 +198,7 @@ public class Program
                      queryHumanOption,
                      queryLimitOption,
                      queryExternalOption,
+                     queryStartOption,
                  })
         {
             option.Recursive = true;
@@ -210,6 +216,7 @@ public class Program
         queryCommand.Options.Add(queryHumanOption);
         queryCommand.Options.Add(queryLimitOption);
         queryCommand.Options.Add(queryExternalOption);
+        queryCommand.Options.Add(queryStartOption);
         queryCommand.Options.Add(queryHelpOption);
         queryCommand.SetAction((ParseResult parseResult, CancellationToken ct) =>
             QueryCommandHandler.ExecuteAsync(
@@ -224,7 +231,8 @@ public class Program
                     Multi: false,
                     parseResult.GetValue(queryHumanOption),
                     parseResult.GetValue(queryLimitOption),
-                    parseResult.GetValue(queryExternalOption)),
+                    parseResult.GetValue(queryExternalOption),
+                    parseResult.GetValue(queryStartOption)),
                 ct));
 
         var multiQueryCommand = new Command(
@@ -252,7 +260,8 @@ public class Program
                     Multi: true,
                     parseResult.GetValue(queryHumanOption),
                     parseResult.GetValue(queryLimitOption),
-                    parseResult.GetValue(queryExternalOption)),
+                    parseResult.GetValue(queryExternalOption),
+                    parseResult.GetValue(queryStartOption)),
                 ct));
         queryCommand.Subcommands.Add(multiQueryCommand);
 

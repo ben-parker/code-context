@@ -89,6 +89,16 @@ namespace CodeContext.Core.Snapshots
         /// null with the reason when a level is a link or not a directory, or cannot be created.
         /// </summary>
         public static CacheDirectory? Open(string rootPath, string workspaceId, out string? refusal)
+            => Open(rootPath, workspaceId, create: true, out refusal);
+
+        /// <summary>
+        /// <see cref="Open(string, string, out string?)"/> for a reader that must change nothing (a one-shot query):
+        /// creates no level; null with the reason when a level is missing, a link or not a directory.
+        /// </summary>
+        public static CacheDirectory? OpenExisting(string rootPath, string workspaceId, out string? refusal)
+            => Open(rootPath, workspaceId, create: false, out refusal);
+
+        private static CacheDirectory? Open(string rootPath, string workspaceId, bool create, out string? refusal)
         {
             refusal = null;
             if (string.IsNullOrEmpty(workspaceId) || workspaceId.IndexOfAny(['/', '\\', ':']) >= 0 || workspaceId is "." or "..")
@@ -109,7 +119,7 @@ namespace CodeContext.Core.Snapshots
             var workspace = Path.Combine(cache, workspaceId);
             foreach (var level in new[] { codecontext, cache, workspace })
             {
-                refusal = EnsureDirectory(level);
+                refusal = create ? EnsureDirectory(level) : CheckExisting(level);
                 if (refusal is not null) return null;
             }
             return new CacheDirectory(codecontext, cache, workspace);
@@ -408,6 +418,18 @@ namespace CodeContext.Core.Snapshots
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
             {
                 return $"the cache directory '{path}' cannot be created: {exception.Message}";
+            }
+        }
+
+        private static string? CheckExisting(string path)
+        {
+            try
+            {
+                return CheckNotLink(path, expectDirectory: true);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                return $"the cache directory '{path}' cannot be checked: {exception.Message}";
             }
         }
 
