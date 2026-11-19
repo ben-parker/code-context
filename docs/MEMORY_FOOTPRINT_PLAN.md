@@ -359,6 +359,15 @@ Decisions where the backlog was silent:
    graph queries it is ranked by `hubs` and passed through by `path`. On this repository one file changes side
    (`src/CodeContext.Core/Workers/WorkerLaunchSpec.cs`).
 
+9. One declaration, several nodes. Candidates that are the same source declaration (same file, span, name, type and
+   signature; library symbols have no file and never qualify) are one endpoint, not an ambiguity: every copy and its
+   members are seeds (`affected`) or starts and goals (`path`), also when a canonical identifier names one copy (the
+   others are found by name), and the endpoint lists them (`sameDeclaration`, a hint, a `sameDeclaration` line in
+   CLI text). Declarations that differ in any of those stay ambiguous. The bundled workers do not produce this
+   today: the C# worker gives a file shared by projects to one owning project, and the TypeScript worker keys a
+   symbol by file, so it is exercised on hand-built graphs only; it is there for a worker or workspace layout that
+   reports a file once per project.
+
 ## Log
 
 | Date | Item | Result |

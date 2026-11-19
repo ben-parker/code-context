@@ -116,6 +116,13 @@ namespace CodeContext.Core.Services
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
         public bool Ambiguous { get; set; }
 
+        /// <summary>
+        /// The identifiers of the other copies of <see cref="Target"/>: the same source declaration (file, span, name,
+        /// type and signature) indexed more than once, as a file seen through several projects or workspaces is. The
+        /// copies are one thing to change, so all of them were searched together; null when there is only one.
+        /// </summary>
+        public List<string>? SameDeclaration { get; set; }
+
         /// <summary>The first few candidates of an ambiguous name; pass one's identifier back unchanged.</summary>
         public List<CompactCodeNode>? Candidates { get; set; }
 

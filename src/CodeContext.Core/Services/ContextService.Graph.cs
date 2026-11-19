@@ -403,27 +403,62 @@ namespace CodeContext.Core.Services
                 }
                 endpoint.File = ToDisplayPath(files[0]);
             }
-            else if (candidates.Count > 1)
-            {
-                var ranked = RankCandidates(candidates, identifier).ToList();
-                endpoint.MatchMode = "exact";
-                endpoint.Ambiguous = true;
-                endpoint.Candidates = ranked.Take(MaxGraphCandidates).Select(candidate => ToCompactNode(candidate)).ToList();
-                // Graph queries take no narrowing filters: the way to one symbol is its identifier.
-                endpoint.Hint = $"'{identifier}' names {ranked.Count} symbols. Pass one of the candidates' identifiers unchanged"
-                    + (ranked.Count > MaxGraphCandidates ? $" (the first {MaxGraphCandidates} are listed; `query {identifier}` narrows by type, namespace or file)." : ".");
-                return new ResolvedEndpoint(endpoint, null, none);
-            }
             else
             {
-                endpoint.MatchMode = PublicIdentifier(candidates[0]) == identifier ? "identity" : "exact";
-                endpoint.Target = ToCompactNode(candidates[0]);
+                // A canonical identifier names one copy of its declaration; the others are found by its name.
+                if (candidates.Count == 1 && candidates[0] is { Name.Length: > 0, FilePath.Length: > 0 } named)
+                {
+                    foreach (var other in await _nodeRepository.FindByNameAsync(named.Name, named.Type, exact: true))
+                    {
+                        if (other.Id != named.Id && !string.IsNullOrEmpty(other.Id) && IsSameDeclaration(named, other))
+                            candidates.Add(other);
+                    }
+                }
+
+                endpoint.MatchMode = candidates.Count == 1 && PublicIdentifier(candidates[0]) == identifier ? "identity" : "exact";
+                if (candidates.Count > 1)
+                {
+                    var asked = candidates[0];
+                    var ranked = RankCandidates(candidates, identifier).ThenBy(PublicIdentifier, StringComparer.Ordinal).ToList();
+                    if (!ranked.TrueForAll(candidate => IsSameDeclaration(ranked[0], candidate)))
+                    {
+                        endpoint.Ambiguous = true;
+                        endpoint.Candidates = ranked.Take(MaxGraphCandidates).Select(candidate => ToCompactNode(candidate)).ToList();
+                        // Graph queries take no narrowing filters: the way to one symbol is its identifier.
+                        endpoint.Hint = $"'{identifier}' names {ranked.Count} symbols. Pass one of the candidates' identifiers unchanged"
+                            + (ranked.Count > MaxGraphCandidates ? $" (the first {MaxGraphCandidates} are listed; `query {identifier}` narrows by type, namespace or file)." : ".");
+                        return new ResolvedEndpoint(endpoint, null, none);
+                    }
+
+                    // One declaration, indexed once per project or workspace that sees its file: one thing to change.
+                    var target = PublicIdentifier(asked) == identifier ? asked : ranked[0];
+                    if (PublicIdentifier(target) == identifier) endpoint.MatchMode = "identity";
+                    endpoint.Target = ToCompactNode(target);
+                    endpoint.SameDeclaration = ranked.Where(candidate => candidate != target).Select(PublicIdentifier).ToList();
+                    endpoint.Hint = $"'{identifier}' is one declaration ({endpoint.Target.File}:{endpoint.Target.Line}) indexed "
+                        + $"{ranked.Count} times, as {endpoint.Target.Identifier} and {string.Join(", ", endpoint.SameDeclaration)}; "
+                        + "all of them were searched together.";
+                }
+                else endpoint.Target = ToCompactNode(candidates[0]);
             }
 
             var seeds = walk.ExpandMembers(candidates.Select(candidate => candidate.Id!), out var containedBy);
             endpoint.SeedCount = seeds.Count;
             return new ResolvedEndpoint(endpoint, seeds, containedBy);
         }
+
+        /// <summary>
+        /// Whether two nodes are the same source declaration indexed twice: the same file, span, name, type and
+        /// signature. Overloads, neighbours on one line and library symbols (which have no file) are not.
+        /// </summary>
+        private static bool IsSameDeclaration(CodeNode left, CodeNode right)
+            => !string.IsNullOrEmpty(left.FilePath)
+                && string.Equals(left.FilePath, right.FilePath, StringComparison.Ordinal)
+                && left.StartLine == right.StartLine && left.StartCol == right.StartCol
+                && left.EndLine == right.EndLine && left.EndCol == right.EndCol
+                && string.Equals(left.Name, right.Name, StringComparison.Ordinal)
+                && string.Equals(left.Type, right.Type, StringComparison.Ordinal)
+                && string.Equals(left.Signature, right.Signature, StringComparison.Ordinal);
 
         /// <summary>For an empty answer: which projects were analyzed without all they declare, if any.</summary>
         private CoverageSummary? CoverageForEmptyAnswer()

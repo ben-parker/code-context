@@ -220,6 +220,26 @@ public class GraphQueryCommandTests
     }
 
     [Fact]
+    public async Task CopiesOfOneDeclaration_AreNamedBeforeTheAnswer()
+    {
+        var body = """
+            {"seed":{"requested":"Twice","matchMode":"exact","totalMatches":2,"target":{"name":"Twice","type":"Method","file":"shared/util.ts","line":4,"identifier":"ts:app1/Twice"},"seedCount":2,"sameDeclaration":["ts:app2/Twice"],"hint":"one declaration indexed 2 times"},
+             "maxDepth":5,"totalCount":0,"returnedCount":0,"fileCount":0,"items":[]}
+            """;
+        var (exit, output) = await RunAsync(body, "query", "affected", "Twice", "--path", Root);
+        Assert.Equal(0, exit);
+        Assert.StartsWith(
+            "sameDeclaration\tidentifier\t2 copies searched together\tts:app1/Twice\tts:app2/Twice\nseed\tts:app1/Twice\t2 symbols",
+            output.Replace("\r\n", "\n"));
+
+        (exit, output) = await RunAsync(body, "query", "affected", "Twice", "--human", "--path", Root);
+        Assert.Equal(0, exit);
+        Assert.StartsWith(
+            "identifier is one declaration indexed 2 times, searched together: ts:app1/Twice, ts:app2/Twice\n",
+            output.Replace("\r\n", "\n"));
+    }
+
+    [Fact]
     public async Task AffectedAndHubs_ShowCountsTruncationAndHiddenTests()
     {
         var affected = """

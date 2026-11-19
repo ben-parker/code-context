@@ -89,7 +89,10 @@ codecontext query hubs --within src/CodeContext.Core        # the most depended-
   (`Type.Member`), or a file path; there is no substring fallback. An unknown name prints
   `missing`, a name with several symbols `ambiguous` with their identifiers; both exit 2.
   Pass a returned identifier back unchanged. A type stands for itself and its members, a
-  file for its symbols.
+  file for its symbols. One declaration indexed more than once (the same file, span, name,
+  type and signature under several identifiers, as a worker reports a file it sees through
+  several projects or workspaces) is not ambiguous: all its copies are searched together,
+  whichever identifier you pass, and a `sameDeclaration` line lists them.
 - **`path`** prints one shortest chain, a line per hop: `start`; the relationship and the
   line it is recorded at (`CALLS line 42`); `dispatch IMPLEMENTS_MEMBER` or `OVERRIDES_MEMBER`
   where a call through an interface or base member, or the starting member itself, reaches

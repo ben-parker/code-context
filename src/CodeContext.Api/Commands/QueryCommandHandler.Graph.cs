@@ -236,7 +236,16 @@ public static partial class QueryCommandHandler
             output.WriteLine($"ambiguous\t{role}\t{Clean(endpoint.Requested)}\t{endpoint.TotalMatches} matches");
             foreach (var candidate in endpoint.Candidates ?? []) WriteAgentNode("\t", candidate, output);
         }
-        else return true;
+        else
+        {
+            // One declaration indexed more than once: every copy was searched, and the answer is about all of them.
+            if (endpoint.SameDeclaration is { Count: > 0 } copies)
+            {
+                output.WriteLine($"sameDeclaration\t{role}\t{copies.Count + 1} copies searched together"
+                    + $"\t{Clean(endpoint.Target?.Identifier)}\t{string.Join('\t', copies.Select(Clean))}");
+            }
+            return true;
+        }
         if (!string.IsNullOrWhiteSpace(endpoint.Hint)) output.WriteLine($"hint\t{Clean(endpoint.Hint)}");
         return false;
     }
@@ -328,7 +337,15 @@ public static partial class QueryCommandHandler
             foreach (var candidate in endpoint.Candidates ?? [])
                 output.WriteLine($"  - {candidate.Identifier} [{candidate.Type ?? "Unknown"}]{HumanLocation(candidate)}");
         }
-        else return true;
+        else
+        {
+            if (endpoint.SameDeclaration is { Count: > 0 } copies)
+            {
+                output.WriteLine($"{role} is one declaration indexed {copies.Count + 1} times, searched together: "
+                    + $"{endpoint.Target?.Identifier}, {string.Join(", ", copies)}");
+            }
+            return true;
+        }
         if (!string.IsNullOrWhiteSpace(endpoint.Hint)) output.WriteLine($"Hint: {endpoint.Hint}");
         return false;
     }

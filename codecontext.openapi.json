@@ -2232,6 +2232,15 @@
           "ambiguous": {
             "type": "boolean"
           },
+          "sameDeclaration": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
           "candidates": {
             "type": [
               "null",
