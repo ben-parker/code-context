@@ -283,6 +283,33 @@ public class SnapshotStartupTests
     }
 
     [Fact]
+    public async Task LoadedView_IsHandedToTheWriter_AndNotKeptByTheStartupStep()
+    {
+        var basePath = NewBase();
+        try
+        {
+            await using (var first = new SnapshotServiceHarness(basePath))
+            {
+                await first.StartAsync();
+                await first.CommitAsync();
+                await first.AdvanceAsync(Quiet);
+            }
+
+            await using var second = new SnapshotServiceHarness(basePath, isIndexedParser: parser => parser == "fake");
+            await second.StartAsync();
+            Assert.Equal(new[] { "N1_0", "N1_1", "N1_2" }, second.Database.EnumerateNodes().Select(node => node.Name));
+            // The writer took the view (it does not rewrite what it loaded); the step, a singleton, must not keep
+            // the loaded shards alive once a commit has replaced them.
+            Assert.True(second.Service.WrittenMatchesStore);
+            Assert.Null(second.Startup.Result!.LoadedView);
+        }
+        finally
+        {
+            Directory.Delete(basePath, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task SequenceZero_IsNeverLoaded_AndIsDeleted()
     {
         await using var harness = new SnapshotServiceHarness();

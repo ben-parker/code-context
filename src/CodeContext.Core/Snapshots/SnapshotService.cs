@@ -323,7 +323,7 @@ namespace CodeContext.Core.Snapshots
                     _key = result.Key;
                     _host = result.Host;
                     _nextSequence = result.NextSequence;
-                    _written = result.LoadedView ?? SnapshotView.Empty;
+                    _written = _startup.TakeLoadedView() ?? SnapshotView.Empty;
                     _otherSnapshotState.UnionWith(result.DroppedStateFiles ?? []);
                     _lastSeen = _written;
                 }

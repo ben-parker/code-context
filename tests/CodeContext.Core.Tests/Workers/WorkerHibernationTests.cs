@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using CodeContext.Core.Memory;
 using CodeContext.Core.Repositories.InMemory;
 using CodeContext.Core.Services;
 using CodeContext.Core.Snapshots;
@@ -54,11 +55,11 @@ public sealed class WorkerHibernationTests : IAsyncLifetime
         => StartAsync(new PersistentStateTests.Instance(Root, KeyPath, worker,
             settings => settings with { QuietPeriod = TimeSpan.FromMilliseconds(50) }, cache: true));
 
-    private async Task<Host> StartAsync(PersistentStateTests.Instance instance)
+    private async Task<Host> StartAsync(PersistentStateTests.Instance instance, Func<TimeProvider, QuietTimeTrim>? memoryTrim = null)
     {
         var time = new ManualTimeProvider();
         var hibernation = new WorkerHibernation(instance.Workers, instance.Coordinator, new WorkerHibernationSettings { Idle = Idle },
-            time, () => instance.Snapshots.WrittenMatchesStore);
+            time, () => instance.Snapshots.WrittenMatchesStore, memoryTrim: memoryTrim?.Invoke(time));
         var host = new Host(instance, hibernation, time);
         _started.Add(host);
         await instance.StartAsync();
@@ -101,6 +102,30 @@ public sealed class WorkerHibernationTests : IAsyncLifetime
         Assert.Equal("ready", status.Indexing.Status);
         Assert.False(status.Indexing.Cache?.ServingCached ?? false);
         Assert.Equal(4, host.Instance.Database.NodeCount);
+    }
+
+    [Fact]
+    public async Task Hibernation_AsksTheHostForAMemoryTrim_ThoughItAllocatedLittle()
+    {
+        var trims = 0;
+        QuietTimeTrim? trim = null;
+        var host = await StartAsync(
+            new PersistentStateTests.Instance(Root, KeyPath, ["--behavior", "persistent-state", "--fail-marker", FailMarker],
+                settings => settings with { QuietPeriod = TimeSpan.FromMilliseconds(50) }, cache: true),
+            time => trim = new QuietTimeTrim(new QuietTimeTrimSettings(), time, allocatedBytes: () => 0, trim: () =>
+            {
+                Interlocked.Increment(ref trims);
+                return new QuietTimeTrimResult(0, 0, TimeSpan.Zero);
+            }));
+        using var _ = trim;
+        await host.WaitForStateWrittenAsync();
+
+        await host.IdleAsync();
+        Assert.True(host.Instance.Workers.IsHibernated("fake"));
+        Assert.Equal(0, Volatile.Read(ref trims));
+        // The stopped process's pipes, threads and buffers are native memory the allocation counter does not see.
+        host.Time.Advance(TimeSpan.FromSeconds(QuietTimeTrimSettings.DefaultQuietSeconds));
+        Assert.Equal(1, Volatile.Read(ref trims));
     }
 
     [Fact]

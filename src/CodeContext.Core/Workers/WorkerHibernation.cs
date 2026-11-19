@@ -1,4 +1,5 @@
 using System.Globalization;
+using CodeContext.Core.Memory;
 using CodeContext.Core.Services;
 using CodeContext.Core.Snapshots;
 using Microsoft.Extensions.Configuration;
@@ -80,6 +81,7 @@ internal sealed class WorkerHibernation : IHostedService, IDisposable
     private readonly WorkerHibernationSettings _settings;
     private readonly TimeProvider _time;
     private readonly ILogger? _logger;
+    private readonly QuietTimeTrim? _memoryTrim;
     private readonly ITimer? _timer;
     private readonly object _gate = new();
 
@@ -95,8 +97,10 @@ internal sealed class WorkerHibernation : IHostedService, IDisposable
         WorkerHibernationSettings settings,
         TimeProvider time,
         Func<bool>? snapshotWritten,
-        ILogger? logger = null)
+        ILogger? logger = null,
+        QuietTimeTrim? memoryTrim = null)
     {
+        _memoryTrim = memoryTrim;
         _workers = workers;
         _coordinator = coordinator;
         _settings = settings;
@@ -177,6 +181,9 @@ internal sealed class WorkerHibernation : IHostedService, IDisposable
         foreach (var parserId in _workers.ParserIds)
         {
             var outcome = await _workers.TryHibernateAsync(parserId, _settings.Idle, ct).ConfigureAwait(false);
+            // Stopping a process allocates little, so the trim's allocation threshold would skip the native memory
+            // it lets go (measured: about 11 MB on this repository's host).
+            if (outcome == LanguageWorkerService.HibernationOutcome.Hibernated) _memoryTrim?.RequestRelease();
             DateTimeOffset? due = outcome switch
             {
                 LanguageWorkerService.HibernationOutcome.NotIdle => _workers.LastActivity(parserId) + _settings.Idle,
@@ -215,7 +222,8 @@ public static class WorkerHibernationServiceCollectionExtensions
                 WorkerHibernationSettings.Read(sp.GetService<IConfiguration>(), logger),
                 TimeProvider.System,
                 snapshots is null ? null : () => snapshots.WrittenMatchesStore,
-                logger);
+                logger,
+                sp.GetService<QuietTimeTrim>());
         });
         services.AddHostedService(sp => sp.GetRequiredService<WorkerHibernation>());
         return services;

@@ -14,7 +14,8 @@ namespace CodeContext.Core.Snapshots
     /// <summary>
     /// What the start-up step handed over to <see cref="SnapshotService"/>: the mode the cache runs in, and
     /// for a writer the directory, key, host meta, next sequence and the view of what was loaded (so a
-    /// start does not rewrite the snapshot it has just loaded). The writer lock itself is taken from
+    /// start does not rewrite the snapshot it has just loaded; taken once, through
+    /// <see cref="SnapshotStartup.TakeLoadedView"/>). The writer lock itself is taken from
     /// <see cref="SnapshotStartup.TakeLock"/>.
     /// </summary>
     internal sealed record SnapshotStartupResult(
@@ -142,6 +143,22 @@ namespace CodeContext.Core.Snapshots
         public CacheDirectory? Directory
         {
             get { lock (_gate) return _directory; }
+        }
+
+        /// <summary>
+        /// Hands the view of what was loaded to the caller (the writer, so it does not rewrite the snapshot it has just
+        /// loaded) and forgets it: the view references the loaded shards, and this step lives as long as the host, so
+        /// keeping it would hold the loaded generation in memory after commits have replaced it. Null when nothing was
+        /// loaded or the view was taken.
+        /// </summary>
+        public SnapshotView? TakeLoadedView()
+        {
+            lock (_gate)
+            {
+                var view = _result?.LoadedView;
+                if (view is not null) _result = _result! with { LoadedView = null };
+                return view;
+            }
         }
 
         /// <summary>Hands the writer lock to the caller, who holds it from now on; null when there is none.</summary>

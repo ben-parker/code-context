@@ -1,6 +1,8 @@
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using CodeContext.Core.Repositories;
@@ -340,5 +342,32 @@ public class ShardedGraphStoreTests
         Assert.False(_database.ContainsEdge("F:local"), "an evicted node's local edge must not dangle");
         var edgesToZ = await new InMemoryEdgeRepository(_database).GetByTargetIdAsync("Z");
         Assert.DoesNotContain(edgesToZ, e => e.Id == "F:local");
+    }
+
+    // ---- Retention: a replaced shard is not kept alive by the store's caches ----------------
+
+    [Fact]
+    public async Task ReplacedShard_IsNotKeptAliveByTheCompositeAdjacencyCache()
+    {
+        var replaced = await CommitAndReadAsync();
+        // The adjacency cache was built over generation 1; generation 2 replaced the shard and nothing has
+        // read since. The old shard must be collectable: an idle store holds one copy of its facts, not two.
+        Assert.True(await Store.TryCommitGenerationAsync(2,
+            [Node("csharp:w:b", "csharp", "w")], [], new CommitScope("csharp", "w", null)));
+
+        GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
+        GC.WaitForPendingFinalizers();
+        GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
+        Assert.False(replaced.IsAlive, "the composite adjacency cache still holds the replaced shard");
+        Assert.Equal(new[] { "csharp:w:b" }, _database.GetAdjacency().Nodes.Select(n => n.Id));
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private async Task<WeakReference> CommitAndReadAsync()
+    {
+        Assert.True(await Store.TryCommitGenerationAsync(1,
+            [Node("csharp:w:a", "csharp", "w")], [], new CommitScope("csharp", "w", null)));
+        Assert.Single(_database.GetAdjacency().Nodes);
+        return new WeakReference(_database.GetShardState(new ShardKey("csharp", "w")));
     }
 }

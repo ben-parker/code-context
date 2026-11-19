@@ -238,6 +238,47 @@ public class QuietTimeTrimTests
         => Assert.Null(QuietTimeTrimSettings.FromSeconds(text));
 
     [Fact]
+    public void ARelease_TrimsAfterTheQuietPeriod_EvenBelowTheAllocationThreshold()
+    {
+        using var h = new Harness();
+        h.Work(100 * MB);
+        h.Advance(15);
+        Assert.Equal(1, h.Collections);
+
+        // A worker process stopped: little managed allocation, but native memory was let go.
+        using (h.Trim.BeginActivity())
+        {
+            h.Allocated += 1 * MB;
+            h.Trim.RequestRelease();
+        }
+        h.Advance(60);
+        Assert.Equal(2, h.Collections);
+
+        // Once: the next small burst is left alone again.
+        h.Work(1 * MB);
+        h.Advance(60);
+        Assert.Equal(2, h.Collections);
+    }
+
+    [Fact]
+    public void ARelease_OutsideAnActivity_ArmsTheTimer_AndKeepsTheMinimumInterval()
+    {
+        using var h = new Harness();
+        h.Work(100 * MB);
+        h.Advance(15);
+        Assert.Equal(1, h.Collections);
+
+        h.Trim.RequestRelease();
+        h.Advance(14.9);
+        Assert.Equal(1, h.Collections);
+        // Quiet period passed, but the minimum interval since the last trim (30 s) has not.
+        h.Advance(0.2);
+        Assert.Equal(1, h.Collections);
+        h.Advance(15);
+        Assert.Equal(2, h.Collections);
+    }
+
+    [Fact]
     public void CompactAndDecommit_Collects()
     {
         var before = GC.CollectionCount(2);
@@ -245,6 +286,16 @@ public class QuietTimeTrimTests
         Assert.True(GC.CollectionCount(2) > before);
         Assert.True(result.Pause >= TimeSpan.Zero);
         Assert.True(result.WorkingSetAfter > 0);
+    }
+
+    [Fact]
+    public void ReturnFreeNativeMemory_RunsOnGlibcLinux_AndIsANoOpElsewhere()
+    {
+        // glibc names itself libc.so.6; musl and other systems have no malloc_trim to call.
+        var glibc = OperatingSystem.IsLinux()
+            && !System.Runtime.InteropServices.RuntimeInformation.RuntimeIdentifier.Contains("musl", StringComparison.Ordinal);
+        Assert.Equal(glibc, QuietTimeTrim.ReturnFreeNativeMemory());
+        Assert.Equal(glibc, QuietTimeTrim.ReturnFreeNativeMemory());
     }
 }
 

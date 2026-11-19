@@ -790,8 +790,16 @@ namespace CodeContext.Core.Repositories.InMemory
             }
         }
 
-        /// <summary>Invalidates cached statistics/adjacency; called after every committed mutation.</summary>
-        public void NotifyMutation() => Interlocked.Increment(ref _version);
+        /// <summary>
+        /// Invalidates cached statistics/adjacency; called after every committed mutation. The composite adjacency is
+        /// also dropped, not only made stale: it references every shard of the map it was built over, so a stale one
+        /// would keep a replaced generation's shards alive until the next read (an idle host would hold two copies).
+        /// </summary>
+        public void NotifyMutation()
+        {
+            Interlocked.Increment(ref _version);
+            _cachedAdjacency = null;
+        }
 
         public bool TryCommitGeneration(
             long generation,
@@ -1200,7 +1208,8 @@ namespace CodeContext.Core.Repositories.InMemory
 
             var shards = _shards;
             var composite = CompositeAdjacency.Build(shards);
-            _cachedAdjacency = new CachedAdjacency(version, composite);
+            // Not cached when a commit ran meanwhile: it would hold that commit's replaced shards.
+            if (Interlocked.Read(ref _version) == version) _cachedAdjacency = new CachedAdjacency(version, composite);
             return composite;
         }
 

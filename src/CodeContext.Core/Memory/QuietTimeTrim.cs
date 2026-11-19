@@ -66,7 +66,8 @@ namespace CodeContext.Core.Memory
     /// Every piece of work runs inside <see cref="BeginActivity"/>. A trim runs on a timer thread when all of
     /// these hold: no activity is in flight; <see cref="QuietTimeTrimSettings.QuietPeriod"/> has passed since
     /// the last activity ended; <see cref="QuietTimeTrimSettings.MinInterval"/> has passed since the last trim;
-    /// and the process has allocated <see cref="QuietTimeTrimSettings.MinAllocatedBytes"/> since the last trim.
+    /// and the process has allocated <see cref="QuietTimeTrimSettings.MinAllocatedBytes"/> since the last trim (or
+    /// <see cref="RequestRelease"/> was called since).
     /// Each activity's end re-arms the timer, so steady traffic keeps pushing the trim back and never runs it,
     /// and a quiet process that allocated little is left alone: it is looked at once per activity, not polled.
     /// An activity that starts while a trim runs waits for the collection like any other GC pause.
@@ -92,6 +93,7 @@ namespace CodeContext.Core.Memory
         private DateTimeOffset? _lastTrimEnd;
         private long _allocatedAtLastTrim;
         private int _trims;
+        private bool _releaseRequested;
 
         /// <param name="trim">The collection; <see cref="CompactAndDecommit"/> outside tests.</param>
         /// <param name="trimmed">Called after each trim, outside the lock (a log line). An exception from it is swallowed.</param>
@@ -141,6 +143,24 @@ namespace CodeContext.Core.Memory
             return new Activity(this);
         }
 
+        /// <summary>
+        /// Says that memory was let go that the allocation counter does not see: a worker process stopped (the
+        /// pipes, threads and buffers that served it) after work that allocated little. The next trim then runs
+        /// after the quiet period whatever was allocated, once; the quiet period and the minimum interval still
+        /// apply, and it counts as the end of an activity.
+        /// </summary>
+        public void RequestRelease()
+        {
+            if (_timer is null) return;
+            lock (_gate)
+            {
+                if (_disposed) return;
+                _releaseRequested = true;
+                _lastActivityEnd = _time.GetUtcNow();
+                if (_active == 0 && !_trimming) ArmLocked(_settings.QuietPeriod);
+            }
+        }
+
         private void EndActivity()
         {
             lock (_gate)
@@ -170,7 +190,8 @@ namespace CodeContext.Core.Memory
                     return;
                 }
                 // Not worth a pause: the next activity's end looks again.
-                if (_allocatedBytes() - _allocatedAtLastTrim < _settings.MinAllocatedBytes) return;
+                if (!_releaseRequested && _allocatedBytes() - _allocatedAtLastTrim < _settings.MinAllocatedBytes) return;
+                _releaseRequested = false;
                 _trimming = true;
             }
 
@@ -219,7 +240,7 @@ namespace CodeContext.Core.Memory
 
         /// <summary>
         /// One aggressive, blocking, compacting collection of every generation, the large object heap included, which
-        /// also decommits the space it frees. Measured pause: 80 to 240 ms on this repository's host and C# worker.
+        /// also decommits the space it frees. Then the free native heap is returned too (<see cref="ReturnFreeNativeMemory"/>). Measured pause: 80 to 240 ms on this repository's host and C# worker.
         /// </summary>
         public static QuietTimeTrimResult CompactAndDecommit()
         {
@@ -227,9 +248,48 @@ namespace CodeContext.Core.Memory
             var started = Stopwatch.GetTimestamp();
             GCSettings.LargeObjectHeapCompactionMode = GCLargeObjectHeapCompactionMode.CompactOnce;
             GC.Collect(GC.MaxGeneration, GCCollectionMode.Aggressive, blocking: true, compacting: true);
+            ReturnFreeNativeMemory();
             var pause = Stopwatch.GetElapsedTime(started);
             return new QuietTimeTrimResult(before, Environment.WorkingSet, pause);
         }
+
+#if !CODECONTEXT_CSHARP_WORKER
+        private static volatile bool s_nativeTrimUnavailable;
+#endif
+
+        /// <summary>
+        /// On Linux with glibc, gives the free memory of the native heap back to the operating system
+        /// (<c>malloc_trim(0)</c>); elsewhere, and in the C# worker's copy, does nothing. The runtime's own native allocations (the JIT compiling
+        /// a code path for the first time, thread start-up, interop buffers) land in glibc's per-thread arenas, which
+        /// glibc does not shrink on its own: measured on this repository's host, about 13 MB stayed resident after a
+        /// first edit, a hibernation and the collection above. Returns whether the call was made; an unavailable
+        /// <c>libc.so.6</c> or entry point (musl, another OS) turns it off for the process.
+        /// </summary>
+        public static bool ReturnFreeNativeMemory()
+        {
+#if CODECONTEXT_CSHARP_WORKER
+            // The worker reaches the system only through its disk guard, and its banned-symbol list forbids
+            // platform invoke; it keeps the managed trim alone.
+            return false;
+#else
+            if (!OperatingSystem.IsLinux() || s_nativeTrimUnavailable) return false;
+            try
+            {
+                MallocTrim(0);
+                return true;
+            }
+            catch (Exception exception) when (exception is DllNotFoundException or EntryPointNotFoundException)
+            {
+                s_nativeTrimUnavailable = true;
+                return false;
+            }
+#endif
+        }
+
+#if !CODECONTEXT_CSHARP_WORKER
+        [System.Runtime.InteropServices.DllImport("libc.so.6", EntryPoint = "malloc_trim")]
+        private static extern int MallocTrim(nuint pad);
+#endif
 
         private sealed class Activity(QuietTimeTrim owner) : IDisposable
         {
