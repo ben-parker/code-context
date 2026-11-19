@@ -105,7 +105,8 @@ codecontext query multi ContextService StartCommandHandler
 API. With none running, it starts an instance in the background and waits for indexing.
 `--snapshot` (or `CodeContext__QueryFromSnapshot=true`, which `--start` overrides) first
 tries to answer in its own process from the saved index, labelled `cache snapshot`, leaving
-nothing running; see [operations](skill/references/operations.md) for what it checks. Compact,
+nothing running. It checks by file time the files a scan walks and what each worker
+reported it read; see [operations](skill/references/operations.md) for what that misses. Compact,
 line-oriented agent text is the default. Use `--human` for expanded human-readable
 output or `--json` for the exact API response; progress stays on stderr. Test evidence
 is omitted by default, so add `--tests` whenever it matters. Other options include

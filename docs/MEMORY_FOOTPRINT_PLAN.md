@@ -199,15 +199,16 @@ cache, without starting workers. Needs a staleness statement that is honest: at 
 snapshot time and whether any indexed file's size or mtime moved. Depends on M4's
 outcome for whether it reads a mapped or a materialized shard.
 
-As built. With no instance registered for the path, `query` opens the newest snapshot that
-authenticates (`OneShotSnapshot`: same key, checks and refusal budget as a host's load; no
-key, directory, lock, registration, write or worker), stat-checks it, materializes it with
-`SnapshotLoader` and answers through `ContextService` with the endpoint's defaults and the
-REST JSON settings, labelled `cache snapshot`. Anything else falls back to today's start,
-with one stderr line saying why. Measured 2026-11-19, Linux, 4 vCPU; this repository (clone at
-`6f37e17`, 355 checked entries, 9.3 MB snapshot) and jellyfin (2,253 files, 2,838 checked
-entries, 24.7 MB snapshot); wall time of the CLI process and its peak RSS; one-shot over 5
-runs.
+As built. With `--snapshot` (or `CodeContext:QueryFromSnapshot=true`; `--start` overrides it) and no
+instance registered for the path, `query` opens the newest snapshot that authenticates (`OneShotSnapshot`:
+same key, checks, refusal budget and candidate loop as a host's load; no key, directory, lock,
+registration, write or worker), refuses one written while its host was unverified or holding a shard
+whose worker reported no inputs, stat-checks it, materializes it with `SnapshotLoader` and answers
+through `ContextService` with the endpoint's defaults and ASP.NET's own JSON options, labelled `cache
+snapshot`. Anything else falls back to today's start, with one stderr line saying why. Without the flag
+or setting, `query` starts an instance as before M5. Measured 2026-11-19, Linux, 4 vCPU; this repository
+(clone at `6f37e17`, 355 checked entries, 9.3 MB snapshot) and jellyfin (2,253 files, 2,838 checked
+entries, 24.7 MB snapshot); wall time of the CLI process and its peak RSS; one-shot over 5 runs.
 
 | | JIT build, code-context | JIT, jellyfin | AOT host, code-context | AOT, jellyfin |
 |---|---|---|---|---|
@@ -217,33 +218,43 @@ runs.
 
 Decisions:
 
-1. Freshness, option (a). The snapshot holds no per-file size, time or hash (they are in the C#
-   worker's state file), so the check is by time against the capture: every directory, claimed or
-   project-input file and `.gitignore` the scan's own selection walk includes, plus
-   `obj/project.assets.json` beside a project; a time after the capture less 2 s (coarse file
-   systems) counts. Directory times catch adds, deletes and renames. Moved means fall back. Stat
-   pass: 13-25 ms here, 37-227 ms on jellyfin (cold first run in a process 130 ms), 0.68-0.71 s
-   warm and 1.1-1.5 s cold cache on a synthetic tree of 100,000 files in 5,000 folders. Not seen:
-   content rewritten in place with an older time set afterwards, and on Linux a file copied in
-   with an old time is seen only through its folder (.NET reports no birth time there).
-2. Default when no instance runs; `--start` for the old behaviour (and `init` or `start --detach`
-   still give a resident instance, which `query` prefers). One-shot costs 0.35-1 s more per query
-   than a resident AOT instance, so a resident one is faster from the second query on; but it
-   leaves nothing behind (against 580-790 MB and the verification's CPU), and the first edit makes
-   the next query fall back and start an instance, so an editing session ends up resident anyway.
-   Asking a few questions and leaving, the case this item is for, gains most.
+1. Freshness, option (a), by what the workers say they read. The snapshot holds no per-file size, time
+   or hash (they are in the C# worker's state file), so the check is by time against the capture, of
+   exactly: every directory, claimed file and `.gitignore` the scan's own selection walk includes, plus
+   each shard's `inputs` as its worker reported them (protocol `analysis/delta.inputs`, additive and
+   optional, version still 1; stored in snapshot format 2): files that must still exist and be no newer,
+   paths that must still be absent. The C# worker reports what it checks itself before reusing what it
+   read (project model stamps, `Directory.Build.*`, `Directory.Packages.props`, `global.json` and `.git`
+   probes up to the repository top, restore data where the project puts it, listed directories, every
+   referenced assembly); the TypeScript worker its configs with `extends` and `references`, what module
+   resolution looked at (TypeScript's failed and affecting locations), the program's library and
+   declaration files under `node_modules`, and the directories it listed. A time after the capture less
+   2 s counts. The time is the status change time on Linux (`statx`), which no user tool sets back, and
+   the later of write and creation time elsewhere; a time ahead of the clock counts as a change but never
+   makes a host rewrite. The root's time after `.codecontext/` was made is recorded, so making it is no
+   change. Stat pass: 41-47 ms warm on jellyfin (89-233 ms inside a cold one-shot, 4,236 entries with the
+   inputs), 0.74-0.78 s on a synthetic tree of 100,000 files in 5,000 folders, as before. Not seen: on
+   Windows and macOS, content rewritten in place with an older time set afterwards; an edit landing
+   between a worker's read and the capture when the host then stops before its watcher reports it; a
+   change of configured ignore patterns or of the installed workers.
+2. Opt-in (`--snapshot`, or the setting), after the review found stale answers labelled current under
+   the first check. One-shot costs 0.35-1 s more per query than a resident AOT instance, but leaves
+   nothing behind (against 580-790 MB and the verification's CPU), and the first edit makes the next
+   query fall back and start an instance.
 3. Materializing load kept. Phases (JIT harness, cold/warm): authenticate 27/9-13 ms here,
    66/22 ms on jellyfin; materialize 815/348-382 and 1,526/718-837 ms; first query 172/89-138 and
    845/318-452 ms (adjacency build). The AOT figures above are within the comparison's 110-270 MB
    peak; a read-only mapped reader would cut most of the materialize time, not worth phase 8's
    reader now.
 
-Also: after a verification the writer rewrites a loaded snapshot older than some file (a checkout
-and back), else such a repository never answers from the snapshot again; never before the scan
-verified, so a failed verification cannot stamp loaded facts newer. A shard of a worker that sends
-fingerprints but was written without its state (after a failed verification, save or pairing) is
-refused. Not built: a stale answer with a count (option b); the race of an edit landing between a
-worker's read and the capture when the host then stops before its watcher reports it.
+Also: after a verification the writer rewrites, in the background, a loaded snapshot older than some
+input (a checkout and back), else such a repository never answers from the snapshot again; never before
+the scan verified, and the check no longer runs before the scan (a cached start of the 100,000-file tree
+went from 3.24-3.28 s to 2.50-2.79 s). A snapshot captured while no scan had verified the store is
+flagged and rewritten once one has. A shard of a worker that sends fingerprints but was written without
+its state is refused. A running instance now also follows `tsconfig.json`/`jsconfig.json` edits (project
+inputs of the TypeScript worker, which re-reads its configs); other config names reach it at its next
+start. Not built: a stale answer with a count (option b).
 
 ## Closing steps and review process (agreed 2026-11-19)
 

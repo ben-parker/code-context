@@ -189,6 +189,19 @@ files' facts. The contract:
   mid-stream the host commits nothing; keeping the previous baseline means the next
   batch re-emits the same difference and converges.
 
+## Report what the facts were read from (optional)
+
+Send `inputs` on the first `analysis/delta` chunk of every request: `{ "files": [...],
+"absent": [...] }`, absolute paths, complete for the facts as they stand after the request
+(not only what this request read). `files` are the files the worker read besides the
+approved files (project and configuration files, package manifests, lock data, reference
+assemblies, declaration files, anywhere on disk) and directories whose listing it used;
+`absent` are paths it looked for and did not find. The host stores the last set beside the
+shard and in its snapshots, and uses it for one thing: `codecontext query --snapshot` with
+no instance running answers from a snapshot only when none of these files changed, none is
+gone and no absent path exists. A worker that never sends `inputs` is still indexed as
+before; its facts are simply never answered without an instance.
+
 ## Persist state across restarts (optional)
 
 The host saves its graph under `<root>/.codecontext/cache/` and, on the next start, answers

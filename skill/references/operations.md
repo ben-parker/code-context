@@ -12,11 +12,21 @@ Use `codecontext list --json` to inspect registrations. Only after that, use
 `codecontext start --detach --path .` for manual lifecycle troubleshooting.
 
 With `--snapshot` (or `CodeContext__QueryFromSnapshot=true`; `--start` overrides it) and
-no instance running, `query` first tries the saved index in its own process: it answers
-from it (label `cache snapshot`) when the snapshot authenticates and no file a scan reads,
-and no folder holding one, has a newer modification time; otherwise stderr says why
-(`Not answering from the saved index: ...`) and it starts an instance. It writes nothing and
-starts no worker. `CodeContext__CacheEnabled=false` turns it off with the cache.
+no instance running, `query` first tries the saved index in its own process. It answers
+from it (label `cache snapshot`; `--json` carries `cache.state` `"snapshot"`) only when the
+snapshot authenticates, was written by a verified instance, every worker reported what it
+read, and nothing of that changed since by file time: the files and folders a scan walks,
+every file a worker read outside them (project files, configs, restore data, referenced
+assemblies, declaration files, also above the root) still there and no newer, and every
+path a worker looked for and did not find still absent. On Linux the time is the status
+change time, which `tar -x`, `cp -p` or `touch -d` cannot set back. Otherwise stderr says
+why (`Not answering from the saved index: ...`) and it starts an instance. It writes
+nothing and starts no worker. `CodeContext__CacheEnabled=false` turns it off with the cache.
+
+Not seen: on Windows and macOS, content rewritten in place with an older modification
+time set afterwards; an edit landing between a worker's read and the save when the
+instance stops before noticing it; a change of configured ignore patterns or of the
+installed workers.
 
 `query` waits at most 30 seconds for indexing. On timeout it prints "Indexing did not
 become ready within 30 seconds" and exits with code 3; check `codecontext status --path .`

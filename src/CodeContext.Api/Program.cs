@@ -189,8 +189,9 @@ public class Program
         };
         Option<bool> querySnapshotOption = new("--snapshot")
         {
-            Description = "With no instance running, answer in this process from the saved index when nothing it records " +
-                "changed since, leaving nothing running; otherwise start one. CodeContext:QueryFromSnapshot=true " +
+            Description = "With no instance running, answer in this process from the saved index when, by file times, " +
+                "nothing it was made from changed since (the files a scan walks and what each worker reported it read), " +
+                "leaving nothing running; otherwise start one. CodeContext:QueryFromSnapshot=true " +
                 "(environment CodeContext__QueryFromSnapshot=true) makes this the default.",
         };
         foreach (var option in new Option[]

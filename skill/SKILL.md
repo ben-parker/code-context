@@ -63,10 +63,11 @@ Reading results:
   - `unverified`: the re-check failed (`indexing.status` `error`) and the answers stay
     saved ones. Do not wait: confirm with `rg -w <Name>` or by reading the file, or run
     `POST /api/index/refresh` (or restart) and query again once `ready`.
-- `cache snapshot` (only with `--snapshot`) means no instance was running and the answer was read from the saved
-  index after checking that no indexed file or folder has a newer modification time; no
-  worker re-analysed anything. Treat it like a served answer. An edit makes the next
-  `query` start an instance, which re-checks.
+- `cache snapshot` (only with `--snapshot`; `--json`: `"cache":{"state":"snapshot",...}`)
+  means no instance was running and the answer was read from the saved index after a
+  check by file times of what it was made from (see [operations](references/operations.md));
+  no worker re-analysed anything. It can miss a change that check cannot see. Before
+  editing on it or concluding absence, confirm with `rg` or query without `--snapshot`.
 - `relationships not loaded` means nothing was fetched: the name was ambiguous
   (re-query with a target's identifier) or the depth was 0. It says nothing about
   whether the symbol has users.

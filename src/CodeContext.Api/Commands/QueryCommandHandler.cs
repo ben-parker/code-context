@@ -596,7 +596,7 @@ public static class QueryCommandHandler
     /// <summary>
     /// The first line of an answer from a saved index. While an instance re-checks it (<c>verifying</c>,
     /// <c>unverified</c>) every line after it, a miss included, may be stale: a miss is not conclusive until
-    /// the index is verified. <c>snapshot</c> was checked only by modification times, with no worker.
+    /// the index is verified. <c>snapshot</c> was checked only by file times, with no worker.
     /// Always four fields; the time is empty when the snapshot time is unknown.
     /// </summary>
     private static void WriteAgentCache(CacheNotice? cache, TextWriter output)
@@ -613,7 +613,7 @@ public static class QueryCommandHandler
         {
             CacheState.Unverified => $"Cached, unverified: answers come from {savedAt}; checking them against the files failed.",
             CacheState.Snapshot => $"Cached, snapshot: answers come from {savedAt}, read without a running instance; " +
-                "no indexed file or folder has a newer modification time.",
+                "by file times, nothing it was made from has changed since.",
             _ => $"Cached, {cache.State}: answers come from {savedAt} and are being checked against the files.",
         });
     }
@@ -621,7 +621,7 @@ public static class QueryCommandHandler
     private static string CacheMeaning(string state) => state switch
     {
         CacheState.Unverified => "answers come from the saved index; re-checking the files failed",
-        CacheState.Snapshot => "answers come from the saved index, read without a running instance; no indexed file is newer by modification time",
+        CacheState.Snapshot => "answers come from the saved index, read without a running instance; by file times nothing it was made from changed since",
         _ => "answers come from the saved index while files are re-checked",
     };
 

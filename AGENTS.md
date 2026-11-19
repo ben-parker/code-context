@@ -100,7 +100,8 @@ changed while the host was down; any other worker re-walks and replaces its fact
 `SnapshotService` writes snapshots after commits, off the commit path, and asks such
 workers to save their state when it captures. `OneShotSnapshot` is the read-only path a
 `query` with no instance takes: it authenticates, stat-checks with `SnapshotFreshness`,
-materializes and answers through `ContextService`, writing nothing.
+materializes and answers through `ContextService`, writing nothing; it trusts a shard only
+as far as its worker's reported `inputs` (protocol) say what the facts were read from.
 
 ## Architecture invariants
 
@@ -120,7 +121,10 @@ materializes and answers through `ContextService`, writing nothing.
   the host follows none when it walks the root, and the TypeScript worker follows one
   only to a place it would read, since package managers link packages. Both are tested
   against `tests/Shared/disk-guard-vectors.json`; a new rule goes there first. New
-  worker code that reads a file goes through the guard.
+  worker code that reads a file goes through the guard, and what it reads (or looks for
+  and does not find) besides the approved files must reach the worker's `inputs`
+  (`ProjectModel` stamps in the C# worker, `InputRecorder` in the TypeScript worker):
+  `query --snapshot` trusts a snapshot only as far as those say.
 - Every worker-owned node ID, edge ID, and edge source ID starts with
   `<parserId>:<workspaceId>:`. IDs are stable semantic identities, not source offsets.
   A worker must replace all facts whose meaning may change and reanalyze semantic
