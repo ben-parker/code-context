@@ -4,6 +4,7 @@
 # Usage: scripts/bench/measure-memory.sh [--path DIR] [--no-cache] [--queries]
 #          [--queries-file FILE] [--heap] [--top N] [--settle SECONDS]
 #          [--write-timeout SECONDS] [--json] [--binary PATH]
+#          [--hibernate SECONDS [--probe-cs FILE] [--probe-ts FILE]]
 #
 # Starts an instance on DIR (default: the current directory), cached (the default: a
 # warm-up start writes a snapshot, then the measured start loads it) or --no-cache,
@@ -25,6 +26,14 @@
 # mix, the same without the snapshot step (queries write nothing). The output's write=
 # and stable= are the seconds the first and last waits took (write=-1: no write seen).
 #
+# --hibernate SECONDS starts the instance with CodeContext:WorkerHibernateSeconds set. After
+# the idle reading (and the query mix), it times an edit to a C# and a TypeScript file while
+# the workers run (append a probe class, poll `query` until it resolves), waits until every
+# worker session is hibernated, settles, reads again (phase hibern), times a query, times the
+# same edits while hibernated (each wakes its worker), settles and reads again (phase woken).
+# Probe files default to src/CodeContext.Core/CodeGraph.cs and
+# tests/CodeContext.Core.Tests/TestFiles/TypeScript/SimpleClass.ts under DIR; each is restored.
+#
 # The instance is always stopped; a .codecontext directory the script created is removed;
 # `git status --short` must be unchanged at the end. Linux only; needs jq, and
 # dotnet-gcdump for --heap. The binary defaults to the Release build in this repository
@@ -45,6 +54,9 @@ settle=20
 write_timeout=60
 json=0
 timeout=300
+hibernate=
+probe_cs=
+probe_ts=
 
 usage() { sed -n '2,31s/^# \{0,1\}//p' "${BASH_SOURCE[0]}"; }
 
@@ -60,6 +72,9 @@ while [ $# -gt 0 ]; do
     --write-timeout) write_timeout=$2; shift 2 ;;
     --json) json=1; shift ;;
     --binary) bin=$2; shift 2 ;;
+    --hibernate) hibernate=$2; shift 2 ;;
+    --probe-cs) probe_cs=$2; shift 2 ;;
+    --probe-ts) probe_ts=$2; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -90,6 +105,13 @@ fi
 if [ "$queries" = 1 ]; then
   [ -n "$queries_file" ] || queries_file=$script_dir/queries-$(basename "$root").txt
   [ -f "$queries_file" ] || die "no query list at $queries_file (pass --queries-file)"
+fi
+
+if [ -n "$hibernate" ]; then
+  export CodeContext__WorkerHibernateSeconds=$hibernate
+  [ -n "$probe_cs" ] || probe_cs=$root/src/CodeContext.Core/CodeGraph.cs
+  [ -n "$probe_ts" ] || probe_ts=$root/tests/CodeContext.Core.Tests/TestFiles/TypeScript/SimpleClass.ts
+  for f in "$probe_cs" "$probe_ts"; do [ -f "$f" ] || die "no probe file $f"; done
 fi
 
 work=$(mktemp -d)
@@ -123,6 +145,8 @@ stop_instance() {
 cleanup() {
   local status=$?
   stop_instance
+  [ -f "$work/probe-cs.orig" ] && cp "$work/probe-cs.orig" "$probe_cs"
+  [ -f "$work/probe-ts.orig" ] && cp "$work/probe-ts.orig" "$probe_ts"
   if [ "$created_cc" = 1 ]; then rm -rf "$root/.codecontext"; fi
   rm -rf "$work"
   if [ "$in_git" = 1 ] && [ "$(git -C "$root" status --short)" != "$git_before" ]; then
@@ -292,6 +316,63 @@ if [ "$queries" = 1 ]; then
   read_memory queries
 fi
 
+hibernation=
+if [ -n "$hibernate" ]; then
+  now_ms() { date +%s%3N; }
+  cp "$probe_cs" "$work/probe-cs.orig"
+  cp "$probe_ts" "$work/probe-ts.orig"
+  probe_n=0
+  # Appends a probe class to the file and prints the milliseconds until `query` resolves it.
+  probe() {
+    local kind=$1 file=$2 name t0 deadline
+    probe_n=$((probe_n + 1))
+    name=HibernationProbe${kind}${probe_n}
+    case $kind in
+      Cs) printf '\ninternal static class %s { }\n' "$name" >>"$file" ;;
+      Ts) printf '\nexport class %s { }\n' "$name" >>"$file" ;;
+    esac
+    t0=$(now_ms)
+    deadline=$((SECONDS + 120))
+    until "$bin" query "$name" --path "$root" </dev/null >/dev/null 2>&1; do
+      [ $SECONDS -lt $deadline ] || { echo -1; return 0; }
+      sleep 0.05
+    done
+    echo $(( $(now_ms) - t0 ))
+  }
+  restore_probes() {
+    cp "$work/probe-cs.orig" "$probe_cs"
+    cp "$work/probe-ts.orig" "$probe_ts"
+  }
+  sessions() { "$bin" status --path "$root" 2>/dev/null | jq -r '[.parsers.sessions[]? | select(.state != "notNeeded") | .state] | join(",")'; }
+
+  awake_cs=$(probe Cs "$probe_cs")
+  awake_ts=$(probe Ts "$probe_ts")
+  restore_probes
+  log "edits while awake: C# ${awake_cs} ms, TypeScript ${awake_ts} ms; waiting for hibernation"
+  deadline=$((SECONDS + hibernate + 300))
+  until [ "$(sessions)" != "" ] && sessions | grep -qvE '(^|,)(ready|indexing|starting|failed|unavailable|stopped)(,|$)'; do
+    [ $SECONDS -lt $deadline ] || die "workers did not hibernate (sessions: $(sessions))"
+    sleep 2
+  done
+  hibernated_sessions=$(sessions)
+  sleep "$settle"
+  wait_stable >/dev/null
+  read_memory hibern
+  t0=$(now_ms)
+  "$bin" query ContextService --path "$root" </dev/null >"$work/hq.out" 2>&1 || die "query while hibernated failed"
+  query_ms=$(( $(now_ms) - t0 ))
+  query_label=$(grep -c '^cache' "$work/hq.out" || true)
+  [ "$(pgrep -P "$host" | wc -l)" = 0 ] || log "warning: worker processes ran during the hibernated query"
+  wake_cs=$(probe Cs "$probe_cs")
+  wake_ts=$(probe Ts "$probe_ts")
+  restore_probes
+  sleep "$settle"
+  wait_stable >/dev/null
+  read_memory woken
+  hibernation="hibernate=${hibernate}s  sessions=${hibernated_sessions}  query_hibernated=${query_ms}ms (cache label lines: ${query_label})
+edit->answer ms: awake C# ${awake_cs}, TS ${awake_ts}; hibernated C# ${wake_cs}, TS ${wake_ts}"
+fi
+
 heap_rows=
 if [ "$heap" = 1 ]; then
   while read -r label pid; do
@@ -333,6 +414,7 @@ fi
 printf '%s  %s  files=%s  ready=%ss  write=%ss  settle=%ss  stable=%ss' "$root" "$mode" "$files" "$ready_s" \
   "$write_wait" "$settle" "$stable_wait"
 [ "$queries" = 1 ] && printf '  queries=%s (failed %s)' "$query_count" "$query_failures"
+[ -n "$hibernation" ] && printf '\n%s' "$hibernation"
 printf '\n%-8s %-11s %9s %9s %9s\n' phase process rss_mb anon_mb file_mb
 awk '{ printf "%-8s %-11s %9.1f %9.1f %9.1f\n", $1, $2, $3/1024, $4/1024, $5/1024 }' "$work/memory"
 if [ -f "$work/heap" ]; then
