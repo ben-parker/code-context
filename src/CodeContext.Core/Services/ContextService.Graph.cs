@@ -93,7 +93,7 @@ namespace CodeContext.Core.Services
             {
                 response.Found = true;
                 response.Path = ToHops(steps, from.ContainedBy, to.ContainedBy, walk);
-                response.Length = steps.Count(step => step.Hop == "uses");
+                response.Length = UsesHops(steps);
             }
             else
             {
@@ -177,14 +177,13 @@ namespace CodeContext.Core.Services
                 var limitedWithoutRelation = false;
                 var limitedWithTests = false;
                 if (walk.FiltersRelations
-                    && walk.With(null, walk.IncludesTests).ShortestPath(from.Seeds!, goals, request.MaxDepth, out limitedWithoutRelation) is { } withoutRelation)
+                    && walk.WithoutRelationFilter().ShortestPath(from.Seeds!, goals, request.MaxDepth, out limitedWithoutRelation) is { } withoutRelation)
                 {
                     excluded.Add("relation");
                     length = UsesHops(withoutRelation);
                 }
                 if (!walk.IncludesTests
-                    && walk.With(walk.FiltersRelations ? RelationsOf(request) : null, true)
-                        .ShortestPath(from.Seeds!, goals, request.MaxDepth, out limitedWithTests) is { } withTests)
+                    && walk.WithTests().ShortestPath(from.Seeds!, goals, request.MaxDepth, out limitedWithTests) is { } withTests)
                 {
                     excluded.Add("tests");
                     length = Math.Min(length ?? int.MaxValue, UsesHops(withTests));
@@ -194,7 +193,7 @@ namespace CodeContext.Core.Services
                     // With one filter, the search without it was the unfiltered search: it is not run again.
                     if (walk.FiltersRelations && !walk.IncludesTests)
                     {
-                        if (walk.With(null, true).ShortestPath(from.Seeds!, goals, request.MaxDepth, out unfilteredLimited) is { } unfiltered)
+                        if (walk.WithoutRelationFilter().WithTests().ShortestPath(from.Seeds!, goals, request.MaxDepth, out unfilteredLimited) is { } unfiltered)
                         {
                             excluded.AddRange(["relation", "tests"]);
                             length = UsesHops(unfiltered);
@@ -243,8 +242,6 @@ namespace CodeContext.Core.Services
                 + "Relationships are static evidence; reflection, dependency injection by convention, events, configuration and "
                 + "anything the workers do not record are invisible here, so cross-check with rg.");
         }
-
-        private static HashSet<string>? RelationsOf(GraphPathRequest request) => ParseRelationFilter(request.Relation);
 
         private static int UsesHops(List<GraphWalk.PathStep> steps) => steps.Count(step => step.Hop == "uses");
 

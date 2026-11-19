@@ -848,7 +848,7 @@ namespace CodeContext.Core.Services
             };
 
         /// <summary>A library symbol the code uses, known only through that use.</summary>
-        private static bool IsExternal(CodeNode node)
+        internal static bool IsExternal(CodeNode node)
             => node.Metadata?.GetValueOrDefault("external") == "true";
 
         private string ToDisplayPath(string path)
@@ -1071,9 +1071,44 @@ namespace CodeContext.Core.Services
             "IMPLEMENTS_MEMBER", "OVERRIDES_MEMBER",
         };
 
-        private static bool IsUsageEdge(CodeEdge edge)
-            => edge.Type is null || (!ContainmentEdgeKinds.Contains(edge.Type)
-                && !MethodFamilyEdgeKinds.Contains(edge.Type));
+        /// <summary>What an edge is to a query: a use, containment, or a method-family link (implements or overrides a member).</summary>
+        internal enum EdgeRole : byte { Usage, Containment, Family }
+
+        /// <summary>
+        /// The role of an edge kind. Queries ask this of every edge they look at, so the kinds as the workers write
+        /// them are told apart by an ordinal switch; any other spelling goes to the case-insensitive sets above, which
+        /// this agrees with.
+        /// </summary>
+        internal static EdgeRole RoleOf(string? type)
+        {
+            switch (type)
+            {
+                case null:
+                case "CALLS":
+                case "REFERENCES":
+                case "MOCK_CALLS":
+                case "IMPLEMENTS":
+                case "INHERITS":
+                case "EXTENDS":
+                case "IMPORTS":
+                case "USES":
+                    return EdgeRole.Usage;
+                case "HAS_METHOD":
+                case "HAS_PROPERTY":
+                case "HAS_FIELD":
+                case "CONTAINS":
+                    return EdgeRole.Containment;
+                case "IMPLEMENTS_MEMBER":
+                case "OVERRIDES_MEMBER":
+                    return EdgeRole.Family;
+                default:
+                    return ContainmentEdgeKinds.Contains(type) ? EdgeRole.Containment
+                        : MethodFamilyEdgeKinds.Contains(type) ? EdgeRole.Family
+                        : EdgeRole.Usage;
+            }
+        }
+
+        private static bool IsUsageEdge(CodeEdge edge) => RoleOf(edge.Type) == EdgeRole.Usage;
 
         // Graph traversal uses first-parent-wins semantics: the first edge that reaches a
         // node fixes that node's recorded RelationPath (and, for family expansion, its

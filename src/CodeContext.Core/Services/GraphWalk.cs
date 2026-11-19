@@ -44,8 +44,11 @@ namespace CodeContext.Core.Services
             _cancellation = cancellation;
         }
 
-        public GraphWalk With(HashSet<string>? relations, bool includeTests)
-            => new(_shards, relations, includeTests, _rootPath, _cancellation);
+        /// <summary>The same walk following every usage kind.</summary>
+        public GraphWalk WithoutRelationFilter() => new(_shards, null, _includeTests, _rootPath, _cancellation);
+
+        /// <summary>The same walk with test files included.</summary>
+        public GraphWalk WithTests() => new(_shards, _relations, true, _rootPath, _cancellation);
 
         /// <summary>Symbols visited between two looks at the cancellation token.</summary>
         internal const int VisitsPerCancellationCheck = 1024;
@@ -76,54 +79,14 @@ namespace CodeContext.Core.Services
 
         public bool IsTestNode(CodeNode node) => RepositoryPaths.IsTestFile(node.FilePath, _rootPath);
 
-        /// <summary>What an edge is to a walk: a use, containment, or a method-family link (implements or overrides a member).</summary>
-        internal enum EdgeRole : byte { Usage, Containment, Family }
+        internal static bool IsUsage(CodeEdge edge) => ContextService.RoleOf(edge.Type) == ContextService.EdgeRole.Usage;
 
-        /// <summary>
-        /// The role of an edge kind. The walks ask this of every edge they look at, so the kinds as the workers write
-        /// them are told apart by an ordinal switch; any other spelling goes to the context service's case-insensitive
-        /// sets, which this agrees with.
-        /// </summary>
-        internal static EdgeRole Role(string? type)
-        {
-            switch (type)
-            {
-                case null:
-                case "CALLS":
-                case "REFERENCES":
-                case "MOCK_CALLS":
-                case "IMPLEMENTS":
-                case "INHERITS":
-                case "EXTENDS":
-                case "IMPORTS":
-                case "USES":
-                    return EdgeRole.Usage;
-                case "HAS_METHOD":
-                case "HAS_PROPERTY":
-                case "HAS_FIELD":
-                case "CONTAINS":
-                    return EdgeRole.Containment;
-                case "IMPLEMENTS_MEMBER":
-                case "OVERRIDES_MEMBER":
-                    return EdgeRole.Family;
-                default:
-                    return ContextService.ContainmentEdgeKinds.Contains(type) ? EdgeRole.Containment
-                        : ContextService.MethodFamilyEdgeKinds.Contains(type) ? EdgeRole.Family
-                        : EdgeRole.Usage;
-            }
-        }
+        internal static bool IsFamily(CodeEdge edge) => ContextService.RoleOf(edge.Type) == ContextService.EdgeRole.Family;
 
-        internal static bool IsUsage(CodeEdge edge) => Role(edge.Type) == EdgeRole.Usage;
-
-        internal static bool IsFamily(CodeEdge edge) => Role(edge.Type) == EdgeRole.Family;
-
-        internal static bool IsContainment(CodeEdge edge) => Role(edge.Type) == EdgeRole.Containment;
+        internal static bool IsContainment(CodeEdge edge) => ContextService.RoleOf(edge.Type) == ContextService.EdgeRole.Containment;
 
         internal static bool IsStaticDispatch(CodeEdge edge)
             => edge.Metadata?.GetValueOrDefault(EdgeMetadataKeys.Dispatch) == EdgeDispatch.Static;
-
-        internal static bool IsExternal(CodeNode node)
-            => node.Metadata?.GetValueOrDefault("external") == "true";
 
         internal static string Kind(CodeEdge edge) => edge.Type ?? "USES";
 
@@ -221,7 +184,7 @@ namespace CodeContext.Core.Services
                         return null;
                     }
 
-                    if (state.Dispatch && Node(state.Id) is { } member && !IsExternal(member))
+                    if (state.Dispatch && Node(state.Id) is { } member && !ContextService.IsExternal(member))
                     {
                         foreach (var shard in _shards)
                         {
@@ -361,7 +324,7 @@ namespace CodeContext.Core.Services
                     if (!(climbed ??= new HashSet<string>(StringComparer.Ordinal)).Add(declaration)) continue;
                     // Once its callers are in, a declaration adds nothing more (in a probe, they are visited already).
                     if (!probe && !declarationsSeen.Add(declaration)) continue;
-                    if (Node(declaration) is not { } declared || IsExternal(declared)) continue;
+                    if (Node(declaration) is not { } declared || ContextService.IsExternal(declared)) continue;
                     foreach (var shard in _shards)
                     {
                         var inbound = shard.GetEdgesByTarget(declaration);

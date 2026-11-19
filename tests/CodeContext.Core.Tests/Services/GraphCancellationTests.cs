@@ -35,7 +35,7 @@ public class GraphCancellationTests
         Assert.Throws<OperationCanceledException>(() => Walk(graph, gone.Token).ShortestPath(start, end, int.MaxValue - 1, out _));
         Assert.Throws<OperationCanceledException>(() => Walk(graph, gone.Token).AffectedBy([.. end], int.MaxValue - 1, out _));
         Assert.Throws<OperationCanceledException>(() => Walk(graph, gone.Token).Hubs(_ => true));
-        Assert.Throws<OperationCanceledException>(() => Walk(graph, gone.Token).With(null, false).Hubs(_ => true));
+        Assert.Throws<OperationCanceledException>(() => Walk(graph, gone.Token).WithoutRelationFilter().Hubs(_ => true));
     }
 
     [Fact]
