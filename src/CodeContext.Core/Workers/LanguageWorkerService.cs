@@ -304,9 +304,11 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
         {
             if (state.Hibernated)
             {
-                // The re-index reads the files as they are now. A replacement already holds this batch. A baseline the
-                // worker accepted is checked by size and time, which an edit can leave alone, so the batch's
-                // content changes still follow as touches; its deletions are done.
+                // The re-index reads the files as they are now. A replacement already holds this batch. After an
+                // accepted baseline the C# worker has already re-walked what the batch changed (it restores a saved
+                // walk only when the file's SHA-256 content hash matches), but the protocol does not say how a worker
+                // decides a file is unchanged, so the batch's content changes still follow as touches; its deletions
+                // are done.
                 if (!await WakeCoreAsync(state, approvedFiles, ct).ConfigureAwait(false)) return;
                 changes = changes.Where(change => change.Type != FileChangeType.Deleted).ToList();
                 if (changes.Count == 0) return;
