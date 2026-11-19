@@ -637,7 +637,8 @@ class Workspace {
     /** Everything the facts of the last analysis were read from besides the approved files,
      * as protocol `inputs`: the configs, what module resolution looked at, the library and
      * declaration files the program holds, and the directories the compiler listed or found
-     * missing. The compiler's own files, beside this worker, are left out. */
+     * missing. The compiler's own files, beside this worker, are left out, and so is every
+     * path the disk guard refuses. */
     collectInputs(program) {
         const files = new Set();
         const absent = new Set();
@@ -660,7 +661,9 @@ class Workspace {
         }
         for (const fileName of files) absent.delete(fileName);
         const sorted = set => [...set].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-        return { files: sorted(files), absent: sorted(absent) };
+        // The host looks at each of these with no guard of its own, so a path this worker may
+        // not read (it looked absent, and stays so) is not named to it.
+        return { files: disk.readable(sorted(files)), absent: disk.readable(sorted(absent)) };
     }
 
     applyConfiguration(loaded) {

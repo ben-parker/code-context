@@ -204,7 +204,12 @@ public sealed class Disk
     /// <summary><see cref="Path.GetRelativePath"/>, which normalizes both of its arguments.</summary>
     public string RelativePath(string relativeTo, string path) => PathGuard.RelativePath(relativeTo, path);
 
-    /// <summary>Private, because a refused path already looks missing and so no caller has anything to check.</summary>
+    /// <summary>
+    /// Whether this worker may not read a path. For one use: a path the worker hands to the host, which reads
+    /// with no guard, must not be one of these. No reader asks, since a refused path already looks missing.
+    /// </summary>
+    public bool Refuses(string path) => _guard.Refused(path);
+
     private bool Refused(string path) => _guard.Refused(path);
 
     private static FileNotFoundException Absent(string path) => new($"Could not find file '{path}'.", path);

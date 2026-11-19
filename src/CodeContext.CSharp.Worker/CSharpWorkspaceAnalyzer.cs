@@ -291,6 +291,12 @@ public sealed class CSharpWorkspaceAnalyzer
     /// </summary>
     internal Action<WorkerState>? RestoreFault { get; init; }
 
+    /// <summary>
+    /// Says a path may not be reported as an input, in place of the disk guard. Only tests set this: off Windows
+    /// the guard refuses nothing, and this lets a test stand where Windows would.
+    /// </summary>
+    internal Func<string, bool>? RefusedInput { get; init; }
+
     /// <summary>How many times a file was parsed into a unit, by this analyzer.</summary>
     public int ParseCount { get; private set; }
 
@@ -1238,7 +1244,7 @@ public sealed class CSharpWorkspaceAnalyzer
     /// listed to find projects and restore data, the repository markers looked for above the root, and every assembly
     /// a unit compiles against. These are what this worker itself checks before it reuses what it read (the model's
     /// stamps, the references' times in each unit's signature), so a snapshot judged current by them is one this worker
-    /// would not have read differently.
+    /// would not have read differently. A path the disk guard refuses is left out: it reads as absent and stays so.
     /// </summary>
     private WorkerInputs Inputs()
     {
@@ -1257,6 +1263,11 @@ public sealed class CSharpWorkspaceAnalyzer
                 .Select(reference => reference.FilePath).OfType<string>());
         }
         files.ExceptWith(_files);
+
+        // The host looks at each of these with no guard of its own, so what this worker may not read is not named.
+        var refused = RefusedInput ?? _disk.Refuses;
+        files.RemoveWhere(path => refused(path));
+        absent.RemoveWhere(path => refused(path));
         return new WorkerInputs(
             files.Order(StringComparer.Ordinal).ToList(),
             absent.Order(StringComparer.Ordinal).ToList());
