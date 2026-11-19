@@ -311,6 +311,46 @@ public class ShardedGraphStoreTests
     }
 
     [Fact]
+    public void ScopedCommit_AllocatesNoSetOfItsOwnIds()
+    {
+        // A commit checks its ids against the other shards by probing their tables with each delta fact;
+        // it needs no set of the delta's ids, which for a first scan was a table of every edge key.
+        var nodes = new List<CodeNode>();
+        for (var i = 0; i < 5_000; i++) nodes.Add(Node($"p:w:N{i}", "p", "w", $"/repo/f{i / 20}.cs"));
+        var edges = new List<CodeEdge>();
+        for (var i = 0; i < 40_000; i++) edges.Add(Edge($"p:w:E{i}", $"p:w:N{i / 8}", $"p:w:N{i * 7 % 5_000}", "p", "w"));
+        var warm = new InMemoryDatabase();
+        Assert.True(warm.TryCommitGeneration(1, nodes, edges, new CommitScope("p", "w", null)));
+
+        var database = new InMemoryDatabase();
+        Assert.True(database.TryCommitGeneration(1, [Node("q:w:Other", "q", "w", "/repo/other.cs")], [], new CommitScope("q", "w", null)));
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        Assert.True(database.TryCommitGeneration(2, nodes, edges, new CommitScope("p", "w", null)));
+        var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        Assert.Equal(40_000, database.EdgeCount);
+        // With a set of the node ids and a set of the edge keys it allocated 6.3 MB.
+        Assert.True(allocated < 4_300_000, $"The commit allocated {allocated:N0} bytes.");
+    }
+
+    [Fact]
+    public async Task ScopedCommit_DeltaNamingAForeignIdTwice_DropsTheForeignCopyOnce()
+    {
+        await Store.TryCommitGenerationAsync(1, [Node("shared", "pA", "ws", "/a.cs"), Node("a2", "pA", "ws", "/a.cs")],
+            [Edge("e-shared", "shared", "a2", "pA", "ws")], new CommitScope("pA", "ws", null));
+
+        await Store.TryCommitGenerationAsync(2,
+            [Node("shared", "pB", "ws", "/b.cs"), Node("shared", "pB", "ws", "/b.cs")],
+            [Edge("e-shared", "shared", "shared", "pB", "ws"), Edge("e-shared", "shared", "shared", "pB", "ws")],
+            new CommitScope("pB", "ws", null));
+
+        Assert.Equal(new ShardKey("pB", "ws"), _database.FindShardOfNode("shared"));
+        Assert.Equal(new ShardKey("pB", "ws"), _database.FindShardOfEdge("e-shared"));
+        Assert.Equal(2, _database.NodeCount);
+        Assert.Equal(1, _database.EdgeCount);
+    }
+
+    [Fact]
     public async Task ScopedCommit_DeltaIdCollidingWithForeignShard_DeltaWinsGlobally()
     {
         // An out-of-scope foreign shard co-resides an id the A-delta re-emits.

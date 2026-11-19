@@ -62,9 +62,9 @@ internal sealed class DelegatingShard : IGraphShard
     public IGraphShard? WithoutForeignConflicts(
         IReadOnlySet<string> removedIds,
         IReadOnlySet<string> removedNotReestablished,
-        IReadOnlySet<string> deltaNodeIds,
-        IReadOnlyCollection<object> deltaEdgeIds)
-        => Wrap(_inner.WithoutForeignConflicts(removedIds, removedNotReestablished, deltaNodeIds, deltaEdgeIds));
+        IReadOnlyList<CodeNode> deltaNodes,
+        IReadOnlyList<CodeEdge> deltaEdges)
+        => Wrap(_inner.WithoutForeignConflicts(removedIds, removedNotReestablished, deltaNodes, deltaEdges));
 
     public void CollectNodesOutside(IReadOnlySet<string> keepPaths, HashSet<string> into)
         => _inner.CollectNodesOutside(keepPaths, into);

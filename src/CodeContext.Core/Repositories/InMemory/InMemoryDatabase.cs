@@ -345,8 +345,8 @@ namespace CodeContext.Core.Repositories.InMemory
             public IGraphShard? WithoutForeignConflicts(
                 IReadOnlySet<string> removedIds,
                 IReadOnlySet<string> removedNotReestablished,
-                IReadOnlySet<string> deltaNodeIds,
-                IReadOnlyCollection<object> deltaEdgeIds)
+                IReadOnlyList<CodeNode> deltaNodes,
+                IReadOnlyList<CodeEdge> deltaEdges)
             {
                 HashSet<object>? dropEdges = null;
 
@@ -361,17 +361,17 @@ namespace CodeContext.Core.Repositories.InMemory
                     }
                 }
 
-                if (deltaEdgeIds.Count > 0)
+                if (!Edges.IsEmpty)
                 {
-                    foreach (var id in deltaEdgeIds)
-                        if (Edges.ContainsKey(id)) (dropEdges ??= new HashSet<object>(EdgeIdKeys.Comparer)).Add(id);
+                    foreach (var edge in deltaEdges)
+                        if (edge.IdKey is { } id && Edges.ContainsKey(id)) (dropEdges ??= new HashSet<object>(EdgeIdKeys.Comparer)).Add(id);
                 }
 
                 HashSet<string>? dropNodes = null;
-                if (deltaNodeIds.Count > 0)
+                if (!Nodes.IsEmpty)
                 {
-                    foreach (var id in deltaNodeIds)
-                        if (Nodes.ContainsKey(id)) (dropNodes ??= new HashSet<string>(StringComparer.Ordinal)).Add(id);
+                    foreach (var node in deltaNodes)
+                        if (node.Id is { } id && Nodes.ContainsKey(id)) (dropNodes ??= new HashSet<string>(StringComparer.Ordinal)).Add(id);
                 }
 
                 // When a delta reclaims an id, the evicted foreign node's OWN edges die with it — including
@@ -1374,26 +1374,15 @@ namespace CodeContext.Core.Repositories.InMemory
             var builder = current.ToBuilder();
             builder[key] = nextShard;
 
-            // Delta ids let us fold cross-shard id collisions (delta wins) into the same one-swap publish.
-            var deltaNodeIds = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var node in nodes)
-                if (node.Id is not null) deltaNodeIds.Add(node.Id);
-            var deltaEdgeIds = new HashSet<object>(EdgeIdKeys.Comparer);
-            foreach (var edge in edges)
-                if (edge.IdKey is { } id) deltaEdgeIds.Add(id);
-
             // Rebuild any foreign shard that (a) holds an edge now dangling onto a removed-and-not-
             // reestablished node, or (b) co-resides a delta id — the delta wins globally, so the stale
             // foreign copy is dropped. Both fold into this single swap; untouched shards keep their ref.
-            if (removedNodeIds.Count > 0 || deltaNodeIds.Count > 0 || deltaEdgeIds.Count > 0)
+            // Each foreign shard probes its own tables with the delta's facts: no set of the delta's ids.
+            foreach (var (otherKey, otherShard) in current)
             {
-                foreach (var (otherKey, otherShard) in current)
-                {
-                    if (otherKey == key) continue;
-                    var rebuilt = otherShard.WithoutForeignConflicts(
-                        removedNodeIds, removedNotReestablished, deltaNodeIds, deltaEdgeIds);
-                    if (rebuilt is not null) builder[otherKey] = rebuilt;
-                }
+                if (otherKey == key) continue;
+                var rebuilt = otherShard.WithoutForeignConflicts(removedNodeIds, removedNotReestablished, nodes, edges);
+                if (rebuilt is not null) builder[otherKey] = rebuilt;
             }
 
             return builder.ToImmutable();
