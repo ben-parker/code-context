@@ -33,12 +33,16 @@ codecontext query ContextService --tests    # add static test evidence (off by d
 codecontext query multi Foo Bar             # several identifiers, one round trip, in order
 ```
 
-`query` auto-discovers (or starts) the repo's instance, waits up to 30 seconds for
-indexing (exit code 3 on timeout; see [operations](references/operations.md)), and
-prints compact agent-oriented text; progress goes to stderr. Options: `--depth N`
+`query` uses the repo's running instance. With none, it answers in its own process from
+the saved index when no indexed file changed since (label `cache snapshot`, nothing left
+running); otherwise it starts an instance and waits up to 30 seconds for indexing (exit
+code 3 on timeout; see [operations](references/operations.md)). It prints compact
+agent-oriented text; progress goes to stderr. Options: `--depth N`
 (`0` = cheap identity lookup), `--relation CALLS,REFERENCES`, `--exact`,
 `--limit N` (entries per relationship list, 1-100, default 10), `--external` (include
-library symbols), `--path DIR`, `--human`, `--json`.
+library symbols), `--path DIR`, `--human`, `--json`, `--start` (start an instance
+instead of answering from the saved index: each later query then takes well under a
+second on a large repository, against about 1-2 s for each one answered from the saved index).
 
 Reading results:
 
@@ -61,6 +65,10 @@ Reading results:
   - `unverified`: the re-check failed (`indexing.status` `error`) and the answers stay
     saved ones. Do not wait: confirm with `rg -w <Name>` or by reading the file, or run
     `POST /api/index/refresh` (or restart) and query again once `ready`.
+- `cache snapshot` means no instance was running and the answer was read from the saved
+  index after checking that no indexed file or folder has a newer modification time; no
+  worker re-analysed anything. Treat it like a served answer. An edit makes the next
+  `query` start an instance, which re-checks.
 - `relationships not loaded` means nothing was fetched: the name was ambiguous
   (re-query with a target's identifier) or the depth was 0. It says nothing about
   whether the symbol has users.

@@ -134,6 +134,16 @@ has its own identity, uncommitted edits included) refuses that state and re-walk
 everything, as do workers without the capability. To start without the saved index,
 use `--no-cache` or delete `<root>/.codecontext/cache/` first.
 
+`codecontext query` with no instance running reads the newest snapshot in its own
+process (`OneShotSnapshot`) and answers from it, labelled `cache snapshot`, when no
+file a scan reads, and no folder holding one, is newer than the snapshot by
+modification time (`SnapshotFreshness`; `obj/project.assets.json` beside a project
+counts). It creates, locks and writes nothing and starts no worker; anything else
+(changed files, no key, a refused snapshot, a shard saved without its worker's state,
+the cache off) starts an instance as before. After a verification, a host rewrites a
+snapshot that is older than some file even when no fact changed, so a touched file does
+not keep later queries off the saved index.
+
 To clear the cache, stop the instance and delete `<root>/.codecontext/cache/`;
 deleting `~/.codecontext/cache.key` invalidates every snapshot of that user. To run
 without it, start with `--no-cache` (or set `CodeContext__CacheEnabled=false`): no

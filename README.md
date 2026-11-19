@@ -101,8 +101,11 @@ codecontext query ContextService --tests
 codecontext query multi ContextService StartCommandHandler
 ```
 
-`query` finds the closest instance watching the requested path, starts one in the
-background when necessary, waits for indexing, and queries the compact API. Compact,
+`query` finds the closest instance watching the requested path and queries its compact
+API. With none running, it answers in its own process from the saved index when no
+indexed file changed since it was written (labelled `cache snapshot`; no process is left
+running), and otherwise starts an instance in the background and waits for indexing;
+`--start` always starts one. Compact,
 line-oriented agent text is the default. Use `--human` for expanded human-readable
 output or `--json` for the exact API response; progress stays on stderr. Test evidence
 is omitted by default, so add `--tests` whenever it matters. Other options include
@@ -130,7 +133,7 @@ codecontext start --detach --path .         # background REST service
 codecontext start --path . --port 8080      # fixed port
 codecontext init --path .                   # pre-warm: start the scan ahead of time
 codecontext init --path . --wait            # pre-warm and block until the index is ready
-codecontext query ContextService            # discover/start, wait, and query
+codecontext query ContextService            # discover, saved index, or start; then query
 codecontext query multi A B --tests         # ordered multi-query with test evidence
 codecontext list                            # human-readable instances
 codecontext list --json                     # machine-readable instances

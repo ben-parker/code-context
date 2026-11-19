@@ -113,6 +113,8 @@ namespace CodeContext.Core.Snapshots
                 using (file)
                 {
                     var open = Stopwatch.GetElapsedTime(openedAt);
+                    if (file.Header.CreatedUtcTicks < DateTime.MinValue.Ticks || file.Header.CreatedUtcTicks > DateTime.MaxValue.Ticks)
+                        return Unavailable($"{candidate.Name}: the capture time is not a time");
                     var capturedUtc = new DateTime(file.Header.CreatedUtcTicks, DateTimeKind.Utc);
                     // The newest authentic snapshot decides: an older one is never fresher.
                     var freshness = SnapshotFreshness.For(options, workers, catalog)(capturedUtc);

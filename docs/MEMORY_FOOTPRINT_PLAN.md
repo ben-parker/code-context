@@ -199,6 +199,52 @@ cache, without starting workers. Needs a staleness statement that is honest: at 
 snapshot time and whether any indexed file's size or mtime moved. Depends on M4's
 outcome for whether it reads a mapped or a materialized shard.
 
+As built. With no instance registered for the path, `query` opens the newest snapshot that
+authenticates (`OneShotSnapshot`: same key, checks and refusal budget as a host's load; no
+key, directory, lock, registration, write or worker), stat-checks it, materializes it with
+`SnapshotLoader` and answers through `ContextService` with the endpoint's defaults and the
+REST JSON settings, labelled `cache snapshot`. Anything else falls back to today's start,
+with one stderr line saying why. Measured 2026-11-19, Linux, 4 vCPU; this repository (clone at
+`6f37e17`, 355 checked entries, 9.3 MB snapshot) and jellyfin (2,253 files, 2,838 checked
+entries, 24.7 MB snapshot); wall time of the CLI process and its peak RSS; one-shot over 5
+runs.
+
+| | JIT build, code-context | JIT, jellyfin | AOT host, code-context | AOT, jellyfin |
+|---|---|---|---|---|
+| One-shot answer, nothing left running | 1.19-1.31 s, 189-222 MB | 2.07-2.23 s, 274-293 MB | 0.37-0.41 s, 105-114 MB | 1.06-1.32 s, 195-197 MB |
+| Today's cold `query` (`--start`) | 1.60 s; leaves 646 MB (host 257, C# 164, TS 225) | 2.95 s; leaves 790 MB (312, 478) | 0.71 s; leaves 577 MB | 1.47 s; leaves 645 MB |
+| Query to a running instance | 0.28-0.35 s | 0.28-0.35 s | 0.03 s | 0.05-0.07 s |
+
+Decisions:
+
+1. Freshness, option (a). The snapshot holds no per-file size, time or hash (they are in the C#
+   worker's state file), so the check is by time against the capture: every directory, claimed or
+   project-input file and `.gitignore` the scan's own selection walk includes, plus
+   `obj/project.assets.json` beside a project; a time after the capture less 2 s (coarse file
+   systems) counts. Directory times catch adds, deletes and renames. Moved means fall back. Stat
+   pass: 13-25 ms here, 37-227 ms on jellyfin (cold first run in a process 130 ms), 0.68-0.71 s
+   warm and 1.1-1.5 s cold cache on a synthetic tree of 100,000 files in 5,000 folders. Not seen:
+   content rewritten in place with an older time set afterwards, and on Linux a file copied in
+   with an old time is seen only through its folder (.NET reports no birth time there).
+2. Default when no instance runs; `--start` for the old behaviour (and `init` or `start --detach`
+   still give a resident instance, which `query` prefers). One-shot costs 0.35-1 s more per query
+   than a resident AOT instance, so a resident one is faster from the second query on; but it
+   leaves nothing behind (against 580-790 MB and the verification's CPU), and the first edit makes
+   the next query fall back and start an instance, so an editing session ends up resident anyway.
+   Asking a few questions and leaving, the case this item is for, gains most.
+3. Materializing load kept. Phases (JIT harness, cold/warm): authenticate 27/9-13 ms here,
+   66/22 ms on jellyfin; materialize 815/348-382 and 1,526/718-837 ms; first query 172/89-138 and
+   845/318-452 ms (adjacency build). The AOT figures above are within the comparison's 110-270 MB
+   peak; a read-only mapped reader would cut most of the materialize time, not worth phase 8's
+   reader now.
+
+Also: after a verification the writer rewrites a loaded snapshot older than some file (a checkout
+and back), else such a repository never answers from the snapshot again; never before the scan
+verified, so a failed verification cannot stamp loaded facts newer. A shard of a worker that sends
+fingerprints but was written without its state (after a failed verification, save or pairing) is
+refused. Not built: a stale answer with a count (option b); the race of an edit landing between a
+worker's read and the capture when the host then stops before its watcher reports it.
+
 ## Closing steps and review process (agreed 2026-11-19)
 
 1. Finish M3c (branch `m3c`, worktree `/home/user/cc-m3c`) and M5, each with an independent review.

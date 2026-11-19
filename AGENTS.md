@@ -10,10 +10,12 @@ codecontext query ContextService
 codecontext query ContextService --tests  # when test evidence matters
 ```
 
-`query` selects the closest registered ancestor, starts a detached instance when none
-exists, waits up to 30 seconds for indexing (a restarted instance answers at once from
-its saved index, labelled `cache`, while it re-checks the files; on timeout it exits
-with code 3), and verifies contract, root, and instance identity. Tests are omitted by default; add `--tests` whenever test evidence
+`query` selects the closest registered ancestor. With none, it answers in its own process
+from the saved index when no indexed file changed since (labelled `cache snapshot`, nothing
+left running; `--start` skips this), else starts a detached instance and waits up to 30
+seconds for indexing (a restarted instance answers at once from its saved index, labelled
+`cache`, while it re-checks the files; on timeout it exits with code 3), and verifies
+contract, root, and instance identity. Tests are omitted by default; add `--tests` whenever test evidence
 matters.
 
 Use the normalized graph for semantic questions:
@@ -96,7 +98,9 @@ readers see its result and the label goes. A worker that declares `persistentSta
 (the C# worker) is offered the state it saved with that snapshot and sends only what
 changed while the host was down; any other worker re-walks and replaces its facts.
 `SnapshotService` writes snapshots after commits, off the commit path, and asks such
-workers to save their state when it captures.
+workers to save their state when it captures. `OneShotSnapshot` is the read-only path a
+`query` with no instance takes: it authenticates, stat-checks with `SnapshotFreshness`,
+materializes and answers through `ContextService`, writing nothing.
 
 ## Architecture invariants
 
