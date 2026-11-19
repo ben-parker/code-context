@@ -204,4 +204,18 @@ namespace CodeContext.Core.Repositories
         /// <summary>Cheap aggregate counts over the committed graph.</summary>
         GraphStatistics GetStatistics();
     }
+
+    /// <summary>
+    /// A store that can hand back the id string a node it holds is stored with, so a writer mapping new facts
+    /// can name that node by the same instance instead of one more copy of the text.
+    /// </summary>
+    internal interface IStoredNodeIds
+    {
+        /// <summary>
+        /// The stored instance of <paramref name="id"/>, the id of a node the next commit would find (the
+        /// staged graph while a reconciliation is staged, else the published one), or null when no such node
+        /// is stored.
+        /// </summary>
+        string? FindStoredNodeId(string id);
+    }
 }

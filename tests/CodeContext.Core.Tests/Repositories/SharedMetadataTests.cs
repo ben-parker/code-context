@@ -156,6 +156,48 @@ public class SharedMetadataTests
     }
 
     /// <summary>
+    /// A file-scoped request names nodes of other files as edge endpoints. Those ids are stored as the
+    /// instance the stored node holds, not one more copy per request: after every file had been edited once,
+    /// this repository's store held three instances of each target id on average.
+    /// </summary>
+    [Fact]
+    public async Task Commit_OfOneFile_StoresEndpointsInOtherFilesAsTheStoredNodesIds()
+    {
+        var factory = new InMemoryRepositoryFactory(NullLogger<InMemoryRepositoryFactory>.Instance);
+        var store = (IGenerationalGraphStore)factory.CreateGraphRepository();
+        var applier = new AnalysisDeltaApplier(store, NullLogger<AnalysisDeltaApplier>.Instance);
+        static string Fresh(string text) => new(text.AsSpan());
+        static ProtocolNode NodeIn(string name, string file) => new(Fresh($"fake:ws-1:{name}"), Fresh($"fake:{name}"), name, "method", "fake", Fresh(file));
+        static ProtocolEdge Calls(string source, string target)
+            => new(Fresh($"fake:ws-1:{source}->fake:ws-1:{target}"), Fresh($"fake:ws-1:{source}"), Fresh($"fake:ws-1:{target}"), "calls");
+        AnalysisDelta Delta(long generation, bool all, string[] files, ProtocolNode[] nodes, ProtocolEdge[] edges)
+            => new("fake", "1.0", "ws-1", generation, generation, all, files, nodes, edges, IsLastForRequest: true);
+
+        Assert.True(await applier.ApplyAsync(Delta(1, true, [],
+            [NodeIn("A", "src/a.fake"), NodeIn("B", "src/b.fake")], [Calls("A", "B"), Calls("B", "A")])));
+        // File b again, alone: its edge names A, a node of a file the request does not carry, and Missing, no node at all.
+        Assert.True(await applier.ApplyAsync(Delta(2, false, ["src/b.fake"],
+            [NodeIn("B", "src/b.fake")], [Calls("B", "A"), Calls("B", "Missing")])));
+        // And inside a reconciliation, where the shard the request extends is the staged one.
+        store.BeginReconciliation();
+        Assert.True(await applier.ApplyAsync(Delta(3, false, ["src/c.fake"], [NodeIn("C", "src/c.fake")], [Calls("C", "B")])));
+        Assert.True(await applier.ApplyAsync(Delta(4, false, ["src/d.fake"], [NodeIn("D", "src/d.fake")], [Calls("D", "C")])));
+        store.CommitReconciliation();
+
+        var graph = (await ((ICodeGraphRepository)store).GetGraphAsync())!;
+        CodeNode Stored(string name) => graph.Nodes.Single(node => node.Id == $"fake:ws-1:{name}");
+        CodeEdge StoredEdge(string source, string target) => graph.Edges.Single(edge => edge.Id == $"fake:ws-1:{source}->fake:ws-1:{target}");
+        Assert.Same(Stored("A").Id, StoredEdge("B", "A").TargetId);
+        Assert.Same(Stored("B").Id, StoredEdge("B", "A").SourceId);
+        Assert.Equal("fake:ws-1:Missing", StoredEdge("B", "Missing").TargetId);
+        Assert.Same(Stored("B").Id, StoredEdge("C", "B").TargetId);
+        Assert.Same(Stored("C").Id, StoredEdge("D", "C").TargetId);
+        // The id is still kept as parts over those instances.
+        var key = Assert.IsType<EdgeId>(StoredEdge("B", "A").IdKey);
+        Assert.Same(Stored("A").Id, key.Target);
+    }
+
+    /// <summary>
     /// A source map that yields a key twice (any IReadOnlyDictionary a worker host hands over, not only a
     /// Dictionary) keeps the last value at the key's first position, as the store did before M1, and the
     /// request still commits.

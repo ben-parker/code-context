@@ -54,6 +54,7 @@ public sealed class AnalysisDeltaApplier : IAnalysisDeltaSink
     }
 
     private readonly IGenerationalGraphStore _store;
+    private readonly IStoredNodeIds? _storedNodeIds;
     private readonly ILogger<AnalysisDeltaApplier> _logger;
     private readonly IAnalysisCoverageRegistry? _coverage;
     private readonly SemaphoreSlim _commitLock = new(1, 1);
@@ -67,6 +68,7 @@ public sealed class AnalysisDeltaApplier : IAnalysisDeltaSink
         IAnalysisCoverageRegistry? coverage = null)
     {
         _store = store;
+        _storedNodeIds = store as IStoredNodeIds;
         _logger = logger;
         _coverage = coverage;
     }
@@ -141,7 +143,7 @@ public sealed class AnalysisDeltaApplier : IAnalysisDeltaSink
             _pending.Remove(pendingKey);
             // One pool per request: facts of the commit with equal metadata share one immutable instance,
             // and repeated strings one instance.
-            var mapper = new FactMapper(pending);
+            var mapper = new FactMapper(pending, _storedNodeIds);
             var nodes = new List<CodeNode>(pending.Nodes.Count);
             foreach (var node in pending.Nodes) nodes.Add(mapper.ToCodeNode(node));
             var edges = new List<CodeEdge>(pending.Edges.Count);
@@ -229,8 +231,12 @@ public sealed class AnalysisDeltaApplier : IAnalysisDeltaSink
         private readonly FactMetadata _ownershipOnly;
         private string[] _scratch = new string[16];
 
-        public FactMapper(PendingDelta delta)
+        public FactMapper(PendingDelta delta, IStoredNodeIds? stored)
         {
+            // An endpoint the request carries no node for (a node of a file it does not replace) is stored
+            // as the instance that node holds in the store, so editing a file does not add a copy of the
+            // id of everything the file uses.
+            _storedId = stored is null ? static _ => null : stored.FindStoredNodeId;
             // Node ids, paths and the other repeated text of the request: presized for about two per node.
             _pool = new FactMetadataPool(stringCapacity: 2 * delta.Nodes.Count + 64);
             _parserId = _pool.Intern(delta.ParserId);
@@ -240,6 +246,7 @@ public sealed class AnalysisDeltaApplier : IAnalysisDeltaSink
         }
 
         private readonly Func<ReadOnlySpan<char>, string> _share;
+        private readonly Func<string, string?> _storedId;
 
         // The fact's metadata: the source's entries in their order, with the two ownership keys set to the
         // delta's values (in place where the source has them, appended in this order where it does not), so
@@ -342,13 +349,14 @@ public sealed class AnalysisDeltaApplier : IAnalysisDeltaSink
         {
             if (source is not null && string.Equals(source, _lastSource, StringComparison.Ordinal)) return _lastSourcePooled;
             _lastSource = source;
-            return _lastSourcePooled = _pool.Intern(source);
+            return _lastSourcePooled = _pool.Intern(source, _storedId);
         }
 
         // Strings that repeat across the facts of a request (paths, kinds, languages, names, and node ids
         // that edges name as endpoints) arrive as one instance per occurrence from the deserializer; each is
         // stored through the request's pool, as a snapshot load shares them through the shard's string
-        // table. Nodes are mapped before edges, so an endpoint is the instance its node holds.
+        // table. Nodes are mapped before edges, so an endpoint is the instance its node holds: the
+        // request's node, or else the stored one.
         public CodeNode ToCodeNode(ProtocolNode node) => new()
         {
             Id = _pool.Intern(node.Id),
@@ -375,7 +383,7 @@ public sealed class AnalysisDeltaApplier : IAnalysisDeltaSink
         public CodeEdge ToCodeEdge(ProtocolEdge edge)
         {
             var source = InternSource(edge.SourceId);
-            var target = _pool.Intern(edge.TargetId);
+            var target = _pool.Intern(edge.TargetId, _storedId);
             var stored = new CodeEdge
             {
                 SourceId = source,

@@ -148,6 +148,18 @@ namespace CodeContext.Core
         }
 
         /// <summary>
+        /// As <see cref="Intern(string)"/>, but a text the pool does not hold yet becomes the instance
+        /// <paramref name="known"/> gives for it, if it gives one, rather than <paramref name="value"/>.
+        /// </summary>
+        [return: NotNullIfNotNull(nameof(value))]
+        public string? Intern(string? value, Func<string, string?> known)
+        {
+            if (value is null) return null;
+            ref var pooled = ref CollectionsMarshal.GetValueRefOrAddDefault(_strings, value, out _);
+            return pooled ??= known(value) ?? value;
+        }
+
+        /// <summary>
         /// The shared map of <paramref name="pairs"/> (key, value, ...). The array is taken (its strings
         /// interned in place) only when the content is new; the caller must not touch it afterwards.
         /// </summary>

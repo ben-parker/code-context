@@ -983,6 +983,22 @@ namespace CodeContext.Core.Repositories.InMemory
         }
 
         /// <summary>
+        /// The id instance held by the node <paramref name="id"/> in the graph the next commit extends (the
+        /// staged map while a reconciliation is staged, else the published one), or null when there is none.
+        /// </summary>
+        internal string? FindStoredNodeId(string id)
+        {
+            lock (_commitLock)
+            {
+                foreach (var shard in (_reconciliationState ?? _shards).Values)
+                {
+                    if (shard.TryGetNode(id, out var node)) return node!.Id;
+                }
+                return null;
+            }
+        }
+
+        /// <summary>
         /// Equal entry by entry, in order, each entry field by field with its lists compared by content (a
         /// record's own equality compares list references, and each delta deserializes new lists). Null
         /// equals only null.
