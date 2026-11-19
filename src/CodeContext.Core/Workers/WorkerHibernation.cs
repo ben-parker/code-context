@@ -117,6 +117,9 @@ internal sealed class WorkerHibernation : IHostedService, IDisposable
 
     public bool Enabled => _timer is not null;
 
+    /// <summary>The settings it was built with.</summary>
+    internal WorkerHibernationSettings Settings => _settings;
+
     /// <summary>Checks run so far. For tests.</summary>
     internal int Checks
     {
