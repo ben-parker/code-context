@@ -27,6 +27,15 @@ public class ParserProtocolContractTests
     private static HashSet<string> JsonNames(JsonElement element)
         => element.EnumerateObject().Select(property => property.Name).ToHashSet(StringComparer.Ordinal);
 
+    /// <summary>The schema tells a worker author the limit the host applies to one report of inputs, and what leaving nested absent paths out means.</summary>
+    [Fact]
+    public void WorkerInputs_SchemaStatesTheHostsLimit_AndTheAbsentPathRule()
+    {
+        var description = Schema().GetProperty("$defs").GetProperty("workerInputs").GetProperty("description").GetString()!;
+        Assert.Contains(CodeContext.Core.Workers.ParserProcessSupervisor.MaxInputs.ToString("N0", System.Globalization.CultureInfo.InvariantCulture), description);
+        Assert.Contains("SHOULD", description);
+    }
+
     [Fact]
     public void InitializeResult_WithoutPersistentState_ReadsAsFalse_AndFalseIsNotWritten()
     {
