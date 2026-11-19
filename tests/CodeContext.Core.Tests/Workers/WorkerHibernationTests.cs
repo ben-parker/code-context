@@ -46,10 +46,16 @@ public sealed class WorkerHibernationTests : IAsyncLifetime
     }
 
     /// <summary>A host over the root with hibernation on fake time; snapshots are written 50 ms after a commit.</summary>
-    private async Task<Host> StartAsync(string behavior = "persistent-state", bool cache = true, TimeSpan? snapshotQuiet = null)
+    private Task<Host> StartAsync(string behavior = "persistent-state", bool cache = true, TimeSpan? snapshotQuiet = null)
+        => StartAsync(new PersistentStateTests.Instance(Root, KeyPath, ["--behavior", behavior, "--fail-marker", FailMarker],
+            settings => settings with { QuietPeriod = snapshotQuiet ?? TimeSpan.FromMilliseconds(50) }, cache));
+
+    private Task<Host> StartAsync(RegisteredWorker worker)
+        => StartAsync(new PersistentStateTests.Instance(Root, KeyPath, worker,
+            settings => settings with { QuietPeriod = TimeSpan.FromMilliseconds(50) }, cache: true));
+
+    private async Task<Host> StartAsync(PersistentStateTests.Instance instance)
     {
-        var instance = new PersistentStateTests.Instance(Root, KeyPath, ["--behavior", behavior, "--fail-marker", FailMarker],
-            settings => settings with { QuietPeriod = snapshotQuiet ?? TimeSpan.FromMilliseconds(50) }, cache);
         var time = new ManualTimeProvider();
         var hibernation = new WorkerHibernation(instance.Workers, instance.Coordinator, new WorkerHibernationSettings { Idle = Idle },
             time, () => instance.Snapshots.WrittenMatchesStore);
@@ -61,9 +67,12 @@ public sealed class WorkerHibernationTests : IAsyncLifetime
         return host;
     }
 
-    private async Task<List<string>> FreshScanAsync(string behavior = "persistent-state")
+    private Task<List<string>> FreshScanAsync(string behavior = "persistent-state")
+        => FreshScanAsync(new PersistentStateTests.Instance(Root, KeyPath, ["--behavior", behavior], null, cache: false));
+
+    private async Task<List<string>> FreshScanAsync(PersistentStateTests.Instance fresh)
     {
-        await using var fresh = new PersistentStateTests.Instance(Root, KeyPath, ["--behavior", behavior], null, cache: false);
+        await using var _ = fresh;
         await fresh.StartAsync();
         await fresh.WaitForAsync(() => fresh.ScanState.Phase == ScanPhase.Ready, "a fresh scan");
         var facts = Facts(fresh.Database);
@@ -279,6 +288,60 @@ public sealed class WorkerHibernationTests : IAsyncLifetime
         Assert.False(host.Instance.Workers.IsHibernated("fake"));
     }
 
+    /// <summary>
+    /// The real C# worker: hibernated with its state saved, an edit made while it is down wakes it through that state,
+    /// and the graph equals a fresh scan.
+    /// </summary>
+    [Fact]
+    public async Task CSharpWorker_EditWhileHibernated_WakesThroughItsSavedState_AndEqualsAFreshScan()
+    {
+        foreach (var name in new[] { "a.fake", "b.fake" }) File.Delete(Path.Combine(Root, name));
+        File.WriteAllText(Path.Combine(Root, "Service.cs"), "namespace Demo; public class Service { public int Run() => 1; }\n");
+        File.WriteAllText(Path.Combine(Root, "Caller.cs"), "namespace Demo; public class Caller { public int Go() => new Service().Run(); }\n");
+        var host = await StartAsync(CSharpWorkerPipeline.CSharpWorkerRegistration());
+        await host.WaitForStateWrittenAsync("csharp");
+        await host.IdleAsync();
+        Assert.True(host.Instance.Workers.IsHibernated("csharp"));
+        Assert.Equal(ParserSessionState.Hibernated, host.Session.State);
+
+        var caller = Path.Combine(Root, "Caller.cs");
+        File.WriteAllText(caller,
+            "namespace Demo; public class Caller { public int Go() => new Service().Run(); public int Again() => new Service().Run() + 1; }\n");
+        await host.Instance.Coordinator.NotifyFileChangedAsync(caller, FileChangeType.Changed);
+        await host.Instance.WaitForAsync(() => host.Instance.Database.EnumerateNodes().Any(node => node.Name == "Again")
+            && !host.Instance.Coordinator.IsBusy, "the woken worker's commit");
+
+        Assert.Contains(host.Instance.WorkerLog.Entries, entry => entry.Message.Contains("woke: its saved state was accepted", StringComparison.Ordinal));
+        Assert.Equal(ParserSessionState.Ready, host.Session.State);
+        Assert.Equal(await FreshScanAsync(new PersistentStateTests.Instance(Root, KeyPath, CSharpWorkerPipeline.CSharpWorkerRegistration(), null, cache: false)),
+            Facts(host.Instance.Database));
+    }
+
+    /// <summary>The real TypeScript worker: hibernated without saved state, an edit wakes it, it re-reads, and the graph equals a fresh scan.</summary>
+    [Fact]
+    [Trait("Category", "ExternalTooling")]
+    public async Task TypeScriptWorker_EditWhileHibernated_ReReadsOnWake_AndEqualsAFreshScan()
+    {
+        foreach (var name in new[] { "a.fake", "b.fake" }) File.Delete(Path.Combine(Root, name));
+        File.WriteAllText(Path.Combine(Root, "service.ts"), "export class Service { run(): number { return 1; } }\n");
+        File.WriteAllText(Path.Combine(Root, "caller.ts"),
+            "import { Service } from './service';\nexport class Caller { go(): number { return new Service().run(); } }\n");
+        var host = await StartAsync(TypeScriptWorkerProtocolTests.TypeScriptWorkerRegistration());
+        await host.IdleAsync();
+        Assert.True(host.Instance.Workers.IsHibernated("typescript"));
+
+        var caller = Path.Combine(Root, "caller.ts");
+        File.WriteAllText(caller,
+            "import { Service } from './service';\nexport class Caller { go(): number { return new Service().run(); } again(): number { return new Service().run(); } }\n");
+        await host.Instance.Coordinator.NotifyFileChangedAsync(caller, FileChangeType.Changed);
+        await host.Instance.WaitForAsync(() => host.Instance.Database.EnumerateNodes().Any(node => node.Name == "again")
+            && !host.Instance.Coordinator.IsBusy, "the woken worker's commit");
+
+        Assert.Equal(ParserSessionState.Ready, host.Session.State);
+        Assert.Equal(await FreshScanAsync(new PersistentStateTests.Instance(Root, KeyPath, TypeScriptWorkerProtocolTests.TypeScriptWorkerRegistration(), null, cache: false)),
+            Facts(host.Instance.Database));
+    }
+
     /// <summary>The graph's facts without the generation number the fake worker stamps on each fact.</summary>
     private static List<string> Facts(InMemoryDatabase database)
         => GraphFacts.Of(database).Select(fact => System.Text.RegularExpressions.Regex.Replace(fact, "\"gen\":\"[0-9]+\",?", "")).ToList();
@@ -305,13 +368,13 @@ public sealed class WorkerHibernationTests : IAsyncLifetime
         public ParserSessionSnapshot Session => Instance.Sessions.GetSnapshots().Single();
 
         /// <summary>The worker's state is saved with a snapshot that holds the store as it is now.</summary>
-        public Task WaitForStateWrittenAsync()
-            => Instance.WaitForAsync(() => !Instance.Coordinator.IsBusy && Instance.Snapshots.WrittenMatchesStore && StateRecorded(),
+        public Task WaitForStateWrittenAsync(string parserId = "fake")
+            => Instance.WaitForAsync(() => !Instance.Coordinator.IsBusy && Instance.Snapshots.WrittenMatchesStore && StateRecorded(parserId),
                 "the worker state to be written");
 
-        private bool StateRecorded()
+        private bool StateRecorded(string parserId)
         {
-            var (shard, annotation) = Instance.Database.CurrentShard(InMemoryDatabase.ShardKey.From("fake", "default"));
+            var (shard, annotation) = Instance.Database.CurrentShard(InMemoryDatabase.ShardKey.From(parserId, "default"));
             return shard is not null && annotation?.StateFor(shard) is not null;
         }
 
