@@ -421,7 +421,8 @@ public sealed class WorkerHibernationTests : IAsyncLifetime
     /// created, edited in a body and in a declaration, renamed, deleted; project constants, references and
     /// <c>Directory.Build.props</c>), and before every step the worker hibernates once its state is written. The step's
     /// edits reach the disk while it is down and are delivered as a watcher would; the first of them wakes it (through
-    /// its saved state, or by re-reading), and after each wake the graph equals a fresh scan.
+    /// its saved state, which every wake must accept), and after each wake the graph equals a fresh scan by a new worker
+    /// process.
     /// </summary>
     [Theory]
     [InlineData(20261119)]
@@ -431,7 +432,6 @@ public sealed class WorkerHibernationTests : IAsyncLifetime
         foreach (var name in new[] { "a.fake", "b.fake" }) File.Delete(Path.Combine(Root, name));
         var walk = new EditWalk(Root, seed, extended: true);
         walk.WriteAll();
-        await using var fresh = new CSharpWorkerPipeline(Root);
         var host = await StartAsync(CSharpWorkerPipeline.CSharpWorkerRegistration());
         await AssertConvergedAsync("the first scan");
 
@@ -450,9 +450,15 @@ public sealed class WorkerHibernationTests : IAsyncLifetime
             await AssertConvergedAsync($"step {step}");
         }
 
-        var wakes = host.Instance.WorkerLog.Entries.Count(entry => entry.Message.Contains("woke:", StringComparison.Ordinal));
-        Assert.Equal(steps, wakes);
-        Assert.Contains(host.Instance.WorkerLog.Entries, entry => entry.Message.Contains("woke: its saved state was accepted", StringComparison.Ordinal));
+        // Every wake must accept its saved state: the worker hibernates only once that state is written and matches
+        // the store, nothing changes the store while it is down, and the wake's index request is its session's first
+        // mutating request. TryRestore's refusals (another build, state id, workspace, root, fingerprints, a malformed
+        // file) are all broken invariants here, and an edit to a project input is applied after the restore, not a
+        // reason to refuse it. So a re-read on any wake is a defect, even though the graph would still converge.
+        var wakes = host.Instance.WorkerLog.Entries.Where(entry => entry.Message.Contains("woke:", StringComparison.Ordinal))
+            .Select(entry => entry.Message).ToList();
+        Assert.Equal(steps, wakes.Count);
+        Assert.All(wakes, wake => Assert.Contains("woke: its saved state was accepted", wake, StringComparison.Ordinal));
         foreach (var kind in new[] { "body", "top-level", "add file", "delete file", "rename file" })
             Assert.True(walk.Kinds.GetValueOrDefault(kind) > 0, $"Seed {seed}: no '{kind}' edit in {steps} steps.");
         Assert.True(walk.Kinds.GetValueOrDefault("project constant") + walk.Kinds.GetValueOrDefault("project reference")
@@ -460,6 +466,9 @@ public sealed class WorkerHibernationTests : IAsyncLifetime
 
         async Task AssertConvergedAsync(string when)
         {
+            // Fresh: a new pipeline and a new worker process for every comparison, so no state a long-lived
+            // worker kept between scans can make the expectation agree with the hibernating host.
+            await using var fresh = new CSharpWorkerPipeline(Root);
             await fresh.GraphUpdateService.PerformInitialScanAsync(Root, null, CancellationToken.None);
             var expected = Facts(fresh.RepositoryFactory.Database);
             var actual = Facts(host.Instance.Database);

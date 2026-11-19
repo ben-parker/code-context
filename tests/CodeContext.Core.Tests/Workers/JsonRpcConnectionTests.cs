@@ -228,4 +228,70 @@ public class JsonRpcConnectionTests : IAsyncLifetime
         await Assert.ThrowsAsync<ParserProtocolViolationException>(
             () => readLoop.WaitAsync(TimeSpan.FromSeconds(5)));
     }
+
+    // A null "result" was invisible to the reader before "result": null was read as present (it must be,
+    // for shutdown's answer). Two messages that carry one were tolerated then and stay tolerated: a
+    // JSON-RPC 1.0 style error response, which also writes "result": null, and a request or notification,
+    // where a result member means nothing and is ignored.
+
+    [Fact]
+    public async Task AnErrorResponse_WithANullResult_IsAnErrorResponse_AndTheConnectionStaysUp()
+    {
+        var readLoop = _host.StartAsync();
+        using var requests = new FrameReader(_hostToWorker.Reader.AsStream());
+
+        var first = _host.InvokeVoidAsync(ParserProtocolMethods.Shutdown);
+        var id = await ReadRequestIdAsync(requests);
+        await WriteRawAsync($"{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":null,\"error\":{{\"code\":-32603,\"message\":\"boom\"}}}}");
+        var error = await Assert.ThrowsAsync<JsonRpcRemoteException>(() => first.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Equal("boom", error.Message);
+
+        var second = _host.InvokeVoidAsync(ParserProtocolMethods.Shutdown);
+        id = await ReadRequestIdAsync(requests);
+        await WriteRawAsync($"{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":null}}");
+        await second.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.False(readLoop.IsCompleted);
+    }
+
+    [Fact]
+    public async Task ARequestAndANotification_WithANullResult_AreHandled_AndTheConnectionStaysUp()
+    {
+        var notified = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _host.AddNotificationHandler("test/ping", _ => { notified.TrySetResult(); return Task.CompletedTask; });
+        _host.AddRequestHandler("test/echo", (_, _) => Task.FromResult<JsonElement?>(JsonSerializer.SerializeToElement(7)));
+        var readLoop = _host.StartAsync();
+        using var answers = new FrameReader(_hostToWorker.Reader.AsStream());
+
+        await WriteRawAsync("{\"jsonrpc\":\"2.0\",\"method\":\"test/ping\",\"result\":null}");
+        await notified.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        await WriteRawAsync("{\"jsonrpc\":\"2.0\",\"id\":41,\"method\":\"test/echo\",\"result\":null}");
+        using var frame = (await answers.ReadFrameAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5)))!.Value;
+        var answer = JsonSerializer.Deserialize(frame.Payload, ParserProtocolJsonContext.Default.JsonRpcMessage)!;
+        Assert.Equal(41, answer.Id);
+        Assert.Equal(7, answer.Result!.Value.GetInt32());
+        Assert.False(readLoop.IsCompleted);
+    }
+
+    [Theory]
+    [InlineData("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{},\"error\":{\"code\":-32603,\"message\":\"x\"}}")]
+    [InlineData("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":0,\"error\":{\"code\":-32603,\"message\":\"x\"}}")]
+    [InlineData("{\"jsonrpc\":\"2.0\",\"id\":1}")]
+    [InlineData("{\"jsonrpc\":\"2.0\",\"method\":\"test/ping\",\"result\":{}}")]
+    [InlineData("{\"jsonrpc\":\"2.0\",\"method\":\"test/ping\",\"error\":{\"code\":-32603,\"message\":\"x\"}}")]
+    public async Task AResponseWithAResultAndAnError_OrWithNeither_OrAMethodWithAValue_IsStillRefused(string json)
+    {
+        var readLoop = _host.StartAsync();
+        await WriteRawAsync(json);
+        await Assert.ThrowsAsync<ParserProtocolViolationException>(() => readLoop.WaitAsync(TimeSpan.FromSeconds(5)));
+    }
+
+    private Task WriteRawAsync(string json)
+        => HeaderFraming.WriteFrameAsync(_workerToHost.Writer.AsStream(), System.Text.Encoding.UTF8.GetBytes(json));
+
+    private static async Task<long> ReadRequestIdAsync(FrameReader reader)
+    {
+        using var frame = (await reader.ReadFrameAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5)))!.Value;
+        return JsonSerializer.Deserialize(frame.Payload, ParserProtocolJsonContext.Default.JsonRpcMessage)!.Id!.Value;
+    }
 }
