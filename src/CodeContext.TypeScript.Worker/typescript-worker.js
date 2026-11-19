@@ -1679,6 +1679,15 @@ function analyzeFile(workspace, workspaceId, program, checker, fileName, diagnos
      * rather than called is a REFERENCES edge from where it is handed over. `symbol` is
      * given for a shorthand property, whose name is not itself an expression.
      */
+    // Whether an expression names a member through `super`, as `super.m`, `super['m']` and
+    // `(super.m)` do. Such a call or value is bound to the base method, never an override of it.
+    const isThroughSuper = (expression) => {
+        while (expression && ts.isParenthesizedExpression(expression)) expression = expression.expression;
+        return !!expression
+            && (ts.isPropertyAccessExpression(expression) || ts.isElementAccessExpression(expression))
+            && expression.expression.kind === ts.SyntaxKind.SuperKeyword;
+    };
+
     const addValueReference = (expression, symbol) => {
         if (!expression) return;
         const nameNode = ts.isPropertyAccessExpression(expression) ? expression.name : expression;
@@ -1702,9 +1711,7 @@ function analyzeFile(workspace, workspaceId, program, checker, fileName, diagnos
             column: String(position.character + 1),
         };
         // `super.m` taken as a value, like `super.m()`, is bound to the base method.
-        if (ts.isPropertyAccessExpression(expression) && expression.expression.kind === ts.SyntaxKind.SuperKeyword) {
-            metadata.dispatch = 'static';
-        }
+        if (isThroughSuper(expression)) metadata.dispatch = 'static';
         addEdge(enclosingDeclarationId(expression), targetId, 'REFERENCES', metadata);
     };
 
@@ -1931,11 +1938,7 @@ function analyzeFile(workspace, workspaceId, program, checker, fileName, diagnos
                             column: String(position.character + 1),
                         };
                         if (!targetDecl) metadata.unresolved = 'true';
-                        // `super.m()` calls the base implementation itself, never an override of it.
-                        if (ts.isPropertyAccessExpression(expression)
-                            && expression.expression.kind === ts.SyntaxKind.SuperKeyword) {
-                            metadata.dispatch = 'static';
-                        }
+                        if (isThroughSuper(expression)) metadata.dispatch = 'static';
                         addEdge(enclosingDeclarationId(tsNode), targetId, 'CALLS', metadata);
                     }
                 }

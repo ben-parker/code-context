@@ -1190,6 +1190,8 @@ namespace Mixed { public class Service { public string Run() => ""ok""; } }");
                 save(): void { super.save(); }
                 again(other: Base): void { other.save(); }
                 later(): unknown[] { return [super.save]; }
+                computed(): void { super['save'](); }
+                wrapped(): void { (super.save)(); }
             }
             """);
         await _pipeline.GraphUpdateService.PerformInitialScanAsync(_tempDir, null, CancellationToken.None);
@@ -1208,6 +1210,13 @@ namespace Mixed { public class Service { public string Run() => ""ok""; } }");
             edge => edge.Type == "REFERENCES" && edge.TargetId!.EndsWith("#Base.save()", StringComparison.Ordinal)
                 && edge.SourceId!.Contains("#Derived.later", StringComparison.Ordinal));
         Assert.Equal(EdgeDispatch.Static, captured.Metadata![EdgeMetadataKeys.Dispatch]);
+
+        // An element access or parentheses through super are still bound to the base method.
+        foreach (var form in new[] { "#Derived.computed", "#Derived.wrapped" })
+        {
+            var call = Assert.Single(edges, edge => edge.SourceId!.Contains(form, StringComparison.Ordinal));
+            Assert.Equal(EdgeDispatch.Static, call.Metadata![EdgeMetadataKeys.Dispatch]);
+        }
     }
 
     [Fact]

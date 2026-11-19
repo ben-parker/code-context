@@ -114,6 +114,7 @@ public class CSharpWorkerAnalyzerTests : IDisposable
                 public void Again(Base other) { other.Run(); }
                 public System.Action Later() => base.Run;
                 public System.Action Bound(Base other) => other.Run;
+                public void Wrapped() { (base.Run)(); }
             }
             """));
 
@@ -124,6 +125,7 @@ public class CSharpWorkerAnalyzerTests : IDisposable
         var baseCall = calls[Id("Derived.Run()")];
         Assert.Equal(EdgeDispatch.Static, baseCall.Metadata![EdgeMetadataKeys.Dispatch]);
         Assert.Equal("3", baseCall.Metadata["line"]);
+        Assert.Equal(EdgeDispatch.Static, calls[Id("Derived.Wrapped()")].Metadata![EdgeMetadataKeys.Dispatch]);
         var dispatching = calls[Id("Derived.Again(Base)")];
         Assert.False(dispatching.Metadata!.ContainsKey(EdgeMetadataKeys.Dispatch));
 

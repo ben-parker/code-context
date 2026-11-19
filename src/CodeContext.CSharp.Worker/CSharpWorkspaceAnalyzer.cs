@@ -2048,9 +2048,7 @@ public sealed class CSharpWorkspaceAnalyzer
                 var kind = enclosingMethod is not null && IsMockOrFluentTestInvocation(node, enclosingMethod)
                     ? "MOCK_CALLS"
                     : "CALLS";
-                // `base.M()` calls the base implementation itself, never an override of it.
-                var staticallyBound = node.Expression is MemberAccessExpressionSyntax { Expression: BaseExpressionSyntax };
-                AddLocatedEdge(callerId, NodeId(calleeSymbol), kind, node, staticallyBound);
+                AddLocatedEdge(callerId, NodeId(calleeSymbol), kind, node, IsThroughBase(node.Expression));
             }
             base.VisitInvocationExpression(node);
         }
@@ -2325,10 +2323,21 @@ public sealed class CSharpWorkspaceAnalyzer
 
             var targetId = NodeId(member);
             // `base.M` taken as a method group, like `base.M()`, is bound to the base member.
-            var staticallyBound = node.Parent is MemberAccessExpressionSyntax { Expression: BaseExpressionSyntax } access
-                && access.Name == node;
+            var staticallyBound = node.Parent is MemberAccessExpressionSyntax access && access.Name == node
+                && IsThroughBase(access);
             if (sourceId != targetId)
                 AddLocatedEdge(sourceId, targetId, "REFERENCES", node, staticallyBound);
+        }
+
+        /// <summary>
+        /// Whether an expression names a member through <c>base</c>, as <c>base.M</c> or
+        /// <c>(base.M)</c> do. Such a call or method group is bound to the base member itself,
+        /// never an override of it.
+        /// </summary>
+        private static bool IsThroughBase(ExpressionSyntax expression)
+        {
+            while (expression is ParenthesizedExpressionSyntax parenthesized) expression = parenthesized.Expression;
+            return expression is MemberAccessExpressionSyntax { Expression: BaseExpressionSyntax };
         }
 
         private void AddLocatedEdge(string sourceId, string targetId, string kind, SyntaxNode location, bool staticallyBound = false)
