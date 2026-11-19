@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Threading.Channels;
+using CodeContext.Core.Paths;
 using CodeContext.Parser.Protocol;
 using Microsoft.Extensions.Logging;
 
@@ -117,6 +118,8 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
     private readonly SemaphoreSlim _lifecycleLock = new(1, 1);
     private readonly CancellationTokenSource _shutdown = new();
     private readonly ConcurrentDictionary<long, ActiveMutation> _activeMutations = new();
+    // Which reported input paths the host may not look at, by spelling; null where none is refused (off Windows).
+    private readonly Func<string, bool>? _refusedInput;
 
     private Process? _process;
     private JsonRpcConnection? _connection;
@@ -178,6 +181,7 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
         _logger = logger;
         _registry = registry;
         _hostOptions = hostOptions ?? new CodeContextOptions();
+        _refusedInput = ReportedPaths.RefusedAsSpelled(_hostOptions.RootPath);
         _snapshot = new ParserSessionSnapshot(spec.ParserId, spec.DisplayName, ParserSessionState.Starting);
     }
 
@@ -515,7 +519,7 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
 
         if (delta.Inputs is { } inputs)
         {
-            delta = delta with { Inputs = InputsOfChunk(inputs, firstChunk: active.DeltasReceived == 0, delta.RequestId) };
+            delta = delta with { Inputs = InputsOfChunk(inputs, firstChunk: active.DeltasReceived == 0, delta.RequestId, _refusedInput) };
         }
 
         var ownershipPrefix = $"{delta.ParserId}:{Uri.EscapeDataString(delta.WorkspaceId)}:";
@@ -1198,7 +1202,7 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
     /// The inputs a chunk contributes to its request: the first chunk's, normalized (<see cref="NormalizeInputs"/>);
     /// a later chunk's are not read, as the schema says, so neither checked nor sorted.
     /// </summary>
-    internal static WorkerInputs? InputsOfChunk(WorkerInputs? reported, bool firstChunk, long requestId)
+    internal static WorkerInputs? InputsOfChunk(WorkerInputs? reported, bool firstChunk, long requestId, Func<string, bool>? refused = null)
     {
         if (reported is null || !firstChunk) return null;
         if (reported.Files is null || reported.Absent is null || reported.Files.Contains(null!) || reported.Absent.Contains(null!))
@@ -1206,7 +1210,7 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
             throw new ParserProtocolViolationException(
                 $"analysis/delta for request {requestId} carried inputs without files or absent paths, or with a null one.");
         }
-        return NormalizeInputs(reported);
+        return NormalizeInputs(reported, refused);
     }
 
     /// <summary>
@@ -1214,12 +1218,18 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
     /// in ordinal order, so that two reports of the same set compare equal; and an absent path under another listed
     /// absent path is dropped (the schema lets a worker leave it out: it cannot exist while that one does not), so a
     /// worker that leaves them out and one that lists every failed lookup are kept alike. Null when the report lists
-    /// more than <see cref="MaxInputs"/>.
+    /// more than <see cref="MaxInputs"/>, or when a path it would keep is one the host may not look at
+    /// (<paramref name="refused"/>, <see cref="ReportedPaths.RefusedAsSpelled"/>): a report is what a repository made
+    /// its worker say, and the host looks at every path it keeps, so such a report is not kept at all and its shard is
+    /// never judged current without a worker.
     /// </summary>
-    internal static WorkerInputs? NormalizeInputs(WorkerInputs inputs)
+    internal static WorkerInputs? NormalizeInputs(WorkerInputs inputs, Func<string, bool>? refused = null)
     {
         if (inputs.Files.Count + inputs.Absent.Count > MaxInputs) return null;
-        return new WorkerInputs(Kept(inputs.Files, dropNested: false), Kept(inputs.Absent, dropNested: true));
+        var files = Kept(inputs.Files, dropNested: false);
+        var absent = Kept(inputs.Absent, dropNested: true);
+        if (refused is not null && (files.Exists(path => refused(path)) || absent.Exists(path => refused(path)))) return null;
+        return new WorkerInputs(files, absent);
     }
 
     private static List<string> Kept(IReadOnlyList<string> paths, bool dropNested)

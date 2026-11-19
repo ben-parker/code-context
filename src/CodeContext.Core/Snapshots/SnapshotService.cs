@@ -265,7 +265,7 @@ namespace CodeContext.Core.Snapshots
                 try
                 {
                     var result = filesSince(capturedUtc, inputs!, rootTimeTicks);
-                    if (result.Unchanged || result.InFuture) return;
+                    if (result.Unchanged || result.InFuture || result.NotChecked) return;
                     _logger.LogInformation(
                         "'{Path}' {Why}; the verified graph will be written again for one-shot queries.", result.FirstMoved, result.Why);
                     lock (_gate)

@@ -278,6 +278,21 @@ public class AnalysisDeltaApplierTests
     }
 
     [Fact]
+    public void Inputs_WithAPathTheHostMayNotLookAt_AreKeptAsNone()
+    {
+        var root = OperatingSystem.IsWindows() ? @"C:\repo\" : "/repo/";
+        var bad = root + "refused";
+
+        // Wherever it is listed: the shard is then never answered without a worker, rather than checked without it.
+        Assert.Null(ParserProcessSupervisor.NormalizeInputs(new WorkerInputs([root + "a", bad], []), path => path == bad));
+        Assert.Null(ParserProcessSupervisor.NormalizeInputs(new WorkerInputs([root + "a"], [bad]), path => path == bad));
+        Assert.NotNull(ParserProcessSupervisor.NormalizeInputs(new WorkerInputs([root + "a"], [root + "b"]), path => path == bad));
+        // One that the host drops anyway refuses nothing.
+        Assert.NotNull(ParserProcessSupervisor.NormalizeInputs(new WorkerInputs([root + "a"], [root + "b", bad + "x", root + "b" + Path.DirectorySeparatorChar + "refused"]),
+            path => path.EndsWith("refused", StringComparison.Ordinal)));
+    }
+
+    [Fact]
     public void Inputs_AreTakenFromARequestsFirstChunkOnly()
     {
         var root = OperatingSystem.IsWindows() ? @"C:\repo\" : "/repo/";

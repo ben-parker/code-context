@@ -66,7 +66,8 @@ public sealed class SnapshotFreshnessTests : IDisposable
         [PathOf("src/Lib.csproj"), PathOf("src/obj/project.assets.json"), PathOf("web/tsconfig.json"), Path.Combine(_base, "Directory.Build.props")],
         [PathOf("src/Directory.Build.props"), PathOf("Directory.Packages.props"), Path.Combine(_base, "global.json")]);
 
-    private SnapshotFreshnessResult Check(DateTime captured, TimeSpan? tolerance = null, WorkerInputs? inputs = null, long rootTicks = 0, DateTime? now = null)
+    private SnapshotFreshnessResult Check(DateTime captured, TimeSpan? tolerance = null, WorkerInputs? inputs = null, long rootTicks = 0, DateTime? now = null,
+        Func<string, bool>? refused = null)
         => SnapshotFreshness.Check(
             new RepositoryFileSelector(Options.Create(new CodeContextOptions { RootPath = Root })),
             Root,
@@ -75,7 +76,47 @@ public sealed class SnapshotFreshnessTests : IDisposable
             [inputs ?? Reported()],
             rootTicks,
             now,
-            tolerance ?? TimeSpan.Zero);
+            tolerance ?? TimeSpan.Zero,
+            refused);
+
+    /// <summary>
+    /// A reported path the host may not look at (on Windows, one on a share nobody chose: opening it would
+    /// authenticate to that host) is not looked at, and the answer is "not known", never "unchanged".
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void ARefusedReportedPath_IsNotLookedAt_AndTheSnapshotIsNotKnownToBeCurrent(bool asFile)
+    {
+        var captured = BuildAndCapture();
+        // Looking would say something else: as a file it is "gone", as an absent path it "exists now".
+        var path = asFile ? Path.Combine(_base, "never-there.props") : Path.Combine(_base, "Directory.Build.props");
+        var inputs = asFile ? new WorkerInputs([path], []) : new WorkerInputs([], [path]);
+        var asked = new List<string>();
+
+        var result = Check(captured, inputs: inputs, refused: candidate =>
+        {
+            asked.Add(candidate);
+            return candidate == path;
+        });
+
+        Assert.False(result.Unchanged);
+        Assert.True(result.NotChecked);
+        Assert.Equal(path, result.FirstMoved);
+        Assert.Contains("not looked at", result.Why);
+        Assert.Contains(path, asked);
+    }
+
+    [Fact]
+    public void ReportedPathsThatAreNotRefused_AreCheckedAsBefore()
+    {
+        var captured = BuildAndCapture();
+
+        var result = Check(captured, refused: _ => false);
+
+        Assert.True(result.Unchanged, result.FirstMoved);
+        Assert.False(result.NotChecked);
+    }
 
     [Fact]
     public void NothingTouched_IsUnchanged()
