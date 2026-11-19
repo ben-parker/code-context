@@ -481,6 +481,32 @@ public sealed class WorkerHibernationTests : IAsyncLifetime
         Assert.True(host.Instance.Workers.IsHibernated("fake"));
     }
 
+    /// <summary>A full rescan is a wake too: when it fails with the process up, the worker is not hibernated, and the next change re-indexes.</summary>
+    [Fact]
+    public async Task FailedRescanOfAHibernatedWorker_IsNotReportedAsHibernated_AndTheNextChangeReIndexes()
+    {
+        var host = await StartAsync();
+        await host.WaitForStateWrittenAsync();
+        await host.IdleAsync();
+        Assert.True(host.Instance.Workers.IsHibernated("fake"));
+
+        File.WriteAllText(FailMarker, "fail");
+        Assert.NotNull(await host.Instance.Coordinator.TryRequestFullRescanAsync());
+        await host.Instance.WaitForAsync(() => host.Session.State == ParserSessionState.Failed && !host.Instance.Coordinator.IsBusy, "the failed rescan");
+        Assert.NotNull(host.Session.ProcessId);
+        Assert.False(host.Instance.Workers.IsHibernated("fake"));
+
+        File.Delete(FailMarker);
+        File.WriteAllText(Path.Combine(Root, "d.fake"), "d");
+        await host.Instance.Coordinator.RefreshFileAsync(Path.Combine(Root, "d.fake"));
+        Assert.Equal(ParserSessionState.Ready, host.Session.State);
+        Assert.Equal(await FreshScanAsync(), Facts(host.Instance.Database));
+
+        await host.WaitForStateWrittenAsync();
+        await host.IdleAsync();
+        Assert.True(host.Instance.Workers.IsHibernated("fake"));
+    }
+
     [Fact]
     public async Task ExplicitRefresh_WakesTheWorker_ThroughItsSavedState()
     {
