@@ -79,6 +79,7 @@ public class FileWatcherService : IHostedService, IDisposable
 
     private void OnChanged(object sender, FileSystemEventArgs e)
     {
+        if (e.ChangeType != WatcherChangeTypes.Changed && PublishIfDirectory(e.FullPath, gone: e.ChangeType == WatcherChangeTypes.Deleted)) return;
         if (ShouldIgnore(e.FullPath)) return;
         _logger.LogDebug("File change detected: {ChangeType} - {FullPath}", e.ChangeType, e.FullPath);
 
@@ -96,8 +97,44 @@ public class FileWatcherService : IHostedService, IDisposable
         _logger.LogDebug("File renamed: {Old} to {New}", e.OldFullPath, e.FullPath);
         // A rename is a delete of the old path plus a (re)appearance of the new one;
         // both paths must reach the coordinator or one side of the rename is lost.
-        if (!ShouldIgnore(e.OldFullPath)) Publish(e.OldFullPath, FileChangeType.Deleted);
-        if (!ShouldIgnore(e.FullPath)) Publish(e.FullPath, FileChangeType.Changed);
+        if (!PublishIfDirectory(e.OldFullPath, gone: true) && !ShouldIgnore(e.OldFullPath)) Publish(e.OldFullPath, FileChangeType.Deleted);
+        if (!PublishIfDirectory(e.FullPath, gone: false) && !ShouldIgnore(e.FullPath)) Publish(e.FullPath, FileChangeType.Changed);
+    }
+
+    /// <summary>
+    /// Forwards a directory that was created, moved in, renamed or removed as one subtree notification: the
+    /// watcher reports nothing for the files such a directory already holds (or held), so the coordinator
+    /// reconciles what is under it. A path that is gone cannot be asked what it was: one that no worker would
+    /// have indexed as a file may have been a directory, and reconciling a path with nothing known under it
+    /// costs a lookup. Nothing below an excluded or ignored directory is forwarded, as for files.
+    /// </summary>
+    /// <returns>True when the path was handled as a directory (forwarded or excluded).</returns>
+    private bool PublishIfDirectory(string path, bool gone)
+    {
+        if (gone)
+        {
+            if (!ShouldIgnore(path)) return false;
+        }
+        else if (!Directory.Exists(path))
+        {
+            return false;
+        }
+        if (!_fileSelector.IsIncluded(path, isDirectory: true)) return true;
+        _logger.LogDebug("Directory change detected: {FullPath}", path);
+        try
+        {
+            var write = _coordinator.NotifySubtreeChangedAsync(path, _lifetimeCts.Token);
+            if (!write.IsCompletedSuccessfully) write.AsTask().GetAwaiter().GetResult();
+        }
+        catch (OperationCanceledException)
+        {
+            // shutting down
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to enqueue directory change for {FullPath}.", path);
+        }
+        return true;
     }
 
     private void Publish(string fullPath, FileChangeType changeType)

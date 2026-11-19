@@ -31,6 +31,7 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
 
     private abstract record Command;
     private sealed record FileChangedCommand(string Path, FileChangeType Type) : Command;
+    private sealed record SubtreeChangedCommand(string Path) : Command;
     private sealed record FullScanCommand : Command;
     private sealed record RefreshFileCommand(string Path, TaskCompletionSource Completion) : Command;
 
@@ -209,6 +210,11 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
         await _commands.Writer.WriteAsync(new FileChangedCommand(fullPath, changeType), ct);
     }
 
+    public async ValueTask NotifySubtreeChangedAsync(string directoryPath, CancellationToken ct = default)
+    {
+        await _commands.Writer.WriteAsync(new SubtreeChangedCommand(directoryPath), ct);
+    }
+
     public async Task<long?> TryRequestFullRescanAsync(CancellationToken ct = default)
     {
         if (!_scanState.TryBeginScan())
@@ -332,8 +338,8 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
         {
             switch (command)
             {
-                case FileChangedCommand firstChange:
-                    return await ProcessChangeBatchAsync(firstChange, ct);
+                case FileChangedCommand or SubtreeChangedCommand:
+                    return await ProcessChangeBatchAsync(command, ct);
 
                 case FullScanCommand:
                     await RunScanAsync(resumable: false, ct);
@@ -416,18 +422,20 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
     /// while draining ends the batch and is returned to the caller, except a maintenance
     /// command, which waits and runs once the batch is applied.
     /// </summary>
-    private async Task<Command?> ProcessChangeBatchAsync(FileChangedCommand first, CancellationToken ct)
+    private async Task<Command?> ProcessChangeBatchAsync(Command first, CancellationToken ct)
     {
-        var pending = new Dictionary<string, FileChangeType>(
-            OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
-        AddPending(pending, first);
+        var comparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+        var pending = new Dictionary<string, FileChangeType>(comparer);
+        var subtrees = new HashSet<string>(comparer);
+        if (first is FileChangedCommand firstChange) AddPending(pending, firstChange);
+        else subtrees.Add(((SubtreeChangedCommand)first).Path);
 
         Command? interrupting = null;
         List<MaintenanceCommand>? deferred = null;
         var applied = false;
         try
         {
-            interrupting = await CoalesceAndApplyAsync(pending, ct, maintenance => (deferred ??= []).Add(maintenance));
+            interrupting = await CoalesceAndApplyAsync(pending, subtrees, ct, maintenance => (deferred ??= []).Add(maintenance));
             applied = true;
         }
         finally
@@ -446,7 +454,7 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
     }
 
     private async Task<Command?> CoalesceAndApplyAsync(
-        Dictionary<string, FileChangeType> pending, CancellationToken ct, Action<MaintenanceCommand> defer)
+        Dictionary<string, FileChangeType> pending, HashSet<string> subtrees, CancellationToken ct, Action<MaintenanceCommand> defer)
     {
         Command? interrupting = null;
         var deadline = DateTimeOffset.UtcNow + MaxBatchLatency;
@@ -463,6 +471,10 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
             {
                 AddPending(pending, change);
             }
+            else if (next is SubtreeChangedCommand subtree)
+            {
+                subtrees.Add(subtree.Path);
+            }
             else if (next is MaintenanceCommand maintenance)
             {
                 // Maintenance does not end the batch; it runs once the batch is applied.
@@ -473,6 +485,25 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
             {
                 interrupting = next;
                 break;
+            }
+        }
+
+        if (subtrees.Count > 0)
+        {
+            // A directory that appeared, moved or went is reconciled as a whole, here on the loop: one
+            // notification, however many files it holds. A file's own event in this batch keeps its type.
+            try
+            {
+                foreach (var change in await _graphUpdateService.ExpandSubtreesAsync(subtrees, ct))
+                    pending.TryAdd(change.Path, change.Type);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to reconcile {Count} changed directories.", subtrees.Count);
             }
         }
 
