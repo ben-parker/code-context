@@ -1069,20 +1069,24 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
         {
             if (_stopping || _disposed || _unavailable || !IsLive || _client is not { } client) return false;
             _hibernating = true;
+            // Bounded by HibernateStopTimeout twice (the answer, then the exit), not a stop's waits: this runs on the
+            // coordinator's loop. The request is not cancelled (that would add the cancel grace period); closing the
+            // connection below ends it.
+            var shutdown = client.ShutdownAsync(ct);
             try
             {
-                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                timeout.CancelAfter(_options.ShutdownTimeout);
-                await client.ShutdownAsync(timeout.Token).ConfigureAwait(false);
+                await shutdown.WaitAsync(_options.HibernateStopTimeout, ct).ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
             {
-                _logger.LogDebug("[{ParserId}] shutdown request before hibernating failed ({Message}); falling back to EOF.",
+                _ = shutdown.ContinueWith(static task => _ = task.Exception, CancellationToken.None,
+                    TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
+                _logger.LogInformation("[{ParserId}] shutdown request before hibernating failed ({Message}); falling back to EOF.",
                     _spec.ParserId, ex.Message);
             }
 
             // Detaches the process before closing its pipes, so the connection monitor does not report the exit.
-            await CleanupProcessAsync(kill: false).ConfigureAwait(false);
+            await CleanupProcessAsync(kill: false, _options.HibernateStopTimeout).ConfigureAwait(false);
             Transition(ParserSessionState.Hibernated, "idle: the process exited; the next change starts it again");
             return true;
         }
@@ -1097,7 +1101,7 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
     /// Closes the protocol pipes (the worker's EOF-exit signal), waits briefly, and
     /// kills the process tree if it is still alive (always when <paramref name="kill"/>).
     /// </summary>
-    private async Task CleanupProcessAsync(bool kill)
+    private async Task CleanupProcessAsync(bool kill, TimeSpan? exitWait = null)
     {
         var process = _process;
         var connection = _connection;
@@ -1122,7 +1126,8 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
         {
             if (!process.HasExited && !kill)
             {
-                using var wait = new CancellationTokenSource(_options.ExitAfterEofTimeout);
+                var waitFor = exitWait ?? _options.ExitAfterEofTimeout;
+                using var wait = new CancellationTokenSource(waitFor);
                 try
                 {
                     await process.WaitForExitAsync(wait.Token).ConfigureAwait(false);
@@ -1130,7 +1135,7 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
                 catch (OperationCanceledException)
                 {
                     _logger.LogWarning("[{ParserId}] worker ignored EOF for {Timeout}s; killing process tree.",
-                        _spec.ParserId, _options.ExitAfterEofTimeout.TotalSeconds);
+                        _spec.ParserId, waitFor.TotalSeconds);
                 }
             }
             if (!process.HasExited)

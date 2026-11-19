@@ -347,6 +347,26 @@ public class ParserProcessSupervisorTests
     }
 
     [Fact]
+    public async Task Hibernate_OfAWorkerThatIgnoresShutdownAndEof_IsBounded_ThenKills()
+    {
+        // Production waits: 5 s for the shutdown answer and 5 s for the exit after EOF. A stop at host shutdown may
+        // take them; a hibernation runs on the coordinator's loop under the worker's lock and must not.
+        var options = new ParserWorkerOptions { InitializeTimeout = TimeSpan.FromSeconds(60) };
+        await using var supervisor = CreateSupervisor(FakeWorkerSpec("--behavior", "ignore-shutdown"), options);
+        supervisor.DeltaHandler = (_, _) => Task.FromResult(true);
+        await supervisor.IndexWorkspaceAsync(new IndexWorkspaceParams("ws-1", 1, ["a.fake"]));
+        var pid = supervisor.Snapshot.ProcessId!.Value;
+
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        Assert.True(await supervisor.HibernateAsync());
+        watch.Stop();
+
+        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(4), $"Hibernating took {watch.Elapsed.TotalSeconds:0.0} s.");
+        Assert.True(HasProcessExited(pid), "The worker process should have been killed.");
+        Assert.Equal(ParserSessionState.Hibernated, supervisor.Snapshot.State);
+    }
+
+    [Fact]
     public async Task Hibernate_StopsTheProcessWithoutCountingARestart()
     {
         var registry = new ParserSessionRegistry();

@@ -21,6 +21,7 @@ using CodeContext.Parser.Protocol;
 //   invalid-progress-file reports a current file outside the approved set
 //   invalid-progress-request reports progress for an unknown request id
 //   native-advertised-missing advertises native trees but omits the handler
+//   ignore-shutdown   never answers shutdown, and stays up for 60 s after stdin EOF
 //
 // Persistent state (plan phase 5). Every behaviour that does not declare persistentState fails a request
 // that carries a baseline, and workspace/saveState, with InvalidRequest: the host must never send them.
@@ -82,10 +83,11 @@ connection.AddRequestHandlerWithId(ParserProtocolMethods.IndexWorkspace,
 connection.AddRequestHandlerWithId(ParserProtocolMethods.ApplyChanges,
     (requestId, p, ct) => state.HandleApplyChangesAsync(requestId, p, ct, connection));
 connection.AddRequestHandler(ParserProtocolMethods.SaveState, (p, ct) => state.HandleSaveStateAsync(p, ct));
-connection.AddRequestHandler(ParserProtocolMethods.Shutdown, (_, _) =>
+connection.AddRequestHandler(ParserProtocolMethods.Shutdown, async (_, _) =>
 {
     state.ShutdownRequested = true;
-    return Task.FromResult<JsonElement?>(null);
+    if (behavior == "ignore-shutdown") await Task.Delay(Timeout.Infinite);
+    return null;
 });
 
 // The read loop ends on stdin EOF — the mandatory self-cleaning exit signal.
@@ -98,6 +100,7 @@ catch (ParserProtocolViolationException ex)
     Console.Error.WriteLine($"fake-worker: protocol violation from host: {ex.Message}");
     return 1;
 }
+if (behavior == "ignore-shutdown") await Task.Delay(TimeSpan.FromSeconds(60));
 return 0;
 
 static string? GetOption(string[] args, string name)

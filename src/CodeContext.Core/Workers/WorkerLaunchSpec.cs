@@ -49,6 +49,13 @@ public sealed class ParserWorkerOptions
     /// <summary>How long a worker gets to exit after its stdin is closed before it is killed.</summary>
     public TimeSpan ExitAfterEofTimeout { get; set; } = TimeSpan.FromSeconds(5);
 
+    /// <summary>
+    /// When hibernating an idle worker: how long it gets to answer shutdown, and then to exit after stdin EOF, before
+    /// it is killed. Shorter than a stop's waits, because a hibernation holds the coordinator's loop and the worker's
+    /// lock; an idle worker has nothing in flight to lose, and a healthy one answers and exits in milliseconds.
+    /// </summary>
+    public TimeSpan HibernateStopTimeout { get; set; } = TimeSpan.FromSeconds(1);
+
     /// <summary>Unexpected-exit respawns allowed before the session is marked Unavailable.</summary>
     public int MaxRestarts { get; set; } = 3;
 
