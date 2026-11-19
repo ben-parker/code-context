@@ -219,6 +219,23 @@ internal sealed class WorkerSession(IWorkerOutput output, Func<string, string?, 
         }
     }
 
+    /// <summary>
+    /// Drops what the compilations of every workspace have bound, between requests: it waits for a request that
+    /// is running and holds the next one off for the moment it takes. Returns how many units were released.
+    /// </summary>
+    public int ReleaseBoundState()
+    {
+        _lock.Wait();
+        try
+        {
+            return _workspaces.Values.Sum(workspace => workspace.ReleaseBoundState());
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
     private CSharpWorkspaceAnalyzer GetWorkspace(string workspaceId)
     {
         if (!_workspaces.TryGetValue(workspaceId, out var workspace))

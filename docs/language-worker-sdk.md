@@ -219,7 +219,15 @@ Send `inputs` on the first `analysis/delta` chunk of every request: `{ "files": 
 (not only what this request read). `files` are the files the worker read besides the
 approved files (project and configuration files, package manifests, lock data, reference
 assemblies, declaration files, anywhere on disk) and directories whose listing it used;
-`absent` are paths it looked for and did not find. The host stores the last set beside the
+`absent` are paths it looked for and did not find. Order does not matter and a repeated
+path counts once. While a directory is absent so is everything in it, so name the highest
+absent directory once in place of every name below it (the host drops those names itself),
+but only a directory you saw to be absent. The host looks at every path you send, so send
+none your worker would itself refuse to open: on Windows a path a repository names on
+`\\host\share` makes whoever opens it authenticate to that host, and the bundled workers
+leave out what their disk guard refuses. Do not list directories a build rewrites (below
+`obj`, say) unless the facts depend on their listing: each build would then read as a
+change. The host stores the last set beside the
 shard and in its snapshots, and uses it for one thing: `codecontext query --snapshot` with
 no instance running answers from a snapshot only when none of these files changed, none is
 gone and no absent path exists. A worker that never sends `inputs` is still indexed as

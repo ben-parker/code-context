@@ -63,6 +63,13 @@ public sealed class CSharpWorkerLazyFallbackTests : IDisposable
         Assert.Equal(expected, actual);
     }
 
+    /// <summary>The runtime's own assemblies among the inputs an analysis reports.</summary>
+    private static List<string> RuntimeInputs(CSharpWorkspaceAnalyzer.AnalysisResult result)
+    {
+        var runtime = Path.GetDirectoryName(typeof(object).Assembly.Location)! + Path.DirectorySeparatorChar;
+        return result.Inputs.Files.Where(path => path.StartsWith(runtime, StringComparison.Ordinal)).ToList();
+    }
+
     [Fact]
     public void NoRuntimeReferencesAreLoadedWhileEveryFileHasAProject()
     {
@@ -71,7 +78,8 @@ public sealed class CSharpWorkerLazyFallbackTests : IDisposable
         var analyzer = Scan();
         Assert.Equal(0, analyzer.RuntimeReferenceLoads);
 
-        analyzer.Analyze(CancellationToken.None);
+        // Reporting what the facts were read from must not be what loads them: nothing was read from them.
+        Assert.Empty(RuntimeInputs(analyzer.Analyze(CancellationToken.None)));
         File.WriteAllText(code, Code.Replace("items.Count", "items.Count + 1", StringComparison.Ordinal));
         analyzer.ApplyChanges([new FileChangeDto(code, FileChangeKinds.Changed)], CancellationToken.None);
         analyzer.Analyze(CancellationToken.None);
@@ -86,9 +94,20 @@ public sealed class CSharpWorkerLazyFallbackTests : IDisposable
     {
         Directory.CreateDirectory(Root);
         var analyzer = Scan();
-        analyzer.Analyze(CancellationToken.None);
+        var result = analyzer.Analyze(CancellationToken.None);
 
         Assert.Equal(0, analyzer.RuntimeReferenceLoads);
+        Assert.Empty(RuntimeInputs(result));
+    }
+
+    [Fact]
+    public void TheRuntimeReferencesAreReachedOnlyThroughTheCountedLoad()
+    {
+        // The count above is the proof that nothing loads them early, so nothing may go around it.
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "CodeContext.sln"))) directory = directory.Parent;
+        var source = File.ReadAllText(Path.Combine(directory!.FullName, "src", "CodeContext.CSharp.Worker", "CSharpWorkspaceAnalyzer.cs"));
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(source, @"SharedReferences\.Value"));
     }
 
     [Fact]
@@ -101,6 +120,7 @@ public sealed class CSharpWorkerLazyFallbackTests : IDisposable
         var result = analyzer.Analyze(CancellationToken.None);
 
         Assert.Equal(1, analyzer.RuntimeReferenceLoads);
+        Assert.Contains(RuntimeInputs(result), path => Path.GetFileName(path) == "System.Linq.dll");
         Assert.Contains(result.Edges, edge => edge.SourceId.EndsWith(":W.Loose.Go(System.Collections.Generic.List<int>)", StringComparison.Ordinal)
             && edge.TargetId.Contains("Enumerable.Where", StringComparison.Ordinal));
     }

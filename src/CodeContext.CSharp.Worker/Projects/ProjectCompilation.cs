@@ -207,10 +207,22 @@ internal sealed class ProjectCompilation
     public void RefreshReferences()
     {
         if (References.Count == 0 || !(Changed || References.Exists(reference => reference.Changed))) return;
-        Compilation = Compilation.WithReferences(
-            _metadataReferences.AddRange(References.Select(reference => (MetadataReference)reference.Compilation.ToMetadataReference())));
+        Compilation = Compilation.WithReferences(CurrentReferences());
         Changed = true;
     }
+
+    /// <summary>
+    /// Lets go of everything the compilation has bound (declared symbols, member tables, what it read of its
+    /// references), which after a full walk is most of what a unit holds, and keeps the trees, options and
+    /// references: a compilation made over again from the same parts binds the same, when next asked. The units
+    /// this one references must have been released first, so it points at their new compilations and not at the
+    /// ones let go. Says nothing changed, because nothing a walk would see has.
+    /// </summary>
+    public void ReleaseBoundState()
+        => Compilation = References.Count == 0 ? Compilation.Clone() : Compilation.WithReferences(CurrentReferences());
+
+    private ImmutableArray<MetadataReference> CurrentReferences()
+        => _metadataReferences.AddRange(References.Select(reference => (MetadataReference)reference.Compilation.ToMetadataReference()));
 
     public void ClearChanged() => Changed = false;
 }

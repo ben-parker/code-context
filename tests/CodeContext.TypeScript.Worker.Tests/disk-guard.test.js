@@ -72,6 +72,32 @@ for (const scenario of scenarios) {
     });
 }
 
+// The host looks at every path a worker reports as an input (protocol `inputs`), with no
+// guard of its own, so a refused path is one the worker never names to it.
+for (const scenario of scenarios) {
+    test(`vectors, reported inputs: ${scenario.name}`, () => {
+        const { guard, asked } = guardOver(scenario);
+        const expected = scenario.cases
+            .filter(({ refused }) => !(typeof refused === 'boolean' ? refused : refused.typescript))
+            .map(({ path: given }) => given);
+
+        assert.deepEqual(guard.readable(scenario.cases.map(({ path: given }) => given)), expected);
+        assert.deepEqual(asked.filter(looked => lower(looked).startsWith(B + B + 'evil')), []);
+    });
+}
+
+test('the worker reports as inputs only what the guard would let it read', () => {
+    const source = fs.readFileSync(path.join(workerDirectory, 'typescript-worker.js'), 'utf8');
+    const collect = source.slice(source.indexOf('    collectInputs(program) {'), source.indexOf('    applyConfiguration(loaded) {'));
+
+    const returned = [...collect.matchAll(/return \{ files: ([^,]+), absent: ([^}]+) \};/g)];
+    assert.equal(returned.length, 1, 'one way out of collectInputs');
+    assert.match(returned[0][1], /^disk\.readable\(/);
+    assert.match(returned[0][2].trim(), /^disk\.readable\(/);
+    // Nothing else puts `inputs` on a delta.
+    assert.equal([...source.matchAll(/\binputs: /g)].length, 2, source.match(/.*\binputs: .*/g).join(' | '));
+});
+
 test('a share is refused when it is named by a URL or by bytes', () => {
     const { guard } = guardOver({ root: win('C:/repo') });
 

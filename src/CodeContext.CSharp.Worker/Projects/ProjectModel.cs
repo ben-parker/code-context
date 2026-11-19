@@ -84,6 +84,9 @@ public sealed class ProjectInfo
 public sealed class ProjectModel
 {
     private const string AssetsFileName = "project.assets.json";
+
+    /// <summary>Where a build keeps what it generates, restore data included.</summary>
+    private const string IntermediateDirectory = "obj";
     private const string DefaultConfiguration = "Debug";
 
     private static readonly StringComparer PathComparer =
@@ -291,12 +294,13 @@ public sealed class ProjectModel
         private Discovery Discover()
         {
             var discovery = new Discovery([], [], []);
-            var pending = new Stack<string>();
-            pending.Push(root);
+            // With each directory, how far below an obj directory it is (0 for obj itself, -1 outside any).
+            var pending = new Stack<(string Directory, int BelowIntermediate)>();
+            pending.Push((root, -1));
             while (pending.Count > 0)
             {
                 ct.ThrowIfCancellationRequested();
-                var directory = pending.Pop();
+                var (directory, belowIntermediate) = pending.Pop();
                 try
                 {
                     _listed.Add(directory);
@@ -309,9 +313,16 @@ public sealed class ProjectModel
                             || name.EndsWith(".slnx", StringComparison.OrdinalIgnoreCase)) discovery.Solutions.Add(file);
                     }
                     // A link can lead back here, and whatever it reaches is not this tree's.
+                    // Restore data lies in obj, or one directory down where every project shares one obj (the
+                    // artifacts layout). Below that is what a build writes: nothing here is read from it, and a
+                    // compile moves those directories' times, which listed would tell the host the index is stale.
+                    if (belowIntermediate >= 1) continue;
                     foreach (var child in disk.RealDirectories(directory))
                     {
-                        if (!SkippedDirectories.Contains(Path.GetFileName(child))) pending.Push(child);
+                        var name = Path.GetFileName(child);
+                        if (SkippedDirectories.Contains(name)) continue;
+                        pending.Push((child, belowIntermediate >= 0 ? belowIntermediate + 1
+                            : name.Equals(IntermediateDirectory, StringComparison.OrdinalIgnoreCase) ? 0 : -1));
                     }
                 }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
