@@ -103,6 +103,10 @@ public class GraphSurfaceTests
     [InlineData("/api/graph/affected?identifier=A&limit=0", "limit must be between 1 and 100 (got 0).")]
     [InlineData("/api/graph/path?from=A&to=B&maxDepth=21", "maxDepth must be between 1 and 20 (got 21).")]
     [InlineData("/api/graph/hubs?within=../x", "within '../x' must not leave the indexed root.")]
+    // Routing matches a trailing slash and any letter case; validation must see the same requests.
+    [InlineData("/api/graph/hubs/?lmit=3", "'lmit' does not apply to hubs queries; hubs accepts limit, relation, type, within, includeTests, includeExternal.")]
+    [InlineData("/api/graph/path/?from=A", "to is required.")]
+    [InlineData("/API/Graph/Affected/?identifier=A&maxDepth=x", "maxDepth must be an integer (got 'x').")]
     public async Task Rest_BadInput_IsA400ThatSaysWhy(string url, string message)
     {
         await using var app = await StartAppAsync(Sample());

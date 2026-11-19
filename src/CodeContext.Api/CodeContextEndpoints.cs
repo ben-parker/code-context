@@ -147,6 +147,7 @@ public static class CodeContextEndpoints
             {
                 From = from, To = to, MaxDepth = maxDepth, Relation = relation, IncludeTests = includeTests,
             }, ct)))
+        .WithMetadata(new GraphQueryEndpoint(GraphQueryParameters.PathQuery))
         .WithName("FindGraphPath")
         .WithSummary("Find how one symbol reaches another")
         .WithDescription("Returns a shortest chain of recorded relationships (calls, references, inheritance, imports) from " +
@@ -170,6 +171,7 @@ public static class CodeContextEndpoints
             {
                 Identifier = identifier, MaxDepth = maxDepth, Relation = relation, IncludeTests = includeTests, Limit = limit,
             }, ct)))
+        .WithMetadata(new GraphQueryEndpoint(GraphQueryParameters.AffectedQuery))
         .WithName("GetAffected")
         .WithSummary("List what depends on a symbol, transitively")
         .WithDescription("Returns the symbols that use the identifier, then their users, up to maxDepth hops, nearest first: " +
@@ -195,6 +197,7 @@ public static class CodeContextEndpoints
                 Limit = limit, Relation = relation, Type = type, Within = within,
                 IncludeTests = includeTests, IncludeExternal = includeExternal,
             }, ct)))
+        .WithMetadata(new GraphQueryEndpoint(GraphQueryParameters.HubsQuery))
         .WithName("GetHubs")
         .WithSummary("List the symbols most others depend on")
         .WithDescription("Ranks symbols by distinct direct dependents (symbols with a recorded use of them; a type's count " +
@@ -384,29 +387,28 @@ public static class CodeContextEndpoints
         return app;
     }
 
-    /// <summary>The graph query routes and the query each one answers.</summary>
+    /// <summary>The graph query routes.</summary>
     internal static class GraphRoutes
     {
         public const string Path = "/api/graph/path";
         public const string Affected = "/api/graph/affected";
         public const string Hubs = "/api/graph/hubs";
-
-        public static string? QueryOf(PathString path)
-            => path.Equals(Path, StringComparison.OrdinalIgnoreCase) ? GraphQueryParameters.PathQuery
-                : path.Equals(Affected, StringComparison.OrdinalIgnoreCase) ? GraphQueryParameters.AffectedQuery
-                : path.Equals(Hubs, StringComparison.OrdinalIgnoreCase) ? GraphQueryParameters.HubsQuery
-                : null;
     }
+
+    /// <summary>Marks a graph query endpoint with the query it answers, for <see cref="UseGraphQueryValidation"/>.</summary>
+    internal sealed record GraphQueryEndpoint(string Query);
 
     /// <summary>
     /// Refuses a graph query whose parameters are unknown to it, belong to another query, are given twice, are of the
     /// wrong kind, or are missing, with a 400 that says which and why. Minimal API binding would answer those with an
-    /// empty 400, or not at all for a parameter it does not know.
+    /// empty 400, or not at all for a parameter it does not know. The route is known by the endpoint routing matched
+    /// (routing runs first), so every request that reaches a graph endpoint is checked, a trailing slash or other
+    /// letter case included.
     /// </summary>
     public static IApplicationBuilder UseGraphQueryValidation(this IApplicationBuilder app)
         => app.Use(async (context, next) =>
         {
-            if (GraphRoutes.QueryOf(context.Request.Path) is { } query
+            if (context.GetEndpoint()?.Metadata.GetMetadata<GraphQueryEndpoint>() is { Query: var query }
                 && GraphQueryParameters.Check(query, context.Request.Query.Select(pair =>
                     new KeyValuePair<string, IReadOnlyList<string?>>(pair.Key, pair.Value.ToArray()))) is { } problem)
             {
