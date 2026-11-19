@@ -217,6 +217,37 @@ public sealed class TypeScriptWorkerInputsTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task AbsentPaths_AreReportedOnceAtTheHighestAbsentFolder_AndStillSeeWhatAppears()
+    {
+        // A package nobody installed: the compiler lists every name it would have tried in every node_modules
+        // folder from the file up to the top of the disk, most of them in folders that do not exist either.
+        File.WriteAllText(Path.Combine(Web, "main.ts"),
+            "import { helper } from \"@lib/util\";\nimport gone from \"not-installed-pkg\";\nexport function mainFn(): number { return helper() + gone; }\n");
+        await _pipeline.GraphUpdateService.PerformInitialScanAsync(_root, null, CancellationToken.None);
+        var inputs = WorkerInputsAssert.Recorded(_pipeline.RepositoryFactory.Database, "typescript");
+
+        // The folder that would hold it is absent, and says so for everything below it.
+        var modules = Path.Combine(Web, "node_modules");
+        Assert.Contains(modules, inputs.Absent);
+        var listed = inputs.Absent.ToHashSet(StringComparer.Ordinal);
+        Assert.All(inputs.Absent, path =>
+        {
+            Assert.False(Path.Exists(path), path);
+            // Nothing is claimed absent on the word of a folder above it: the folder above is there.
+            Assert.True(Directory.Exists(Path.GetDirectoryName(path)), path);
+            for (var above = Path.GetDirectoryName(path); above is not null; above = Path.GetDirectoryName(above))
+            {
+                Assert.DoesNotContain(above, listed);
+            }
+        });
+
+        // Installing the package is still seen, through the one path that stands for it.
+        Directory.CreateDirectory(Path.Combine(modules, "not-installed-pkg"));
+        File.WriteAllText(Path.Combine(modules, "not-installed-pkg", "index.d.ts"), "declare const gone: number; export default gone;\n");
+        Assert.Contains(inputs.Absent, Path.Exists);
+    }
+
+    [Fact]
     public async Task PathMappingEditedInPlace_ReachesARunningInstance()
     {
         await _pipeline.GraphUpdateService.PerformInitialScanAsync(_root, null, CancellationToken.None);

@@ -536,6 +536,44 @@ function recordingConfigHost(recorder) {
     };
 }
 
+/**
+ * The absent paths with each replaced by its highest absent directory, once: while a
+ * directory is missing so is everything in it, and the compiler lists every name it would
+ * have tried in directories it never looked into. A directory is called absent only when
+ * the disk says so here (through `fs`, so through the guard); one that holds a file that
+ * was read is there without asking. No path of the result is below another.
+ */
+function highestAbsent(absent, files) {
+    const there = new Map();
+    for (const fileName of files) {
+        for (let directory = path.dirname(fileName); !there.has(directory); directory = path.dirname(directory)) {
+            there.set(directory, true);
+        }
+    }
+    const exists = directory => {
+        let known = there.get(directory);
+        if (known === undefined) {
+            known = fs.existsSync(directory);
+            there.set(directory, known);
+        }
+        return known;
+    };
+    const highest = new Set();
+    for (const fileName of absent) {
+        let top = fileName;
+        for (let parent = path.dirname(top); parent !== top && !exists(parent); parent = path.dirname(top)) top = parent;
+        highest.add(top);
+    }
+    // A path the compiler called absent can have appeared since, with others found below it.
+    const below = fileName => {
+        for (let parent = path.dirname(fileName), last = fileName; parent !== last; last = parent, parent = path.dirname(parent)) {
+            if (highest.has(parent)) return true;
+        }
+        return false;
+    };
+    return [...highest].filter(fileName => !below(fileName));
+}
+
 class Workspace {
     constructor(rootPath) {
         this.rootPath = rootPath;
@@ -556,6 +594,7 @@ class Workspace {
         // What each file's module resolution looked at (TypeScript's own failed and affecting
         // locations), replaced whenever the file's imports are resolved again.
         this.resolutionInputs = new Map(); // canonicalKey -> { files: string[], absent: string[] }
+        this.lookedLocations = new Map(); // a location as the compiler spelled it -> the same in full
         // Directories the compiler listed or found missing while it built the program.
         this.hostProbes = new InputRecorder();
         this.analysisInputs = new InputRecorder();
@@ -614,10 +653,23 @@ class Workspace {
     resolveModuleName(moduleName, containingFile, options) {
         const result = ts.resolveModuleName(moduleName, containingFile, options, this.serviceHost);
         if (this.resolving) {
-            for (const location of result.failedLookupLocations ?? []) this.resolving.absent.add(path.resolve(location));
-            for (const location of result.affectingLocations ?? []) this.resolving.files.add(path.resolve(location));
+            for (const location of result.failedLookupLocations ?? []) this.resolving.absent.add(this.lookedAt(location));
+            for (const location of result.affectingLocations ?? []) this.resolving.files.add(this.lookedAt(location));
         }
         return result.resolvedModule;
+    }
+
+    /** A location in full, as one string for as long as the configuration stands: library
+     * files look in the same node_modules folders by the thousand and every analysis names
+     * the same paths again, and a string met before costs `collectInputs` no new resolving
+     * or hashing. */
+    lookedAt(location) {
+        let full = this.lookedLocations.get(location);
+        if (full === undefined) {
+            full = path.resolve(location);
+            this.lookedLocations.set(location, full);
+        }
+        return full;
     }
 
     /** Reads the configs again, and starts a new language service, when one of them changed
@@ -629,6 +681,7 @@ class Workspace {
         this.applyConfiguration(loadCompilerOptions(this.rootPath));
         this.moduleTargets = new Map();
         this.resolutionInputs = new Map();
+        this.lookedLocations = new Map();
         this.hostProbes = new InputRecorder();
         this.service = ts.createLanguageService(this.serviceHost, ts.createDocumentRegistry());
         return true;
@@ -638,14 +691,17 @@ class Workspace {
      * as protocol `inputs`: the configs, what module resolution looked at, the library and
      * declaration files the program holds, and the directories the compiler listed or found
      * missing. The compiler's own files, beside this worker, are left out, and so is every
-     * path the disk guard refuses. */
+     * path the disk guard refuses. An absent path stands for everything below it, so only
+     * the highest absent directory of each is named (`highestAbsent`). In no order, and each
+     * path once: the host sorts what it keeps. */
     collectInputs(program) {
         const files = new Set();
         const absent = new Set();
         const own = canonicalKey(__dirname) + path.sep;
         const keep = (set, fileName) => {
-            const full = path.resolve(fileName);
-            if (!this.files.has(canonicalKey(full)) && !canonicalKey(full).startsWith(own)) set.add(full);
+            const full = this.lookedAt(fileName);
+            const key = process.platform === 'win32' ? full.toLowerCase() : full;
+            if (!this.files.has(key) && !key.startsWith(own)) set.add(full);
         };
         for (const recorder of [this.configInputs, this.hostProbes, this.analysisInputs]) {
             for (const fileName of recorder.files.keys()) keep(files, fileName);
@@ -654,16 +710,20 @@ class Workspace {
         const sourceFiles = program.getSourceFiles();
         const inProgram = new Set(sourceFiles.map(file => canonicalKey(file.fileName)));
         for (const file of sourceFiles) keep(files, file.fileName);
+        // Most of these are named by many files: gathered as they are, then judged once each.
+        const lookedFiles = new Set();
+        const lookedAbsent = new Set();
         for (const [key, looked] of this.resolutionInputs) {
             if (!inProgram.has(key)) continue;
-            for (const fileName of looked.files) keep(files, fileName);
-            for (const fileName of looked.absent) keep(absent, fileName);
+            for (const fileName of looked.files) lookedFiles.add(fileName);
+            for (const fileName of looked.absent) lookedAbsent.add(fileName);
         }
+        for (const fileName of lookedFiles) keep(files, fileName);
+        for (const fileName of lookedAbsent) keep(absent, fileName);
         for (const fileName of files) absent.delete(fileName);
-        const sorted = set => [...set].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
         // The host looks at each of these with no guard of its own, so a path this worker may
         // not read (it looked absent, and stays so) is not named to it.
-        return { files: disk.readable(sorted(files)), absent: disk.readable(sorted(absent)) };
+        return { files: disk.readable([...files]), absent: disk.readable(highestAbsent(absent, files)) };
     }
 
     applyConfiguration(loaded) {
