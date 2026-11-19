@@ -760,6 +760,7 @@ public sealed class CSharpWorkspaceAnalyzer
         walker.Visit(root);
         nodes.TrimExcess();
         edges.TrimExcess();
+        externals.TrimExcess();
         return new WalkedFile(unit, nodes, edges, externals, walker.UnresolvedNames)
         {
             Stamp = _stamps.GetValueOrDefault(path),
@@ -768,6 +769,9 @@ public sealed class CSharpWorkspaceAnalyzer
     }
 
     private string Share(string id) => _idStrings.GetOrAdd(id, id);
+
+    /// <summary>The edges the last walk of <paramref name="path"/> found, or null when it is not walked. For tests.</summary>
+    internal List<EdgeFact>? WalkedEdges(string path) => _walked.TryGetValue(path, out var walked) ? walked.Edges : null;
 
     /// <summary>
     /// Settles which file holds each fact, a pure function of the file SET and never of edit
@@ -871,10 +875,13 @@ public sealed class CSharpWorkspaceAnalyzer
         }
 
         var edges = new HashSet<EdgeFact>();
+        var allOwn = true;
         foreach (var edge in walked.Edges)
         {
             if (!owners.TryGetValue(edge.SourceId, out var owner) || owner == path) edges.Add(edge);
+            else allOwn = false;
         }
+        var fromOthers = false;
         foreach (var node in nodes)
         {
             if (!shared.TryGetValue(node.Id, out var files)) continue;
@@ -883,12 +890,16 @@ public sealed class CSharpWorkspaceAnalyzer
                 if (file == path) continue;
                 foreach (var edge in _walked[file].Edges)
                 {
-                    if (edge.SourceId == node.Id) edges.Add(edge);
+                    if (edge.SourceId == node.Id && edges.Add(edge)) fromOthers = true;
                 }
             }
         }
 
-        return new FileFacts(path, Qualify(nodes, contested), edges.ToList());
+        // Usually the bucket's edges are exactly the walk's, in the walk's order (a set enumerates in insertion order
+        // until something is removed): then the bucket shares the walk's list, which nothing changes, rather than
+        // holding a second copy of every edge for as long as the file is unchanged.
+        var bucketEdges = allOwn && !fromOthers && edges.Count == walked.Edges.Count ? walked.Edges : edges.ToList();
+        return new FileFacts(path, Qualify(nodes, contested), bucketEdges);
     }
 
     private List<ProjectCoverage> BuildCoverage()

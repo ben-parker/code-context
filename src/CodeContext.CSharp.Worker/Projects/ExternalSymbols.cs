@@ -36,6 +36,9 @@ internal sealed class ExternalSymbols(
     /// <summary>The containment edges between them.</summary>
     public IReadOnlyList<EdgeFact> Edges => _edges;
 
+    /// <summary>Drops the list's growth slack once the walk that filled it is over; it is kept while the file is unchanged.</summary>
+    public void TrimExcess() => _edges.TrimExcess();
+
     /// <summary>
     /// The stubs of a walk saved earlier, exactly as that walk recorded them. They stay out of the shared
     /// cache, so what a later walk records does not depend on what was restored before it.
