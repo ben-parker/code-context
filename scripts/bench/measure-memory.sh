@@ -4,7 +4,7 @@
 # Usage: scripts/bench/measure-memory.sh [--path DIR] [--no-cache] [--queries]
 #          [--queries-file FILE] [--heap] [--top N] [--settle SECONDS]
 #          [--write-timeout SECONDS] [--json] [--binary PATH]
-#          [--hibernate SECONDS [--probe-cs FILE] [--probe-ts FILE]]
+#          [--hibernate SECONDS [--probe-cs FILE] [--probe-ts FILE] [--probe-query NAME]]
 #
 # Starts an instance on DIR (default: the current directory), cached (the default: a
 # warm-up start writes a snapshot, then the measured start loads it) or --no-cache,
@@ -30,9 +30,12 @@
 # the idle reading (and the query mix), it times an edit to a C# and a TypeScript file while
 # the workers run (append a probe class, poll `query` until it resolves), waits until every
 # worker session is hibernated, settles, reads again (phase hibern), times a query, times the
-# same edits while hibernated (each wakes its worker), settles and reads again (phase woken).
+# same edits while hibernated (each wakes its worker), waits for the snapshot write that
+# follows them, settles and reads again (phase woken).
 # Probe files default to src/CodeContext.Core/CodeGraph.cs and
 # tests/CodeContext.Core.Tests/TestFiles/TypeScript/SimpleClass.ts under DIR; each is restored.
+# --probe-ts none skips the TypeScript edits (a repository with no TypeScript file).
+# --probe-query names the symbol queried while hibernated (default ContextService).
 #
 # The instance is always stopped; a .codecontext directory the script created is removed;
 # `git status --short` must be unchanged at the end. Linux only; needs jq, and
@@ -57,8 +60,9 @@ timeout=300
 hibernate=
 probe_cs=
 probe_ts=
+probe_query=ContextService
 
-usage() { sed -n '2,31s/^# \{0,1\}//p' "${BASH_SOURCE[0]}"; }
+usage() { sed -n '2,/^set -e/{/^set -e/d;s/^# \{0,1\}//p;}' "${BASH_SOURCE[0]}"; }
 
 while [ $# -gt 0 ]; do
   case $1 in
@@ -75,6 +79,7 @@ while [ $# -gt 0 ]; do
     --hibernate) hibernate=$2; shift 2 ;;
     --probe-cs) probe_cs=$2; shift 2 ;;
     --probe-ts) probe_ts=$2; shift 2 ;;
+    --probe-query) probe_query=$2; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -111,7 +116,7 @@ if [ -n "$hibernate" ]; then
   export CodeContext__WorkerHibernateSeconds=$hibernate
   [ -n "$probe_cs" ] || probe_cs=$root/src/CodeContext.Core/CodeGraph.cs
   [ -n "$probe_ts" ] || probe_ts=$root/tests/CodeContext.Core.Tests/TestFiles/TypeScript/SimpleClass.ts
-  for f in "$probe_cs" "$probe_ts"; do [ -f "$f" ] || die "no probe file $f"; done
+  for f in "$probe_cs" "$probe_ts"; do [ "$f" = none ] || [ -f "$f" ] || die "no probe file $f"; done
 fi
 
 work=$(mktemp -d)
@@ -320,7 +325,7 @@ hibernation=
 if [ -n "$hibernate" ]; then
   now_ms() { date +%s%3N; }
   cp "$probe_cs" "$work/probe-cs.orig"
-  cp "$probe_ts" "$work/probe-ts.orig"
+  [ "$probe_ts" = none ] || cp "$probe_ts" "$work/probe-ts.orig"
   probe_n=0
   # Appends a probe class to the file and prints the milliseconds until `query` resolves it.
   probe() {
@@ -341,12 +346,12 @@ if [ -n "$hibernate" ]; then
   }
   restore_probes() {
     cp "$work/probe-cs.orig" "$probe_cs"
-    cp "$work/probe-ts.orig" "$probe_ts"
+    [ "$probe_ts" = none ] || cp "$work/probe-ts.orig" "$probe_ts"
   }
   sessions() { "$bin" status --path "$root" 2>/dev/null | jq -r '[.parsers.sessions[]? | select(.state != "notNeeded") | .state] | join(",")'; }
 
   awake_cs=$(probe Cs "$probe_cs")
-  awake_ts=$(probe Ts "$probe_ts")
+  awake_ts=-; [ "$probe_ts" = none ] || awake_ts=$(probe Ts "$probe_ts")
   restore_probes
   log "edits while awake: C# ${awake_cs} ms, TypeScript ${awake_ts} ms; waiting for hibernation"
   deadline=$((SECONDS + hibernate + 300))
@@ -359,18 +364,26 @@ if [ -n "$hibernate" ]; then
   wait_stable >/dev/null
   read_memory hibern
   t0=$(now_ms)
-  "$bin" query ContextService --path "$root" </dev/null >"$work/hq.out" 2>&1 || die "query while hibernated failed"
+  "$bin" query "$probe_query" --path "$root" </dev/null >"$work/hq.out" 2>&1 || die "query while hibernated failed"
   query_ms=$(( $(now_ms) - t0 ))
   query_label=$(grep -c '^cache' "$work/hq.out" || true)
   [ "$(pgrep -P "$host" | wc -l)" = 0 ] || log "warning: worker processes ran during the hibernated query"
   wake_cs=$(probe Cs "$probe_cs")
-  wake_ts=$(probe Ts "$probe_ts")
+  wake_ts=-; [ "$probe_ts" = none ] || wake_ts=$(probe Ts "$probe_ts")
   restore_probes
+  # The woken reading, like the idle one, follows the snapshot write after the last commit
+  # (the restore's) and the quiet-time trim after it; reading earlier sees the burst's garbage.
+  woken_write=-1
+  if [ "$cache" = 1 ]; then
+    sleep 2
+    wait_ready
+    woken_write=$(wait_snapshot_write "$(snapshot_sequence)")
+  fi
   sleep "$settle"
   wait_stable >/dev/null
   read_memory woken
   hibernation="hibernate=${hibernate}s  sessions=${hibernated_sessions}  query_hibernated=${query_ms}ms (cache label lines: ${query_label})
-edit->answer ms: awake C# ${awake_cs}, TS ${awake_ts}; hibernated C# ${wake_cs}, TS ${wake_ts}"
+edit->answer ms: awake C# ${awake_cs}, TS ${awake_ts}; hibernated C# ${wake_cs}, TS ${wake_ts}; woken write=${woken_write}s"
 fi
 
 heap_rows=
