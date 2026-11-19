@@ -1,6 +1,7 @@
 using CodeContext.Core;
 using CodeContext.Core.Repositories;
 using CodeContext.Core.Services;
+using CodeContext.Parser.Protocol;
 using NSubstitute;
 
 namespace CodeContext.Core.Tests.Services;
@@ -115,7 +116,7 @@ public class MethodFamilyContextTests
         var edges = new[]
         {
             Edge("derived", "base", "OVERRIDES_MEMBER"),
-            Edge("derived", "base", "CALLS", 5),
+            Edge("derived", "base", "CALLS", 5, staticCall: true),
         };
         var service = CreateService(nodes, edges);
 
@@ -129,9 +130,10 @@ public class MethodFamilyContextTests
     [Fact]
     public async Task MethodUsedBy_LeavesASiblingsBaseCallToTheMethodItNames()
     {
-        // Two overrides of one virtual method; one calls base. That call is bound to the base
-        // method, so it reaches neither the other override nor any override but its own base,
-        // while a call through the base type, which dispatches, is a user of every override.
+        // Two overrides of one virtual method; one calls base. The worker marks that call as
+        // bound to the base method, so it reaches neither the other override nor any override
+        // but its own base, while a call through the base type, which dispatches, is a user of
+        // every override.
         var nodes = new[]
         {
             Node("base", "csharp:Example.Folder.Validate()", "Validate", "Method"),
@@ -142,7 +144,7 @@ public class MethodFamilyContextTests
         var edges = new[]
         {
             Edge("collection", "base", "OVERRIDES_MEMBER"), Edge("aggregate", "base", "OVERRIDES_MEMBER"),
-            Edge("aggregate", "base", "CALLS", 7),
+            Edge("aggregate", "base", "CALLS", 7, staticCall: true),
             Edge("dispatcher", "base", "CALLS", 9),
         };
         var service = CreateService(nodes, edges);
@@ -156,6 +158,57 @@ public class MethodFamilyContextTests
             "csharp:Example.Folder.Validate()", depth: 1, maxRelationships: 10)).Matches).Relationships!;
         Assert.Equal(["csharp:Example.AggregateFolder.Validate()", "csharp:Example.Refresh()"],
             named.UsedBy!.Select(node => node.Identifier).Order());
+    }
+
+    [Fact]
+    public async Task MethodUsedBy_ListsAnOverrideDispatchingToOthersForEveryOverride()
+    {
+        // A composite override calls the same virtual method on its children through the base
+        // type. That call dispatches, so it may reach a sibling override and is listed for it.
+        var nodes = new[]
+        {
+            Node("base", "csharp:Example.Folder.Validate()", "Validate", "Method"),
+            Node("collection", "csharp:Example.CollectionFolder.Validate()", "Validate", "Method"),
+            Node("aggregate", "csharp:Example.AggregateFolder.Validate()", "Validate", "Method"),
+        };
+        var edges = new[]
+        {
+            Edge("collection", "base", "OVERRIDES_MEMBER"), Edge("aggregate", "base", "OVERRIDES_MEMBER"),
+            Edge("aggregate", "base", "CALLS", 7),
+        };
+        var service = CreateService(nodes, edges);
+
+        var sibling = Assert.Single((await service.GetCompactContextAsync(
+            "csharp:Example.CollectionFolder.Validate()", depth: 1, maxRelationships: 10)).Matches).Relationships!;
+        Assert.Equal(["csharp:Example.AggregateFolder.Validate()"], sibling.UsedBy!.Select(node => node.Identifier));
+    }
+
+    [Fact]
+    public async Task MethodUsedBy_LeavesABaseCallFromOutsideTheFamilyToTheMethodItNames()
+    {
+        // Any method of a derived class may call base.Save(); that call is bound to Base.Save
+        // as surely as one from the override, so it is not a user of the overrides.
+        var nodes = new[]
+        {
+            Node("base", "csharp:Example.Base.Save()", "Save", "Method"),
+            Node("derived", "csharp:Example.Derived.Save()", "Save", "Method"),
+            Node("helper", "csharp:Example.Derived.SaveQuietly()", "SaveQuietly", "Method"),
+        };
+        var edges = new[]
+        {
+            Edge("derived", "base", "OVERRIDES_MEMBER"),
+            Edge("helper", "base", "CALLS", 12, staticCall: true),
+        };
+        var service = CreateService(nodes, edges);
+
+        var overriding = Assert.Single((await service.GetCompactContextAsync(
+            "csharp:Example.Derived.Save()", depth: 1, maxRelationships: 10)).Matches).Relationships!;
+        Assert.Empty(overriding.UsedBy ?? []);
+        Assert.Equal(0, overriding.UsedByCount ?? 0);
+
+        var named = Assert.Single((await service.GetCompactContextAsync(
+            "csharp:Example.Base.Save()", depth: 1, maxRelationships: 10)).Matches).Relationships!;
+        Assert.Equal(["csharp:Example.Derived.SaveQuietly()"], named.UsedBy!.Select(node => node.Identifier));
     }
 
     [Fact]
@@ -225,9 +278,15 @@ public class MethodFamilyContextTests
         Id = id, Identifier = identifier, Name = name, Type = type, Signature = name + "()"
     };
 
-    private static CodeEdge Edge(string source, string target, string type, int? line = null) => new()
+    private static CodeEdge Edge(string source, string target, string type, int? line = null, bool staticCall = false)
     {
-        Id = $"{source}-{type}-{target}-{line}", SourceId = source, TargetId = target, Type = type,
-        Metadata = line is null ? null : new Dictionary<string, string> { ["line"] = line.Value.ToString() }
-    };
+        var metadata = new Dictionary<string, string>();
+        if (line is not null) metadata["line"] = line.Value.ToString();
+        if (staticCall) metadata[EdgeMetadataKeys.Dispatch] = EdgeDispatch.Static;
+        return new CodeEdge
+        {
+            Id = $"{source}-{type}-{target}-{line}", SourceId = source, TargetId = target, Type = type,
+            Metadata = metadata.Count == 0 ? null : metadata,
+        };
+    }
 }

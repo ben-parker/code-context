@@ -104,6 +104,40 @@ public class CSharpWorkerAnalyzerTests : IDisposable
     }
 
     [Fact]
+    public void Analyze_MarksACallThroughBaseAsStaticallyBound()
+    {
+        var result = Analyze(("Calls.cs", """
+            public class Base { public virtual void Run() { } }
+            public class Derived : Base
+            {
+                public override void Run() { base.Run(); }
+                public void Again(Base other) { other.Run(); }
+                public System.Action Later() => base.Run;
+                public System.Action Bound(Base other) => other.Run;
+                public void Wrapped() { (base.Run)(); }
+            }
+            """));
+
+        var calls = result.Edges
+            .Where(edge => edge.Kind == "CALLS" && edge.TargetId == Id("Base.Run()"))
+            .ToDictionary(edge => edge.SourceId);
+
+        var baseCall = calls[Id("Derived.Run()")];
+        Assert.Equal(EdgeDispatch.Static, baseCall.Metadata![EdgeMetadataKeys.Dispatch]);
+        Assert.Equal("3", baseCall.Metadata["line"]);
+        Assert.Equal(EdgeDispatch.Static, calls[Id("Derived.Wrapped()")].Metadata![EdgeMetadataKeys.Dispatch]);
+        var dispatching = calls[Id("Derived.Again(Base)")];
+        Assert.False(dispatching.Metadata!.ContainsKey(EdgeMetadataKeys.Dispatch));
+
+        // A method group taken through base is bound to the base method as a call through it is.
+        var references = result.Edges
+            .Where(edge => edge.Kind == "REFERENCES" && edge.TargetId == Id("Base.Run()"))
+            .ToDictionary(edge => edge.SourceId);
+        Assert.Equal(EdgeDispatch.Static, references[Id("Derived.Later()")].Metadata![EdgeMetadataKeys.Dispatch]);
+        Assert.False(references[Id("Derived.Bound(Base)")].Metadata!.ContainsKey(EdgeMetadataKeys.Dispatch));
+    }
+
+    [Fact]
     public void Analyze_ShouldIdentifyInterfaceAndCreateCorrectNode()
     {
         var result = AnalyzeTestClassFile(out _);

@@ -1182,6 +1182,44 @@ namespace Mixed { public class Service { public string Run() => ""ok""; } }");
     }
 
     [Fact]
+    public async Task ACallThroughSuper_IsMarkedStaticallyBound()
+    {
+        await WriteFileAsync("save.ts", """
+            export class Base { save(): void { } }
+            export class Derived extends Base {
+                save(): void { super.save(); }
+                again(other: Base): void { other.save(); }
+                later(): unknown[] { return [super.save]; }
+                computed(): void { super['save'](); }
+                wrapped(): void { (super.save)(); }
+            }
+            """);
+        await _pipeline.GraphUpdateService.PerformInitialScanAsync(_tempDir, null, CancellationToken.None);
+
+        var edges = (await _pipeline.RepositoryFactory.CreateEdgeRepository().GetAllAsync())
+            .Where(edge => edge.Type == "CALLS" && edge.TargetId!.EndsWith("#Base.save()", StringComparison.Ordinal))
+            .ToList();
+        var superCall = Assert.Single(edges, edge => edge.SourceId!.EndsWith("#Derived.save()", StringComparison.Ordinal));
+        Assert.Equal(EdgeDispatch.Static, superCall.Metadata![EdgeMetadataKeys.Dispatch]);
+        var dispatching = Assert.Single(edges, edge => edge.SourceId!.Contains("#Derived.again", StringComparison.Ordinal));
+        Assert.False(dispatching.Metadata!.ContainsKey(EdgeMetadataKeys.Dispatch));
+
+        // The method itself taken through super is bound to the base method as a call is.
+        var captured = Assert.Single(
+            (await _pipeline.RepositoryFactory.CreateEdgeRepository().GetAllAsync()),
+            edge => edge.Type == "REFERENCES" && edge.TargetId!.EndsWith("#Base.save()", StringComparison.Ordinal)
+                && edge.SourceId!.Contains("#Derived.later", StringComparison.Ordinal));
+        Assert.Equal(EdgeDispatch.Static, captured.Metadata![EdgeMetadataKeys.Dispatch]);
+
+        // An element access or parentheses through super are still bound to the base method.
+        foreach (var form in new[] { "#Derived.computed", "#Derived.wrapped" })
+        {
+            var call = Assert.Single(edges, edge => edge.SourceId!.Contains(form, StringComparison.Ordinal));
+            Assert.Equal(EdgeDispatch.Static, call.Metadata![EdgeMetadataKeys.Dispatch]);
+        }
+    }
+
+    [Fact]
     public async Task TopLevelInvocation_HasARealModuleScopeCaller()
     {
         await WriteFileAsync("entry.ts",

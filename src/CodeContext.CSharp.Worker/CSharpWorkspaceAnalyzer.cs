@@ -994,19 +994,23 @@ public sealed class CSharpWorkspaceAnalyzer
     /// across a large workspace cost more than everything else this process holds; both
     /// derive from these fields, so they exist only while being sent.
     /// </summary>
-    public readonly record struct EdgeFact(string SourceId, string TargetId, string Kind, int Line = -1, int Column = -1)
+    /// <param name="StaticallyBound">The call is bound to its target and reaches no override of it, as <c>base.M()</c> is.</param>
+    public readonly record struct EdgeFact(string SourceId, string TargetId, string Kind, int Line = -1, int Column = -1, bool StaticallyBound = false)
     {
         public string Id => $"{SourceId}=[{Kind}]=>{TargetId}" + (Line >= 0 ? $"@{Line}:{Column}" : string.Empty);
 
-        public ProtocolEdge ToProtocol() => new(
-            Id, SourceId, TargetId, Kind,
-            Line >= 0
-                ? new Dictionary<string, string>
-                {
-                    ["line"] = Line.ToString(CultureInfo.InvariantCulture),
-                    ["column"] = Column.ToString(CultureInfo.InvariantCulture),
-                }
-                : null);
+        public ProtocolEdge ToProtocol()
+        {
+            if (Line < 0 && !StaticallyBound) return new(Id, SourceId, TargetId, Kind, null);
+            var metadata = new Dictionary<string, string>();
+            if (Line >= 0)
+            {
+                metadata["line"] = Line.ToString(CultureInfo.InvariantCulture);
+                metadata["column"] = Column.ToString(CultureInfo.InvariantCulture);
+            }
+            if (StaticallyBound) metadata[EdgeMetadataKeys.Dispatch] = EdgeDispatch.Static;
+            return new(Id, SourceId, TargetId, Kind, metadata);
+        }
     }
 
     /// <summary>What one walk of one file found, kept so an untouched file is not walked again.</summary>
@@ -2044,7 +2048,7 @@ public sealed class CSharpWorkspaceAnalyzer
                 var kind = enclosingMethod is not null && IsMockOrFluentTestInvocation(node, enclosingMethod)
                     ? "MOCK_CALLS"
                     : "CALLS";
-                AddLocatedEdge(callerId, NodeId(calleeSymbol), kind, node);
+                AddLocatedEdge(callerId, NodeId(calleeSymbol), kind, node, IsThroughBase(node.Expression));
             }
             base.VisitInvocationExpression(node);
         }
@@ -2318,14 +2322,28 @@ public sealed class CSharpWorkspaceAnalyzer
             }
 
             var targetId = NodeId(member);
+            // `base.M` taken as a method group, like `base.M()`, is bound to the base member.
+            var staticallyBound = node.Parent is MemberAccessExpressionSyntax access && access.Name == node
+                && IsThroughBase(access);
             if (sourceId != targetId)
-                AddLocatedEdge(sourceId, targetId, "REFERENCES", node);
+                AddLocatedEdge(sourceId, targetId, "REFERENCES", node, staticallyBound);
         }
 
-        private void AddLocatedEdge(string sourceId, string targetId, string kind, SyntaxNode location)
+        /// <summary>
+        /// Whether an expression names a member through <c>base</c>, as <c>base.M</c> or
+        /// <c>(base.M)</c> do. Such a call or method group is bound to the base member itself,
+        /// never an override of it.
+        /// </summary>
+        private static bool IsThroughBase(ExpressionSyntax expression)
+        {
+            while (expression is ParenthesizedExpressionSyntax parenthesized) expression = parenthesized.Expression;
+            return expression is MemberAccessExpressionSyntax { Expression: BaseExpressionSyntax };
+        }
+
+        private void AddLocatedEdge(string sourceId, string targetId, string kind, SyntaxNode location, bool staticallyBound = false)
         {
             var position = location.GetLocation().GetLineSpan().StartLinePosition;
-            _edges.Add(new EdgeFact(sourceId, targetId, kind, position.Line, position.Character));
+            _edges.Add(new EdgeFact(sourceId, targetId, kind, position.Line, position.Character, staticallyBound));
         }
 
         /// <summary>

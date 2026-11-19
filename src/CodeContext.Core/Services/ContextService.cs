@@ -752,12 +752,10 @@ namespace CodeContext.Core.Services
             else if (outgoing) directEdges = await _edgeRepository.GetBySourceIdAsync(target.Id);
             else if (family.Count > 0)
             {
-                var members = new HashSet<string>(family.Keys, StringComparer.Ordinal);
-                var dispatched = await GetDispatchedMembersAsync(family.Keys);
                 var collected = new List<CodeEdge>();
                 foreach (var familyId in family.Keys)
                     collected.AddRange((await _edgeRepository.GetByTargetIdAsync(familyId))
-                        .Where(edge => !IsUsageEdge(edge) || ReachesQueriedMethod(edge, target.Id, members, dispatched)));
+                        .Where(edge => !IsUsageEdge(edge) || ReachesQueriedMethod(edge, target.Id)));
                 directEdges = collected;
             }
             else directEdges = await _edgeRepository.GetByTargetIdAsync(target.Id);
@@ -1212,39 +1210,21 @@ namespace CodeContext.Core.Services
         }
 
         /// <summary>
-        /// The members of a method family that a call reaches only through dispatch: interface
-        /// members, which something implements. A call to one may land on any implementation.
+        /// Whether a usage edge into a method family counts as a use of the queried method
+        /// <paramref name="selfId"/>. A call reaches any override or implementation of the
+        /// member it names, so it counts for the whole family, from inside it (a decorator
+        /// delegating to what it wraps, a composite calling its children) or outside. One the
+        /// worker marks statically bound, as <c>base.M()</c> and <c>super.m()</c> are, reaches
+        /// the member it names alone, so it counts only when that is the queried method.
         /// </summary>
-        private async Task<HashSet<string>> GetDispatchedMembersAsync(IEnumerable<string> familyIds)
-        {
-            var dispatched = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var familyId in familyIds)
-            {
-                if ((await _edgeRepository.GetByTargetIdAsync(familyId)).Any(edge => edge.Type == "IMPLEMENTS_MEMBER"))
-                    dispatched.Add(familyId);
-            }
-            return dispatched;
-        }
-
-        /// <summary>
-        /// Whether a usage edge into a method family counts as a use of the queried method.
-        /// One from outside the family always does, as a call to any member may reach it. One
-        /// from another member does when it names the queried method, or when it calls an
-        /// interface member, as a decorator delegating to what it wraps does. A member calling
-        /// a class method in its family is calling <c>base</c>, bound to exactly that method,
-        /// so it is a user of that method alone, not of a sibling override.
-        /// </summary>
-        private static bool ReachesQueriedMethod(
-            CodeEdge edge, string selfId, IReadOnlySet<string> family, IReadOnlySet<string> dispatched)
-            => edge.SourceId is null
-                || !family.Contains(edge.SourceId)
-                || edge.TargetId == selfId
-                || (edge.TargetId is not null && dispatched.Contains(edge.TargetId));
+        private static bool ReachesQueriedMethod(CodeEdge edge, string selfId)
+            => edge.TargetId == selfId
+                || edge.Metadata?.GetValueOrDefault(EdgeMetadataKeys.Dispatch) != EdgeDispatch.Static;
 
         /// <summary>
         /// What reaches any member of <paramref name="familyIds"/>, the method family of
-        /// <paramref name="selfId"/>. Another member that calls one is a caller like any other
-        /// where <see cref="ReachesQueriedMethod"/> says its call can reach the queried method;
+        /// <paramref name="selfId"/>, where <see cref="ReachesQueriedMethod"/> says a call can
+        /// reach the queried method. Another member of the family is a caller like any other;
         /// the queried method itself is never its own user, as in
         /// <see cref="TraverseRelationshipsAsync"/>.
         /// </summary>
@@ -1255,15 +1235,13 @@ namespace CodeContext.Core.Services
             var visited = new HashSet<string>(StringComparer.Ordinal) { selfId };
             var result = new Dictionary<string, TraversedRelationship>(StringComparer.Ordinal);
             var frontier = new List<(string NodeId, List<string>? Path)>();
-            var family = familyIds as IReadOnlySet<string> ?? new HashSet<string>(familyIds, StringComparer.Ordinal);
-            var dispatched = await GetDispatchedMembersAsync(familyIds);
 
             foreach (var familyId in familyIds)
             {
                 foreach (var edge in OrderForTraversal((await _edgeRepository.GetByTargetIdAsync(familyId)).Where(IsUsageEdge)))
                 {
                     if (string.IsNullOrEmpty(edge.SourceId) || visited.Contains(edge.SourceId)) continue;
-                    if (!ReachesQueriedMethod(edge, selfId, family, dispatched)) continue;
+                    if (!ReachesQueriedMethod(edge, selfId)) continue;
                     var node = await _nodeRepository.GetByIdAsync(edge.SourceId);
                     if (node is null) continue;
                     var path = trackPath ? new List<string> { edge.Type ?? "USES" } : null;

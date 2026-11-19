@@ -257,6 +257,26 @@ public sealed record ProjectCoverage(
     [property: JsonPropertyName("commonUnresolvedNames")] IReadOnlyList<string>? CommonUnresolvedNames = null,
     [property: JsonPropertyName("notes")] IReadOnlyList<string>? Notes = null);
 
+/// <summary>Edge metadata keys the host reads, beyond a located edge's <c>line</c> and <c>column</c>.</summary>
+public static class EdgeMetadataKeys
+{
+    /// <summary>
+    /// How a call reaches its target. Absent means the call may dispatch to any override or
+    /// implementation of it; <see cref="EdgeDispatch.Static"/> means it reaches the target alone.
+    /// </summary>
+    public const string Dispatch = "dispatch";
+}
+
+/// <summary>Values of <see cref="EdgeMetadataKeys.Dispatch"/>.</summary>
+public static class EdgeDispatch
+{
+    /// <summary>
+    /// The call is bound to its target and never reaches an override of it, as
+    /// <c>base.M()</c> in C# and <c>super.m()</c> in TypeScript are.
+    /// </summary>
+    public const string Static = "static";
+}
+
 public static class ProjectCoverageStates
 {
     /// <summary>Everything the project declares was found.</summary>

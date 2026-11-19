@@ -251,7 +251,11 @@
         "sourceId": { "type": "string" },
         "targetId": { "type": "string" },
         "kind": { "type": "string", "description": "Versioned string ('calls', 'implements', ...), not a closed enum." },
-        "metadata": { "type": "object", "additionalProperties": { "type": "string" } }
+        "metadata": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "The host reads 'line' and 'column', where the edge occurs in the declared bases, and 'dispatch': 'static' on a call bound to its target that reaches no override of it, as base.M() and super.m() are. Without it a call may reach any override or implementation of its target."
+        }
       }
     },
     "projectCoverage": {

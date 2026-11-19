@@ -259,6 +259,13 @@ with a type-driven deserializer (one that picks the types to create from the dat
 Normalized nodes/edges are the primary extension contract. Use them for semantic and
 cross-language relationships. Do not put a detailed universal AST into graph nodes.
 
+A call edge reaches whatever overrides or implements its target, so the host lists its
+caller for every member of the target's method family (the `IMPLEMENTS_MEMBER` and
+`OVERRIDES_MEMBER` edges you emit). Mark a call that is bound to its target alone, such
+as `base.M()` in C# or `super.m()` in TypeScript, with edge metadata
+`"dispatch": "static"`; the host then lists it only for the method it names. A worker
+that does not mark such calls is read as if every call dispatches.
+
 Optionally advertise `nativeSyntaxTree` and implement `syntaxTree/get`. Return a
 parser-owned, versioned `format` plus a bounded JSON tree. Support `start`/`length`
 ranges and `maxDepth` so callers can request a focused subtree. Native trees are
