@@ -202,11 +202,22 @@ namespace CodeContext.Core.Services
                 }
             }
 
-            if (depthLimited || unfilteredLimited)
+            if (depthLimited)
             {
                 return (null,
                     $"No path {names}{filtered} within {request.MaxDepth} hop(s), and the search stopped at that limit with symbols "
                     + $"left to explore, so a longer path may exist: raise maxDepth (at most {GraphQueryLimits.MaxDepth}).");
+            }
+            if (unfilteredLimited)
+            {
+                // The filtered search reached everything it could: only without the filters is there more past the limit.
+                var remedies = new List<string>();
+                if (walk.FiltersRelations) remedies.Add("without the relation filter");
+                if (!walk.IncludesTests) remedies.Add("with test files included (includeTests, --tests)");
+                return (null,
+                    $"No path {names}{filtered}, which reaches nothing more at any depth. Without those filters the search "
+                    + $"stopped at {request.MaxDepth} hop(s) with symbols left to explore, so a longer path may exist "
+                    + $"{string.Join(" and ", remedies)} and a larger maxDepth (at most {GraphQueryLimits.MaxDepth}).");
             }
 
             var reverse = walk.ShortestPath(to.Seeds!, from.Seeds!.ToHashSet(StringComparer.Ordinal), request.MaxDepth, out _);

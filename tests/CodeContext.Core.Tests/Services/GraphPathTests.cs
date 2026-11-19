@@ -202,6 +202,26 @@ public class GraphPathTests
     }
 
     [Fact]
+    public async Task ADepthLimitReachedOnlyWithoutTheFilters_IsNotBlamedOnTheFilteredSearch()
+    {
+        // With test files excluded nothing lies beyond A; through the test helper, the path is 5 hops, over the limit.
+        var service = new GraphTestGraph()
+            .Node("A").Node("Helper", file: "tests/Helpers.cs").Node("N1").Node("N2").Node("N3").Node("C")
+            .Calls("A", "Helper").Calls("Helper", "N1").Calls("N1", "N2").Calls("N2", "N3").Calls("N3", "C")
+            .Build();
+
+        var response = await Path(service, I("A"), I("C"), maxDepth: 3);
+
+        Assert.False(response.Found);
+        Assert.False(response.DepthLimited);
+        Assert.Null(response.ExcludedBy);
+        // Raising maxDepth alone finds nothing: it takes test files too.
+        Assert.False((await Path(service, I("A"), I("C"), maxDepth: 20)).Found);
+        Assert.DoesNotContain("raise maxDepth", response.Explanation);
+        Assert.Contains("with test files included (includeTests, --tests) and a larger maxDepth", response.Explanation);
+    }
+
+    [Fact]
     public async Task APathTheOtherWayRound_IsPointedOut()
     {
         var service = new GraphTestGraph().Node("A").Node("B").Calls("B", "A").Build();
