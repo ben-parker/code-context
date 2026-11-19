@@ -84,8 +84,8 @@ public sealed class WorkerHibernationSettingsTests
 
     [Fact]
     public void TheEnvironmentVariable_IsTheConfigurationKeysEnvironmentForm()
-        => Assert.Equal(WorkerHibernationSettings.ConfigurationKey.Replace(":", "__", StringComparison.Ordinal),
-            WorkerHibernationSettings.EnvironmentVariable);
+        => Assert.Equal(WorkerHibernationSettings.EnvironmentVariable,
+            WorkerHibernationSettings.ConfigurationKey.Replace(":", "__", StringComparison.Ordinal));
 
     [Theory]
     [InlineData("30", true)]
