@@ -161,7 +161,9 @@ namespace CodeContext.Core
             if (left is EdgeId l && right is EdgeId r)
             {
                 if (l.Hash != r.Hash) return false;
-                if (ReferenceEquals(l.Source, r.Source) && ReferenceEquals(l.Target, r.Target))
+                // Over the same endpoints, two canonical splits of one text are the same split. A split read from
+                // elsewhere may not be canonical: the same text cut differently, which only the text comparison sees.
+                if (l.Canonical && r.Canonical && ReferenceEquals(l.Source, r.Source) && ReferenceEquals(l.Target, r.Target))
                     return string.Equals(l.Middle, r.Middle, StringComparison.Ordinal) && string.Equals(l.Tail, r.Tail, StringComparison.Ordinal);
             }
             return Compare(left, right) == 0;

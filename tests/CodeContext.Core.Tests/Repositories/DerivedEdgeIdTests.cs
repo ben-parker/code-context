@@ -61,6 +61,29 @@ public class DerivedEdgeIdTests
         Assert.True(EdgeId.FromParts("s", "x", "T", "T").Canonical);
     }
 
+    /// <summary>
+    /// Two keys with the same source and target instances and the same text, split differently (a snapshot can carry
+    /// a split no writer makes), are one key: equal, one hash, order 0, and a table takes only the first.
+    /// </summary>
+    [Fact]
+    public void SameTextSplitDifferently_OverTheSameEndpoints_IsOneKey()
+    {
+        var source = "p:w:a";
+        var target = "x";
+        var left = EdgeId.FromParts(source, "", target, "xx");
+        var right = EdgeId.FromParts(source, "x", target, "x");
+        Assert.Equal("p:w:axxx", left.ToString());
+        Assert.Equal(left.ToString(), right.ToString());
+
+        Assert.True(EdgeIdKeys.AreEqual(left, right));
+        Assert.True(EdgeIdKeys.Comparer.Equals(left, right));
+        Assert.Equal(EdgeIdKeys.Comparer.GetHashCode(left), EdgeIdKeys.Comparer.GetHashCode(right));
+        Assert.Equal(0, EdgeIdKeys.Compare(left, right));
+        var table = new Dictionary<object, int>(EdgeIdKeys.Comparer);
+        Assert.True(table.TryAdd(left, 1));
+        Assert.False(table.TryAdd(right, 2));
+    }
+
     /// <summary>Equality, hashing, ordinal order and prefix tests of keys of both kinds agree with the text.</summary>
     [Fact]
     public void Keys_CompareHashAndMatchAsTheirText()
