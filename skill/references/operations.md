@@ -11,12 +11,12 @@ and the next change or refresh restarts it. `failed` or `unavailable` is not.
 Use `codecontext list --json` to inspect registrations. Only after that, use
 `codecontext start --detach --path .` for manual lifecycle troubleshooting.
 
-With no instance running, `query` first tries the saved index in its own process: it
-answers from it (label `cache snapshot`) when the snapshot authenticates and no file a scan
-reads, and no folder holding one, has a newer modification time; otherwise stderr says why
+With `--snapshot` (or `CodeContext__QueryFromSnapshot=true`; `--start` overrides it) and
+no instance running, `query` first tries the saved index in its own process: it answers
+from it (label `cache snapshot`) when the snapshot authenticates and no file a scan reads,
+and no folder holding one, has a newer modification time; otherwise stderr says why
 (`Not answering from the saved index: ...`) and it starts an instance. It writes nothing and
-starts no worker. `--start` skips this; `CodeContext__CacheEnabled=false` turns it off with
-the cache.
+starts no worker. `CodeContext__CacheEnabled=false` turns it off with the cache.
 
 `query` waits at most 30 seconds for indexing. On timeout it prints "Indexing did not
 become ready within 30 seconds" and exits with code 3; check `codecontext status --path .`

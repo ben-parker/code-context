@@ -10,9 +10,9 @@ codecontext query ContextService
 codecontext query ContextService --tests  # when test evidence matters
 ```
 
-`query` selects the closest registered ancestor. With none, it answers in its own process
-from the saved index when no indexed file changed since (labelled `cache snapshot`, nothing
-left running; `--start` skips this), else starts a detached instance and waits up to 30
+`query` selects the closest registered ancestor. With none, it starts a detached instance
+(with `--snapshot`, or `CodeContext__QueryFromSnapshot=true`, it first tries to answer in its
+own process from the saved index, labelled `cache snapshot`) and waits up to 30
 seconds for indexing (a restarted instance answers at once from its saved index, labelled
 `cache`, while it re-checks the files; on timeout it exits with code 3), and verifies
 contract, root, and instance identity. Tests are omitted by default; add `--tests` whenever test evidence

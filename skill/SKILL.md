@@ -33,16 +33,14 @@ codecontext query ContextService --tests    # add static test evidence (off by d
 codecontext query multi Foo Bar             # several identifiers, one round trip, in order
 ```
 
-`query` uses the repo's running instance. With none, it answers in its own process from
-the saved index when no indexed file changed since (label `cache snapshot`, nothing left
-running); otherwise it starts an instance and waits up to 30 seconds for indexing (exit
-code 3 on timeout; see [operations](references/operations.md)). It prints compact
+`query` uses the repo's running instance, or starts one and waits up to 30 seconds for
+indexing (exit code 3 on timeout; see [operations](references/operations.md)). It prints compact
 agent-oriented text; progress goes to stderr. Options: `--depth N`
 (`0` = cheap identity lookup), `--relation CALLS,REFERENCES`, `--exact`,
 `--limit N` (entries per relationship list, 1-100, default 10), `--external` (include
-library symbols), `--path DIR`, `--human`, `--json`, `--start` (start an instance
-instead of answering from the saved index: each later query then takes well under a
-second on a large repository, against about 1-2 s for each one answered from the saved index).
+library symbols), `--path DIR`, `--human`, `--json`, `--snapshot` (with no instance
+running, answer in this process from the saved index when nothing it records changed,
+leaving nothing running; see [operations](references/operations.md)).
 
 Reading results:
 
@@ -65,7 +63,7 @@ Reading results:
   - `unverified`: the re-check failed (`indexing.status` `error`) and the answers stay
     saved ones. Do not wait: confirm with `rg -w <Name>` or by reading the file, or run
     `POST /api/index/refresh` (or restart) and query again once `ready`.
-- `cache snapshot` means no instance was running and the answer was read from the saved
+- `cache snapshot` (only with `--snapshot`) means no instance was running and the answer was read from the saved
   index after checking that no indexed file or folder has a newer modification time; no
   worker re-analysed anything. Treat it like a served answer. An edit makes the next
   `query` start an instance, which re-checks.

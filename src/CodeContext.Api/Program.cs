@@ -164,9 +164,9 @@ public class Program
 
         var queryCommand = new Command(
             "query",
-            "Queries one identifier. Uses the running instance; with none, answers in this process from the saved " +
-            "index when no indexed file changed since (labelled cache snapshot), else starts an instance and waits for " +
-            "indexing (or answers at once from the saved index, labelled cache, while it is re-checked).");
+            "Queries one identifier. Uses the running instance, or starts one and waits for indexing (or answers at once " +
+            "from the saved index, labelled cache, while it is re-checked). With --snapshot and no instance running, " +
+            "answers in this process from the saved index when nothing it records changed since (labelled cache snapshot).");
         Argument<string> queryIdentifierArgument = new("identifier")
         {
             Description = "A symbol name, canonical identifier, or source file path.",
@@ -185,7 +185,13 @@ public class Program
         };
         Option<bool> queryStartOption = new("--start")
         {
-            Description = "With no instance running, start one instead of answering from the saved index in this process.",
+            Description = "With no instance running, start one (the default unless CodeContext:QueryFromSnapshot is true).",
+        };
+        Option<bool> querySnapshotOption = new("--snapshot")
+        {
+            Description = "With no instance running, answer in this process from the saved index when nothing it records " +
+                "changed since, leaving nothing running; otherwise start one. CodeContext:QueryFromSnapshot=true " +
+                "(environment CodeContext__QueryFromSnapshot=true) makes this the default.",
         };
         foreach (var option in new Option[]
                  {
@@ -199,6 +205,7 @@ public class Program
                      queryLimitOption,
                      queryExternalOption,
                      queryStartOption,
+                     querySnapshotOption,
                  })
         {
             option.Recursive = true;
@@ -217,6 +224,7 @@ public class Program
         queryCommand.Options.Add(queryLimitOption);
         queryCommand.Options.Add(queryExternalOption);
         queryCommand.Options.Add(queryStartOption);
+        queryCommand.Options.Add(querySnapshotOption);
         queryCommand.Options.Add(queryHelpOption);
         queryCommand.SetAction((ParseResult parseResult, CancellationToken ct) =>
             QueryCommandHandler.ExecuteAsync(
@@ -232,7 +240,8 @@ public class Program
                     parseResult.GetValue(queryHumanOption),
                     parseResult.GetValue(queryLimitOption),
                     parseResult.GetValue(queryExternalOption),
-                    parseResult.GetValue(queryStartOption)),
+                    parseResult.GetValue(queryStartOption),
+                    parseResult.GetValue(querySnapshotOption)),
                 ct));
 
         var multiQueryCommand = new Command(
@@ -261,7 +270,8 @@ public class Program
                     parseResult.GetValue(queryHumanOption),
                     parseResult.GetValue(queryLimitOption),
                     parseResult.GetValue(queryExternalOption),
-                    parseResult.GetValue(queryStartOption)),
+                    parseResult.GetValue(queryStartOption),
+                    parseResult.GetValue(querySnapshotOption)),
                 ct));
         queryCommand.Subcommands.Add(multiQueryCommand);
 

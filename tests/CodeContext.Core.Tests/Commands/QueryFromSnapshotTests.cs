@@ -11,16 +11,18 @@ using CodeContext.Core.Workers;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 
 namespace CodeContext.Core.Tests.Commands;
 
 /// <summary>
-/// <c>codecontext query</c> with no instance running and a snapshot on disk (memory plan M5): it answers in its own
-/// process, labelled <c>snapshot</c>, exactly as a served answer apart from that label, writes nothing, starts no
-/// worker; anything changed, a refused snapshot, the cache turned off or <c>--start</c> fall back to starting an
-/// instance; a running instance is always preferred. The snapshot is written by a production-wired instance with the
+/// <c>codecontext query --snapshot</c> (or the setting) with no instance running and a snapshot on disk (memory plan
+/// M5): it answers in its own process, labelled <c>snapshot</c>, exactly as a served answer apart from that label, writes
+/// nothing, starts no worker; anything changed, a refused snapshot, the cache turned off fall back to starting an
+/// instance; without the flag or the setting, and with <c>--start</c>, an instance is started as always; a running
+/// instance is always preferred. The snapshot is written by a production-wired instance with the
 /// real fake worker; the served answers come from a verified instance behind the real REST endpoints.
 /// </summary>
 public sealed class QueryFromSnapshotTests : IAsyncLifetime
@@ -189,15 +191,67 @@ public sealed class QueryFromSnapshotTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task StartOption_SkipsTheSnapshot()
+    public async Task WithoutTheFlagOrTheSetting_StartsAnInstance_AndTheSnapshotIsNotOpened()
+    {
+        var opened = 0;
+        var starts = 0;
+        var (exit, _, error) = await RunAsync(["aClass"], new Registry(null), http: null,
+            root => { opened++; return Open()(root); },
+            start: (_, _) => { starts++; return Task.FromResult(DetachedStartResult.Failed("not in this test")); },
+            snapshotFlag: false);
+
+        Assert.Equal(4, exit);
+        Assert.Equal(0, opened);
+        Assert.Equal(1, starts);
+        Assert.DoesNotContain("saved index", error);
+    }
+
+    [Fact]
+    public async Task Setting_MakesTheSnapshotTheDefault()
+    {
+        var (exit, output, error) = await RunAsync(["aClass"], new Registry(null), http: null, Open(),
+            snapshotFlag: false, snapshotByDefault: true);
+
+        Assert.Equal(0, exit);
+        Assert.Empty(error);
+        Assert.StartsWith("cache\tsnapshot\t", output);
+    }
+
+    [Fact]
+    public async Task StartOption_WinsOverTheSetting()
     {
         var opened = 0;
         var (exit, _, error) = await RunAsync(["aClass", "--start"], new Registry(null), http: null,
-            root => { opened++; return Open()(root); });
+            root => { opened++; return Open()(root); }, snapshotFlag: false, snapshotByDefault: true);
 
         Assert.Equal(4, exit);
         Assert.Equal(0, opened);
         Assert.DoesNotContain("saved index", error);
+    }
+
+    [Fact]
+    public async Task SnapshotAndStart_AreRefusedTogether()
+    {
+        var (exit, _, error) = await RunAsync(["aClass", "--start"], new Registry(null), http: null, Open());
+
+        Assert.Equal(1, exit);
+        Assert.Contains("--snapshot and --start cannot be combined", error);
+    }
+
+    [Theory]
+    [InlineData(null, false)]
+    [InlineData("true", true)]
+    [InlineData("True", true)]
+    [InlineData("false", false)]
+    [InlineData("1", false)]
+    [InlineData("yes", false)]
+    public void Setting_IsReadAsABoolean(string? value, bool expected)
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { [QueryCommandHandler.SnapshotByDefaultKey] = value })
+            .Build();
+
+        Assert.Equal(expected, QueryCommandHandler.SnapshotByDefault(configuration));
     }
 
     [Fact]
@@ -271,14 +325,15 @@ public sealed class QueryFromSnapshotTests : IAsyncLifetime
 
     private async Task<(int Exit, string Output, string Error)> RunAsync(
         string[] query, IInstanceRegistry registry, HttpClient? http, Func<string, OneShotSnapshotOpen>? open,
-        Func<string, CancellationToken, Task<DetachedStartResult>>? start = null)
+        Func<string, CancellationToken, Task<DetachedStartResult>>? start = null,
+        bool snapshotFlag = true, bool snapshotByDefault = false)
     {
         var multi = query[0] == "multi";
         var identifiers = query.Skip(multi ? 1 : 0).TakeWhile(arg => !arg.StartsWith("--", StringComparison.Ordinal)).ToList();
         var depthIndex = Array.IndexOf(query, "--depth");
         var settings = new QuerySettings(
             identifiers, Root, depthIndex < 0 ? 1 : int.Parse(query[depthIndex + 1]), query.Contains("--tests"), null, false,
-            query.Contains("--json"), multi, query.Contains("--human"), Start: query.Contains("--start"));
+            query.Contains("--json"), multi, query.Contains("--human"), Start: query.Contains("--start"), Snapshot: snapshotFlag);
         var output = new StringWriter();
         var error = new StringWriter();
         var runtime = new QueryRuntime(
@@ -286,7 +341,8 @@ public sealed class QueryFromSnapshotTests : IAsyncLifetime
             http ?? new HttpClient(new RefusingHandler()),
             start ?? ((_, _) => Task.FromResult(DetachedStartResult.Failed("not in this test"))),
             output, error, TimeProvider.System, (_, _) => Task.CompletedTask, TimeSpan.FromSeconds(30),
-            OpenSnapshot: open);
+            OpenSnapshot: open,
+            SnapshotByDefault: snapshotByDefault);
         var exit = await QueryCommandHandler.ExecuteAsync(settings, runtime, CancellationToken.None);
         return (exit, output.ToString(), error.ToString());
     }

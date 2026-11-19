@@ -22,7 +22,8 @@ public sealed record QuerySettings(
     bool Human = false,
     int? Limit = null,
     bool External = false,
-    bool Start = false);
+    bool Start = false,
+    bool Snapshot = false);
 
 internal sealed record QueryRuntime(
     IInstanceRegistry Registry,
@@ -34,7 +35,8 @@ internal sealed record QueryRuntime(
     Func<TimeSpan, CancellationToken, Task> DelayAsync,
     TimeSpan ReadinessTimeout,
     Func<string, bool>? DirectoryExists = null,
-    Func<string, OneShotSnapshotOpen>? OpenSnapshot = null);
+    Func<string, OneShotSnapshotOpen>? OpenSnapshot = null,
+    bool SnapshotByDefault = false);
 
 public static class QueryCommandHandler
 {
@@ -49,6 +51,7 @@ public static class QueryCommandHandler
         var registry = new InstanceRegistry();
         using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
         var orchestrator = new DetachedStartOrchestrator(registry);
+        var configuration = HostConfiguration();
         var runtime = new QueryRuntime(
             registry,
             http,
@@ -58,7 +61,8 @@ public static class QueryCommandHandler
             TimeProvider.System,
             Task.Delay,
             TimeSpan.FromSeconds(30),
-            OpenSnapshot: root => OneShotSnapshot.TryOpen(root, HostConfiguration()));
+            OpenSnapshot: root => OneShotSnapshot.TryOpen(root, configuration),
+            SnapshotByDefault: SnapshotByDefault(configuration));
 
         return await ExecuteAsync(settings, runtime, ct);
     }
@@ -79,6 +83,13 @@ public static class QueryCommandHandler
             .AddEnvironmentVariables()
             .Build();
     }
+
+    /// <summary>The setting that makes <c>--snapshot</c> the default: <c>CodeContext:QueryFromSnapshot</c>.</summary>
+    internal const string SnapshotByDefaultKey = "CodeContext:QueryFromSnapshot";
+
+    /// <summary>Whether <see cref="SnapshotByDefaultKey"/> is set to true; anything else, or nothing, is false.</summary>
+    internal static bool SnapshotByDefault(IConfiguration configuration)
+        => bool.TryParse(configuration[SnapshotByDefaultKey], out var value) && value;
 
     internal static async Task<int> ExecuteAsync(
         QuerySettings settings,
@@ -106,6 +117,12 @@ public static class QueryCommandHandler
         if (settings.Json && settings.Human)
         {
             runtime.Error.WriteLine("--json and --human cannot be combined.");
+            return 1;
+        }
+
+        if (settings.Snapshot && settings.Start)
+        {
+            runtime.Error.WriteLine("--snapshot and --start cannot be combined.");
             return 1;
         }
 
@@ -139,10 +156,11 @@ public static class QueryCommandHandler
         }
 
         InstanceRecord instance;
-        if (discovered is null && !settings.Start && runtime.OpenSnapshot is { } openSnapshot)
+        var fromSnapshot = settings.Snapshot || (!settings.Start && runtime.SnapshotByDefault);
+        if (discovered is null && fromSnapshot && runtime.OpenSnapshot is { } openSnapshot)
         {
-            // No instance: answer here from the saved index when nothing it describes has changed, and leave
-            // nothing running. Otherwise start one as before, which verifies and re-walks.
+            // Asked for (--snapshot, or the setting) and no instance: answer here from the saved index when nothing
+            // it records has changed, and leave nothing running. Otherwise start one as always, which verifies.
             var opened = openSnapshot(lookupPath);
             if (opened.Snapshot is { } snapshot)
             {

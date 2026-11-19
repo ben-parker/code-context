@@ -134,8 +134,8 @@ has its own identity, uncommitted edits included) refuses that state and re-walk
 everything, as do workers without the capability. To start without the saved index,
 use `--no-cache` or delete `<root>/.codecontext/cache/` first.
 
-`codecontext query` with no instance running reads the newest snapshot in its own
-process (`OneShotSnapshot`) and answers from it, labelled `cache snapshot`, when no
+`codecontext query --snapshot` (or with `CodeContext__QueryFromSnapshot=true`) with no
+instance running reads the newest snapshot in its own process (`OneShotSnapshot`) and answers from it, labelled `cache snapshot`, when no
 file a scan reads, and no folder holding one, is newer than the snapshot by
 modification time (`SnapshotFreshness`; `obj/project.assets.json` beside a project
 counts). It creates, locks and writes nothing and starts no worker; anything else
