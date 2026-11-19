@@ -174,6 +174,8 @@ public class GraphSurfaceTests
     [InlineData("get_affected", """{"identifier":"A","maxDepth":"3"}""", "maxDepth must be an integer.")]
     [InlineData("get_affected", """{"identifier":"A","limit":1.5}""", "limit must be an integer.")]
     [InlineData("get_hubs", """{"includeTests":"true"}""", "includeTests must be true or false.")]
+    [InlineData("get_hubs", """{"Limit":2}""", "'Limit' is written 'limit' (argument names are case-sensitive).")]
+    [InlineData("get_path", """{"from":"A","To":"B"}""", "'To' is written 'to' (argument names are case-sensitive).")]
     [InlineData("get_path", """{"from":"A"}""", "to is required.")]
     [InlineData("get_affected", """{"identifier":"  "}""", "identifier is required.")]
     [InlineData("get_hubs", """{"limit":0}""", "limit must be between 1 and 100 (got 0).")]

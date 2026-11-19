@@ -215,8 +215,11 @@ internal static class McpToolCatalog
         var values = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
         foreach (var (key, value) in args ?? new Dictionary<string, JsonElement>())
         {
-            if (GraphQueryParameters.Find(query, key) is not { } parameter || parameter.Name != key)
+            if (GraphQueryParameters.Find(query, key) is not { } parameter)
                 throw new ArgumentException(GraphQueryParameters.NotApplicable(query, key));
+            // The tool's own argument in another letter case: say that, not that it belongs to another query.
+            if (parameter.Name != key)
+                throw new ArgumentException($"'{key}' is written '{parameter.Name}' (argument names are case-sensitive).");
             if (value.ValueKind == JsonValueKind.Null) continue;
             var expected = parameter.Kind switch
             {
