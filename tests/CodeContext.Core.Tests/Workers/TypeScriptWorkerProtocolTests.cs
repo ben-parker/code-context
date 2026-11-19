@@ -51,7 +51,10 @@ public class TypeScriptWorkerProtocolTests : IAsyncLifetime
             MaxProtocolVersion: ParserProtocol.Version,
             Languages: ["typescript", "javascript"],
             Extensions: [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".vue"],
-            ProjectMarkers: ["tsconfig.json", "package.json"]);
+            ProjectMarkers: ["tsconfig.json", "package.json"],
+            // As shipped: the configs a running instance hands to the worker when they change.
+            ProjectInputs: JsonSerializer.Deserialize(
+                File.ReadAllText(Path.Combine(workerDir, "worker-manifest.json")), ParserProtocolJsonContext.Default.WorkerManifest)!.ProjectInputs);
         var spec = new WorkerLaunchSpec(
             "typescript", "TypeScript", "node", ["typescript-worker.js"], WorkingDirectory: workerDir);
         return new RegisteredWorker(manifest, spec, Path.Combine(workerDir, "worker-manifest.json"));

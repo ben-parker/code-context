@@ -3,6 +3,7 @@ using CodeContext.Core.Repositories.InMemory;
 using CodeContext.Core.Serialization;
 using CodeContext.Core.Services;
 using CodeContext.Core.Workers;
+using CodeContext.Parser.Protocol;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -57,11 +58,13 @@ namespace CodeContext.Core.Snapshots
         }
 
         /// <summary><see cref="TryOpen(string, IConfiguration?)"/> with the options and the catalog given (tests).</summary>
-        internal static OneShotSnapshotOpen TryOpen(CodeContextOptions options, IWorkerCatalog catalog)
+        /// <param name="checkAgainst">For tests: the time files are compared with in place of the capture time, standing for a
+        /// capture made later (a status change time cannot be set back to age a tree).</param>
+        internal static OneShotSnapshotOpen TryOpen(CodeContextOptions options, IWorkerCatalog catalog, DateTime? checkAgainst = null)
         {
             try
             {
-                return TryOpenCore(options, catalog);
+                return TryOpenCore(options, catalog, checkAgainst);
             }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException)
             {
@@ -69,7 +72,7 @@ namespace CodeContext.Core.Snapshots
             }
         }
 
-        private static OneShotSnapshotOpen TryOpenCore(CodeContextOptions options, IWorkerCatalog catalog)
+        private static OneShotSnapshotOpen TryOpenCore(CodeContextOptions options, IWorkerCatalog catalog, DateTime? checkAgainst)
         {
             var started = Stopwatch.GetTimestamp();
             var settings = SnapshotServiceSettings.From(options);
@@ -97,55 +100,73 @@ namespace CodeContext.Core.Snapshots
             var expectations = new SnapshotExpectations(settings.HostVersion, root, OperatingSystem.IsWindows());
             var costly = 0;
             string? firstRefusal = null;
-            foreach (var candidate in directory.EnumerateOwnFiles()
-                         .Where(file => file.Kind == CacheFileKind.Snapshot && SnapshotStartup.IsUsable(file.Sequence))
-                         .OrderByDescending(file => file.Sequence).ThenBy(file => file.Name, StringComparer.Ordinal))
+            // The newest authentic snapshot decides: an older one is never fresher.
+            var (_, opened) = SnapshotStartup.TryNewestFirst<OneShotSnapshotOpen>(
+                directory.EnumerateOwnFiles(), key, expectations, ref costly,
+                (candidate, file, open) => (true, Answer(candidate, file, open), SnapshotRejection.None, null),
+                (candidate, rejection, reason) => firstRefusal ??= $"{candidate.Name}: {rejection}: {reason}");
+            return opened ?? Unavailable(firstRefusal is null ? "no saved index" : $"no saved index could be used ({firstRefusal})");
+
+            OneShotSnapshotOpen Answer(CacheFile candidate, SnapshotFile file, TimeSpan open)
             {
-                if (costly >= SnapshotService.MaxCostlyRefusals) break;
-                var openedAt = Stopwatch.GetTimestamp();
-                var opened = SnapshotFile.Open(candidate.Path, key, expectations);
-                if (opened.File is not { } file)
-                {
-                    firstRefusal ??= $"{candidate.Name}: {opened.Rejection}: {opened.Reason}";
-                    if (SnapshotStartup.IsCostly(opened.Rejection, opened.PassedHostMeta)) costly++;
-                    continue;
-                }
-                using (file)
-                {
-                    var open = Stopwatch.GetElapsedTime(openedAt);
-                    if (file.Header.CreatedUtcTicks < DateTime.MinValue.Ticks || file.Header.CreatedUtcTicks > DateTime.MaxValue.Ticks)
-                        return Unavailable($"{candidate.Name}: the capture time is not a time");
-                    var capturedUtc = new DateTime(file.Header.CreatedUtcTicks, DateTimeKind.Utc);
-                    // The newest authentic snapshot decides: an older one is never fresher.
-                    var freshness = SnapshotFreshness.For(options, workers, catalog)(capturedUtc);
-                    if (!freshness.Unchanged)
-                        return Unavailable($"'{freshness.FirstMoved}' changed after the saved index of {CacheState.FormatTicks(file.Header.CreatedUtcTicks)}");
+                if (file.Header.Unverified)
+                    return Unavailable($"{candidate.Name} was written while the index was unverified");
+                if (file.Header.CreatedUtcTicks < DateTime.MinValue.Ticks || file.Header.CreatedUtcTicks > DateTime.MaxValue.Ticks)
+                    return Unavailable($"{candidate.Name}: the capture time is not a time");
+                var capturedUtc = new DateTime(file.Header.CreatedUtcTicks, DateTimeKind.Utc);
+                var snapshotAt = CacheState.FormatTicks(file.Header.CreatedUtcTicks);
+                bool Accept(InMemoryDatabase.ShardKey shard)
+                    => string.Equals(shard.WorkspaceId, settings.WorkspaceId, StringComparison.Ordinal) && workers.IsIndexedParser(shard.ParserId);
 
-                    var materializedAt = Stopwatch.GetTimestamp();
-                    var loaded = SnapshotLoader.Materialize(file, shard =>
-                        string.Equals(shard.WorkspaceId, settings.WorkspaceId, StringComparison.Ordinal) && workers.IsIndexedParser(shard.ParserId));
-                    if (!loaded.Loaded) return Unavailable($"{candidate.Name}: {loaded.Rejection}: {loaded.Reason}");
-                    if (!SnapshotStartup.TryAnnotations(loaded, directory, out var annotations, out _, out var failure))
-                        return Unavailable($"{candidate.Name}: {failure}");
-                    // A worker that keeps saved state (it sends fingerprints) has its state bound to every shard a
-                    // verified store wrote. One without it was written after a verification failed, a save failed or the
-                    // pairing broke: facts no worker confirmed, which only an instance may serve, labelled.
-                    if (annotations.FirstOrDefault(pair => pair.Value is { Fingerprints.Count: > 0, State: null }) is { Key: var unpaired, Value: not null })
-                        return Unavailable($"{candidate.Name}: shard {unpaired} was saved without its worker's state");
-                    factory.Database.PublishLoadedShards(loaded.ForPublish(), annotations);
-                    var materialize = Stopwatch.GetElapsedTime(materializedAt);
-
-                    var notice = new CacheNotice { State = CacheState.Snapshot, SnapshotAt = CacheState.FormatTicks(file.Header.CreatedUtcTicks) };
-                    var context = new ContextService(
-                        factory.CreateNodeRepository(), factory.CreateEdgeRepository(), factory.CreateFileMetadataRepository(),
-                        Options.Create(options), workers, coverage, new FixedNotice(notice));
-                    return new OneShotSnapshotOpen(
-                        new OneShotSnapshot(context, capturedUtc,
-                            new OneShotTimings(keyAndDirectory, open, freshness.Elapsed, freshness.Checked, materialize)),
-                        null);
+                // What every shard read besides its files, as its worker reported it: without that report nothing says
+                // whether the shard is current, and only an instance (whose worker re-reads) may answer from it.
+                var inputs = new List<WorkerInputs>();
+                foreach (var shard in file.Shards.Where(shard => Accept(shard.Key)))
+                {
+                    if (ReadInputs(shard.ReadInfo()) is not { } reported)
+                        return Unavailable($"{candidate.Name}: the worker of shard {shard.Key} reported no inputs for it");
+                    inputs.Add(reported);
                 }
+                var freshness = SnapshotFreshness.For(options, workers, checkAgainst ?? capturedUtc, inputs, file.Header.RootTimeTicks);
+                if (!freshness.Unchanged) return Unavailable(freshness.Describe(snapshotAt ?? "an unknown time"));
+
+                var materializedAt = Stopwatch.GetTimestamp();
+                var loaded = SnapshotLoader.Materialize(file, Accept);
+                if (!loaded.Loaded) return Unavailable($"{candidate.Name}: {loaded.Rejection}: {loaded.Reason}");
+                if (!SnapshotStartup.TryAnnotations(loaded, directory, out var annotations, out _, out var failure))
+                    return Unavailable($"{candidate.Name}: {failure}");
+                // A worker that keeps saved state (it sends fingerprints) has its state bound to every shard a
+                // verified store wrote. One without it was written after a verification failed, a save failed or the
+                // pairing broke: facts no worker confirmed, which only an instance may serve, labelled.
+                if (annotations.FirstOrDefault(pair => pair.Value is { Fingerprints.Count: > 0, State: null }) is { Key: var unpaired, Value: not null })
+                    return Unavailable($"{candidate.Name}: shard {unpaired} was saved without its worker's state");
+                factory.Database.PublishLoadedShards(loaded.ForPublish(), annotations);
+                var materialize = Stopwatch.GetElapsedTime(materializedAt);
+
+                var notice = new CacheNotice { State = CacheState.Snapshot, SnapshotAt = snapshotAt };
+                var context = new ContextService(
+                    factory.CreateNodeRepository(), factory.CreateEdgeRepository(), factory.CreateFileMetadataRepository(),
+                    Options.Create(options), workers, coverage, new FixedNotice(notice));
+                return new OneShotSnapshotOpen(
+                    new OneShotSnapshot(context, capturedUtc,
+                        new OneShotTimings(keyAndDirectory, open, freshness.Elapsed, freshness.Checked, materialize)),
+                    null);
             }
-            return Unavailable(firstRefusal is null ? "no saved index" : $"no saved index could be used ({firstRefusal})");
+        }
+
+        /// <summary>A shard's reported inputs, or null when its worker sent none or they do not read as two lists of paths.</summary>
+        private static WorkerInputs? ReadInputs(SnapshotShardInfo info)
+        {
+            if (info.Inputs is not { Length: > 0 } bytes) return null;
+            try
+            {
+                var inputs = System.Text.Json.JsonSerializer.Deserialize(bytes, ParserProtocolJsonContext.Default.WorkerInputs);
+                return inputs?.Files is null || inputs.Absent is null || inputs.Files.Contains(null!) || inputs.Absent.Contains(null!) ? null : inputs;
+            }
+            catch (System.Text.Json.JsonException)
+            {
+                return null;
+            }
         }
 
         private static OneShotSnapshotOpen Unavailable(string reason) => new(null, reason);

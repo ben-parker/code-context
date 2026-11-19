@@ -306,12 +306,85 @@ public sealed class QueryFromSnapshotTests : IAsyncLifetime
         Assert.False(Directory.Exists(Path.Combine(bare, ".codecontext")));
     }
 
+    [Fact]
+    public async Task AWorkerThatReportsNoInputs_IsNeverAnsweredFromWithoutAnInstance()
+    {
+        var root = await WriteSnapshotAsync("no-inputs", "no-inputs");
+        Age();
+
+        var result = OneShotSnapshot.TryOpen(
+            new CodeContextOptions { RootPath = root, CacheKeyPath = KeyPath }, new StaticWorkerCatalog(CachedInstance.FakeWorker("no-inputs")), _checkAgainst);
+
+        Assert.Null(result.Snapshot);
+        Assert.Contains("reported no inputs", result.Reason);
+    }
+
+    [Theory]
+    [InlineData("edit")]
+    [InlineData("delete")]
+    [InlineData("create")]
+    public async Task AReportedInputOutsideTheRoot_ThatChanges_FallsBack(string change)
+    {
+        var props = Path.Combine(_base, $"{change}.props");
+        if (change != "create") File.WriteAllText(props, "<Project />");
+        var root = await WriteSnapshotAsync($"input-{change}", "normal", props);
+        Age();
+        var worker = CachedInstance.FakeWorker("normal", props);
+        OneShotSnapshotOpen Open() => OneShotSnapshot.TryOpen(
+            new CodeContextOptions { RootPath = root, CacheKeyPath = KeyPath }, new StaticWorkerCatalog(worker), _checkAgainst);
+        Assert.NotNull(Open().Snapshot);
+
+        switch (change)
+        {
+            case "edit": File.WriteAllText(props, "<Project><PropertyGroup /></Project>"); break;
+            case "delete": File.Delete(props); break;
+            default: File.WriteAllText(props, "<Project />"); break;
+        }
+
+        var result = Open();
+        Assert.Null(result.Snapshot);
+        Assert.Contains(props, result.Reason);
+    }
+
+    [Fact]
+    public async Task TheFirstSnapshotOfASmallRepository_IsUsableAtOnce()
+    {
+        // The review's case: making .codecontext/ moves the root's time inside the slack before the first capture.
+        var root = Directory.CreateDirectory(Path.Combine(_base, "small")).FullName;
+        File.WriteAllText(Path.Combine(root, "a.fake"), "a");
+        Thread.Sleep(SnapshotFreshness.Tolerance + TimeSpan.FromMilliseconds(300));
+        await using (var instance = new CachedInstance(root, KeyPath, "normal"))
+        {
+            await instance.StartAsync();
+            await instance.WaitForAsync(() => instance.ScanState.Phase == ScanPhase.Ready, "the scan");
+            await instance.StopAsync();
+        }
+
+        var result = OneShotSnapshot.TryOpen(
+            new CodeContextOptions { RootPath = root, CacheKeyPath = KeyPath }, new StaticWorkerCatalog(CachedInstance.FakeWorker("normal")));
+
+        Assert.True(result.Snapshot is not null, result.Reason);
+    }
+
     // ---- helpers ----
+
+    /// <summary>A repository of its own with one fake file, scanned by an instance that then stops and leaves its snapshot.</summary>
+    private async Task<string> WriteSnapshotAsync(string name, string behavior, params string[] inputs)
+    {
+        var root = Directory.CreateDirectory(Path.Combine(_base, name)).FullName;
+        File.WriteAllText(Path.Combine(root, "a.fake"), "a");
+        await using var instance = new CachedInstance(root, KeyPath, behavior, inputs: inputs);
+        await instance.StartAsync();
+        await instance.WaitForAsync(() => instance.ScanState.Phase == ScanPhase.Ready, "the scan");
+        await instance.StopAsync();
+        Assert.NotEmpty(Directory.GetFiles(Path.Combine(root, ".codecontext", "cache", "default"), "*.ccsnap"));
+        return root;
+    }
 
     private Func<string, OneShotSnapshotOpen> Open(string? keyPath = null, bool cacheEnabled = true, bool markerWorker = false)
         => root => OneShotSnapshot.TryOpen(
             new CodeContextOptions { RootPath = root, CacheKeyPath = keyPath ?? KeyPath, CacheEnabled = cacheEnabled },
-            new StaticWorkerCatalog(markerWorker ? MarkerWorker() : CachedInstance.FakeWorker("normal")));
+            new StaticWorkerCatalog(markerWorker ? MarkerWorker() : CachedInstance.FakeWorker("normal")), _checkAgainst);
 
     /// <summary>The fake worker's manifest with a command that leaves a file behind if it is ever run.</summary>
     private RegisteredWorker MarkerWorker()
@@ -382,12 +455,17 @@ public sealed class QueryFromSnapshotTests : IAsyncLifetime
         return app;
     }
 
-    /// <summary>Sets every time in the tree (outside <c>.codecontext</c>) an hour back, as if the snapshot were older work.</summary>
+    // What a one-shot open compares files with in place of the capture time, once the tree has "aged".
+    private DateTime? _checkAgainst;
+
+    /// <summary>
+    /// As if the snapshot were captured after every file: opens from here on compare with now in place of the capture
+    /// time (a status change time cannot be set back to age a tree), so only what changes after this call counts.
+    /// </summary>
     private void Age()
     {
-        var past = DateTime.UtcNow - TimeSpan.FromHours(1);
-        foreach (var file in Directory.GetFiles(Root, "*", SearchOption.TopDirectoryOnly)) File.SetLastWriteTimeUtc(file, past);
-        Directory.SetLastWriteTimeUtc(Root, past);
+        _checkAgainst = DateTime.UtcNow + SnapshotFreshness.Tolerance;
+        Thread.Sleep(20);
     }
 
     private static List<string> Listing(string directory)

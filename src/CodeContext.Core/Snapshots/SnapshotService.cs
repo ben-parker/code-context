@@ -207,11 +207,18 @@ namespace CodeContext.Core.Snapshots
         private readonly HashSet<string> _loggedSkips = new(StringComparer.Ordinal);
         private SnapshotServiceStatus _status = new(SnapshotCacheMode.Starting);
 
-        // What a one-shot query checks before answering from a snapshot (SnapshotFreshness); null skips the check.
-        private readonly Func<DateTime, SnapshotFreshnessResult>? _filesSince;
-        // Guarded by _gate. The loaded snapshot is older than a file it describes: once a scan has verified the store
-        // (ScanPhase.Ready), it counts as unwritten. Never before: an unverified store must not get a newer capture time.
+        // What a one-shot query checks before answering from a snapshot (SnapshotFreshness): capture time, the shards'
+        // inputs, the root time the snapshot recorded. Null skips the check.
+        private readonly Func<DateTime, IEnumerable<WorkerInputs>, long, SnapshotFreshnessResult>? _filesSince;
+        // Guarded by _gate. The newest snapshot on disk cannot serve a one-shot query (loaded older than a file it
+        // describes, or written unverified): once a scan has verified the store (ScanPhase.Ready), it counts as unwritten.
+        // Never before: an unverified store must not get a newer capture time.
         private bool _rewriteWhenVerified;
+        // Guarded by _gate. A snapshot was loaded and not yet checked against the files: checked off the start-up path,
+        // in the background, once the scan has verified the store.
+        private (DateTime CapturedUtc, long RootTimeTicks)? _checkLoaded;
+        // The root's time once the cache directory existed, recorded in every snapshot (SnapshotHeader.RootTimeTicks).
+        private long _rootTimeTicks;
 
         public SnapshotService(
             IndexCoordinator coordinator,
@@ -224,7 +231,7 @@ namespace CodeContext.Core.Snapshots
             CacheState? cacheState = null,
             IWorkerStateSaver? workers = null,
             QuietTimeTrim? memoryTrim = null,
-            Func<DateTime, SnapshotFreshnessResult>? filesSince = null)
+            Func<DateTime, IEnumerable<WorkerInputs>, long, SnapshotFreshnessResult>? filesSince = null)
         {
             _memoryTrim = memoryTrim;
             _filesSince = filesSince;
@@ -240,27 +247,40 @@ namespace CodeContext.Core.Snapshots
         }
 
         /// <summary>
-        /// Whether the loaded snapshot is older than a file it describes (by <see cref="SnapshotFreshness"/>), so the
-        /// store is written again once a scan has verified it, even when its facts did not change. Without this a file touched with the
-        /// same content (a checkout and back) would keep every later one-shot query from using the snapshot, since an
-        /// unchanged store is never rewritten.
+        /// Whether the loaded snapshot is older than a file it describes (by <see cref="SnapshotFreshness"/>, with the
+        /// inputs the verified store now records), so the store is written again even when its facts did not change.
+        /// Without this a file touched with the same content (a checkout and back) would keep every later one-shot query
+        /// from using the snapshot, since an unchanged store is never rewritten. A time in the future is not a reason:
+        /// no snapshot written now would be newer. Run in the background after the verifying scan, so a cached start
+        /// does not walk the tree before it scans.
         /// </summary>
-        private bool LoadedSnapshotOlderThanFiles(CacheLoadOutcome outcome)
+        private void CheckLoadedInBackground(DateTime capturedUtc, long rootTimeTicks, SnapshotView view)
         {
-            if (_filesSince is null || outcome.Kind != CacheLoadKind.Loaded || outcome.SnapshotCreatedUtcTicks is not { } ticks) return false;
-            try
+            if (_filesSince is not { } filesSince) return;
+            var inputs = view.Shards.Select(shard => shard.Annotation?.Inputs).ToList();
+            // A shard without inputs is never answered without a worker: rewriting would not change that.
+            if (inputs.Contains(null)) return;
+            _ = Task.Run(() =>
             {
-                var result = _filesSince(new DateTime(ticks, DateTimeKind.Utc));
-                if (result.Unchanged) return false;
-                _logger.LogInformation(
-                    "'{Path}' is newer than the loaded snapshot; the verified graph will be written again for one-shot queries.",
-                    result.FirstMoved);
-                return true;
-            }
-            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException)
-            {
-                return true;
-            }
+                try
+                {
+                    var result = filesSince(capturedUtc, inputs!, rootTimeTicks);
+                    if (result.Unchanged || result.InFuture) return;
+                    _logger.LogInformation(
+                        "'{Path}' {Why}; the verified graph will be written again for one-shot queries.", result.FirstMoved, result.Why);
+                    lock (_gate)
+                    {
+                        if (_status.Mode != SnapshotCacheMode.Writer || _stopping || !_written.SameAs(view)) return;
+                        _written = SnapshotView.Empty;
+                        _lastChangeAt = _time.GetUtcNow();
+                    }
+                    OnMutationCommandCompleted();
+                }
+                catch (Exception exception)
+                {
+                    _logger.LogDebug(exception, "The loaded snapshot could not be checked against the files.");
+                }
+            });
         }
 
         public SnapshotServiceStatus Status
@@ -346,7 +366,6 @@ namespace CodeContext.Core.Snapshots
 
             try
             {
-                var rewriteLoaded = LoadedSnapshotOlderThanFiles(result.Outcome);
                 lock (_gate)
                 {
                     // Stopped before the step ran: the step's own Dispose releases the lock.
@@ -357,7 +376,12 @@ namespace CodeContext.Core.Snapshots
                     _host = result.Host;
                     _nextSequence = result.NextSequence;
                     _written = _startup.TakeLoadedView() ?? SnapshotView.Empty;
-                    _rewriteWhenVerified = rewriteLoaded;
+                    _rewriteWhenVerified = result.Outcome.SnapshotUnverified;
+                    _checkLoaded = result.Outcome is { Kind: CacheLoadKind.Loaded, SnapshotCreatedUtcTicks: { } ticks }
+                        && ticks >= DateTime.MinValue.Ticks && ticks <= DateTime.MaxValue.Ticks
+                        ? (new DateTime(ticks, DateTimeKind.Utc), result.Outcome.SnapshotRootTimeTicks)
+                        : null;
+                    _rootTimeTicks = result.RootTimeTicks;
                     _otherSnapshotState.UnionWith(result.DroppedStateFiles ?? []);
                     _lastSeen = _written;
                 }
@@ -412,8 +436,14 @@ namespace CodeContext.Core.Snapshots
                     if (_rewriteWhenVerified && _scanState.Phase == ScanPhase.Ready)
                     {
                         _rewriteWhenVerified = false;
+                        _checkLoaded = null;
                         _written = SnapshotView.Empty;
                         _lastChangeAt = now;
+                    }
+                    if (_checkLoaded is { } loaded && _scanState.Phase == ScanPhase.Ready)
+                    {
+                        _checkLoaded = null;
+                        CheckLoadedInBackground(loaded.CapturedUtc, loaded.RootTimeTicks, _written);
                     }
                     if (!view.SameAs(_lastSeen))
                     {
@@ -621,7 +651,12 @@ namespace CodeContext.Core.Snapshots
         {
             if (_database is null || !_database.TryLatchCommitted(out var shards, out var annotations, out var generation)) return null;
             return new SnapshotCapture(SnapshotView.Of(shards, annotations), generation, _time.GetUtcNow(),
-                Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+                Stopwatch.GetElapsedTime(started).TotalMilliseconds)
+            {
+                // A store no scan has verified (the verification failed, or it has not finished) is written for the next
+                // start, which verifies it again, and never answered from without a worker.
+                Unverified = _scanState.Phase != ScanPhase.Ready,
+            };
         }
 
         private void OnCaptured(Task<SnapshotCapture?> task)
@@ -821,6 +856,9 @@ namespace CodeContext.Core.Snapshots
                     : System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(
                         units as List<UnitFingerprint> ?? units.ToList(),
                         ParserProtocolJsonContext.Default.ListUnitFingerprint);
+                var inputs = shard.Annotation?.Inputs is not { } reported
+                    ? null
+                    : System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(reported, ParserProtocolJsonContext.Default.WorkerInputs);
                 // The state file only while it still describes the captured shard.
                 var state = shard.State;
                 info[shard.Key] = new SnapshotShardInfo(
@@ -829,7 +867,8 @@ namespace CodeContext.Core.Snapshots
                     StateId: state?.StateId,
                     StateSha256: state?.Sha256,
                     Coverage: coverage,
-                    Fingerprints: fingerprints);
+                    Fingerprints: fingerprints,
+                    Inputs: inputs);
             }
             return new SnapshotWriteInput
             {
@@ -840,6 +879,8 @@ namespace CodeContext.Core.Snapshots
                 StoreGeneration = (ulong)Math.Max(0, capture.StoreGeneration),
                 CreatedUtcTicks = capture.CapturedAt.UtcTicks,
                 InstanceId = _settings.InstanceId,
+                RootTimeTicks = _rootTimeTicks,
+                Unverified = capture.Unverified,
             };
         }
 
@@ -967,6 +1008,8 @@ namespace CodeContext.Core.Snapshots
                     {
                         case WriteOutcomeKind.Written:
                             _written = capture.View;
+                            // Written unverified: the next verification writes the same store again, verified.
+                            if (capture.Unverified) _rewriteWhenVerified = true;
                             _otherSnapshotState.Clear();
                             _lastLoggedFailure = null;
                             _status = _status with

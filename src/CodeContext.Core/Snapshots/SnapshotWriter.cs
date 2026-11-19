@@ -12,7 +12,7 @@ namespace CodeContext.Core.Snapshots
 
     /// <summary>
     /// What a snapshot stores beside one shard's facts: the parser version and worker state binding
-    /// (each optional), and the coverage and fingerprints JSON, opaque UTF-8 bytes handed back as written.
+    /// (each optional), and the coverage, fingerprints and inputs JSON, UTF-8 bytes handed back as written.
     /// </summary>
     internal sealed record SnapshotShardInfo(
         string? ParserVersion = null,
@@ -20,7 +20,8 @@ namespace CodeContext.Core.Snapshots
         string? StateId = null,
         string? StateSha256 = null,
         byte[]? Coverage = null,
-        byte[]? Fingerprints = null)
+        byte[]? Fingerprints = null,
+        byte[]? Inputs = null)
     {
         public static readonly SnapshotShardInfo Empty = new();
     }
@@ -42,6 +43,12 @@ namespace CodeContext.Core.Snapshots
         public long CreatedUtcTicks { get; init; }
 
         public Guid InstanceId { get; init; }
+
+        /// <summary>The root directory's change time as the host saw it once its cache directory was in place; 0 for none.</summary>
+        public long RootTimeTicks { get; init; }
+
+        /// <summary>Written by a host whose verification failed: <see cref="SnapshotFormat.FlagUnverified"/>.</summary>
+        public bool Unverified { get; init; }
     }
 
     /// <summary>A shard the writer left out, and why.</summary>
@@ -235,7 +242,9 @@ namespace CodeContext.Core.Snapshots
             BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(SnapshotFormat.HeaderEndianTag), SnapshotFormat.EndianTag);
             BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(SnapshotFormat.HeaderHeaderSize), SnapshotFormat.HeaderSize);
             BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(SnapshotFormat.HeaderFlags),
-                input.Host.PathsCaseInsensitive ? SnapshotFormat.FlagPathsCaseInsensitive : 0);
+                (input.Host.PathsCaseInsensitive ? SnapshotFormat.FlagPathsCaseInsensitive : 0)
+                | (input.Unverified ? SnapshotFormat.FlagUnverified : 0));
+            BinaryPrimitives.WriteInt64LittleEndian(header.AsSpan(SnapshotFormat.HeaderRootTimeTicks), input.RootTimeTicks);
             BinaryPrimitives.WriteUInt64LittleEndian(header.AsSpan(SnapshotFormat.HeaderFileLength), (ulong)fileLength);
             BinaryPrimitives.WriteUInt64LittleEndian(header.AsSpan(SnapshotFormat.HeaderSequence), input.Sequence);
             BinaryPrimitives.WriteUInt64LittleEndian(header.AsSpan(SnapshotFormat.HeaderStoreGeneration), input.StoreGeneration);
@@ -906,6 +915,7 @@ namespace CodeContext.Core.Snapshots
 
                 sections[18] = info.Coverage ?? Array.Empty<byte>();
                 sections[19] = info.Fingerprints ?? Array.Empty<byte>();
+                sections[20] = info.Inputs ?? Array.Empty<byte>();
 
                 // ---- Blob ----, sized exactly: the layout below, computed first.
                 var blobLength = (long)SnapshotFormat.ShardHeaderSize + SnapshotFormat.SectionCount * SnapshotFormat.SectionEntrySize;

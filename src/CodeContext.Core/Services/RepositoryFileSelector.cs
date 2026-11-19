@@ -99,14 +99,15 @@ public sealed class RepositoryFileSelector : IRepositoryFileSelector
 
     /// <summary>
     /// Every file and directory under the root that this policy includes, whatever its extension, with
-    /// its last write and creation times (UTC): the walk <see cref="EnumerateIncludedFiles"/> makes, so a
-    /// caller that checks files against a saved index sees exactly the files a scan would. The root
-    /// itself is not visited. The walk stops when <paramref name="visit"/> returns false.
+    /// its last write and creation times (UTC) when <paramref name="withTimes"/> (free on Windows, a stat per
+    /// entry elsewhere): the walk <see cref="EnumerateIncludedFiles"/> makes, so a caller that checks files
+    /// against a saved index sees exactly the files a scan would. The root itself is not visited. The walk
+    /// stops when <paramref name="visit"/> returns false.
     /// </summary>
-    internal void WalkIncludedWithTimes(Func<ScannedEntry, bool> visit)
+    internal void WalkIncluded(bool withTimes, Func<ScannedEntry, bool> visit)
     {
         Invalidate();
-        Walk(withTimes: true, visit);
+        Walk(withTimes, visit);
     }
 
     private void Walk(bool withTimes, Func<ScannedEntry, bool> visit)

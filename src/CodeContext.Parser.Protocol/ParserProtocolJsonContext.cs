@@ -20,6 +20,7 @@ namespace CodeContext.Parser.Protocol;
 [JsonSerializable(typeof(IndexWorkspaceResult))]
 [JsonSerializable(typeof(IndexBaseline))]
 [JsonSerializable(typeof(UnitFingerprint))]
+[JsonSerializable(typeof(WorkerInputs))]
 [JsonSerializable(typeof(SaveStateParams))]
 [JsonSerializable(typeof(SaveStateResult))]
 [JsonSerializable(typeof(ApplyChangesParams))]

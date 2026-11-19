@@ -1,3 +1,5 @@
+import json
+import pathlib
 import unittest
 
 from codecontext_worker_sdk import (
@@ -6,8 +8,11 @@ from codecontext_worker_sdk import (
     CAPABILITIES,
     METHODS,
     MessageDecoder,
+    WorkerInputs,
     encode_message,
 )
+
+SCHEMA = pathlib.Path(__file__).resolve().parents[3] / "src" / "CodeContext.Parser.Protocol" / "protocol" / "parser-protocol.schema.json"
 
 
 class FramingTests(unittest.TestCase):
@@ -18,6 +23,11 @@ class FramingTests(unittest.TestCase):
         self.assertEqual("workspace/saveState", METHODS["save_state"])
         self.assertEqual("persistentState", CAPABILITIES["persistent_state"])
         self.assertEqual(("accepted", "rejected"), (BASELINE_ACCEPTED, BASELINE_REJECTED))
+
+    def test_worker_inputs_name_the_schema_fields(self) -> None:
+        schema = json.loads(SCHEMA.read_text(encoding="utf-8"))["$defs"]
+        self.assertEqual(set(schema["workerInputs"]["properties"]), set(WorkerInputs.__annotations__))
+        self.assertEqual("#/$defs/workerInputs", schema["analysisDelta"]["properties"]["inputs"]["$ref"])
 
     def test_fragmented_and_adjacent_frames(self) -> None:
         first = encode_message({"jsonrpc": "2.0", "id": 1, "result": "héllo"})

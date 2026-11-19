@@ -13,7 +13,7 @@ namespace CodeContext.Core.Tests.Snapshots;
 using ShardKey = InMemoryDatabase.ShardKey;
 
 /// <summary>
-/// Pins the format-version-1 layout: a tiny graph written with a fixed key, time, sequence,
+/// Pins the format-version-2 layout: a tiny graph written with a fixed key, time, sequence,
 /// generation and instance id must give exactly the checked-in bytes. A change here is a format
 /// change and needs a new <c>formatVersion</c>. To regenerate after a deliberate change, set
 /// <c>CODECONTEXT_SNAPSHOT_GOLDEN_OUT</c> to the absolute path of the fixture file and run this test.
@@ -65,7 +65,7 @@ public class SnapshotGoldenTests
 
         // Header.
         Assert.Equal("CCSNAP\r\n"u8.ToArray(), bytes[..8]);
-        Assert.Equal(1u, U32(8));
+        Assert.Equal(2u, U32(8));
         Assert.Equal(0x01020304u, U32(12));
         Assert.Equal(256u, U32(16));
         Assert.Equal(1u, U32(20));                                 // paths compared case-insensitively
@@ -78,7 +78,8 @@ public class SnapshotGoldenTests
         Assert.Equal(2u, U32(68));
         var directory = (int)U64(72);
         Assert.Equal(new Guid("5d0c9a1e-7b3f-4c0e-9a6d-2f8b1c4e7a90"), new Guid(bytes.AsSpan(80, 16)));
-        Assert.All(bytes[96..256], b => Assert.Equal(0, b));
+        Assert.Equal(0UL, U64(96));                                // root time: none recorded
+        Assert.All(bytes[104..256], b => Assert.Equal(0, b));
 
         // Host meta: u32 count, (u16 keyLength, key, u32 valueLength, value)*.
         var meta = new Dictionary<string, string>();
@@ -110,18 +111,18 @@ public class SnapshotGoldenTests
 
         // Shard header: magic "SHRD", sectionCount, N, E, S, stringCount, F, nameCount, foldedNameFirstRef, flags.
         Assert.Equal("SHRD"u8.ToArray(), bytes[blob..(blob + 4)]);
-        Assert.Equal(20u, U32(blob + 4));
+        Assert.Equal(21u, U32(blob + 4));
         Assert.Equal(3u, U32(blob + 8));
         Assert.Equal(3u, U32(blob + 12));
         var idCount = (int)U32(blob + 16);
         var fileCount = (int)U32(blob + 24);
         Assert.Equal(1u, U32(blob + 32));
 
-        // Section table: 20 entries of u32 kind, u32 elementSize, u64 offset, u64 length, dense and 8-byte aligned.
-        var elementSizes = new uint[] { 1, 4, 1, 80, 32, 8, 4, 4, 4, 4, 4, 4, 24, 12, 4, 4, 4, 4, 1, 1 };
-        var sections = new (int Offset, int Length)[21];
-        var end = 128 + 20 * 24;
-        for (var k = 1; k <= 20; k++)
+        // Section table: 21 entries of u32 kind, u32 elementSize, u64 offset, u64 length, dense and 8-byte aligned.
+        var elementSizes = new uint[] { 1, 4, 1, 80, 32, 8, 4, 4, 4, 4, 4, 4, 24, 12, 4, 4, 4, 4, 1, 1, 1 };
+        var sections = new (int Offset, int Length)[22];
+        var end = 128 + 21 * 24;
+        for (var k = 1; k <= 21; k++)
         {
             var entry = blob + 128 + (k - 1) * 24;
             Assert.Equal((uint)k, U32(entry));

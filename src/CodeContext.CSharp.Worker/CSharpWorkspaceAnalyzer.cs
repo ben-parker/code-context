@@ -715,7 +715,7 @@ public sealed class CSharpWorkspaceAnalyzer
         var buckets = SettleOwnership(walkedNow, removed);
         var diagnostics = _pendingDiagnostics.ToList();
         _pendingDiagnostics.Clear();
-        return new AnalysisResult(diagnostics, buckets) { Coverage = BuildCoverage(), Fingerprints = Fingerprints() };
+        return new AnalysisResult(diagnostics, buckets) { Coverage = BuildCoverage(), Fingerprints = Fingerprints(), Inputs = Inputs() };
     }
 
     private static bool ShouldReportProgress(int processed, int total)
@@ -1065,6 +1065,9 @@ public sealed class CSharpWorkspaceAnalyzer
         /// <summary>Each unit's fingerprint over the inputs these facts were walked from, in unit key order.</summary>
         public List<UnitFingerprint> Fingerprints { get; init; } = [];
 
+        /// <summary>What these facts were read from besides the approved files (see <see cref="CSharpWorkspaceAnalyzer.Inputs"/>).</summary>
+        public WorkerInputs Inputs { get; init; } = new([], []);
+
         public List<ProtocolNode> Nodes => _nodes ??= Buckets.SelectMany(bucket => bucket.Nodes).ToList();
 
         /// <summary>The wire form of every edge. Sending walks <see cref="Buckets"/> instead.</summary>
@@ -1217,6 +1220,36 @@ public sealed class CSharpWorkspaceAnalyzer
                 _stamps.TryGetValue(path, out var stamp) ? stamp.ContentHash : [],
                 _owners.TryGetValue(path, out var owner) ? KeyOf(owner) : string.Empty)).ToList(),
             unit.References.ConvertAll(KeyOf))));
+
+    /// <summary>
+    /// Everything the facts depend on besides the approved files, for the host's check of a snapshot without a worker:
+    /// the files the project model was read from (absent where they were looked for and not found), the directories
+    /// listed to find projects and restore data, the repository markers looked for above the root, and every assembly
+    /// a unit compiles against. These are what this worker itself checks before it reuses what it read (the model's
+    /// stamps, the references' times in each unit's signature), so a snapshot judged current by them is one this worker
+    /// would not have read differently.
+    /// </summary>
+    private WorkerInputs Inputs()
+    {
+        var files = new HashSet<string>(PathComparer);
+        var absent = new HashSet<string>(PathComparer);
+        if (_model is { } model)
+        {
+            foreach (var (path, stamp) in model.InputStamps) (ProjectModel.IsMissingStamp(stamp) ? absent : files).Add(path);
+            files.UnionWith(model.ListedDirectories);
+            absent.UnionWith(model.AbsentBoundaryMarkers);
+            foreach (var project in model.Projects) files.UnionWith(project.MetadataReferences);
+        }
+        if (_units.Exists(unit => unit.Project is not { } project || project.State == ProjectCoverageState.Fallback))
+        {
+            files.UnionWith(SharedReferences.Value.OfType<PortableExecutableReference>()
+                .Select(reference => reference.FilePath).OfType<string>());
+        }
+        files.ExceptWith(_files);
+        return new WorkerInputs(
+            files.Order(StringComparer.Ordinal).ToList(),
+            absent.Order(StringComparer.Ordinal).ToList());
+    }
 
     /// <summary>
     /// What a new process needs to emit what this one would emit next: the walks, the hashes of the facts

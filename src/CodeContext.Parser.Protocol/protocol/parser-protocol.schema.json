@@ -306,6 +306,7 @@
           "description": "Optional; sent by a worker that declared capabilities.persistentState, on the first chunk of every request (the host reads the first chunk's only; later chunks' are ignored). The host stores them and hands them back unread. Order is not significant: the host compares them as a set keyed by unit, and a list that names a unit twice equals no other. Replaces the shard's fingerprints when the request commits; a request without them clears them, and no baseline is offered from those facts.",
           "items": { "$ref": "#/$defs/unitFingerprint" }
         },
+        "inputs": { "$ref": "#/$defs/workerInputs" },
         "diagnostics": {
           "type": "array",
           "items": {
@@ -319,6 +320,15 @@
           }
         },
         "isLastForRequest": { "type": "boolean", "description": "True on the final chunk for this request. The host buffers chunks and atomically commits only after this marker." }
+      }
+    },
+    "workerInputs": {
+      "type": "object",
+      "description": "Optional, on the first chunk of a request (the host reads the first chunk's only). Everything besides the request's own files that the workspace's facts as they stand after the request depend on, complete each time (not only what this request read): project and configuration files, package manifests and lock data, reference assemblies and declaration files, directories whose listing was used, and paths looked for and not found. The host stores the last set per shard and replaces it when the request commits; a request without it clears it. The host does not use it for indexing: it decides, with no worker running, whether a saved snapshot of the shard is still current (an entry in files whose change or creation time is after the snapshot, or that is gone, or an entry in absent that now exists, means it is not). A shard whose worker never sends it is never answered from a snapshot without a worker. Entries are absolute paths; the host ignores entries that are not.",
+      "required": ["files", "absent"],
+      "properties": {
+        "files": { "type": "array", "items": { "type": "string" }, "description": "Files read, and directories whose entries were listed, that exist." },
+        "absent": { "type": "array", "items": { "type": "string" }, "description": "Paths looked for that did not exist; one under a directory listed here as absent may be left out." }
       }
     },
     "analysisProgress": {

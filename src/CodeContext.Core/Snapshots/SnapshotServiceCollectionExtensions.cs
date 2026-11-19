@@ -67,8 +67,9 @@ namespace CodeContext.Core.Snapshots
                 sp.GetRequiredService<CacheState>(),
                 sp.GetService<LanguageWorkerService>(),
                 sp.GetService<QuietTimeTrim>(),
-                sp.GetService<LanguageWorkerService>() is { } workers && sp.GetService<IWorkerCatalog>() is { } catalog
-                    ? SnapshotFreshness.For(sp.GetRequiredService<IOptions<CodeContextOptions>>().Value, workers, catalog)
+                sp.GetService<LanguageWorkerService>() is { } workers
+                    ? (capturedUtc, inputs, rootTimeTicks) => SnapshotFreshness.For(
+                        sp.GetRequiredService<IOptions<CodeContextOptions>>().Value, workers, capturedUtc, inputs, rootTimeTicks)
                     : null));
             services.AddHostedService(sp => sp.GetRequiredService<SnapshotService>());
             return services;

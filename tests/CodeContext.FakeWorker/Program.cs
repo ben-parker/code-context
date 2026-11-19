@@ -46,10 +46,15 @@ using CodeContext.Parser.Protocol;
 //
 // --fail-marker <path>: while that file exists, workspace/index and workspace/applyChanges emit their delta
 // and then answer complete:false (a request that fails after its delta committed).
+//
+// Inputs: every delta reports protocol `inputs`; each --input <path> (repeatable) is reported as read when it
+// exists at the request, absent otherwise. Behaviour no-inputs reports none.
 
 var behavior = GetOption(args, "--behavior") ?? "normal";
 var markerPath = GetOption(args, "--marker");
 var failMarker = GetOption(args, "--fail-marker");
+var inputPaths = args.Select((arg, i) => (arg, i)).Where(pair => pair.arg == "--input" && pair.i + 1 < args.Length)
+    .Select(pair => Path.GetFullPath(args[pair.i + 1])).ToList();
 
 var stdin = Console.OpenStandardInput();
 var stdout = Console.OpenStandardOutput();
@@ -73,7 +78,7 @@ if (behavior == "stderr-flood")
     Console.Error.Flush();
 }
 
-var state = new WorkerState(behavior, markerPath, failMarker);
+var state = new WorkerState(behavior, markerPath, failMarker, inputPaths);
 var connection = new JsonRpcConnection(stdin, stdout);
 
 connection.AddRequestHandler(ParserProtocolMethods.Initialize, (p, ct) => state.HandleInitializeAsync(p, ct));
@@ -112,7 +117,7 @@ static string? GetOption(string[] args, string name)
     return null;
 }
 
-internal sealed class WorkerState(string behavior, string? markerPath, string? failMarker)
+internal sealed class WorkerState(string behavior, string? markerPath, string? failMarker, List<string> inputPaths)
 {
     private const string ParserId = "fake";
     private const string ParserVersion = "1.0.0-test";
@@ -440,7 +445,10 @@ internal sealed class WorkerState(string behavior, string? markerPath, string? f
             ReplacesFiles: replacesFiles ?? files,
             Nodes: nodes,
             Edges: edges,
-            IsLastForRequest: true);
+            IsLastForRequest: true,
+            Inputs: behavior == "no-inputs"
+                ? null
+                : new WorkerInputs(inputPaths.Where(File.Exists).ToList(), inputPaths.Where(path => !File.Exists(path)).ToList()));
     }
 
     private static T Deserialize<T>(JsonElement? paramsElement, System.Text.Json.Serialization.Metadata.JsonTypeInfo<T> typeInfo)

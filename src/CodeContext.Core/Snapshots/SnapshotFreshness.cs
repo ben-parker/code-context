@@ -1,141 +1,153 @@
 using System.Diagnostics;
 using CodeContext.Core.Services;
 using CodeContext.Core.Workers;
+using CodeContext.Parser.Protocol;
 using Microsoft.Extensions.Options;
 
 namespace CodeContext.Core.Snapshots
 {
     /// <summary>The outcome of <see cref="SnapshotFreshness.Check"/>.</summary>
-    /// <param name="Checked">Files and directories whose times were compared.</param>
-    /// <param name="Moved">How many of them are newer than the snapshot (the walk stops at the first).</param>
-    /// <param name="FirstMoved">The first one found, root-relative with '/' separators; null when none moved.</param>
-    internal sealed record SnapshotFreshnessResult(int Checked, int Moved, string? FirstMoved, TimeSpan Elapsed)
+    /// <param name="Checked">Files, directories and absent paths looked at.</param>
+    /// <param name="FirstMoved">The first entry found changed, root-relative with '/' separators inside the root and absolute
+    /// outside it; null when none changed. The walk stops at the first.</param>
+    /// <param name="Why">What about <paramref name="FirstMoved"/> counts as a change.</param>
+    /// <param name="InFuture">The entry's time is later than the clock allows (<see cref="SnapshotFreshness.Tolerance"/>
+    /// ahead of now): no snapshot written now could be newer, so a host does not rewrite one for it.</param>
+    internal sealed record SnapshotFreshnessResult(int Checked, string? FirstMoved, string? Why, bool InFuture, TimeSpan Elapsed)
     {
-        public bool Unchanged => Moved == 0;
+        public bool Unchanged => FirstMoved is null;
+
+        /// <summary>One line for a person: what changed and how.</summary>
+        public string Describe(string snapshotAt)
+            => FirstMoved is null ? "nothing changed" : $"'{FirstMoved}' {Why} (the saved index is of {snapshotAt})";
     }
 
     /// <summary>
-    /// Whether anything a scan would read has changed since a snapshot was captured, judged without a worker:
-    /// the snapshot holds no per-file sizes or hashes (those live in the worker's own state file), so the test
-    /// is by time. Walked with the scan's own file selection (<see cref="RepositoryFileSelector"/>: mandatory
-    /// exclusions, configured patterns, <c>.gitignore</c> rules), it compares against the capture time:
+    /// Whether anything the snapshot's facts were made from has changed since it was captured, judged without a worker:
+    /// the snapshot holds no per-file sizes or hashes (those live in the worker's own state), so the test is by time,
+    /// read through <see cref="FileChangeTime"/> (the status change time on Linux). It looks at exactly
     /// <list type="bullet">
-    /// <item>every included directory, the root too: its modification time moves when an entry is added,
-    /// removed or renamed in it, which catches new, deleted and moved files, a moved file keeping its own times;</item>
-    /// <item>every included file a worker claims by extension, or declares a project input by extension
-    /// (<c>.csproj</c>), and every <c>.gitignore</c>;</item>
-    /// <item>a project input a worker names exactly (<c>project.assets.json</c>) beside an included project
-    /// input and in its <c>obj/</c> folder, where a restore writes it although <c>obj/</c> is never scanned.</item>
+    /// <item>what the scan selects, walked with the scan's own selection (<see cref="RepositoryFileSelector"/>: mandatory
+    /// exclusions, configured patterns, <c>.gitignore</c> rules): every included directory (its time moves when an entry
+    /// is added, removed or renamed in it), every included file a worker claims by extension, every <c>.gitignore</c>;</item>
+    /// <item>what each shard's worker reported it read besides those files (<see cref="WorkerInputs"/>, stored in the
+    /// snapshot): each file or directory listed there must still exist and be no newer, each absent path must still be
+    /// absent. A shard without a report is not checked here: the caller refuses it.</item>
     /// </list>
-    /// An entry has moved when the later of its modification and creation time is after the capture time less
-    /// <see cref="Tolerance"/> (file systems that keep times to one or two seconds). On Windows and macOS a creation
-    /// time is new for a file copied or unpacked with its old modification time; on Linux .NET reports no birth
-    /// time, and such a file is seen through its folder. Not seen: content written in place over an existing file
-    /// with an older modification time set afterwards (<c>cp -p</c>, <c>rsync -t</c> onto it), and an edit landing
-    /// after a worker read a file but before the capture when the host then stops before its watcher reports it.
-    /// The walk stops at the first moved entry.
+    /// An entry has changed when its time is after the capture time less <see cref="Tolerance"/> (file systems keeping
+    /// times to a second or two). The root is the exception for one time: the one its writer recorded once its cache
+    /// directory existed, since making <c>.codecontext/</c> moves the root's time just before the first capture.
+    /// A time more than <see cref="Tolerance"/> ahead of now counts as changed, flagged <see cref="SnapshotFreshnessResult.InFuture"/>.
     /// </summary>
     internal static class SnapshotFreshness
     {
-        /// <summary>Times within this much before the capture count as after it.</summary>
+        /// <summary>Times within this much before the capture count as after it; times this much ahead of now are not believed.</summary>
         public static readonly TimeSpan Tolerance = TimeSpan.FromSeconds(2);
 
-        /// <summary>Where NuGet writes <c>project.assets.json</c> beside a project by default.</summary>
-        private const string IntermediateDirectory = "obj";
-
         /// <param name="claimsExtension">Whether a worker indexes files with this extension.</param>
-        /// <param name="isProjectInput">Whether a worker treats this file as a project input (path, included).</param>
-        /// <param name="exactProjectInputNames">Project inputs that workers name exactly rather than by extension.</param>
+        /// <param name="inputs">Each loaded shard's reported inputs.</param>
+        /// <param name="rootTimeTicks">The root's time its writer recorded (<see cref="SnapshotHeader.RootTimeTicks"/>); 0 for none.</param>
+        /// <param name="nowUtc">The clock; <see cref="DateTime.UtcNow"/> unless given (tests).</param>
         /// <param name="tolerance"><see cref="Tolerance"/> unless given (tests).</param>
         public static SnapshotFreshnessResult Check(
             RepositoryFileSelector selector,
             string rootPath,
             DateTime capturedUtc,
             Func<string, bool> claimsExtension,
-            Func<string, bool, bool> isProjectInput,
-            IReadOnlyCollection<string> exactProjectInputNames,
+            IEnumerable<WorkerInputs> inputs,
+            long rootTimeTicks = 0,
+            DateTime? nowUtc = null,
             TimeSpan? tolerance = null)
         {
             var started = Stopwatch.GetTimestamp();
             var root = Path.GetFullPath(rootPath);
-            var limit = capturedUtc - (tolerance ?? Tolerance);
+            var slack = tolerance ?? Tolerance;
+            var limit = capturedUtc - slack;
+            var ahead = (nowUtc ?? DateTime.UtcNow) + Tolerance;
             var checkedCount = 0;
             string? moved = null;
+            string? why = null;
+            var future = false;
 
-            bool Moved(string path, DateTime lastWrite, DateTime creation)
+            string Shown(string path)
+            {
+                var relative = Path.GetRelativePath(root, path);
+                return relative == ".." || relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal)
+                    || Path.IsPathFullyQualified(relative)
+                    ? path
+                    : relative.Replace('\\', '/');
+            }
+
+            bool Changed(string path, DateTime time)
             {
                 checkedCount++;
-                if (lastWrite <= limit && creation <= limit) return false;
-                moved = Path.GetRelativePath(root, path).Replace('\\', '/');
+                if (time <= limit) return false;
+                moved = Shown(path);
+                future = time > ahead;
+                why = future ? "has a time in the future" : "changed after the saved index";
                 return true;
             }
 
-            if (!TryTimes(root, out var rootWrite, out var rootCreation) || Moved(root, rootWrite, rootCreation))
-                return new SnapshotFreshnessResult(checkedCount, 1, moved ?? ".", Stopwatch.GetElapsedTime(started));
+            SnapshotFreshnessResult Result() => new(checkedCount, moved, why, future, Stopwatch.GetElapsedTime(started));
 
-            var projectDirectories = new HashSet<string>(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
-            selector.WalkIncludedWithTimes(entry =>
+            checkedCount++;
+            if (!FileChangeTime.TryRead(root, out var rootTime))
             {
-                var relevant = entry.IsDirectory
-                    || claimsExtension(Path.GetExtension(entry.Path))
-                    || selector.IsIgnoreFile(entry.Path);
-                if (!relevant && isProjectInput(entry.Path, true))
+                (moved, why) = (".", "cannot be read");
+                return Result();
+            }
+            if (!(rootTimeTicks != 0 && rootTime.Ticks == rootTimeTicks) && Changed(root, rootTime)) return Result();
+
+            var changeTimes = FileChangeTime.ReadsChangeTime;
+            selector.WalkIncluded(withTimes: !changeTimes, entry =>
+            {
+                if (!entry.IsDirectory && !claimsExtension(Path.GetExtension(entry.Path)) && !selector.IsIgnoreFile(entry.Path)) return true;
+                DateTime time;
+                if (!changeTimes) time = entry.LastWriteTimeUtc > entry.CreationTimeUtc ? entry.LastWriteTimeUtc : entry.CreationTimeUtc;
+                else if (!FileChangeTime.TryRead(entry.Path, out time))
                 {
-                    relevant = true;
-                    if (Path.GetDirectoryName(entry.Path) is { } directory) projectDirectories.Add(directory);
+                    // Gone since the listing: the listing's directory has moved as well, unless the race is very close.
+                    checkedCount++;
+                    (moved, why) = (Shown(entry.Path), "disappeared while it was checked");
+                    return false;
                 }
-                return !relevant || !Moved(entry.Path, entry.LastWriteTimeUtc, entry.CreationTimeUtc);
+                return !Changed(entry.Path, time);
             });
-            if (moved is not null) return new SnapshotFreshnessResult(checkedCount, 1, moved, Stopwatch.GetElapsedTime(started));
+            if (moved is not null) return Result();
 
-            foreach (var directory in projectDirectories)
+            foreach (var reported in inputs)
             {
-                foreach (var name in exactProjectInputNames)
+                foreach (var file in reported.Files)
                 {
-                    foreach (var candidate in new[] { Path.Combine(directory, name), Path.Combine(directory, IntermediateDirectory, name) })
+                    if (!FileChangeTime.TryRead(file, out var time))
                     {
-                        if (!File.Exists(candidate) || !TryTimes(candidate, out var write, out var creation)) continue;
-                        if (Moved(candidate, write, creation))
-                            return new SnapshotFreshnessResult(checkedCount, 1, moved, Stopwatch.GetElapsedTime(started));
+                        checkedCount++;
+                        (moved, why) = (Shown(file), "was read for the saved index and is gone");
+                        return Result();
                     }
+                    if (Changed(file, time)) return Result();
+                }
+                foreach (var absent in reported.Absent)
+                {
+                    checkedCount++;
+                    if (!FileChangeTime.TryRead(absent, out _)) continue;
+                    (moved, why) = (Shown(absent), "was looked for and absent when the index was saved, and exists now");
+                    return Result();
                 }
             }
-            return new SnapshotFreshnessResult(checkedCount, 0, null, Stopwatch.GetElapsedTime(started));
+            return Result();
         }
 
         /// <summary>
-        /// The check as a host's routing defines it: extensions and project inputs from the workers, exact project
-        /// input names from their manifests, the selection policy from <paramref name="options"/> (a selector of its
-        /// own, so a scan's selector is never invalidated).
+        /// The check as a host's routing defines it: extensions from the workers, the selection policy from
+        /// <paramref name="options"/> (a selector of its own, so a scan's selector is never invalidated).
         /// </summary>
-        internal static Func<DateTime, SnapshotFreshnessResult> For(
-            CodeContextOptions options, LanguageWorkerService workers, IWorkerCatalog catalog, TimeSpan? tolerance = null)
-        {
-            var exactNames = catalog.Workers.SelectMany(worker => worker.Manifest.ProjectInputs ?? [])
-                .Where(input => !input.StartsWith('.'))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToList();
-            return capturedUtc => Check(
+        internal static SnapshotFreshnessResult For(
+            CodeContextOptions options, LanguageWorkerService workers, DateTime capturedUtc, IEnumerable<WorkerInputs> inputs,
+            long rootTimeTicks, TimeSpan? tolerance = null)
+            => Check(
                 new RepositoryFileSelector(Options.Create(options)), options.RootPath, capturedUtc,
                 extension => workers.TryGetParserForExtension(extension, out _),
-                (path, included) => workers.TryGetParserForProjectInput(path, included, out _),
-                exactNames, tolerance);
-        }
-
-        private static bool TryTimes(string path, out DateTime lastWrite, out DateTime creation)
-        {
-            try
-            {
-                FileSystemInfo info = Directory.Exists(path) ? new DirectoryInfo(path) : new FileInfo(path);
-                lastWrite = info.LastWriteTimeUtc;
-                creation = info.CreationTimeUtc;
-                return info.Exists;
-            }
-            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-            {
-                lastWrite = creation = default;
-                return false;
-            }
-        }
+                inputs, rootTimeTicks, tolerance: tolerance);
     }
 }

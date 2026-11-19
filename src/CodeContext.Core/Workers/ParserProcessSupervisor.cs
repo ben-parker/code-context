@@ -513,6 +513,16 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
             }
         }
 
+        if (delta.Inputs is { } inputs)
+        {
+            if (inputs.Files is null || inputs.Absent is null || inputs.Files.Contains(null!) || inputs.Absent.Contains(null!))
+            {
+                throw new ParserProtocolViolationException(
+                    $"analysis/delta for request {delta.RequestId} carried inputs without files or absent paths, or with a null one.");
+            }
+            delta = delta with { Inputs = NormalizeInputs(inputs) };
+        }
+
         var ownershipPrefix = $"{delta.ParserId}:{Uri.EscapeDataString(delta.WorkspaceId)}:";
         if (delta.Nodes.Any(node => string.IsNullOrWhiteSpace(node.Id)
                 || !node.Id.StartsWith(ownershipPrefix, StringComparison.Ordinal))
@@ -1181,5 +1191,24 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
             _lifecycleLock.Dispose();
             _shutdown.Dispose();
         }
+    }
+
+    /// <summary>The most input paths kept for one shard; a longer report is kept as none (the shard is then never answered without a worker).</summary>
+    internal const int MaxInputs = 500_000;
+
+    /// <summary>
+    /// Inputs as the host keeps them: fully qualified paths only (the schema says the rest are ignored), each once,
+    /// in ordinal order, so that two reports of the same set compare equal. Null when there are more than
+    /// <see cref="MaxInputs"/>.
+    /// </summary>
+    internal static WorkerInputs? NormalizeInputs(WorkerInputs inputs)
+    {
+        if (inputs.Files.Count + inputs.Absent.Count > MaxInputs) return null;
+        static List<string> Kept(IEnumerable<string> paths)
+            => paths.Where(path => path.Length > 0 && !path.Contains('\0') && Path.IsPathFullyQualified(path))
+                .Distinct(StringComparer.Ordinal)
+                .Order(StringComparer.Ordinal)
+                .ToList();
+        return new WorkerInputs(Kept(inputs.Files), Kept(inputs.Absent));
     }
 }

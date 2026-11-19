@@ -34,6 +34,16 @@ class UnitFingerprint(TypedDict):
     value: str
 
 
+class WorkerInputs(TypedDict):
+    """analysis/delta's optional inputs, on the first chunk of a request: everything besides the request's own
+    files that the workspace's facts depend on, complete each time, as absolute paths. files: files read and
+    directories listed, which exist; absent: paths looked for and not found. A host uses it only to decide, with
+    no worker running, whether a saved snapshot is still current."""
+
+    files: list[str]
+    absent: list[str]
+
+
 class IndexBaseline(TypedDict):
     """workspace/index params' optional baseline, sent only to a worker that declared persistentState."""
 

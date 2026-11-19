@@ -235,7 +235,8 @@ namespace CodeContext.Core.Snapshots
             Meta.GetValueOrDefault(SnapshotFormat.StateIdKey),
             Meta.GetValueOrDefault(SnapshotFormat.StateSha256Key),
             _region.Slice(Offset(SnapshotSectionKind.Coverage), Length(SnapshotSectionKind.Coverage)).ToArray(),
-            _region.Slice(Offset(SnapshotSectionKind.Fingerprints), Length(SnapshotSectionKind.Fingerprints)).ToArray());
+            _region.Slice(Offset(SnapshotSectionKind.Fingerprints), Length(SnapshotSectionKind.Fingerprints)).ToArray(),
+            _region.Slice(Offset(SnapshotSectionKind.Inputs), Length(SnapshotSectionKind.Inputs)).ToArray());
 
         // ---- Records ----
 

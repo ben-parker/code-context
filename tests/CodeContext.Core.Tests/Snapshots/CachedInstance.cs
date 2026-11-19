@@ -24,7 +24,8 @@ internal sealed class CachedInstance : IAsyncDisposable
 
     /// <param name="behavior">The fake worker's behaviour, or null for no worker at all.</param>
     /// <param name="instanceId">What status reports as the instance id (a query checks it against the registry).</param>
-    public CachedInstance(string root, string keyPath, string? behavior, string? instanceId = null)
+    /// <param name="inputs">What the fake worker reports as its inputs.</param>
+    public CachedInstance(string root, string keyPath, string? behavior, string? instanceId = null, string[]? inputs = null)
     {
         Factory = new InMemoryRepositoryFactory(NullLogger<InMemoryRepositoryFactory>.Instance);
         Factory.InitializeAsync(root).Wait();
@@ -34,7 +35,7 @@ internal sealed class CachedInstance : IAsyncDisposable
         var coverage = AnalysisCoverageRegistry.ForStore(Factory);
         var store = (IGenerationalGraphStore)Factory.CreateGraphRepository();
         Workers = new LanguageWorkerService(
-            behavior is null ? new StaticWorkerCatalog() : new StaticWorkerCatalog(FakeWorker(behavior)),
+            behavior is null ? new StaticWorkerCatalog() : new StaticWorkerCatalog(FakeWorker(behavior, inputs ?? [])),
             new AnalysisDeltaApplier(store, NullLogger<AnalysisDeltaApplier>.Instance, coverage),
             Sessions, options, NullLoggerFactory.Instance, TestWorkerOptions.Patient());
         var graphUpdate = new GraphUpdateService(Factory, options, NullLogger<GraphUpdateService>.Instance, metadata, Workers);
@@ -92,15 +93,17 @@ internal sealed class CachedInstance : IAsyncDisposable
         await Workers.DisposeAsync();
     }
 
-    internal static RegisteredWorker FakeWorker(string behavior)
+    /// <param name="inputs">Paths the fake reports as its inputs (read when they exist, absent otherwise).</param>
+    internal static RegisteredWorker FakeWorker(string behavior, params string[] inputs)
     {
         var baseDirectory = AppContext.BaseDirectory;
         var apphost = Path.Combine(baseDirectory,
             OperatingSystem.IsWindows() ? "CodeContext.FakeWorker.exe" : "CodeContext.FakeWorker");
+        string[] arguments = ["--behavior", behavior, .. inputs.SelectMany(input => new[] { "--input", input })];
         var spec = File.Exists(apphost)
-            ? new WorkerLaunchSpec("fake", "Fake Worker", apphost, ["--behavior", behavior])
+            ? new WorkerLaunchSpec("fake", "Fake Worker", apphost, arguments)
             : new WorkerLaunchSpec("fake", "Fake Worker", "dotnet",
-                [Path.Combine(baseDirectory, "CodeContext.FakeWorker.dll"), "--behavior", behavior]);
+                [Path.Combine(baseDirectory, "CodeContext.FakeWorker.dll"), .. arguments]);
         var manifest = new WorkerManifest(
             ManifestVersion: 1, ParserId: "fake", DisplayName: "Fake Worker", Version: "1.0.0-test",
             Command: "test", Args: [], MinProtocolVersion: ParserProtocol.Version, MaxProtocolVersion: ParserProtocol.Version,

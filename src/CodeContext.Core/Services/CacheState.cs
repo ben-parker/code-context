@@ -42,7 +42,9 @@ internal sealed record CacheLoadOutcome(
     ulong? SnapshotSequence = null,
     long? SizeBytes = null,
     IReadOnlyList<string>? Parsers = null,
-    long? WorkerStateBytes = null)
+    long? WorkerStateBytes = null,
+    bool SnapshotUnverified = false,
+    long SnapshotRootTimeTicks = 0)
 {
     public static CacheLoadOutcome Disabled(string reason) => new(CacheLoadKind.Disabled, reason);
 }

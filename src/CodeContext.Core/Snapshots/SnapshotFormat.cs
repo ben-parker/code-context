@@ -27,10 +27,12 @@ namespace CodeContext.Core.Snapshots
         TypeHistogram = 18,
         Coverage = 19,
         Fingerprints = 20,
+        Inputs = 21,
     }
 
     /// <summary>
-    /// Constants and record layouts of the snapshot file, format version 1. All integers are
+    /// Constants and record layouts of the snapshot file, format version 2 (version 1 had no
+    /// <see cref="SnapshotSectionKind.Inputs"/> section and no <see cref="FlagUnverified"/>; it is refused as any other version). All integers are
     /// little-endian. Offsets in the file header and shard directory are absolute; offsets inside
     /// a shard blob are relative to the blob start. Every blob and section starts on an 8-byte
     /// boundary, and the layout is dense: host meta at 256, the directory at the next 8-byte
@@ -47,7 +49,7 @@ namespace CodeContext.Core.Snapshots
     /// </summary>
     internal static class SnapshotFormat
     {
-        public const uint FormatVersion = 1;
+        public const uint FormatVersion = 2;
         public const uint EndianTag = 0x01020304;
         public const int HeaderSize = 256;
         public const int FooterSize = 40;
@@ -56,7 +58,7 @@ namespace CodeContext.Core.Snapshots
         public const int DirectoryEntrySize = 64;
         public const int ShardHeaderSize = 128;
         public const int SectionEntrySize = 24;
-        public const int SectionCount = 20;
+        public const int SectionCount = 21;
         public const int NodeRecordSize = 80;
         public const int EdgeRecordSize = 32;
         public const int IdEntrySize = 8;
@@ -65,6 +67,12 @@ namespace CodeContext.Core.Snapshots
 
         /// <summary>Header flag bit 0: paths were compared case-insensitively by the writer.</summary>
         public const uint FlagPathsCaseInsensitive = 1;
+
+        /// <summary>
+        /// Header flag bit 1: written by a host whose verification of a loaded snapshot failed (status <c>error</c>,
+        /// label <c>unverified</c>). A host loads it as any other; a process without a worker never answers from it.
+        /// </summary>
+        public const uint FlagUnverified = 2;
 
         /// <summary>NodeRecord flag bit 0: <c>metadata.external == "true"</c>.</summary>
         public const uint NodeFlagExternal = 1;
@@ -122,6 +130,7 @@ namespace CodeContext.Core.Snapshots
         public const int HeaderShardCount = 68;
         public const int HeaderShardDirectoryOffset = 72;
         public const int HeaderInstanceId = 80;
+        public const int HeaderRootTimeTicks = 96;
 
         // Host meta keys.
         public const string HostVersionKey = "hostVersion";
@@ -154,6 +163,7 @@ namespace CodeContext.Core.Snapshots
             SnapshotSectionKind.NameTable => NameEntrySize,
             SnapshotSectionKind.Coverage => 1,
             SnapshotSectionKind.Fingerprints => 1,
+            SnapshotSectionKind.Inputs => 1,
             _ => 4,
         };
 

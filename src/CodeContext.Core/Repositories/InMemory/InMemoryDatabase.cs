@@ -910,6 +910,7 @@ namespace CodeContext.Core.Repositories.InMemory
                 && string.Equals(existing.ParserVersion, supplied.ParserVersion, StringComparison.Ordinal)
                 && SameCoverage(existing.Coverage, coverage)
                 && ShardAnnotation.SameFingerprints(existing.Fingerprints, supplied.Fingerprints)
+                && ShardAnnotation.SameInputs(existing.Inputs, supplied.Inputs)
                 && Equals(existing.Lineage, lineage)
                 && ReferenceEquals(existing.State, state)
                 && Equals(existing.Anchor, anchor))

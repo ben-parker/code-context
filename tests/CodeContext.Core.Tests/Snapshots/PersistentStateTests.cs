@@ -422,17 +422,22 @@ public sealed class PersistentStateTests : IAsyncLifetime
             Assert.Equal(1, instance.Sessions.GetSnapshots().Single().RestartCount);
         });
 
-    /// <summary>Every time in the tree outside <c>.codecontext</c> an hour back, as if the snapshot were newer than the files.</summary>
+    // The time a one-shot open compares files with in place of the capture time, once the tree has "aged".
+    private DateTime? _checkAgainst;
+
+    /// <summary>
+    /// As if the snapshot were newer than every file: a one-shot open from here on compares with now in place of the
+    /// capture time (a status change time cannot be set back), so only what changes after this call counts.
+    /// </summary>
     private void AgeTheFiles()
     {
-        var past = DateTime.UtcNow - TimeSpan.FromHours(1);
-        foreach (var file in Directory.GetFiles(Root)) File.SetLastWriteTimeUtc(file, past);
-        Directory.SetLastWriteTimeUtc(Root, past);
+        _checkAgainst = DateTime.UtcNow + SnapshotFreshness.Tolerance;
+        Thread.Sleep(20);
     }
 
     private OneShotSnapshotOpen OpenOneShot()
         => OneShotSnapshot.TryOpen(new CodeContextOptions { RootPath = Root, CacheKeyPath = KeyPath },
-            new StaticWorkerCatalog(Instance.FakeWorker(["--behavior", "persistent-state"])));
+            new StaticWorkerCatalog(Instance.FakeWorker(["--behavior", "persistent-state"])), _checkAgainst);
 
     [Fact]
     public async Task TouchedWithTheSameContent_TheVerifiedStoreIsWrittenAgain_SoOneShotQueriesCanUseIt()
@@ -473,6 +478,30 @@ public sealed class PersistentStateTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task AModificationTimeInTheFuture_IsNoReasonToRewriteOnEveryStart()
+    {
+        File.SetLastWriteTimeUtc(Path.Combine(Root, "a.fake"), DateTime.UtcNow + TimeSpan.FromDays(365));
+        await FirstRunAsync();
+        AgeTheFiles();
+        var oneShot = OpenOneShot();
+        // Where the status change time is read, the future time is not believed and does not matter; elsewhere it makes
+        // the one-shot path refuse, as no snapshot could be newer.
+        if (FileChangeTime.ReadsChangeTime) Assert.True(oneShot.Snapshot is not null, oneShot.Reason);
+        else Assert.Contains("in the future", oneShot.Reason);
+
+        for (var start = 0; start < 2; start++)
+        {
+            await using var next = Start("persistent-state", checkFileTimes: true);
+            await next.StartAsync();
+            await next.WaitForAsync(() => next.ScanState.Phase == ScanPhase.Ready, "the verification scan");
+            await Task.Delay(200);
+            await next.StopAsync();
+            Assert.Equal(0, next.Snapshots.Status.WritesCompleted);
+        }
+        Assert.Equal(1UL, NewestSequence());
+    }
+
+    [Fact]
     public async Task TouchedThenTheVerificationFails_TheLoadedStoreIsNotStampedNewer()
     {
         await FirstRunAsync();
@@ -506,9 +535,10 @@ public sealed class PersistentStateTests : IAsyncLifetime
         }
         Assert.Null(Newest().Shards.Single().Info.StateFileName);
         Assert.Empty(StateFiles());
+        Assert.True(Newest().Header!.Unverified);
         // Facts no worker confirmed: a one-shot query does not answer from them, however old the files are.
         AgeTheFiles();
-        Assert.Contains("saved without its worker's state", OpenOneShot().Reason);
+        Assert.Contains("written while the index was unverified", OpenOneShot().Reason);
         Assert.Equal(CacheState.Replaced, await NextVerificationAsync());
     }
 
@@ -581,7 +611,9 @@ public sealed class PersistentStateTests : IAsyncLifetime
             Coordinator = new IndexCoordinator(graphUpdate, ScanState, options, NullLoggerFactory.Instance, cacheState: CacheState);
             Snapshots = new SnapshotService(Coordinator, Factory.Database, ScanState, settings, Startup, TimeProvider.System,
                 SnapshotLog, CacheState, Workers,
-                filesSince: checkFileTimes ? SnapshotFreshness.For(options.Value, Workers, Catalog, TimeSpan.Zero) : null);
+                filesSince: checkFileTimes
+                    ? (captured, inputs, rootTicks) => SnapshotFreshness.For(options.Value, Workers, captured, inputs, rootTicks, TimeSpan.Zero)
+                    : null);
             Status = new StatusService(Factory.CreateNodeRepository(), Factory.CreateEdgeRepository(), metadata, Factory, options,
                 ScanState, Sessions, new ApiMetrics(), coverage: coverage, cacheState: CacheState);
         }

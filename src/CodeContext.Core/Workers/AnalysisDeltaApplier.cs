@@ -34,6 +34,9 @@ public sealed class AnalysisDeltaApplier : IAnalysisDeltaSink
         /// <summary>The first chunk's fingerprints, which is where a worker sends them; later chunks' are ignored.</summary>
         public IReadOnlyList<UnitFingerprint>? Fingerprints { get; } = first.Fingerprints;
 
+        /// <summary>The first chunk's inputs, as for <see cref="Fingerprints"/>.</summary>
+        public WorkerInputs? Inputs { get; } = first.Inputs;
+
         public void Append(AnalysisDelta delta)
         {
             if (!string.Equals(ParserVersion, delta.ParserVersion, StringComparison.Ordinal))
@@ -158,6 +161,7 @@ public sealed class AnalysisDeltaApplier : IAnalysisDeltaSink
                 Annotation = new ShardAnnotation(pending.ParserVersion, pending.Coverage)
                 {
                     Fingerprints = pending.Fingerprints,
+                    Inputs = pending.Inputs,
                     Lineage = origin is null
                         ? null
                         : new ShardLineage(origin.Incarnation, origin.Request,

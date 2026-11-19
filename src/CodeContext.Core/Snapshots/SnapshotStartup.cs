@@ -27,7 +27,8 @@ namespace CodeContext.Core.Snapshots
         SnapshotHostMeta? Host = null,
         ulong NextSequence = 1,
         SnapshotView? LoadedView = null,
-        IReadOnlyList<string>? DroppedStateFiles = null);
+        IReadOnlyList<string>? DroppedStateFiles = null,
+        long RootTimeTicks = 0);
 
     /// <summary>
     /// The start-up step of plan 3.5, run once as the first step of <see cref="IndexCoordinator"/> before
@@ -221,6 +222,9 @@ namespace CodeContext.Core.Snapshots
             var directory = CacheDirectory.Open(_settings.RootPath, _settings.WorkspaceId, out var refusal);
             if (directory is null) return Disable(refusal!);
             lock (_gate) _directory = directory;
+            // Making .codecontext/ moved the root's time; snapshots record the time it has now, so that a check
+            // without a worker does not take that for a change (SnapshotFreshness).
+            var rootTimeTicks = FileChangeTime.TryRead(Path.GetFullPath(_settings.RootPath), out var rootTime) ? rootTime.Ticks : 0;
 
             _settings.BeforeLock?.Invoke(directory);
             var lockResult = directory.TryAcquireWriterLock(out var lockStream, out var lockReason);
@@ -246,7 +250,7 @@ namespace CodeContext.Core.Snapshots
 
             var (outcome, view, nextSequence, droppedStateFiles) = SelectAndLoad(directory, key, host, writer, beforePublish);
             return writer
-                ? new SnapshotStartupResult(SnapshotCacheMode.Writer, null, outcome, directory, key, host, nextSequence, view, droppedStateFiles)
+                ? new SnapshotStartupResult(SnapshotCacheMode.Writer, null, outcome, directory, key, host, nextSequence, view, droppedStateFiles, rootTimeTicks)
                 : new SnapshotStartupResult(SnapshotCacheMode.ReadOnly, lockReason, outcome, Host: host, Key: key);
         }
 
@@ -371,7 +375,8 @@ namespace CodeContext.Core.Snapshots
             foreach (var (_, annotation) in annotations)
                 if (annotation.State is { } state) stateBytes = (stateBytes ?? 0) + state.Bytes;
             var published = new CacheLoadOutcome(
-                CacheLoadKind.Loaded, null, header.CreatedUtcTicks, header.Sequence, header.FileLength, parsers, stateBytes);
+                CacheLoadKind.Loaded, null, header.CreatedUtcTicks, header.Sequence, header.FileLength, parsers, stateBytes,
+                header.Unverified, header.RootTimeTicks);
             // Readers run while this step does: the state says "serving a loaded snapshot" before any loaded
             // fact is visible, so no answer from it goes unlabelled. A failed publish corrects it (RunLoadStep).
             beforePublish?.Invoke(published);
@@ -400,46 +405,64 @@ namespace CodeContext.Core.Snapshots
             CacheDirectory directory, IReadOnlyList<CacheFile> files, byte[] key, SnapshotExpectations expectations, bool load, List<Refusal> refusals,
             ref int costly)
         {
+            return TryNewestFirst<(SnapshotLoadResult, List<KeyValuePair<ShardKey, ShardAnnotation>>, List<(ShardKey, IReadOnlyList<ProjectCoverage>)>)?>(
+                files, key, expectations, ref costly,
+                (_, file, _) =>
+                {
+                    if (!load) return (true, null, SnapshotRejection.None, null);
+                    var result = SnapshotLoader.Materialize(file, Accept);
+                    if (!result.Loaded) return (false, null, result.Rejection, result.Reason);
+                    return TryAnnotations(result, directory, out var annotations, out var coverage, out var coverageFailure)
+                        ? (true, (result, annotations, coverage), SnapshotRejection.None, null)
+                        : (false, null, SnapshotRejection.Structure, coverageFailure);
+                },
+                (candidate, rejection, reason) =>
+                {
+                    refusals.Add(new Refusal(candidate, rejection, reason));
+                    _logger.LogDebug("Ignoring snapshot {Name}: {Rejection} {Reason}.", candidate.Name, rejection, reason);
+                });
+        }
+
+        /// <summary>
+        /// The candidate loop of a host's load and of a one-shot query, one implementation: the snapshots with a usable
+        /// sequence, newest first (name order among equals), each opened and authenticated; at most
+        /// <see cref="SnapshotService.MaxCostlyRefusals"/> refusals at or after authentication are tried. An authenticated
+        /// file is handed to <paramref name="use"/> (with how long the open took), which either ends the loop with a value
+        /// or refuses the file, which then counts as costly. The file is closed when <paramref name="use"/> returns.
+        /// </summary>
+        /// <returns>The candidate that ended the loop and its value; nulls when none did.</returns>
+        internal static (CacheFile? Candidate, T? Value) TryNewestFirst<T>(
+            IEnumerable<CacheFile> files, byte[] key, SnapshotExpectations expectations, ref int costly,
+            Func<CacheFile, SnapshotFile, TimeSpan, (bool Done, T? Value, SnapshotRejection Rejection, string? Reason)> use,
+            Action<CacheFile, SnapshotRejection, string?> refused)
+        {
             foreach (var candidate in files
                          .Where(file => file.Kind == CacheFileKind.Snapshot && IsUsable(file.Sequence))
                          .OrderByDescending(file => file.Sequence).ThenBy(file => file.Name, StringComparer.Ordinal))
             {
                 if (costly >= SnapshotService.MaxCostlyRefusals) break;
-
+                var openedAt = Stopwatch.GetTimestamp();
+                var opened = SnapshotFile.Open(candidate.Path, key, expectations);
                 SnapshotRejection rejection;
                 string? reason;
                 bool passedHostMeta;
-                if (!load)
+                if (opened.File is { } file)
                 {
-                    var opened = SnapshotFile.Open(candidate.Path, key, expectations);
-                    using (opened.File)
+                    using (file)
                     {
-                        if (opened.File is not null) return (candidate, null);
+                        var (done, value, refusal, why) = use(candidate, file, Stopwatch.GetElapsedTime(openedAt));
+                        if (done) return (candidate, value);
+                        (rejection, reason, passedHostMeta) = (refusal, why, true);
                     }
-                    (rejection, reason, passedHostMeta) = (opened.Rejection, opened.Reason, opened.PassedHostMeta);
                 }
                 else
                 {
-                    var result = SnapshotLoader.Load(candidate.Path, key, expectations, Accept);
-                    if (!result.Loaded)
-                    {
-                        (rejection, reason, passedHostMeta) = (result.Rejection, result.Reason, result.PassedHostMeta);
-                    }
-                    else if (TryAnnotations(result, directory, out var annotations, out var coverage, out var coverageFailure))
-                    {
-                        return (candidate, (result, annotations, coverage));
-                    }
-                    else
-                    {
-                        (rejection, reason, passedHostMeta) = (SnapshotRejection.Structure, coverageFailure, true);
-                    }
+                    (rejection, reason, passedHostMeta) = (opened.Rejection, opened.Reason, opened.PassedHostMeta);
                 }
-
-                refusals.Add(new Refusal(candidate, rejection, reason));
+                refused(candidate, rejection, reason);
                 if (IsCostly(rejection, passedHostMeta)) costly++;
-                _logger.LogDebug("Ignoring snapshot {Name}: {Rejection} {Reason}.", candidate.Name, rejection, reason);
             }
-            return (null, null);
+            return (null, default);
         }
 
         private bool Accept(ShardKey key)
@@ -503,6 +526,24 @@ namespace CodeContext.Core.Snapshots
                         return false;
                     }
                 }
+                WorkerInputs? inputs = null;
+                if (shard.Info.Inputs is { Length: > 0 } inputBytes)
+                {
+                    try
+                    {
+                        inputs = JsonSerializer.Deserialize(inputBytes, ParserProtocolJsonContext.Default.WorkerInputs);
+                    }
+                    catch (JsonException exception)
+                    {
+                        failure = $"the inputs of shard {shard.Key} do not parse: {exception.Message}";
+                        return false;
+                    }
+                    if (inputs?.Files is null || inputs.Absent is null || inputs.Files.Contains(null!) || inputs.Absent.Contains(null!))
+                    {
+                        failure = $"the inputs of shard {shard.Key} are not lists of paths";
+                        return false;
+                    }
+                }
                 WorkerStateBinding? state = null;
                 if (shard.Info is { StateFileName: { } stateFile, StateId: { } stateId, StateSha256: { } sha256 }
                     && WorkerStateFile.IsStateId(stateId) && WorkerStateFile.IsSha256(sha256)
@@ -510,10 +551,11 @@ namespace CodeContext.Core.Snapshots
                 {
                     state = new WorkerStateBinding(stateFile, stateId, sha256, existing.Length);
                 }
-                if (shard.Info.ParserVersion is null && projects is null && fingerprints is null && state is null) continue;
+                if (shard.Info.ParserVersion is null && projects is null && fingerprints is null && inputs is null && state is null) continue;
                 annotations.Add(KeyValuePair.Create(shard.Key, new ShardAnnotation(shard.Info.ParserVersion, projects)
                 {
                     Fingerprints = fingerprints,
+                    Inputs = inputs,
                     State = state,
                     Anchor = state is null ? null : ShardAnchor.Of(shard.Shard),
                 }));

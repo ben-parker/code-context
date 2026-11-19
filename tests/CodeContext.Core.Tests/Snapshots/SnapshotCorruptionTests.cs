@@ -94,7 +94,11 @@ public class SnapshotCorruptionTests
 
     [Fact]
     public void FormatVersion_IsChecked()
-        => AssertRefused(Patch32(SmallFile(), SnapshotFormat.HeaderFormatVersion, 2), SnapshotRejection.FormatVersion);
+    {
+        // Version 1 had no inputs section and no unverified flag: refused as any other version, so a host rebuilds.
+        AssertRefused(Patch32(SmallFile(), SnapshotFormat.HeaderFormatVersion, 1), SnapshotRejection.FormatVersion);
+        AssertRefused(Patch32(SmallFile(), SnapshotFormat.HeaderFormatVersion, SnapshotFormat.FormatVersion + 1), SnapshotRejection.FormatVersion);
+    }
 
     [Fact]
     public void EndianTag_IsChecked()

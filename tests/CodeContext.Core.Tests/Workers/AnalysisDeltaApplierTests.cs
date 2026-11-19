@@ -218,6 +218,35 @@ public class AnalysisDeltaApplierTests
     }
 
     [Fact]
+    public async Task Inputs_AreStoredOnCommitAndClearedWhenAbsent()
+    {
+        var first = new WorkerInputs(["/repo/tsconfig.json"], ["/repo/jsconfig.json"]);
+        Assert.True(await _applier.ApplyAsync(Delta(1, [Node("fake:ws-1:A", "a.fake")], isLastForRequest: false) with { Inputs = first }));
+        Assert.True(await _applier.ApplyAsync(Delta(1, [Node("fake:ws-1:B", "b.fake")]) with { Inputs = new WorkerInputs([], []) }));
+        Assert.Same(first, AnnotationOf()!.Inputs);
+
+        // The same set again is no change to the annotation; a commit that carries none clears it.
+        Assert.True(await _applier.ApplyAsync(Delta(2, [Node("fake:ws-1:A", "a.fake")], replacesWorkspace: false, replacesFiles: ["a.fake"])
+            with { Inputs = new WorkerInputs(["/repo/tsconfig.json"], ["/repo/jsconfig.json"]) }));
+        Assert.True(ShardAnnotation.SameInputs(first, AnnotationOf()!.Inputs));
+        Assert.True(await _applier.ApplyAsync(Delta(3, [Node("fake:ws-1:A", "a.fake")], replacesWorkspace: false, replacesFiles: ["a.fake"])));
+        Assert.Null(AnnotationOf()!.Inputs);
+    }
+
+    [Fact]
+    public void Inputs_AreKeptFullyQualified_OnceEach_InOrder_AndDroppedWhenThereAreTooMany()
+    {
+        var root = OperatingSystem.IsWindows() ? @"C:\repo\" : "/repo/";
+        var normalized = ParserProcessSupervisor.NormalizeInputs(new WorkerInputs(
+            [root + "b", "relative/a", root + "a", root + "b", "", root + "x\0y"], [root + "z", "C:", root + "z"]))!;
+
+        Assert.Equal([root + "a", root + "b"], normalized.Files);
+        Assert.Equal([root + "z"], normalized.Absent);
+        Assert.Null(ParserProcessSupervisor.NormalizeInputs(new WorkerInputs(
+            Enumerable.Range(0, ParserProcessSupervisor.MaxInputs + 1).Select(i => root + i).ToList(), [])));
+    }
+
+    [Fact]
     public async Task Origin_BecomesTheCommitsLineage_EstablishingOnAReplacementOrABaseline()
     {
         var sink = (IAnalysisDeltaSink)_applier;
