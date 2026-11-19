@@ -149,6 +149,10 @@ instance record to stdout.
 
 Instances shut down after 120 minutes without API activity by default. Set
 `--idle-timeout 0` to disable idle shutdown or pass another number of minutes.
+Inside that, a language worker with no file change, refresh or syntax-tree request for
+15 minutes exits and the instance answers from its index; the next change restarts it
+(`CodeContext__WorkerHibernateSeconds`, `0` keeps workers running). The C# worker does so
+only with the cache on, so it restarts from its saved state.
 
 ## REST API
 

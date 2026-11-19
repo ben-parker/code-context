@@ -153,6 +153,22 @@ answers with no worker process; status shows `hibernated`, not failed.
 Dependency: cache plan phase 7 (dormant units) is not required and is not scheduled;
 reconsider it only if wake time is the complaint.
 
+As built, where it differs from cache plan 3.9: the setting is
+`CodeContext:WorkerHibernateSeconds` (default 900 s, 0 off; no CLI flag, no
+`WorkerIdleMinutes`). `WorkerHibernation` arms a timer at the end of each worker operation
+and runs the check as a coordinator maintenance command; the worker service decides under the
+worker's lock. A `persistentState` worker hibernates only when its state is recorded with its
+current shard, the file exists and the written snapshot matches the store, so with
+`--no-cache` or a read-only instance it stays up; other workers always may. The first
+operation on a hibernated worker re-indexes it (baseline where there is one); a replacement
+subsumes the pending batch, an accepted baseline is followed by the batch's content changes as
+touches. A syntax tree wakes through a coordinator mutation command (busy while it runs).
+Waking shows as `starting` with the message `waking from hibernation`; there is no `waking`
+cache label (answers while hibernated are current, not cached). Not built: crash restart from
+the last capture. The supervisor race of section 9 was not reproduced; hibernation found that
+the host's JSON-RPC reader refuses the `"result": null` every worker answers to `shutdown`,
+which stop and hibernate both mask.
+
 ### M4: gate
 
 After M1 to M3, measure again on this repository and on jellyfin. Mapped shard (cache

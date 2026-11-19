@@ -74,7 +74,11 @@ rg --files -g '*.cs' -g '*.ts'
 At runtime, `WorkerCatalog` discovers compatible manifests from
 `CODECONTEXT_WORKERS_DIR`, `~/.codecontext/workers`, then the bundled `workers`
 directory. It never auto-executes repository-local manifests. `LanguageWorkerService`
-supervises discovered workers and routes files by claimed extension.
+supervises discovered workers and routes files by claimed extension. `WorkerHibernation`
+stops a worker idle for `CodeContext:WorkerHibernateSeconds` (default 900, 0 off) from a
+coordinator maintenance command; a `persistentState` worker only once its state is saved
+with a written snapshot. The next operation on it re-indexes first (offering that state),
+so hibernate and wake stay on the coordinator's ordered path.
 
 `IndexCoordinator` is the only writer-side entry point. It serializes startup scans,
 full/single-file refreshes, and coalesced `FileWatcherService` events. Workers stream
