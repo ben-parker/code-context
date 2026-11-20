@@ -231,18 +231,21 @@ namespace CodeContext.Core.Diffs
         /// <summary>
         /// The comment lines of the file at <paramref name="fullPath"/>, read as <see cref="Inspect"/> reads it and only
         /// when its content is still <paramref name="blob"/> (when given); null otherwise. The file is held whole only
-        /// while it is read, in a pooled buffer.
+        /// while it is read (in a pooled buffer when it is under 1 MB), and its lines are never held as strings.
         /// </summary>
         public CommentRuns? ReadComments(string fullPath, string? blob)
         {
             if (_refused(fullPath)) return null;
             byte[]? buffer = null;
+            var pooled = false;
             try
             {
                 using var stream = Open(fullPath);
                 if (stream.Length > MaxHashedBytes) return null;
                 var length = (int)stream.Length;
-                buffer = System.Buffers.ArrayPool<byte>.Shared.Rent(length + 1);
+                // A large buffer is left to the collector: the pool would keep it for the life of an idle host.
+                pooled = length < MaxPooledBytes;
+                buffer = pooled ? System.Buffers.ArrayPool<byte>.Shared.Rent(length + 1) : new byte[length + 1];
                 var total = 0;
                 int read;
                 while (total <= length && (read = stream.Read(buffer, total, length + 1 - total)) > 0) total += read;
@@ -256,9 +259,12 @@ namespace CodeContext.Core.Diffs
             }
             finally
             {
-                if (buffer is not null) System.Buffers.ArrayPool<byte>.Shared.Return(buffer);
+                if (pooled) System.Buffers.ArrayPool<byte>.Shared.Return(buffer!);
             }
         }
+
+        /// <summary>The largest file read into a pooled buffer.</summary>
+        private const int MaxPooledBytes = 1024 * 1024;
 
         private static FileStream Open(string fullPath)
             => new(fullPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, bufferSize: 1, FileOptions.SequentialScan);

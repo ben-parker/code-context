@@ -346,6 +346,27 @@ public sealed class GraphImpactTests : IDisposable
     }
 
     [Fact]
+    public async Task ACommentAboveADeclaration_IsFoundInALargeFileWithAVeryLongLine()
+    {
+        // Over the size read into a pooled buffer, with one line longer than any looked at: read all the same.
+        var filler = string.Concat(Enumerable.Repeat("// filler line of a large file\n", 40_000));
+        var blob = WriteText("src/Big.cs", "class Big\n{\n" + filler + "    int x = " + new string('1', 70_000) + ";\n    /// <summary>Doc.</summary>\n    void Run()\n    {\n    }\n}\n");
+        var service = new GraphTestGraph(_root) { Freshness = new Fresh(DateTime.UtcNow.AddHours(1)) }
+            .Node("Big", "Class", file: "src/Big.cs", line: 0, endLine: 40_007)
+            .Node("Big.Run", file: "src/Big.cs", line: 40_004, endLine: 40_006)
+            .Build();
+
+        var doc = await Impact(service, Diff("src/Big.cs", blob, "@@ -40004 +40004 @@\n-    /// <summary>Old.</summary>\n+    /// <summary>Doc.</summary>"));
+        Assert.Empty(doc.Changes);
+        Assert.Equal(2, doc.IgnoredLines);
+        Assert.True(doc.Complete);
+
+        // A comment directly under the long line stands above no declaration: the type's.
+        var filler2 = await Impact(service, Diff("src/Big.cs", blob, "@@ -40002,0 +40002 @@\n+// filler line of a large file"));
+        Assert.Equal([(I("Big"), "40002")], filler2.Changes.Select(change => (change.Identifier, change.ChangedLines)));
+    }
+
+    [Fact]
     public async Task ACommentLookingLineOfAStringInANamespace_ChangesTheNamespace()
     {
         // A namespace holds statements no declaration does, as a module does: a line of its template literal reads as

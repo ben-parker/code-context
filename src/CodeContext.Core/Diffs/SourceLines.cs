@@ -118,6 +118,9 @@ namespace CodeContext.Core.Diffs
 
         private CommentMarks _marks;
 
+        /// <summary>The longest line looked at; a longer one counts as code.</summary>
+        private const int MaxLineBytes = 64 * 1024;
+
         public int Count { get; private set; }
 
         private CommentRuns(int lines)
@@ -140,6 +143,12 @@ namespace CodeContext.Core.Diffs
                     var end = text.IndexOf((byte)'\n');
                     var line = end < 0 ? text : text[..end];
                     text = end < 0 ? default : text[(end + 1)..];
+                    // A line too long to be a comment anyone wrote (minified code) is read as code, not decoded.
+                    if (line.Length > MaxLineBytes)
+                    {
+                        runs.Add("x");
+                        continue;
+                    }
                     if (line.Length > buffer.Length)
                     {
                         System.Buffers.ArrayPool<char>.Shared.Return(buffer);
