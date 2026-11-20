@@ -401,8 +401,8 @@ Decisions where the backlog was silent:
    (`git -c core.fsmonitor=false diff --no-ext-diff --no-textconv --no-color --no-relative --src-prefix=a/
    --dst-prefix=b/ --full-index <base> HEAD`, the new side checked out); a diff against the working tree runs the
    repository's `filter.*.clean` drivers whatever the flags (checked with git 2.43), and `--no-color`, the explicit
-   prefixes and `--no-relative` keep a configured colour, `diff.noprefix` or `diff.relative` from reshaping the output. Blob ids are computed in the host (SHA-1 and SHA-256, as git
-   computes them), never asked of git. The CLI reads and checks the diff before an instance is asked or started.
+   prefixes and `--no-relative` keep a configured colour, `diff.noprefix` or `diff.relative` from reshaping the
+   output. Blob ids are computed in the host (SHA-1 and SHA-256, as git computes them), never asked of git. The CLI reads and checks the diff before an instance is asked or started.
 2. The diff must describe the index's own file contents, and where that cannot be shown nothing is mapped:
    - Until a read of every file has finished in this instance (first scan running, `cache verifying`, or a failed
      verification) the request is refused: REST 503 `INDEX_NOT_READY`, MCP `isError`; the CLI waits for a finished
@@ -411,7 +411,8 @@ Decisions where the backlog was silent:
      move it. `query --snapshot` uses the capture time, after its freshness check.
    - A file whose change time is later than that is `notYetIndexed` (mid-reindex, edited since): retry.
    - A file whose content is not the diff's new-side blob id is `contentMismatch` (a diff between commits not
-     checked out, or edited since the diff was made); a CRLF checkout is compared without its carriage returns. A
+     checked out, or edited since the diff was made, or a `.gitattributes` filter such as LFS, `ident` or
+     `working-tree-encoding` rewrites it on checkout); a CRLF checkout is compared without its carriage returns. A
      diff with no `index` line (`diff -u`) is mapped but counted `contentUnchecked`, and the answer is not complete.
    - Uncommitted changes: `git diff <base>` compares with the working tree and is checked as above; `git diff
      --cached` matches only where the working tree equals the index; untracked files appear only after `git add
@@ -426,8 +427,8 @@ Decisions where the backlog was silent:
    header). In an added file whose declarations the diff changes, a `using` that is not `global`, a namespace line, a
    lone brace, `#nullable` and `#pragma warning` bind only that file's declarations, every one of them a change, so
    they are counted with `ignoredLines` instead (`UnifiedDiff.IsFileScopedDirective`); a `global using`, an
-   `[assembly:]` attribute or a statement there is still reported; removed lines
-   between or at the edge of declarations, including a replaced signature line (`removedBetweenDeclarations`: what
+   `[assembly:]` attribute or a statement there is still reported. Also never dropped: removed lines between or at
+   the edge of declarations, including a replaced signature line (`removedBetweenDeclarations`: what
    they held exists only on the old side); `deletedFile` (or `notYetIndexed` while still indexed, `contentMismatch`
    while still on disk); `renamed` (the new path is mapped by its hunks; what named the old path is not in the
    index); `binary`; `notIndexed` (no declaration in the file: unparsed, excluded, or a project or config file);
@@ -452,17 +453,20 @@ Decisions where the backlog was silent:
    attributed to the change that reached it first: the walk starts from the changes in file and line order, so the
    nearest change has it, and of changes at one distance the first listed. One generation as in F1 item 6.
 7. The diff is hostile data: at most 16,777,216 characters, 10,000 files, paths of 4,096 characters and line numbers
-   of 100,000,000; every hunk is checked against its header's counts and a truncated, garbled or repeated-file diff
+   of 100,000,000; every hunk is checked against its header's counts (a side may start at line 0 only with no lines)
+   and a truncated, garbled or repeated-file diff
    (`git log -p`) is refused with its line and reason, never read in part. Paths are unquoted (C escapes, UTF-8),
-   stripped of git's one-letter prefix (mnemonic prefixes too), and refused when absolute, with `..`, `.` or empty
+   stripped of git's one-letter prefix (mnemonic prefixes too; so with `--no-prefix` a path whose first directory is
+   one lowercase letter loses it, and a `diff --git` line of two paths under three characters each is refused), and
+   refused when absolute, with `..`, `.` or empty
    segments, a control character or invalid UTF-8; such a path is never looked at. Paths are relative to the git work
    tree holding the root (the nearest ancestor with `.git`, found by looking, not by asking git). Only line numbers
    are kept. The working tree is read only through `ReportedPaths.RefusedOnDisk` (no link the repository holds, no
    share but the root's), regular files only, at most 64 MB hashed, in 64 KB reads (a second pass for a CRLF checkout),
-   never held whole.
+   never held whole; only a module file with a changed comment-looking line (item 5) is read whole, once.
 8. REST takes a JSON body, not a query string (a diff is too large and too varied for one), up to 64 MiB, checked as
    strictly as the graph tools' MCP arguments (unknown or miscased names, wrong kinds, missing or blank `diff`);
-   a query string is refused.
+   a query string is refused, and a body not sent as `application/json` is a bare 415.
 
 ## Log
 

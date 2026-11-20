@@ -157,8 +157,9 @@ namespace CodeContext.Core.Services
                     mismatched++;
                     Unmapped("contentMismatch",
                         "The file in the working tree is not the diff's new side (its blob id differs): the diff is between commits that "
-                        + "are not checked out, or the file changed since the diff was made. Its line numbers would point at the wrong "
-                        + "declarations, so none is mapped.");
+                        + "are not checked out, the file changed since the diff was made, or a .gitattributes filter (LFS, ident, "
+                        + "working-tree-encoding) rewrites it on checkout. Its line numbers would point at the wrong declarations, so "
+                        + "none is mapped.");
                     continue;
                 }
                 if (verdict == DiffWorkingTree.Verdict.Match) response.ContentChecked++;

@@ -79,8 +79,8 @@ curl "http://localhost:<port>/api/graph/affected?identifier=X&maxDepth=5&limit=2
 curl "http://localhost:<port>/api/graph/hubs?limit=20&within=src/Core&type=Class&relation=CALLS&includeTests=false&includeExternal=false"
 ```
 
-Diff impact is a `POST` with a JSON body (MCP: `get_impact`, the same names); a query
-string is refused:
+Diff impact is a `POST` with a JSON body sent as `application/json` (otherwise a bare 415;
+MCP: `get_impact`, the same names); a query string is refused:
 
 ```bash
 git diff $(git merge-base main HEAD) | jq -Rs '{diff: ., maxDepth: 5, limit: 20}' \
