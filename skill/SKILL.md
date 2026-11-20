@@ -24,7 +24,8 @@ and docs.
   text, and to cross-check an empty result before a decision rests on it.
 - **Use a whole-graph query** (below) when the question spans many hops: how A reaches B,
   everything a change could break, the load-bearing symbols of an area. One call replaces
-  a chain of `query` calls stitched together by hand.
+  a chain of `query` calls stitched together by hand. To review or prepare a change, give
+  its diff to `query impact`.
 - **Use the [native syntax tree](references/native-syntax.md)** when exact structure
   matters: overloads, modifiers, spans.
 
@@ -83,6 +84,7 @@ Reading results:
 codecontext query path StartCommandHandler ContextService   # how does one reach the other
 codecontext query affected ContextService.FindPathAsync     # what could break if it changes
 codecontext query hubs --within src/CodeContext.Core        # the most depended-on symbols there
+git diff $(git merge-base main HEAD) | codecontext query impact   # what this branch could break
 ```
 
 - Identifiers match **exactly**: a canonical identifier, an exact or qualified name
@@ -114,6 +116,27 @@ codecontext query hubs --within src/CodeContext.Core        # the most depended-
   20; `truncated` with the total), `--tests` lists the test-file dependents counted in
   `testsHidden` and lets impact move on from them (without it, a test double never makes
   its callers' callers affected).
+- **`impact`** reads a unified diff from stdin or `--diff FILE` and answers `affected` for
+  everything it changes, in one walk: `changed` lists the declarations its changed lines
+  fall in (`member`, or `container` for a type's or module's own lines: its header, its
+  closing line, between members; impact is then walked from the type alone), each with its
+  lines and the dependents attributed to it; `affected` lists them as `affected` does, each
+  `from` the change that reached it first; `tests` lists the test files in reach. The
+  diff's new side must be the working tree: diff against a base, not between two commits
+  (`git diff $(git merge-base main HEAD)`, or `git diff --cached` for what is staged;
+  untracked files appear only after `git add -N`). A file is mapped only when its content
+  is the diff's new side (its blob id, so keep git's `index` lines) and the instance read
+  it after it last changed; `impact` waits for a finished scan. The first line says
+  `complete` or `incomplete`, and `incomplete` exits 2: every part that maps to nothing is
+  listed under `unmapped` with its reason, among them `outsideDeclarations` (imports,
+  usings, a namespace line), `removedBetweenDeclarations` (removed or replaced lines outside
+  a member: a deleted, renamed or re-signed declaration exists only on the old side, so what
+  used it is not in the index; `rg` its old name), `deletedFile`, `renamed`, `binary`,
+  `notIndexed` (a file no worker parses: a project or config file can still matter),
+  `contentMismatch` (the working tree is not the diff's new side), `notYetIndexed` (retry),
+  `outsideRoot` and `invalidPath`. Blank lines and comment lines no member holds change
+  nothing (`ignored`). `--depth`, `--limit` (per list), `--tests` and `--relation` mean what
+  they mean for `affected`. The tool never runs git: you run it.
 - **`hubs`** ranks symbols by distinct direct dependents, then by their files. A type's
   count is uses of the type itself, not of its members (`--type Method` ranks members).
   `--within DIR` (repository-relative), `--type`, `--limit`, `--relation` (kinds counted),
@@ -129,7 +152,7 @@ codecontext query hubs --within src/CodeContext.Core        # the most depended-
   only contains the letters (`Latest.cs`, `WorkerLaunchSpec.cs`, `inspector.ts`) is not
   one; test code named otherwise (`TestHelpers.cs` outside a test directory) is not
   recognized, so check with `rg` when the split matters.
-- To query a symbol named `path`, `affected`, `hubs` or `multi`, put it after `--`:
+- To query a symbol named `path`, `affected`, `hubs`, `impact` or `multi`, put it after `--`:
   `codecontext query --depth 2 -- path`.
 - A graph query walks the graph on every call: milliseconds on a repository of 100,000
   edges, seconds on one of millions. The CLI waits up to 60 seconds for one (5 for
