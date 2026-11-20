@@ -192,7 +192,9 @@ public static partial class QueryCommandHandler
     private static string ImpactBody(QuerySettings settings, GraphQuerySettings graph)
     {
         using var buffer = new MemoryStream();
-        using (var writer = new Utf8JsonWriter(buffer))
+        // Not escaped beyond what JSON requires: the default writes '+' (every added line) and any non-ASCII character as
+        // six bytes, and the body is read only as JSON, never as HTML.
+        using (var writer = new Utf8JsonWriter(buffer, new JsonWriterOptions { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping }))
         {
             writer.WriteStartObject();
             writer.WriteString("diff", graph.DiffText);

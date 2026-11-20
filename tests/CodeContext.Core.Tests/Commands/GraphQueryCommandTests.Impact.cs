@@ -113,7 +113,7 @@ public partial class GraphQueryCommandTests
         Assert.Equal(2, exit);
         Assert.Empty(error.ToString());
         Assert.Equal("/api/graph/impact", handler.Requests.Last().AbsolutePath);
-        Assert.Equal($$"""{"diff":{{JsonSerializer.Serialize(ImpactDiff)}},"maxDepth":3,"relation":"CALLS"}""", posted);
+        Assert.Equal($$"""{"diff":"{{ImpactDiff.Replace("\n", "\\n")}}","maxDepth":3,"relation":"CALLS"}""", posted);
         Assert.Equal(
             "impact\tincomplete\t1 changed\t1 affected in 1 file(s)\tdepth 3\t2 file(s) in the diff\n"
             + "content\t1 file(s) match the working tree\n"
@@ -129,6 +129,27 @@ public partial class GraphQueryCommandTests
             + "\ttests/ATests.cs\n"
             + "hint\tLook.\n",
             output.ToString().Replace("\r\n", "\n"));
+    }
+
+    [Fact]
+    public async Task Impact_PostsTheDiffUnescaped_SoThatADiffAtItsLimitFitsTheBody()
+    {
+        // JSON's default escaping writes '+', '<', '&' and every non-ASCII character as six bytes: a diff of such lines
+        // well under the character limit would pass the 64 MiB body limit.
+        const string diff = "--- a/src/A.cs\n+++ b/src/A.cs\n@@ -1 +1 @@\n-a < b && c\n+\u00e9t\u00e9 \u4e2d\u6587\n";
+        string? posted = null;
+        var handler = new RecordingHandler(request =>
+        {
+            if (request.RequestUri!.AbsolutePath == "/api/status") return Json(Status());
+            posted = request.Content!.ReadAsStringAsync().GetAwaiter().GetResult();
+            return Json(ImpactAnswer);
+        });
+        var (runtime, _, _) = Runtime(handler, diff);
+
+        await QueryCommandHandler.ExecuteAsync(Parse("query", "impact", "--path", Root), runtime, CancellationToken.None);
+
+        Assert.Equal($$"""{"diff":"{{diff.Replace("\n", "\\n")}}"}""", posted);
+        Assert.Equal(diff, JsonDocument.Parse(posted!).RootElement.GetProperty("diff").GetString());
     }
 
     [Fact]
