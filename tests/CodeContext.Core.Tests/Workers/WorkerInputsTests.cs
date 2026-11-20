@@ -119,8 +119,9 @@ public sealed class CSharpWorkerInputsTests : IAsyncLifetime
 
         // The folder the worker listed to find restore data says so first; the file would as well.
         Assert.StartsWith("artifacts/obj", Check(inputs, captured).FirstMoved);
+        // The check names a path in the root with '/' between names, on every platform.
         Assert.Equal(assets, WorkerInputsAssert.Check(Root, captured, inputs with { Files = [] }, ".cs").FirstMoved is { } moved
-            ? Path.Combine(Root, moved) : null);
+            ? Path.GetFullPath(Path.Combine(Root, moved)) : null);
     }
 
     [Fact]
@@ -139,9 +140,13 @@ public sealed class CSharpWorkerInputsTests : IAsyncLifetime
         var (inputs, captured) = await ScanAsync();
         Assert.Contains(library, inputs.Files);
 
+        // A copy keeps the source's last write time, so only a change time sees the file itself rewritten; where the
+        // copy replaces the file instead (macOS clones a new one), its folder has changed as well and says so first.
         File.Copy(typeof(Xunit.Assert).Assembly.Location, library, overwrite: true);
 
-        Assert.Equal("lib/Library.dll", Check(inputs, captured).FirstMoved);
+        Assert.Contains(Check(inputs, captured).FirstMoved, new[] { "lib/Library.dll", "lib" });
+        // Where a change time is read (Linux, Windows), the file's own time says it was rewritten.
+        if (FileChangeTime.ReadsChangeTime) Assert.True(FileChangeTime.TryRead(library, out var time) && time > captured, $"{time:O} against {captured:O}");
     }
 
     [Fact]

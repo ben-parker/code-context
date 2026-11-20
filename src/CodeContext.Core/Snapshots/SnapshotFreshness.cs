@@ -28,7 +28,7 @@ namespace CodeContext.Core.Snapshots
     /// <summary>
     /// Whether anything the snapshot's facts were made from has changed since it was captured, judged without a worker:
     /// the snapshot holds no per-file sizes or hashes (those live in the worker's own state), so the test is by time,
-    /// read through <see cref="FileChangeTime"/> (the status change time on Linux). It looks at exactly
+    /// read through <see cref="FileChangeTime"/> (the change time on Linux and Windows). It looks at exactly
     /// <list type="bullet">
     /// <item>what the scan selects, walked with the scan's own selection (<see cref="RepositoryFileSelector"/>: mandatory
     /// exclusions, configured patterns, <c>.gitignore</c> rules): every included directory (its time moves when an entry
@@ -134,11 +134,12 @@ namespace CodeContext.Core.Snapshots
             if (!(rootTimeTicks != 0 && rootTime.Ticks == rootTimeTicks) && Changed(root, rootTime)) return Result();
 
             // Each directory's ignore file is read whatever its own inclusion (its rules may ignore it), so it is looked
-            // at directly, not as an entry of the walk. One that is not there is covered by its directory's time.
+            // at directly, not as an entry of the walk. One that is not there is covered by its directory's time. One that
+            // is a link is not read by the selector, so where it leads is not looked at: only its own time counts.
             bool IgnoreFileChanged(string directory)
             {
                 var ignoreFile = Path.Combine(directory, IgnoreFileName);
-                return FileChangeTime.TryRead(ignoreFile, out var time) && Changed(ignoreFile, time);
+                return FileChangeTime.TryRead(ignoreFile, out var time, followLinks: false) && Changed(ignoreFile, time);
             }
 
             if (IgnoreFileChanged(root)) return Result();
