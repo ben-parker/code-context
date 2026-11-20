@@ -13,7 +13,7 @@ namespace CodeContext.Core.Tests.Snapshots;
 using ShardKey = InMemoryDatabase.ShardKey;
 
 /// <summary>
-/// Pins the format-version-3 layout: a tiny graph written with a fixed key, time, sequence,
+/// Pins the format-version-4 layout: a tiny graph written with a fixed key, time, sequence,
 /// generation and instance id must give exactly the checked-in bytes. A change here is a format
 /// change and needs a new <c>formatVersion</c>. To regenerate after a deliberate change, set
 /// <c>CODECONTEXT_SNAPSHOT_GOLDEN_OUT</c> to the absolute path of the fixture file and run this test.
@@ -240,9 +240,48 @@ public class SnapshotGoldenTests
             ]));
         var info = new Dictionary<ShardKey, SnapshotShardInfo>
         {
-            [key] = new("1.0.0", null, null, null, Encoding.UTF8.GetBytes("[]"), null),
+            [key] = new("1.0.0", null, null, null, Encoding.UTF8.GetBytes("[]"), null,
+                Encoding.UTF8.GetBytes("""{"files":["/r/A.csproj"],"absent":[]}"""), InputsReadTicks),
         };
         return SnapshotTestSupport.WriteBytes(SnapshotTestSupport.Input(SnapshotTestSupport.ShardsOf(database), sequence: 42, generation: 3, info: info));
+    }
+
+    /// <summary>When the first shard's worker read its inputs, as recorded in its shard meta.</summary>
+    private static readonly long InputsReadTicks = new DateTime(2026, 11, 5, 10, 12, 1, DateTimeKind.Utc).Ticks;
+
+    /// <summary>
+    /// The first shard's meta: the optional <see cref="SnapshotFormat.InputsReadKey"/> beside its inputs, in decimal; and
+    /// a shard written with inputs and no read time reads back with none, which leaves its inputs not known.
+    /// </summary>
+    [Fact]
+    public void TinyGraph_RecordsWhenItsInputsWereRead_AndAShardWithoutThatTimeReadsAsNotKnown()
+    {
+        var fixture = Convert.FromHexString(new string(File.ReadAllText(FixturePath).Where(char.IsAsciiHexDigit).ToArray()));
+        var opened = SnapshotFile.OpenInMemory(fixture, SnapshotFile.FormatName(42, 0x5d0c9a1e), SnapshotTestSupport.Key, SnapshotTestSupport.Expect());
+        Assert.True(opened.File is not null, $"{opened.Rejection}: {opened.Reason}");
+        using (var file = opened.File)
+        {
+            var shard = file.Shards.Single(candidate => candidate.Key == new ShardKey("fake", "ws"));
+            Assert.Equal(InputsReadTicks.ToString(System.Globalization.CultureInfo.InvariantCulture), shard.Meta[SnapshotFormat.InputsReadKey]);
+            var info = shard.ReadInfo();
+            Assert.Equal(InputsReadTicks, info.InputsReadUtcTicks);
+            Assert.True(info.TryReadInputs(out var inputs, out _));
+            Assert.Equal(["/r/A.csproj"], inputs!.Files);
+            Assert.Equal(0, file.Shards.Single(candidate => candidate.Key != shard.Key).ReadInfo().InputsReadUtcTicks);
+        }
+
+        var database = SnapshotTestSupport.Commit((new ShardKey("fake", "ws"),
+            [new CodeNode { Id = "fake:ws:A", Identifier = "fake:A", Name = "A", Type = "class", Metadata = SnapshotTestSupport.Owned(new ShardKey("fake", "ws")) }],
+            []));
+        var untimed = new Dictionary<ShardKey, SnapshotShardInfo>
+        {
+            [new ShardKey("fake", "ws")] = new(Inputs: Encoding.UTF8.GetBytes("""{"files":["/r/A.csproj"],"absent":[]}""")),
+        };
+        var bytes = SnapshotTestSupport.WriteBytes(SnapshotTestSupport.Input(SnapshotTestSupport.ShardsOf(database), info: untimed));
+        using var written = SnapshotTestSupport.OpenInMemory(bytes).File!;
+        var read = Assert.Single(written.Shards);
+        Assert.False(read.Meta.ContainsKey(SnapshotFormat.InputsReadKey));
+        Assert.Equal(DateTime.MinValue, ReportedInputs.ReadTime(read.ReadInfo().InputsReadUtcTicks));
     }
 
     private static string ToHex(byte[] bytes)
