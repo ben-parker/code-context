@@ -78,13 +78,13 @@ namespace CodeContext.Core.Diffs
             var result = new Result();
             var groups = Groups(nodes);
             var roots = groups.Where(group => group.Parent is null).ToList();
-            IReadOnlyList<string>? text = null;
+            QuietRuns? text = null;
             var textRead = false;
             HashSet<int>? starts = null;
 
             foreach (var range in added)
             {
-                foreach (var group in groups)
+                foreach (var group in Overlapping(roots, range.Start, range.End))
                 {
                     var lo = Math.Max(range.Start, group.Start);
                     var hi = Math.Min(range.End, group.End);
@@ -103,9 +103,10 @@ namespace CodeContext.Core.Diffs
                 for (var line = range.Start; line <= range.End; line++)
                 {
                     var member = false;
-                    foreach (var group in groups)
+                    var holding = Overlapping(roots, line, line);
+                    foreach (var group in holding)
                     {
-                        if (line < group.Start || line > group.End || group.Nodes.Exists(node => isContainer(node))) continue;
+                        if (group.Nodes.Exists(node => isContainer(node))) continue;
                         if (Owned(group, line, line).Count == 0) continue;
                         Merge(TouchOf(group, result).Lines, new DiffLineRange(line, line));
                         member = true;
@@ -116,16 +117,15 @@ namespace CodeContext.Core.Diffs
                         Merge(result.CommentBoundaries, new DiffLineRange(line, line));
                         continue;
                     }
-                    if (holdsStatements is not null && Innermost(groups, line) is { } holder && holder.Nodes.Exists(node => holdsStatements(node)))
+                    if (holdsStatements is not null && Innermost(holding) is { } holder && holder.Nodes.Exists(node => holdsStatements(node)))
                     {
                         if (!textRead)
                         {
-                            text = readLines?.Invoke();
+                            text = readLines?.Invoke() is { } read ? new QuietRuns(read) : null;
                             textRead = true;
                         }
                         starts ??= groups.Select(group => group.Start).ToHashSet();
-                        if (text is null || line > text.Count || !UnifiedDiff.IsCommentLine(text[line - 1])
-                            || !IsDocCommentOrHeader(text, line - 1, line + 1, starts))
+                        if (text is null || !text.IsComment(line) || !text.IsDocCommentOrHeader(line - 1, line + 1, starts))
                         {
                             Merge(TouchOf(holder, result).Lines, new DiffLineRange(line, line));
                             continue;
@@ -141,10 +141,9 @@ namespace CodeContext.Core.Diffs
                 Group? around = null;
                 if (removal.NewBefore >= 1)
                 {
-                    foreach (var group in groups)
+                    foreach (var group in Overlapping(roots, removal.NewBefore, removal.NewBefore))
                     {
-                        if (group.Start <= removal.NewBefore && removal.NewAfter <= group.End
-                            && (around is null || Depth(group) > Depth(around)))
+                        if (removal.NewAfter <= group.End && (around is null || Depth(group) > Depth(around)))
                         {
                             around = group;
                         }
@@ -159,11 +158,11 @@ namespace CodeContext.Core.Diffs
                 {
                     if (!textRead)
                     {
-                        text = readLines?.Invoke();
+                        text = readLines?.Invoke() is { } read ? new QuietRuns(read) : null;
                         textRead = true;
                     }
                     starts ??= groups.Select(group => group.Start).ToHashSet();
-                    if (text is null || !IsDocCommentOrHeader(text, removal.NewBefore, removal.NewAfter, starts))
+                    if (text is null || !text.IsDocCommentOrHeader(removal.NewBefore, removal.NewAfter, starts))
                     {
                         TouchOf(around, result).RemovedLines += removal.Old.Count;
                         continue;
@@ -185,30 +184,87 @@ namespace CodeContext.Core.Diffs
             return result;
         }
 
-        /// <summary>The deepest group holding <paramref name="line"/>, or null.</summary>
-        private static Group? Innermost(List<Group> groups, int line)
+        /// <summary>The deepest of <paramref name="holding"/> (the groups holding one line), or null.</summary>
+        private static Group? Innermost(List<Group> holding)
         {
             Group? innermost = null;
-            foreach (var group in groups)
+            foreach (var group in holding)
             {
-                if (group.Start <= line && line <= group.End && (innermost is null || Depth(group) > Depth(innermost))) innermost = group;
+                if (innermost is null || Depth(group) > Depth(innermost)) innermost = group;
             }
             return innermost;
         }
 
         /// <summary>
-        /// Whether a comment between 1-based lines <paramref name="before"/> and <paramref name="after"/> of
-        /// <paramref name="text"/> is, with the comment and blank lines around it, the file's leading comment or the
-        /// comment just above a declaration (one of <paramref name="starts"/>).
+        /// The groups whose lines meet <c>[lo, hi]</c>, found by descending from <paramref name="level"/> (ordered by start):
+        /// a group's parent holds every line it does, so no other group can meet the range.
         /// </summary>
-        private static bool IsDocCommentOrHeader(IReadOnlyList<string> text, int before, int after, HashSet<int> starts)
+        private static List<Group> Overlapping(List<Group> level, int lo, int hi)
         {
-            static bool Quiet(string value) => string.IsNullOrWhiteSpace(value) || UnifiedDiff.IsCommentLine(value);
-            before = Math.Min(before, text.Count);
-            while (before >= 1 && Quiet(text[before - 1])) before--;
-            if (before == 0) return true;
-            while (after >= 1 && after <= text.Count && Quiet(text[after - 1])) after++;
-            return starts.Contains(after);
+            var found = new List<Group>();
+            Descend(level);
+            return found;
+
+            void Descend(List<Group> groups)
+            {
+                foreach (var group in groups)
+                {
+                    if (group.Start > hi) break;
+                    if (group.End < lo) continue;
+                    found.Add(group);
+                    if (group.Children is { } children) Descend(children);
+                }
+            }
+        }
+
+        /// <summary>
+        /// A file's lines read once: which are comment lines, and for each where the run of comment and blank lines it is
+        /// in begins and ends, so that every question about a line is answered without walking the file again.
+        /// </summary>
+        private sealed class QuietRuns
+        {
+            private readonly bool[] _comment;
+
+            /// <summary>For 1-based line i: the first line of its quiet run (i + 1 when line i is not quiet).</summary>
+            private readonly int[] _runStart;
+
+            /// <summary>For 1-based line i: the last line of its quiet run (i - 1 when line i is not quiet).</summary>
+            private readonly int[] _runEnd;
+
+            public QuietRuns(IReadOnlyList<string> lines)
+            {
+                var count = lines.Count;
+                _comment = new bool[count + 2];
+                _runStart = new int[count + 2];
+                _runEnd = new int[count + 2];
+                var quiet = new bool[count + 2];
+                for (var i = 1; i <= count; i++)
+                {
+                    _comment[i] = UnifiedDiff.IsCommentLine(lines[i - 1]);
+                    quiet[i] = _comment[i] || string.IsNullOrWhiteSpace(lines[i - 1]);
+                }
+                for (var i = 1; i <= count; i++) _runStart[i] = quiet[i] ? (quiet[i - 1] ? _runStart[i - 1] : i) : i + 1;
+                _runEnd[count + 1] = count;
+                for (var i = count; i >= 1; i--) _runEnd[i] = quiet[i] ? (quiet[i + 1] ? _runEnd[i + 1] : i) : i - 1;
+                Count = count;
+            }
+
+            public int Count { get; }
+
+            public bool IsComment(int line) => line >= 1 && line <= Count && _comment[line];
+
+            /// <summary>
+            /// Whether a comment between 1-based lines <paramref name="before"/> and <paramref name="after"/> is, with the
+            /// comment and blank lines around it, the file's leading comment or the comment just above a declaration (one
+            /// of <paramref name="starts"/>).
+            /// </summary>
+            public bool IsDocCommentOrHeader(int before, int after, HashSet<int> starts)
+            {
+                before = Math.Min(before, Count);
+                if (before <= 0 || _runStart[before] == 1) return true;
+                if (after < 1 || after > Count) return false;
+                return starts.Contains(_runEnd[after] + 1);
+            }
         }
 
         private static Touch TouchOf(Group group, Result result)
