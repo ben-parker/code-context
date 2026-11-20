@@ -291,7 +291,7 @@ namespace CodeContext.Core.Diffs
                 {
                     var (first, after) = Quoted(rest, 0);
                     left = first;
-                    if (after < rest.Length && rest[after] == ' ')
+                    if (after + 1 < rest.Length && rest[after] == ' ')
                         right = rest[after + 1] == '"' ? Quoted(rest, after + 1).Value : rest[(after + 1)..];
                 }
                 else if ((rest.Length - 1) % 2 == 0 && rest.Length > 5 && rest[(rest.Length - 1) / 2] == ' '

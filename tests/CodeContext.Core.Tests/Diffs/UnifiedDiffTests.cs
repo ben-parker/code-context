@@ -65,6 +65,61 @@ public class UnifiedDiffTests
     public void ACommentLine_IsToldApartByItsStart(string line, bool comment)
         => Assert.Equal(comment, SourceLines.IsCommentLine(line));
 
+    [Fact]
+    public void AMangledDiff_IsReadOrRefused_AndNothingElse()
+    {
+        // Real shapes of diff, then cut, spliced, doubled and overwritten at random: every outcome is a list of files or
+        // an ArgumentException that says where, never another exception and never a file without a path.
+        string[] samples =
+        [
+            Lines("diff --git a/src/Foo.cs b/src/Foo.cs", "index de98044..7be73ce 100644", "--- a/src/Foo.cs", "+++ b/src/Foo.cs",
+                "@@ -10,6 +10,7 @@ class Foo", " context", "-old", "+new", "+// note", " context", "-/* gone", " context", "+", " context",
+                "@@ -30,2 +31,3 @@", " a", "+#if DEBUG", " b", "\\ No newline at end of file"),
+            Lines("diff --git a/old name.txt b/new name.txt", "similarity index 90%", "rename from old name.txt", "rename to new name.txt",
+                "index 1111111..2222222 100644", "--- a/old name.txt", "+++ b/new name.txt", "@@ -1 +1 @@", "-a", "+b"),
+            Lines("diff --git \"a/caf\\303\\251.cs\" \"b/caf\\303\\251.cs\"", "new file mode 100644", "index 0000000..3333333", "--- /dev/null",
+                "+++ \"b/caf\\303\\251.cs\"", "@@ -0,0 +1,3 @@", "+using System;", "+namespace N;", "+class C { }"),
+            Lines("diff --git a/img.png b/img.png", "index 4444444..5555555 100644", "GIT binary patch", "literal 3", "Kc$}6X", "",
+                "diff --git a/gone.cs b/gone.cs", "deleted file mode 100644", "index 6666666..0000000", "--- a/gone.cs", "+++ /dev/null",
+                "@@ -1,2 +0,0 @@", "-a", "-b", "diff --git a/run.sh b/run.sh", "old mode 100644", "new mode 100755"),
+            "--- a/plain.c\t2026-01-01 00:00:00\r\n+++ b/plain.c\t2026-01-02 00:00:00\r\n@@ -1,2 +1,2 @@\r\n one\r\n-two\r\n+deux\r\n",
+            Lines("diff --cc src/Merged.cs", "index 1111111,2222222..3333333", "--- a/src/Merged.cs", "+++ b/src/Merged.cs", "@@@ -1,2 -1,2 +1,2 @@@", "  a", "- b", " +c"),
+        ];
+        var random = new Random(20261120);
+        var read = 0;
+        var refused = 0;
+        for (var round = 0; round < 30_000; round++)
+        {
+            var text = new System.Text.StringBuilder(samples[random.Next(samples.Length)]);
+            for (var edits = 1 + random.Next(3); edits > 0 && text.Length > 0; edits--)
+            {
+                var at = random.Next(text.Length);
+                switch (random.Next(6))
+                {
+                    case 0: text.Length = at; break;
+                    case 1: text.Remove(at, Math.Min(text.Length - at, 1 + random.Next(12))); break;
+                    case 2: text.Insert(at, samples[random.Next(samples.Length)].AsSpan(0, random.Next(40))); break;
+                    case 3: text[at] = "@+- \\\n\r\"0,/\t\0\u00e9"[random.Next(14)]; break;
+                    case 4: text.Insert(at, text.ToString(at, Math.Min(text.Length - at, random.Next(60)))); break;
+                    default: text.Insert(at, random.Next(2) == 0 ? "\n@@ -1 +1 @@\n" : "\ndiff --git a/x b/x\n"); break;
+                }
+            }
+            try
+            {
+                var files = UnifiedDiff.Parse(text.ToString());
+                Assert.All(files, file => Assert.NotNull(file.Path));
+                read++;
+            }
+            catch (ArgumentException exception)
+            {
+                Assert.False(string.IsNullOrWhiteSpace(exception.Message));
+                refused++;
+            }
+        }
+        // Both outcomes are common: the mutations are neither all harmless nor all fatal.
+        Assert.True(read > 3_000 && refused > 3_000, $"{read} read, {refused} refused");
+    }
+
     [Theory]
     [InlineData("#if DEBUG", true)]
     [InlineData("  #elif NET8_0_OR_GREATER", true)]
