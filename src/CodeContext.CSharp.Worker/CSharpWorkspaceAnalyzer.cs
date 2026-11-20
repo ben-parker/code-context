@@ -1010,7 +1010,7 @@ public sealed class CSharpWorkspaceAnalyzer
         var bound = new Dictionary<ProjectCompilation, int>();
         foreach (var walked in _walked.Values)
         {
-            bound[walked.Unit] = bound.GetValueOrDefault(walked.Unit) + walked.Edges.Count(edge => edge.Line >= 0);
+            bound[walked.Unit] = bound.GetValueOrDefault(walked.Unit) + walked.Edges.Count(edge => edge.Line >= 0 && !edge.Unresolved);
             if (walked.UnresolvedNames is not { } own) continue;
             if (!unresolved.TryGetValue(walked.Unit, out var names))
             {
@@ -1137,13 +1137,18 @@ public sealed class CSharpWorkspaceAnalyzer
     /// derive from these fields, so they exist only while being sent.
     /// </summary>
     /// <param name="StaticallyBound">The call is bound to its target and reaches no override of it, as <c>base.M()</c> is.</param>
-    public readonly record struct EdgeFact(string SourceId, string TargetId, string Kind, int Line = -1, int Column = -1, bool StaticallyBound = false)
+    /// <param name="Unresolved">
+    /// The call bound to nothing, so <paramref name="TargetId"/> is the name it invokes, not a node id
+    /// (<see cref="EdgeMetadataKeys.Unresolved"/>).
+    /// </param>
+    public readonly record struct EdgeFact(
+        string SourceId, string TargetId, string Kind, int Line = -1, int Column = -1, bool StaticallyBound = false, bool Unresolved = false)
     {
         public string Id => $"{SourceId}=[{Kind}]=>{TargetId}" + (Line >= 0 ? $"@{Line}:{Column}" : string.Empty);
 
         public ProtocolEdge ToProtocol()
         {
-            if (Line < 0 && !StaticallyBound) return new(Id, SourceId, TargetId, Kind, null);
+            if (Line < 0 && !StaticallyBound && !Unresolved) return new(Id, SourceId, TargetId, Kind, null);
             var metadata = new Dictionary<string, string>();
             if (Line >= 0)
             {
@@ -1151,6 +1156,7 @@ public sealed class CSharpWorkspaceAnalyzer
                 metadata["column"] = Column.ToString(CultureInfo.InvariantCulture);
             }
             if (StaticallyBound) metadata[EdgeMetadataKeys.Dispatch] = EdgeDispatch.Static;
+            if (Unresolved) metadata[EdgeMetadataKeys.Unresolved] = "true";
             return new(Id, SourceId, TargetId, Kind, metadata);
         }
     }
@@ -1549,14 +1555,20 @@ public sealed class CSharpWorkspaceAnalyzer
         return file.Nodes.TrueForAll(node => node.Id.StartsWith(_workspaceIdPrefix, StringComparison.Ordinal)
                 && node.Identifier.StartsWith(IdPrefix, StringComparison.Ordinal)
                 && string.Equals(node.FilePath, file.Path, StringComparison.Ordinal))
-            && file.Edges.TrueForAll(IsInThisWorkspace)
+            && file.Edges.TrueForAll(edge => IsInThisWorkspace(edge) || IsUnresolvedCall(edge))
             && file.StubNodes.TrueForAll(node => ExternalSymbols.IsStub(node, _workspaceIdPrefix) && stubs.Add(node.Id))
-            && file.StubEdges.TrueForAll(IsInThisWorkspace);
+            && file.StubEdges.TrueForAll(edge => IsInThisWorkspace(edge) && !edge.Unresolved);
     }
 
     private bool IsInThisWorkspace(EdgeFact edge)
         => edge.SourceId.StartsWith(_workspaceIdPrefix, StringComparison.Ordinal)
             && edge.TargetId.StartsWith(_workspaceIdPrefix, StringComparison.Ordinal);
+
+    /// <summary>A call that bound to nothing: its own, at a place in the source, to the bare name it invokes.</summary>
+    private bool IsUnresolvedCall(EdgeFact edge)
+        => edge is { Unresolved: true, Line: >= 0, Kind: "CALLS" or "MOCK_CALLS" }
+            && edge.SourceId.StartsWith(_workspaceIdPrefix, StringComparison.Ordinal)
+            && !edge.TargetId.StartsWith(_workspaceIdPrefix, StringComparison.Ordinal);
 
     /// <summary>
     /// Deterministic content hash of one file's facts, stable across processes. Nodes are
@@ -2295,15 +2307,40 @@ public sealed class CSharpWorkspaceAnalyzer
 
         public override void VisitInvocationExpression(InvocationExpressionSyntax node)
         {
-            if (ResolveMethodSymbol(node) is { } calleeSymbol && FindEnclosingNodeId(node) is { } callerId)
+            var calleeSymbol = ResolveMethodSymbol(node);
+            var unboundName = calleeSymbol is null ? UnboundInvokedName(node) : null;
+            if ((calleeSymbol is not null || unboundName is not null) && FindEnclosingNodeId(node) is { } callerId)
             {
                 var enclosingMethod = node.Ancestors().OfType<MethodDeclarationSyntax>().FirstOrDefault();
                 var kind = enclosingMethod is not null && IsMockOrFluentTestInvocation(node, enclosingMethod)
                     ? "MOCK_CALLS"
                     : "CALLS";
-                AddLocatedEdge(callerId, NodeId(calleeSymbol), kind, node, IsThroughBase(node.Expression));
+                if (calleeSymbol is not null) AddLocatedEdge(callerId, NodeId(calleeSymbol), kind, node, IsThroughBase(node.Expression));
+                else AddLocatedEdge(callerId, unboundName!, kind, node, unresolved: true);
             }
             base.VisitInvocationExpression(node);
+        }
+
+        /// <summary>
+        /// The method name a call that bound to nothing invokes: <c>Missing()</c>, <c>x.Missing()</c>, a call on a
+        /// <c>dynamic</c> receiver, a call no overload fits. The host shows it as a possible caller of every method of
+        /// that name, apart from the bound callers. Null when the call names no method: <c>nameof</c>, a call of
+        /// whatever an expression returns, or a name that bound to a field, local or property holding a delegate.
+        /// </summary>
+        private string? UnboundInvokedName(InvocationExpressionSyntax invocation)
+        {
+            SimpleNameSyntax? name = invocation.Expression switch
+            {
+                SimpleNameSyntax simple => simple,
+                MemberAccessExpressionSyntax member => member.Name,
+                MemberBindingExpressionSyntax binding => binding.Name,
+                _ => null,
+            };
+            if (name is null) return null;
+            var symbol = _semanticModel.GetSymbolInfo(name).Symbol;
+            if (symbol is not null and not IMethodSymbol) return null;
+            if (symbol is null && name.Identifier.ValueText == "nameof") return null;
+            return _semanticModel.GetConstantValue(invocation).HasValue ? null : name.Identifier.ValueText;
         }
 
         public override void VisitObjectCreationExpression(ObjectCreationExpressionSyntax node)
@@ -2593,10 +2630,11 @@ public sealed class CSharpWorkspaceAnalyzer
             return expression is MemberAccessExpressionSyntax { Expression: BaseExpressionSyntax };
         }
 
-        private void AddLocatedEdge(string sourceId, string targetId, string kind, SyntaxNode location, bool staticallyBound = false)
+        private void AddLocatedEdge(
+            string sourceId, string targetId, string kind, SyntaxNode location, bool staticallyBound = false, bool unresolved = false)
         {
             var position = location.GetLocation().GetLineSpan().StartLinePosition;
-            _edges.Add(new EdgeFact(sourceId, targetId, kind, position.Line, position.Character, staticallyBound));
+            _edges.Add(new EdgeFact(sourceId, targetId, kind, position.Line, position.Character, staticallyBound, unresolved));
         }
 
         /// <summary>

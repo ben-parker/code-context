@@ -184,6 +184,16 @@ namespace CodeContext.Core.Services
         public int? UsedByReturnedCount { get; set; }
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
         public bool UsedByTruncated { get; set; }
+
+        /// <summary>
+        /// Members whose call names this method or function but bound to nothing (a missing name, an untyped or
+        /// <c>dynamic</c> receiver), so may reach it or another of that name. Never mixed into <see cref="UsedBy"/>.
+        /// </summary>
+        public List<CompactCodeNode>? PossibleCallers { get; set; }
+        public int? PossibleCallersCount { get; set; }
+        public int? PossibleCallersReturnedCount { get; set; }
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+        public bool PossibleCallersTruncated { get; set; }
         public List<CompactCodeNode>? TransitiveUses { get; set; }
         public int? TransitiveUsesCount { get; set; }
         public int? TransitiveUsesReturnedCount { get; set; }
@@ -307,6 +317,12 @@ namespace CodeContext.Core.Services
         /// What uses this construct
         /// </summary>
         public List<CodeNode> UsedBy { get; set; } = new();
+
+        /// <summary>
+        /// Members with a call that names this method or function but bound to nothing, so it may reach this one or
+        /// another of the name: static evidence of a possible use, never mixed into <see cref="UsedBy"/>.
+        /// </summary>
+        public List<CodeNode> PossibleCallers { get; set; } = new();
 
         /// <summary>Nodes beyond the direct Uses list, labeled with shortest path.</summary>
         public List<ContextTransitiveRelationship> TransitiveUses { get; set; } = new();

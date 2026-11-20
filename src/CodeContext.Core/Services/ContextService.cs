@@ -648,6 +648,17 @@ namespace CodeContext.Core.Services
                 compactRelationships.UsedByTruncated = usedBy.TotalCount > maxRelationships;
                 compactRelationships.Truncated |= compactRelationships.UsedByTruncated;
             }
+            if (relationships.PossibleCallers.Count > 0)
+            {
+                var possible = await ToCompactRelatedNodesAsync(
+                    match.Target, relationships.PossibleCallers, outgoing: false, maxRelationships, maxCallSites, relationKinds,
+                    possibleCalls: await GetPossibleCallEdgesAsync(match.Target));
+                compactRelationships.PossibleCallers = possible.Items;
+                compactRelationships.PossibleCallersCount = possible.TotalCount;
+                compactRelationships.PossibleCallersReturnedCount = possible.Items.Count;
+                compactRelationships.PossibleCallersTruncated = possible.TotalCount > maxRelationships;
+                compactRelationships.Truncated |= compactRelationships.PossibleCallersTruncated;
+            }
             if (relationships.TransitiveUses.Count > 0)
             {
                 compactRelationships.TransitiveUses = relationships.TransitiveUses
@@ -752,9 +763,11 @@ namespace CodeContext.Core.Services
             bool outgoing,
             int maxRelationships,
             int maxCallSites,
-            HashSet<string>? relationKinds = null)
+            HashSet<string>? relationKinds = null,
+            IReadOnlyList<CodeEdge>? possibleCalls = null)
         {
-            var family = !outgoing && !string.IsNullOrEmpty(target.Id)
+            // Possible calls name the target without reaching it through its family, so they carry no binding.
+            var family = possibleCalls is null && !outgoing && !string.IsNullOrEmpty(target.Id)
                 && string.Equals(target.Type, "Method", StringComparison.OrdinalIgnoreCase)
                     ? await GetMethodFamilyAsync(target.Id, target)
                     : new Dictionary<string, CodeNode>(StringComparer.Ordinal);
@@ -782,7 +795,8 @@ namespace CodeContext.Core.Services
             }
 
             IReadOnlyList<CodeEdge> directEdges;
-            if (string.IsNullOrEmpty(target.Id)) directEdges = [];
+            if (possibleCalls is not null) directEdges = possibleCalls;
+            else if (string.IsNullOrEmpty(target.Id)) directEdges = [];
             else if (outgoing) directEdges = await _edgeRepository.GetBySourceIdAsync(target.Id);
             else if (family.Count > 0)
             {
@@ -1149,6 +1163,59 @@ namespace CodeContext.Core.Services
 
         private static bool IsUsageEdge(CodeEdge edge) => RoleOf(edge.Type) == EdgeRole.Usage;
 
+        /// <summary>
+        /// A call that bound to nothing (<see cref="EdgeMetadataKeys.Unresolved"/>, and not to a library declaration):
+        /// its target is the name it invokes, not a node.
+        /// </summary>
+        internal static bool IsPossibleCall(CodeEdge edge)
+            => edge.Type is "CALLS" or "MOCK_CALLS"
+                && edge.Metadata is { } metadata
+                && metadata.GetValueOrDefault(EdgeMetadataKeys.Unresolved) == "true"
+                && metadata.GetValueOrDefault(EdgeMetadataKeys.External) != "true";
+
+        /// <summary>
+        /// The calls that bound to nothing but invoke <paramref name="target"/>'s name, from its own worker and
+        /// workspace (the <c>parserId:workspaceId:</c> its id starts with): what may reach it that no bound edge
+        /// records. Only a workspace method or function has them; a library one is reached by binding, not by name.
+        /// </summary>
+        private async Task<IReadOnlyList<CodeEdge>> GetPossibleCallEdgesAsync(CodeNode target)
+        {
+            if (target.Id is not { } id || string.IsNullOrEmpty(target.Name) || IsExternal(target)
+                || !(string.Equals(target.Type, "Method", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(target.Type, "Function", StringComparison.OrdinalIgnoreCase)))
+            {
+                return [];
+            }
+            var first = id.IndexOf(':');
+            var owner = first < 0 ? -1 : id.IndexOf(':', first + 1) + 1;
+            if (owner <= 0) return [];
+
+            List<CodeEdge>? possible = null;
+            foreach (var edge in await _edgeRepository.GetByTargetIdAsync(target.Name))
+            {
+                if (IsPossibleCall(edge) && edge.SourceId is { } source
+                    && source.Length > owner && string.CompareOrdinal(source, 0, id, 0, owner) == 0)
+                {
+                    (possible ??= []).Add(edge);
+                }
+            }
+            return possible ?? (IReadOnlyList<CodeEdge>)[];
+        }
+
+        /// <summary>The members holding <see cref="GetPossibleCallEdgesAsync"/>'s calls, in the order of their first call's edge id.</summary>
+        private async Task<List<CodeNode>> GetPossibleCallersAsync(CodeNode target)
+        {
+            var callers = new List<CodeNode>();
+            var edges = await GetPossibleCallEdgesAsync(target);
+            if (edges.Count == 0) return callers;
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var edge in edges)
+            {
+                if (seen.Add(edge.SourceId!) && await _nodeRepository.GetByIdAsync(edge.SourceId!) is { } caller) callers.Add(caller);
+            }
+            return callers;
+        }
+
         // Graph traversal uses first-parent-wins semantics: the first edge that reaches a
         // node fixes that node's recorded RelationPath (and, for family expansion, its
         // membership). The repository hands edges back in store-enumeration order, which
@@ -1219,6 +1286,7 @@ namespace CodeContext.Core.Services
             }
             relationships.Uses = uses.Where(item => item.Distance == 1).Select(item => item.Node).ToList();
             relationships.UsedBy = usedBy.Where(item => item.Distance == 1).Select(item => item.Node).ToList();
+            relationships.PossibleCallers = await GetPossibleCallersAsync(targetNode);
             relationships.TransitiveUses = uses.Where(item => item.Distance > 1)
                 .Select(item => new ContextTransitiveRelationship
                 {

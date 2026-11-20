@@ -279,6 +279,20 @@ public static class EdgeMetadataKeys
     /// implementation of it; <see cref="EdgeDispatch.Static"/> means it reaches the target alone.
     /// </summary>
     public const string Dispatch = "dispatch";
+
+    /// <summary>
+    /// <c>"true"</c> when the worker bound the reference to no declaration of the workspace, so the edge's target is
+    /// the name the code writes rather than a node id. The host lists such a call (a <c>CALLS</c> or <c>MOCK_CALLS</c>
+    /// edge) as a possible caller of the same worker's same-named methods and functions, apart from the bound callers,
+    /// unless <see cref="External"/> is also set.
+    /// </summary>
+    public const string Unresolved = "unresolved";
+
+    /// <summary>
+    /// <c>"true"</c> on an <see cref="Unresolved"/> edge whose reference did bind, to a declaration outside the
+    /// workspace (a library), so it is no possible use of a workspace symbol of that name.
+    /// </summary>
+    public const string External = "external";
 }
 
 /// <summary>Values of <see cref="EdgeMetadataKeys.Dispatch"/>.</summary>

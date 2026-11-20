@@ -62,7 +62,10 @@ internal sealed class WorkerStateFormatException(string message) : Exception(mes
 /// than compare hashes of facts that lacked them. Walks are stored before settlement and never carry parts: settlement
 /// rebuilds them from the walks.
 ///
-/// Layout, little-endian (format version 3):
+/// Format version 4 has version 3's layout and adds edge flag 2: a call that bound to nothing, whose target is the name
+/// it invokes. A version 3 file holds no such edges, so it is refused and the worker walks afresh.
+///
+/// Layout, little-endian (format version 4):
 /// <code>
 /// header      "CCWSTATE", u32 version, u32 reserved (0), u64 file length,
 ///             str workerIdentity, str stateId, str workspaceId, str rootPath   (str: u32 length, UTF-8)
@@ -78,12 +81,12 @@ internal sealed class WorkerStateFormatException(string message) : Exception(mes
 ///             end column; ref namespace, visibility, signature, returnType, parameters, modifiers;
 ///             u32 metadata count or 0xFFFFFFFF, then count × (ref key, ref value)
 /// edge        ref source, ref target, ref kind, i32 line, i32 column   (both -1: no place in the source),
-///             u8 flags (1 statically bound)
+///             u8 flags (1 statically bound, 2 unresolved)
 /// </code>
 /// </summary>
 internal static class WorkerStateFile
 {
-    public const int FormatVersion = 3;
+    public const int FormatVersion = 4;
 
     /// <summary>A state file longer than this is refused before a byte is read.</summary>
     public const long MaxFileLength = 1L << 30;
@@ -95,6 +98,7 @@ internal static class WorkerStateFile
     private const byte RacyFlag = 1;
     private const byte DirectivesFlag = 2;
     private const byte StaticallyBoundFlag = 1;
+    private const byte UnresolvedFlag = 2;
 
     private static ReadOnlySpan<byte> Magic => "CCWSTATE"u8;
 
@@ -389,7 +393,7 @@ internal static class WorkerStateFile
             facts.U32(strings.Ref(edge.Kind));
             facts.I32(edge.Line);
             facts.I32(edge.Column);
-            facts.U8(edge.StaticallyBound ? StaticallyBoundFlag : (byte)0);
+            facts.U8((byte)((edge.StaticallyBound ? StaticallyBoundFlag : 0) | (edge.Unresolved ? UnresolvedFlag : 0)));
         }
     }
 
@@ -562,8 +566,9 @@ internal static class WorkerStateFile
         {
             var (source, target, kind, line, column) = (reader.Ref(strings), reader.Ref(strings), reader.Ref(strings), reader.I32(), reader.I32());
             var flags = reader.U8();
-            if ((flags & ~StaticallyBoundFlag) != 0) throw new WorkerStateFormatException("unknown edge flags");
-            var edge = new EdgeFact(source, target, kind, line, column, (flags & StaticallyBoundFlag) != 0);
+            if ((flags & ~(StaticallyBoundFlag | UnresolvedFlag)) != 0) throw new WorkerStateFormatException("unknown edge flags");
+            var edge = new EdgeFact(
+                source, target, kind, line, column, (flags & StaticallyBoundFlag) != 0, (flags & UnresolvedFlag) != 0);
             // An edge with no place in the source holds -1 for both.
             if (edge.Line < -1 || edge.Column < -1 || (edge.Line < 0) != (edge.Column < 0))
             {

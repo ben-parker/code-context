@@ -1385,6 +1385,36 @@
           "usedByTruncated": {
             "type": "boolean"
           },
+          "possibleCallers": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/CompactCodeNode"
+            }
+          },
+          "possibleCallersCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "possibleCallersReturnedCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "possibleCallersTruncated": {
+            "type": "boolean"
+          },
           "transitiveUses": {
             "type": [
               "null",
@@ -1744,6 +1774,12 @@
             }
           },
           "usedBy": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CodeNode"
+            }
+          },
+          "possibleCallers": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/CodeNode"

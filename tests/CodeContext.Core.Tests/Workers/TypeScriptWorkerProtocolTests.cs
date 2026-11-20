@@ -1240,6 +1240,42 @@ namespace Mixed { public class Service { public string Run() => ""ok""; } }");
         Assert.Equal(["overridden"], dispatcher.Bindings);
     }
 
+    /// <summary>
+    /// In plain JavaScript a call on a value of no known type binds to nothing, so it is a possible caller of every
+    /// function of that name; a call the compiler bound to a library (<c>items.push</c>) is not, nor is a bound call.
+    /// </summary>
+    [Fact]
+    public async Task ACallThatBindsToNothing_IsAPossibleCaller_AndALibraryCallIsNot()
+    {
+        await WriteFileAsync("widget.js", """
+            export class Widget { render() { return 1; } push() { return 2; } }
+            export function draw(widget) { return widget.render(); }
+            export function direct() { return new Widget().render(); }
+            export function collect(items) { const list = []; list.push(1); return items.push(2); }
+            """);
+
+        var edges = await ScanEdgesAsync();
+
+        var guessed = Assert.Single(edges, edge => edge.SourceId!.EndsWith("#draw(widget)", StringComparison.Ordinal) && edge.Type == "CALLS");
+        Assert.Equal("render", guessed.TargetId);
+        Assert.Equal("true", guessed.Metadata![EdgeMetadataKeys.Unresolved]);
+        Assert.False(guessed.Metadata.ContainsKey(EdgeMetadataKeys.External));
+        var library = Assert.Single(edges, edge => edge.SourceId!.EndsWith("#collect(items)", StringComparison.Ordinal)
+            && edge.Type == "CALLS" && edge.Metadata?.GetValueOrDefault(EdgeMetadataKeys.External) == "true");
+        Assert.Equal("push", library.TargetId);
+
+        var context = new ContextService(_pipeline.RepositoryFactory.CreateNodeRepository(),
+            _pipeline.RepositoryFactory.CreateEdgeRepository(), _pipeline.FileMetadataRepository);
+        var render = Assert.Single((await context.GetCompactContextAsync("render", type: "Method", exact: true)).Matches).Relationships!;
+        Assert.Contains("#direct()", Assert.Single(render.UsedBy!).Identifier, StringComparison.Ordinal);
+        Assert.Contains("#draw(widget)", Assert.Single(render.PossibleCallers!).Identifier, StringComparison.Ordinal);
+        // `items` is untyped, so its push is a possible call; `list` is an array, so its push is the library's.
+        var push = Assert.Single((await context.GetCompactContextAsync("push", type: "Method", exact: true)).Matches).Relationships!;
+        var pusher = Assert.Single(push.PossibleCallers!);
+        Assert.Contains("#collect(items)", pusher.Identifier, StringComparison.Ordinal);
+        Assert.Equal(1, pusher.CallSiteCount);
+    }
+
     [Fact]
     public async Task TopLevelInvocation_HasARealModuleScopeCaller()
     {

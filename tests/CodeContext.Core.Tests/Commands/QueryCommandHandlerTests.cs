@@ -337,6 +337,34 @@ public class QueryCommandHandlerTests
     }
 
     [Fact]
+    public async Task PossibleCallersArePrintedApartFromUsedBy()
+    {
+        const string response = """
+            {"view":"compact","matchMode":"exact","totalMatches":1,"returnedMatches":1,"matches":[{"target":{"name":"Target","type":"Method","file":"src/T.cs","line":7,"signature":"Target()","identifier":"csharp:T.Target()"},"relationships":{"usedBy":[{"name":"Known","type":"Method","file":"src/K.cs","line":3,"relations":["CALLS"],"identifier":"csharp:K.Known()"}],"usedByCount":1,"usedByReturnedCount":1,"possibleCallers":[{"name":"Guess","type":"Method","file":"src/G.cs","line":5,"relations":["CALLS"],"identifier":"csharp:G.Guess()"}],"possibleCallersCount":4,"possibleCallersReturnedCount":1,"possibleCallersTruncated":true,"truncated":true}}]}
+            """;
+        var handler = new RecordingHandler(request =>
+            request.RequestUri!.AbsolutePath == "/api/status" ? Json(Status("ready")) : Json(response));
+        var (runtime, output, _) = Runtime(handler, new FakeRegistry(Instance()));
+
+        Assert.Equal(0, await QueryCommandHandler.ExecuteAsync(
+            new QuerySettings(["Target"], Root, 1, false, null, false, false, false), runtime, CancellationToken.None));
+        var newline = Environment.NewLine;
+        Assert.Equal(
+            $"target\tcsharp:T.Target()\tMethod\tsrc/T.cs:7{newline}" +
+            $"usedBy\t1/1{newline}" +
+            $"\tCALLS\tKnown\tMethod\tsrc/K.cs:3{newline}" +
+            $"possibleCallers\t1/4\ttruncated{newline}" +
+            $"\tCALLS\tGuess\tMethod\tsrc/G.cs:5{newline}",
+            output.ToString());
+
+        var (humanRuntime, human, _) = Runtime(handler, new FakeRegistry(Instance()));
+        Assert.Equal(0, await QueryCommandHandler.ExecuteAsync(
+            new QuerySettings(["Target"], Root, 1, false, null, false, false, false, Human: true), humanRuntime, CancellationToken.None));
+        Assert.Contains("Possible callers, unbound calls of this name (1/4, truncated):", human.ToString());
+        Assert.Contains("Guess [Method] [CALLS]", human.ToString());
+    }
+
+    [Fact]
     public async Task JsonAndHumanCannotBeCombined()
     {
         var (runtime, output, error) = Runtime(
