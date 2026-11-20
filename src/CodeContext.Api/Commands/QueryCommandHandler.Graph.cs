@@ -156,7 +156,7 @@ public static partial class QueryCommandHandler
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException or InvalidDataException)
         {
-            runtime.Error.WriteLine($"Could not read the diff from {source}: {ex.Message}.");
+            runtime.Error.WriteLine($"Could not read the diff from {source}: {ex.Message.TrimEnd('.')}.");
             return null;
         }
         try

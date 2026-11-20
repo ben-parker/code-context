@@ -80,6 +80,8 @@ public partial class GraphQueryCommandTests
 
         Assert.Equal(1, exit);
         Assert.StartsWith($"Could not read the diff from {missing}: ", error.ToString());
+        // The reason is one sentence: the exception's own full stop is not doubled.
+        Assert.DoesNotContain("..", error.ToString());
     }
 
     private const string ImpactAnswer = """
