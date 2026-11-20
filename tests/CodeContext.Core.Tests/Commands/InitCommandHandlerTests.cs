@@ -9,7 +9,9 @@ namespace CodeContext.Core.Tests.Commands;
 
 public class InitCommandHandlerTests
 {
-    private const string Root = "C:\\repo";
+    // A root as the platform spells one: the commands normalize paths natively, so a Windows path
+    // elsewhere is a relative file name and no instance's root.
+    private static readonly string Root = OperatingSystem.IsWindows() ? "C:\\repo" : "/repo";
 
     [Fact]
     public void CommandModel_ExposesInitWithExpectedOptions()
@@ -83,7 +85,7 @@ public class InitCommandHandlerTests
     [Fact]
     public async Task NoWait_ExistingAncestorRoot_ReportsCoversRequestedPath()
     {
-        var requested = Root + "\\src";
+        var requested = Path.Combine(Root, "src");
         var (runtime, _, error) = Runtime(
             new RecordingHandler(_ => throw new InvalidOperationException()),
             (_, _, _, _) => Task.FromResult(DetachedStartResult.Existing(Instance())));
@@ -249,14 +251,14 @@ public class InitCommandHandlerTests
     private static string Status(
         string indexingStatus,
         string instanceId = "id",
-        string root = Root,
+        string? root = null,
         int contract = 1,
         int fileCount = 0,
         int nodeCount = 0)
         => JsonSerializer.Serialize(new
         {
             system = new { instanceId },
-            indexing = new { status = indexingStatus, rootPath = root },
+            indexing = new { status = indexingStatus, rootPath = root ?? Root },
             database = new { fileCount, nodeCount },
             api = new { contractVersion = contract },
         });

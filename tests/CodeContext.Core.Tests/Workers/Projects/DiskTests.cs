@@ -463,28 +463,45 @@ public sealed class DiskTests : IDisposable
         if (OperatingSystem.IsLinux()) Assert.DoesNotContain(path, OpenFiles());
     }
 
-    [Fact]
-    public void AnAssemblyOfSeveralModulesOutsideTheRepositoryStillBindsEveryModule()
+    /// <summary>
+    /// An assembly of several modules, in the repository or outside it, binds every module, and its modules are read
+    /// as its manifest is: into memory, through the guard, with no handle left on any of them (a handle kept on a
+    /// build's output blocks its next build on Windows). What was read besides the manifest is reported as read.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AnAssemblyOfSeveralModulesBindsEveryModule_WithNoHandleLeftOnAny(bool inRepository)
     {
         var outside = Directory.CreateTempSubdirectory("cc-disk-modules-").FullName;
+        var at = inRepository ? Directory.CreateDirectory(Path.Combine(_directory, "lib")).FullName : outside;
         try
         {
             var options = new Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions(Microsoft.CodeAnalysis.OutputKind.NetModule);
             var core = Microsoft.CodeAnalysis.MetadataReference.CreateFromFile(typeof(object).Assembly.Location);
             var module = Microsoft.CodeAnalysis.CSharp.CSharpCompilation.Create(
                 "Part", [Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText("public class InModule { public int Value => 1; }")], [core], options);
-            var modulePath = Path.Combine(outside, "Part.netmodule");
+            var modulePath = Path.Combine(at, "Part.netmodule");
             using (var written = File.Create(modulePath)) Assert.True(module.Emit(written).Success);
-            var whole = Microsoft.CodeAnalysis.CSharp.CSharpCompilation.Create(
-                "Whole",
-                [Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText("public class InMain { }")],
-                [core, Microsoft.CodeAnalysis.ModuleMetadata.CreateFromFile(modulePath).GetReference()],
-                options.WithOutputKind(Microsoft.CodeAnalysis.OutputKind.DynamicallyLinkedLibrary));
-            var wholePath = Path.Combine(outside, "Whole.dll");
-            using (var written = File.Create(wholePath)) Assert.True(whole.Emit(written).Success);
+            var wholePath = Path.Combine(at, "Whole.dll");
+            using (var part = Microsoft.CodeAnalysis.ModuleMetadata.CreateFromFile(modulePath))
+            {
+                var whole = Microsoft.CodeAnalysis.CSharp.CSharpCompilation.Create(
+                    "Whole",
+                    [Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText("public class InMain { }")],
+                    [core, part.GetReference()],
+                    options.WithOutputKind(Microsoft.CodeAnalysis.OutputKind.DynamicallyLinkedLibrary));
+                using var written = File.Create(wholePath);
+                Assert.True(whole.Emit(written).Success);
+            }
+            var disk = On(_directory);
 
-            var reference = On(_directory).Reference(wholePath);
+            var reference = disk.Reference(wholePath);
 
+            if (OperatingSystem.IsLinux()) Assert.DoesNotContain(OpenFiles(), open => open == wholePath || open == modulePath);
+            Assert.Equal([modulePath], disk.ModulesReadFor(wholePath));
+            File.Delete(modulePath);
+            File.Delete(wholePath);
             var uses = Microsoft.CodeAnalysis.CSharp.CSharpCompilation.Create(
                 "Uses",
                 [Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText("class C { int M() => new InModule().Value; InMain Main; }")],

@@ -106,21 +106,27 @@ public class FileWatcherService : IHostedService, IDisposable
     /// watcher reports nothing for the files such a directory already holds (or held), so the coordinator
     /// reconciles what is under it. A path that is gone cannot be asked what it was: one that no worker would
     /// have indexed as a file may have been a directory, and reconciling a path with nothing known under it
-    /// costs a lookup. Nothing below an excluded or ignored directory is forwarded, as for files.
+    /// costs a lookup. A path that appeared is not asked either: asking would follow it if it is a link the
+    /// repository holds, and a link is recognised from the listing of its parent, which the coordinator makes
+    /// once per batch for every path in that directory (one listing per event made a burst in one directory
+    /// quadratic). So every path that appeared is forwarded as a subtree, and as a file as well when it may be
+    /// one; the coordinator refuses a link and skips what is not a directory. Nothing below an excluded or
+    /// ignored directory is forwarded, as for files.
     /// </summary>
-    /// <returns>True when the path was handled as a directory (forwarded or excluded).</returns>
+    /// <returns>True when the path was handled as a directory only.</returns>
     private bool PublishIfDirectory(string path, bool gone)
     {
-        if (gone)
+        if (gone && !ShouldIgnore(path)) return false;
+        if (_fileSelector.IsIncluded(path, isDirectory: true))
         {
-            if (!ShouldIgnore(path)) return false;
+            _logger.LogDebug("Possible directory change: {FullPath}", path);
+            PublishSubtree(path);
         }
-        else if (!Directory.Exists(path))
-        {
-            return false;
-        }
-        if (!_fileSelector.IsIncluded(path, isDirectory: true)) return true;
-        _logger.LogDebug("Directory change detected: {FullPath}", path);
+        return gone;
+    }
+
+    private void PublishSubtree(string path)
+    {
         try
         {
             var write = _coordinator.NotifySubtreeChangedAsync(path, _lifetimeCts.Token);
@@ -134,7 +140,6 @@ public class FileWatcherService : IHostedService, IDisposable
         {
             _logger.LogError(ex, "Failed to enqueue directory change for {FullPath}.", path);
         }
-        return true;
     }
 
     private void Publish(string fullPath, FileChangeType changeType)

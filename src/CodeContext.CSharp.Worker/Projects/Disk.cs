@@ -39,6 +39,8 @@ public sealed class Disk
 
     private static readonly StringComparison PathComparison =
         OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+    private static readonly StringComparer PathComparer =
+        OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
 
     private readonly PathGuard _guard;
 
@@ -138,34 +140,55 @@ public sealed class Disk
     /// rest of the image (the code, most of an implementation assembly) would only take up memory. The
     /// metadata is read here and the file closed before this returns, so no handle is kept on it.
     ///
-    /// Given a file, Roslyn opens any further modules of the assembly itself, later, by a plain file
-    /// name beside it, and asks nobody. Beside a file in the repository that name could be a link, so
-    /// there Roslyn is given only what was read here, from which it can open nothing. Outside the
-    /// repository an assembly that has further modules is handed over as a file, as before, so they bind.
+    /// The further modules of an assembly that has them are read here the same way, each by the name its
+    /// manifest gives, beside it, and through the guard: given a file, Roslyn would open them itself,
+    /// later, asking nobody, and keep them open. A module that is a link the repository holds, that is
+    /// refused, or that cannot be read is left out, and what it declares does not bind.
+    /// <see cref="ModulesReadFor"/> names the modules that were read.
     /// </summary>
     /// <exception cref="FileNotFoundException">The file is missing or refused.</exception>
     public MetadataReference Reference(string path)
     {
         if (Refused(path)) throw Absent(path);
-        ModuleMetadata module;
-        using (var stream = File.OpenRead(path))
-        {
-            module = ModuleMetadata.CreateFromStream(stream, PEStreamOptions.PrefetchMetadata);
-        }
+        var modules = new List<ModuleMetadata> { ReadModule(path) };
         try
         {
-            if (module.GetModuleNames().IsEmpty || _guard.InRepository(path))
+            var read = new List<string>();
+            var directory = Path.GetDirectoryName(path)!;
+            foreach (var name in modules[0].GetModuleNames())
             {
-                return AssemblyMetadata.Create(module).GetReference(filePath: path);
+                if (name.Length == 0 || Path.GetFileName(name) != name) continue;
+                var modulePath = Path.Combine(directory, name);
+                if (Refused(modulePath) || _guard.ThroughALink(modulePath)) continue;
+                try
+                {
+                    modules.Add(ReadModule(modulePath));
+                    read.Add(modulePath);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or BadImageFormatException)
+                {
+                }
             }
+            _modulesRead[path] = read;
+            return AssemblyMetadata.Create(modules).GetReference(filePath: path);
         }
         catch
         {
-            module.Dispose();
+            foreach (var module in modules) module.Dispose();
             throw;
         }
-        module.Dispose();
-        return MetadataReference.CreateFromFile(path);
+    }
+
+    /// <summary>The further modules <see cref="Reference"/> last read for an assembly; none for one of a single module.</summary>
+    public IReadOnlyList<string> ModulesReadFor(string assemblyPath)
+        => _modulesRead.TryGetValue(assemblyPath, out var read) ? read : [];
+
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, IReadOnlyList<string>> _modulesRead = new(PathComparer);
+
+    private static ModuleMetadata ReadModule(string path)
+    {
+        using var stream = File.OpenRead(path);
+        return ModuleMetadata.CreateFromStream(stream, PEStreamOptions.PrefetchMetadata);
     }
 
     /// <summary>

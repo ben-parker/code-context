@@ -119,12 +119,12 @@ public sealed class CSharpWorkerInputsTests : IAsyncLifetime
 
         // The folder the worker listed to find restore data says so first; the file would as well.
         Assert.StartsWith("artifacts/obj", Check(inputs, captured).FirstMoved);
+        // The check names a path in the root with '/' between names, on every platform.
         Assert.Equal(assets, WorkerInputsAssert.Check(Root, captured, inputs with { Files = [] }, ".cs").FirstMoved is { } moved
-            ? Path.Combine(Root, moved) : null);
+            ? Path.GetFullPath(Path.Combine(Root, moved)) : null);
     }
 
-    [Fact]
-    public async Task AReferencedAssembly_RewrittenInPlace_IsSeen()
+    private async Task<(string Library, WorkerInputs Inputs, DateTime Captured)> ReferencedAssemblyAsync()
     {
         var library = Path.Combine(Root, "lib", "Library.dll");
         Directory.CreateDirectory(Path.GetDirectoryName(library)!);
@@ -138,8 +138,49 @@ public sealed class CSharpWorkerInputsTests : IAsyncLifetime
         Write(Path.Combine(Root, "A.cs"), "namespace Demo; public class A { }");
         var (inputs, captured) = await ScanAsync();
         Assert.Contains(library, inputs.Files);
+        return (library, inputs, captured);
+    }
+
+    /// <summary>
+    /// A referenced assembly copied over by one of the same size whose times are all older than the snapshot. Linux
+    /// sees it by the file's status change time. macOS sees it because a copy there replaces the file, so its folder
+    /// changed. Windows does not: the copy carries the source's change and last write times over and keeps the
+    /// replaced file's creation time, so no time moves. That is the documented limit of the one-shot check there; if
+    /// it fails here because the copy is now seen, the limit was closed and the documentation should say so.
+    /// </summary>
+    [Fact]
+    public async Task AReferencedAssembly_CopiedOverKeepingOlderTimes_IsSeenExceptOnWindows()
+    {
+        var (library, inputs, captured) = await ReferencedAssemblyAsync();
 
         File.Copy(typeof(Xunit.Assert).Assembly.Location, library, overwrite: true);
+
+        var moved = Check(inputs, captured).FirstMoved;
+        if (OperatingSystem.IsWindows())
+        {
+            Assert.True(moved is null, $"the copy is seen ('{moved}'): the Windows limit is closed, update FileChangeTime and the skill");
+        }
+        else if (OperatingSystem.IsMacOS())
+        {
+            Assert.Equal("lib", moved);
+        }
+        else
+        {
+            Assert.Equal("lib/Library.dll", moved);
+        }
+    }
+
+    /// <summary>An ordinary edit of a referenced assembly, written in place with its times left alone, is seen everywhere.</summary>
+    [Fact]
+    public async Task AReferencedAssembly_WrittenInPlace_IsSeen()
+    {
+        var (library, inputs, captured) = await ReferencedAssemblyAsync();
+
+        using (var stream = new FileStream(library, FileMode.Open, FileAccess.Write))
+        {
+            stream.Seek(0, SeekOrigin.End);
+            stream.WriteByte(0);
+        }
 
         Assert.Equal("lib/Library.dll", Check(inputs, captured).FirstMoved);
     }

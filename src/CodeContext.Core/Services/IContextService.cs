@@ -327,7 +327,11 @@ namespace CodeContext.Core.Services
         /// <summary>Methods connected to the target through implementation or override declarations.</summary>
         public List<CodeNode> MethodFamilyMembers { get; set; } = new();
 
-        /// <summary>Family declarations that have statically bound incoming calls.</summary>
+        /// <summary>
+        /// The members of the method family (the target included) that some usage names directly: the compile-time
+        /// targets of its call sites, whatever they may dispatch to. Not the calls marked statically bound
+        /// (<c>base.M()</c>, <c>super.m()</c>), which compact <c>bindings</c> shows as <c>static</c>.
+        /// </summary>
         public List<CodeNode> StaticallyBoundTargets { get; set; } = new();
 
         /// <summary>

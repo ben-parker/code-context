@@ -120,6 +120,41 @@ public sealed class DirectoryChangeTests : IAsyncLifetime
         Assert.Null(await FindAsync(_instance.Context, "hiddenClass"));
     }
 
+    /// <summary>
+    /// A link the repository holds is followed by no scan, so nothing reached through one is indexed however it
+    /// appears: a directory link created, moved in or put where an indexed directory was, a file link, a file
+    /// written beneath a link, and a refresh of a path through one. What the replaced directory held goes.
+    /// </summary>
+    [Fact]
+    public async Task LinksThatAppear_AreNotFollowed()
+    {
+        if (OperatingSystem.IsWindows()) return; // creating a link needs a privilege there
+        var outside = Path.Combine(_base, "outside");
+        Directory.CreateDirectory(outside);
+        File.WriteAllText(Path.Combine(outside, "linked.fake"), "l");
+        var stagedLink = Path.Combine(_base, "stage-link");
+        Directory.CreateSymbolicLink(stagedLink, outside);
+
+        Directory.CreateSymbolicLink(Path.Combine(Root, "created"), outside);
+        Directory.Move(stagedLink, Path.Combine(Root, "movedin"));
+        Directory.Delete(Path.Combine(Root, "old"), recursive: true);
+        Directory.CreateSymbolicLink(Path.Combine(Root, "old"), outside);
+        File.CreateSymbolicLink(Path.Combine(Root, "filelink.fake"), Path.Combine(outside, "linked.fake"));
+        await ExpectAsync("movedClass", null);
+        File.WriteAllText(Path.Combine(outside, "beneath.fake"), "b");
+        await _instance.Coordinator.RefreshFileAsync(Path.Combine(Root, "created", "linked.fake"));
+        await _instance.Coordinator.RefreshFileAsync(Path.Combine(Root, "filelink.fake"));
+        // A change that is seen marks the point by which the others would have been.
+        Directory.CreateDirectory(Path.Combine(Root, "seen"));
+        File.WriteAllText(Path.Combine(Root, "seen", "seen.fake"), "s");
+
+        await ExpectAsync("seenClass", "seen/seen.fake");
+        Assert.Null(await FindAsync(_instance.Context, "linkedClass"));
+        Assert.Null(await FindAsync(_instance.Context, "beneathClass"));
+        Assert.Null(await FindAsync(_instance.Context, "filelinkClass"));
+        Assert.Null(await FindAsync(_instance.Context, "movedClass"));
+    }
+
     /// <summary>The running instance comes to answer so, and so does the snapshot it leaves, asked without an instance.</summary>
     private async Task ExpectAsync(string name, string? relativePath)
     {

@@ -10,7 +10,9 @@ namespace CodeContext.Core.Tests.Commands;
 
 public class QueryCommandHandlerTests
 {
-    private const string Root = "C:\\repo";
+    // A root as the platform spells one: the commands normalize paths natively, so a Windows path
+    // elsewhere is a relative file name and no instance's root.
+    private static readonly string Root = OperatingSystem.IsWindows() ? "C:\\repo" : "/repo";
 
     [Fact]
     public void CommandModel_RequiresIdentifiersAndSharesRecursiveOptionsWithMulti()
@@ -156,7 +158,7 @@ public class QueryCommandHandlerTests
         });
 
         var exit = await QueryCommandHandler.ExecuteAsync(
-            new QuerySettings(["Target"], Root + "\\src", 1, false, null, false, true, false),
+            new QuerySettings(["Target"], Path.Combine(Root, "src"), 1, false, null, false, true, false),
             runtime, CancellationToken.None);
 
         Assert.Equal(0, exit);
@@ -197,11 +199,12 @@ public class QueryCommandHandlerTests
     }
 
     [Theory]
-    [InlineData("other", Root, 1)]
-    [InlineData("id", "C:\\other", 1)]
-    [InlineData("id", Root, 2)]
-    public async Task IdentityRootOrContractMismatchReturnsOne(string instanceId, string statusRoot, int contract)
+    [InlineData("other", false, 1)]
+    [InlineData("id", true, 1)]
+    [InlineData("id", false, 2)]
+    public async Task IdentityRootOrContractMismatchReturnsOne(string instanceId, bool otherRoot, int contract)
     {
+        var statusRoot = otherRoot ? Path.Combine(Path.GetDirectoryName(Root)!, "other") : Root;
         var handler = new RecordingHandler(_ => Json(Status("ready", instanceId, statusRoot, contract)));
         var (runtime, _, error) = Runtime(handler, new FakeRegistry(Instance()));
 
@@ -799,11 +802,11 @@ public class QueryCommandHandlerTests
         StartedAt = DateTimeOffset.UtcNow,
     };
 
-    private static string Status(string indexingStatus, string instanceId = "id", string root = Root, int contract = 1)
+    private static string Status(string indexingStatus, string instanceId = "id", string? root = null, int contract = 1)
         => JsonSerializer.Serialize(new
         {
             system = new { instanceId },
-            indexing = new { status = indexingStatus, rootPath = root },
+            indexing = new { status = indexingStatus, rootPath = root ?? Root },
             api = new { contractVersion = contract },
         });
 
