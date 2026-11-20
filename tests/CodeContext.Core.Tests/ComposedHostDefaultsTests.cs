@@ -60,8 +60,12 @@ public sealed class ComposedHostDefaultsTests
                 await SnapshotServiceHarness.WaitUntilAsync(() => scan.Phase == ScanPhase.Ready && trim.Active == 0,
                     "the first scan, with no activity left open", 30_000);
                 Assert.Equal(0, trim.Trims);
-                // The fake worker read its one file at once: the quick worker's idle time.
-                Assert.Equal(TimeSpan.FromSeconds(WorkerHibernationSettings.QuickIdleSeconds), hibernation.IdleFor("fake"));
+                // The read the scan measured is what the default policy is applied to. Which of its two idle times that
+                // gives is the machine's: the measure is the wake's whole cost, the worker's start included, and a first
+                // start under a loaded test run has taken more than the quick read's 5 s (a Windows runner).
+                var read = workers.LastReadDuration("fake");
+                Assert.NotNull(read);
+                Assert.Equal(new WorkerHibernationSettings().IdleFor(read), hibernation.IdleFor("fake"));
             }
             finally
             {
