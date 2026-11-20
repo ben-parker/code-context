@@ -677,6 +677,32 @@ public sealed class GraphImpactTests : IDisposable
     }
 
     [Fact]
+    public async Task AFileTheIndexFailedToRead_OrIsStillReading_IsNotMapped()
+    {
+        // Its blob id matches and its time is old, but the worker's last read of it failed: the index holds what it held before.
+        var files = new CodeContext.Core.Repositories.InMemoryFileMetadataRepository();
+        var graph = Sample();
+        graph.Files = files;
+        var service = graph.Build();
+        var diff = Diff("src/Foo.cs", Blob("src/Foo.cs"), Replace(8));
+        var path = Path.Combine(_root, "src", "Foo.cs");
+
+        await files.UpsertAsync(new CodeContext.Core.Models.FileMetadata { FilePath = path, Status = CodeContext.Core.Models.FileProcessingStatus.Failed, ErrorMessage = "worker exited" });
+        var failed = await Impact(service, diff);
+        Assert.Empty(failed.Changes);
+        var entry = Assert.Single(failed.Unmapped);
+        Assert.Equal("notYetIndexed", entry.Reason);
+        Assert.Contains("worker exited", entry.Detail);
+        Assert.False(failed.Complete);
+
+        await files.UpsertAsync(new CodeContext.Core.Models.FileMetadata { FilePath = path, Status = CodeContext.Core.Models.FileProcessingStatus.Processing });
+        Assert.Equal("notYetIndexed", Assert.Single((await Impact(service, diff)).Unmapped).Reason);
+
+        await files.UpsertAsync(new CodeContext.Core.Models.FileMetadata { FilePath = path, Status = CodeContext.Core.Models.FileProcessingStatus.Completed });
+        Assert.True((await Impact(service, diff)).Complete);
+    }
+
+    [Fact]
     public async Task BeforeAnyScanHasFinished_TheDiffIsRefused()
     {
         var graph = Sample();

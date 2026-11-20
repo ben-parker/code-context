@@ -1,5 +1,6 @@
 using System.Text;
 using CodeContext.Core.Diffs;
+using CodeContext.Core.Models;
 using CodeContext.Core.Repositories.InMemory;
 
 namespace CodeContext.Core.Services
@@ -38,8 +39,8 @@ namespace CodeContext.Core.Services
                     + "Retry when codecontext status shows indexing ready.");
             }
             var tree = new DiffWorkingTree(_rootPath, indexedAsOf);
-            return ReadOneGenerationAsync(shards => Task.FromResult(GetImpactOnce(
-                request, files, tree, new GraphWalk(shards, relations, request.IncludeTests, _rootPath, cancellationToken), shards)),
+            return ReadOneGenerationAsync(shards => GetImpactOnceAsync(
+                request, files, tree, new GraphWalk(shards, relations, request.IncludeTests, _rootPath, cancellationToken), shards, cancellationToken),
                 cancellationToken);
         }
 
@@ -55,8 +56,9 @@ namespace CodeContext.Core.Services
             public int TestsHidden;
         }
 
-        private GraphImpactResponse GetImpactOnce(
-            GraphImpactRequest request, List<DiffFile> files, DiffWorkingTree tree, GraphWalk walk, IGraphShard[] shards)
+        private async Task<GraphImpactResponse> GetImpactOnceAsync(
+            GraphImpactRequest request, List<DiffFile> files, DiffWorkingTree tree, GraphWalk walk, IGraphShard[] shards,
+            CancellationToken cancellationToken)
         {
             var response = new GraphImpactResponse { Cache = _cacheState?.GetNotice(), MaxDepth = request.MaxDepth, DiffFiles = files.Count };
             var unmapped = new List<GraphUnmappedChange>();
@@ -160,6 +162,16 @@ namespace CodeContext.Core.Services
                         + "are not checked out, the file changed since the diff was made, or a .gitattributes filter (LFS, ident, "
                         + "working-tree-encoding) rewrites it on checkout. Its line numbers would point at the wrong declarations, so "
                         + "none is mapped.");
+                    continue;
+                }
+                // The file's content and time say what is on disk; whether the worker's last read of it succeeded is the
+                // file table's to say. A read that failed, or has not finished, left the declarations as they were.
+                if (await _fileMetadataRepository.GetByFilePathAsync(fullPath, cancellationToken) is { Status: not FileProcessingStatus.Completed } unread)
+                {
+                    Unmapped("notYetIndexed", unread.Status == FileProcessingStatus.Failed
+                        ? $"The index failed to read it as it is now ({unread.ErrorMessage ?? "no reason recorded"}) and holds its "
+                            + "declarations as they were before; codecontext status shows the worker's state. Retry once it has been re-indexed."
+                        : "The index has not finished reading it as it is now; retry once the instance has re-indexed it.");
                     continue;
                 }
                 if (verdict == DiffWorkingTree.Verdict.Match) response.ContentChecked++;

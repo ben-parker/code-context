@@ -24,6 +24,9 @@ internal sealed class GraphTestGraph
     /// <summary>The index's freshness given to the service (diff impact); null leaves the time check out.</summary>
     public IIndexFreshness? Freshness { get; set; }
 
+    /// <summary>The file table given to the service; a new, empty one when null.</summary>
+    public CodeContext.Core.Repositories.IFileMetadataRepository? Files { get; set; }
+
     public InMemoryDatabase Database { get; } = new();
 
     public static string Id(string name) => $"csharp:{Workspace(name)}:{name}";
@@ -86,17 +89,18 @@ internal sealed class GraphTestGraph
     public ContextService Build()
     {
         Assert.True(Database.TryCommitGeneration(++_generation, _nodes, _edges, scope: null));
-        return Service(Database, _root, Freshness);
+        return Service(Database, _root, Freshness, Files);
     }
 
     /// <summary>Commits the graph as it is now as a new generation.</summary>
     public void Commit() => Assert.True(Database.TryCommitGeneration(++_generation, _nodes.ToList(), _edges.ToList(), scope: null));
 
-    public static ContextService Service(InMemoryDatabase database, string root = Root, IIndexFreshness? freshness = null)
+    public static ContextService Service(InMemoryDatabase database, string root = Root, IIndexFreshness? freshness = null,
+        CodeContext.Core.Repositories.IFileMetadataRepository? files = null)
         => new(
             new InMemoryNodeRepository(database),
             new InMemoryEdgeRepository(database),
-            new CodeContext.Core.Repositories.InMemoryFileMetadataRepository(),
+            files ?? new CodeContext.Core.Repositories.InMemoryFileMetadataRepository(),
             Options.Create(new CodeContextOptions { RootPath = root }),
             freshness: freshness);
 }
