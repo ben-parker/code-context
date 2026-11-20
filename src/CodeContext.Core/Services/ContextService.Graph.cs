@@ -204,9 +204,12 @@ namespace CodeContext.Core.Services
                                 + $"hop(s) {withTests}: either change finds a path; your own filters excluded them, not the graph.");
                         }
                     }
-                    return ([relationHops is not null ? "relation" : "tests"],
-                        $"No path {names}{filtered}, but one of {relationHops ?? testsHops} hop(s) exists "
-                        + $"{(relationHops is not null ? withoutRelation : withTests)}: your own filter excluded it, not the graph.");
+                    if ((relationHops ?? testsHops) is { } hops)
+                    {
+                        return ([relationHops is not null ? "relation" : "tests"],
+                            $"No path {names}{filtered}, but one of {hops} hop(s) exists "
+                            + $"{(relationHops is not null ? withoutRelation : withTests)}: your own filter excluded it, not the graph.");
+                    }
                 }
             }
 
