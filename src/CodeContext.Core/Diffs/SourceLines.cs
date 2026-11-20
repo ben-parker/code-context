@@ -8,6 +8,18 @@ namespace CodeContext.Core.Diffs
     /// </summary>
     public static partial class SourceLines
     {
+        /// <summary>U+FEFF: at the very start of a file, the byte-order mark (EF BB BF in UTF-8); anywhere else, a character.</summary>
+        public const char ByteOrderMark = '\uFEFF';
+
+        /// <summary>
+        /// The text of 1-based line <paramref name="number"/> of a file as every rule here reads it: line 1 without a
+        /// leading byte-order mark, which belongs to the file's encoding (Visual Studio and EF Core write one), not to
+        /// the line; any other line as it is, since U+FEFF there is a character of the text. Every caller reading a
+        /// line of a file, from a diff or from disk, reads it through this.
+        /// </summary>
+        public static ReadOnlySpan<char> FileLine(ReadOnlySpan<char> line, int number)
+            => number == 1 && !line.IsEmpty && line[0] == ByteOrderMark ? line[1..] : line;
+
         /// <summary>Whether a line holds only whitespace.</summary>
         public static bool IsBlank(ReadOnlySpan<char> line) => line.IsWhiteSpace();
 
@@ -133,7 +145,6 @@ namespace CodeContext.Core.Diffs
         /// <summary>The runs of UTF-8 <paramref name="text"/>, its lines ended by LF or CRLF.</summary>
         public static CommentRuns Read(ReadOnlySpan<byte> text)
         {
-            if (text.StartsWith("\uFEFF"u8)) text = text[3..];
             var runs = new CommentRuns(text.Count((byte)'\n') + 1);
             var buffer = System.Buffers.ArrayPool<char>.Shared.Rent(256);
             try
@@ -176,7 +187,7 @@ namespace CodeContext.Core.Diffs
 
         private void Add(ReadOnlySpan<char> line)
         {
-            var text = line.Trim();
+            var text = SourceLines.FileLine(line, Count + 1).Trim();
             var comment = SourceLines.IsCommentLine(text);
             // The inside or the end of a block comment only under a comment line that opened one.
             if (comment && text[0] == '*' && !_marks.Open) comment = false;

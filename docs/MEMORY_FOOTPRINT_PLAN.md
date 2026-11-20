@@ -462,8 +462,11 @@ Decisions where the backlog was silent:
    of it: cut short after a header, or made with `-w`); `notIndexed` (no declaration in the file, and it may feed
    the index: item 9); `unreadable`; `outsideRoot`; `invalidPath`; `combinedDiff`; `blockCommentBoundary` and
    `conditionalDirective` (item 5). Removed lines inside a member change that member.
-5. Changed lines that change nothing are counted, not mapped: whitespace-only lines, and comment lines that the
-   file shows to be the comment just above a declaration or the file's leading comment. The rules are lexical and
+5. Changed lines that change nothing are counted, not mapped: whitespace-only lines, line 1 replaced by itself with
+   only a byte-order mark added or removed (two lines), and comment lines that the file shows to be the comment just
+   above a declaration or the file's leading comment. A file's line 1 is read without a leading byte-order mark
+   (U+FEFF), on either side of the diff and on disk, by one function every rule reads through
+   (`SourceLines.FileLine`); on any other line U+FEFF is text. The rules are lexical and
    in one place (`SourceLines`): a comment line starts with `//`, `/*`, `*/` or a block comment's `* `, and where a
    block comment ends on the line nothing but comments follows (`/* note */ int x;` is code), or is `#region`.
    Inside a member any line, a comment too, changes it. Where no member holds a comment line the working-tree file

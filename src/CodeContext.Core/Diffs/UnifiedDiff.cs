@@ -446,13 +446,37 @@ namespace CodeContext.Core.Diffs
                 var addedMarks = new CommentMarks();
                 var removedMarks = new CommentMarks();
                 List<int>? markedLines = null;
+                // Old line 1 was passed over as new line 1 with only a byte-order mark added or removed; its new side is next.
+                var sameFirstLine = false;
 
                 while (oldLeft > 0 || newLeft > 0)
                 {
                     if (!NextSpan(out var line)) throw new ArgumentException(
                         $"diff line {hunkLine}: the hunk ends early: {oldLeft} old and {newLeft} new line(s) of its header are missing (a truncated diff?); the diff is refused rather than read in part.");
                     var kind = line.Length == 0 ? ' ' : line[0];
-                    var content = line.Length == 0 ? line : line[1..];
+                    // The line's text as the file holds it: a byte-order mark is no text of its line 1, on either side.
+                    var content = line.Length == 0 ? line : SourceLines.FileLine(line[1..], kind == '-' ? nextOld : nextNew);
+                    if (kind == '-' && nextOld == 1 && nextNew == 1 && oldLeft > 0 && newLeft > 0 && OnlyTheMarkDiffers(line[1..], oldLeft - 1))
+                    {
+                        // Line 1 replaced by itself with a byte-order mark added or removed: no character of the text
+                        // changed, as for a line whose only change is whitespace. Its new side is passed over below.
+                        file.RemovedLineCount++;
+                        file.IgnoredLines++;
+                        sameFirstLine = true;
+                        oldLeft--;
+                        nextOld++;
+                        continue;
+                    }
+                    if (kind == '+' && sameFirstLine && nextNew == 1)
+                    {
+                        if (newLeft == 0) throw Malformed("an added line beyond the hunk's new count");
+                        file.AddedLineCount++;
+                        file.IgnoredLines++;
+                        sameFirstLine = false;
+                        newLeft--;
+                        nextNew++;
+                        continue;
+                    }
                     switch (kind)
                     {
                         case ' ':
@@ -522,7 +546,8 @@ namespace CodeContext.Core.Diffs
 
                 void OpenBlock()
                 {
-                    if (blockNewBefore < 0) blockNewBefore = nextNew - 1;
+                    // Lines removed after a line 1 passed over lie below new line 1, which is still to come.
+                    if (blockNewBefore < 0) blockNewBefore = nextNew - 1 + (sameFirstLine ? 1 : 0);
                 }
 
                 void CloseAdded()
@@ -572,6 +597,33 @@ namespace CodeContext.Core.Diffs
                     removedStart = removedEnd = removedBlank = 0;
                     removedCode = removedComment = removedContinues = false;
                 }
+            }
+
+            /// <summary>
+            /// Whether <paramref name="removed"/>, the old side's line 1, comes back as the new side's line 1 (the first
+            /// added line after the removed run it starts) with nothing changed but a byte-order mark added or removed.
+            /// Looks ahead without reading, over at most the <paramref name="removedAfter"/> removed lines the hunk has left.
+            /// </summary>
+            private bool OnlyTheMarkDiffers(ReadOnlySpan<char> removed, int removedAfter)
+            {
+                var rest = text.AsSpan(_position);
+                while (!rest.IsEmpty && removedAfter >= 0)
+                {
+                    var end = rest.IndexOf('\n');
+                    var line = end < 0 ? rest : rest[..end];
+                    rest = end < 0 ? default : rest[(end + 1)..];
+                    if (line.EndsWith("\r")) line = line[..^1];
+                    if (line.StartsWith("\\")) continue;
+                    if (line.StartsWith("-"))
+                    {
+                        removedAfter--;
+                        continue;
+                    }
+                    if (!line.StartsWith("+")) return false;
+                    var added = line[1..];
+                    return !added.SequenceEqual(removed) && SourceLines.FileLine(added, 1).SequenceEqual(SourceLines.FileLine(removed, 1));
+                }
+                return false;
             }
 
             private static bool TryRange(ReadOnlySpan<char> value, out int start, out int count)
