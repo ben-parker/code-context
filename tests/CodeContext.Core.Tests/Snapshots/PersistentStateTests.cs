@@ -464,6 +464,38 @@ public sealed class PersistentStateTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task TouchedWithTheSameContent_AStopWhileTheLoadedSnapshotIsChecked_StillWritesTheStore()
+    {
+        // The check of the loaded snapshot runs off the coordinator after the verifying scan; a host stopped while it
+        // runs (a short-lived instance, or a slow disk) must still write the store it found older than its files.
+        await FirstRunAsync();
+        AgeTheFiles();
+        File.SetLastWriteTimeUtc(Path.Combine(Root, "a.fake"), DateTime.UtcNow);
+        using var checking = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+
+        await using (var second = Start("persistent-state", checkFileTimes: true))
+        {
+            second.BeforeFileTimeCheck = () =>
+            {
+                checking.Set();
+                release.Wait(TimeSpan.FromSeconds(30));
+            };
+            await second.StartAsync();
+            await second.WaitForAsync(() => checking.IsSet, "the check of the loaded snapshot");
+            var stop = second.StopAsync();
+            // The check finishes only once the stop is under way (or done, if the stop does not wait for it).
+            await Task.WhenAny(stop, Task.Delay(500));
+            release.Set();
+            await stop;
+            Assert.Equal(1, second.Snapshots.Status.WritesCompleted);
+        }
+        Assert.Equal(2UL, NewestSequence());
+        AgeTheFiles();
+        Assert.NotNull(OpenOneShot().Snapshot);
+    }
+
+    [Fact]
     public async Task NothingTouched_WithTheFileTimeCheck_StillWritesNothing()
     {
         await FirstRunAsync();
@@ -624,11 +656,18 @@ public sealed class PersistentStateTests : IAsyncLifetime
             Snapshots = new SnapshotService(Coordinator, Factory.Database, ScanState, settings, Startup, TimeProvider.System,
                 SnapshotLog, CacheState, Workers,
                 filesSince: checkFileTimes
-                    ? (captured, inputs, rootTicks) => SnapshotFreshness.For(options.Value, Workers, captured, inputs, rootTicks, TimeSpan.Zero)
+                    ? (captured, inputs, rootTicks) =>
+                    {
+                        BeforeFileTimeCheck?.Invoke();
+                        return SnapshotFreshness.For(options.Value, Workers, captured, inputs, rootTicks, TimeSpan.Zero);
+                    }
                     : null);
             Status = new StatusService(Factory.CreateNodeRepository(), Factory.CreateEdgeRepository(), metadata, Factory, options,
                 ScanState, Sessions, new ApiMetrics(), coverage: coverage, cacheState: CacheState);
         }
+
+        /// <summary>Runs as the host's check of the loaded snapshot against file times begins (with <c>checkFileTimes</c>).</summary>
+        public Action? BeforeFileTimeCheck { get; set; }
 
         public InMemoryRepositoryFactory Factory { get; }
         public StaticWorkerCatalog Catalog { get; }
