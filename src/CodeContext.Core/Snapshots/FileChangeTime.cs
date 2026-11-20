@@ -10,9 +10,10 @@ namespace CodeContext.Core.Snapshots
     /// <c>tar -x</c>, copied by <c>cp -p</c> or <c>rsync -a</c>, or touched with <c>touch -d</c> still reads as new,
     /// and a modification time set in the future is ignored. On Windows it is the file system's change time
     /// (<c>FILE_BASIC_INFO.ChangeTime</c>, which every write and every setting of the other times moves to the current
-    /// clock, and which copying a file does not carry over), read from the entry itself: a directory
-    /// listing's copy of a directory's times is not kept current as entries come and go in it, and a copy over a file
-    /// keeps the source's last write time. Elsewhere (and where the call is missing) it is the later of the last write
+    /// clock), read from the entry itself, since a directory listing's copy of a directory's times is not kept current as
+    /// entries come and go in it. Unlike Linux's, it can be set: a copy (<c>CopyFile</c>) carries the source's change
+    /// and last write times over, so a file copied over another, keeping its size, with times older than the snapshot is
+    /// not seen there. Elsewhere (and where the call is missing) it is the later of the last write
     /// and creation times: macOS keeps a creation time that a copy or an unpack sets to now, but content written in
     /// place with an older modification time set afterwards is not seen there.
     ///
