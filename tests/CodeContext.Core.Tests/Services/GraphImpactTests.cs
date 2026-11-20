@@ -608,6 +608,8 @@ public sealed class GraphImpactTests : IDisposable
         Assert.Equal(I("Foo.Run"), seeds["Caller"]);
         Assert.Equal(I("Foo.Other"), seeds["OtherCaller"]);
         Assert.Single(impact.Items, item => item.Name == "Shared");
+        // Reached from both at the same distance: the change listed first (file and line order) has it, whatever the ids.
+        Assert.Equal(I("Foo.Run"), seeds["Shared"]);
         // Every listed dependent is attributed to exactly one change.
         Assert.Equal(impact.TotalCount, impact.Changes.Sum(change => change.Dependents));
         Assert.Contains("RunTest", impact.Items.Select(item => item.Name));

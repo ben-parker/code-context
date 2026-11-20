@@ -449,7 +449,8 @@ Decisions where the backlog was silent:
    dispatch, the static-call stop, the test-double stop, `testsHidden`, depth, cancellation and the test-file rule are
    the same; seeds are never listed (a changed declaration that uses another is a change, not a dependent). A
    one-member diff gives the `affected` answer for that member under every filter (tested). Each dependent is
-   attributed to the change that reached it first (results are nearest first). One generation as in F1 item 6.
+   attributed to the change that reached it first: the walk starts from the changes in file and line order, so the
+   nearest change has it, and of changes at one distance the first listed. One generation as in F1 item 6.
 7. The diff is hostile data: at most 16,777,216 characters, 10,000 files, paths of 4,096 characters and line numbers
    of 100,000,000; every hunk is checked against its header's counts and a truncated, garbled or repeated-file diff
    (`git log -p`) is refused with its line and reason, never read in part. Paths are unquoted (C escapes, UTF-8),

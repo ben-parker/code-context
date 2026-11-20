@@ -229,8 +229,10 @@ namespace CodeContext.Core.Services
                 }
             }
 
-            // One walk from every changed declaration, as affected walks from one.
-            var seeds = changeOf.Keys.Order(StringComparer.Ordinal).ToList();
+            // One walk from every changed declaration, as affected walks from one, the changes in file and line order: a
+            // dependent two changes reach at one distance is the first one's.
+            changes.Sort(static (left, right) => CompareByPlace(left.Node, right.Node));
+            var seeds = changes.SelectMany(change => change.Copies).Select(node => node.Id!).ToList();
             var affected = new List<GraphWalk.Affected>();
             if (seeds.Count > 0)
             {
@@ -266,7 +268,6 @@ namespace CodeContext.Core.Services
             }
 
             // Changes, in file and line order.
-            changes.Sort(static (left, right) => CompareByPlace(left.Node, right.Node));
             response.ChangeCount = changes.Count;
             foreach (var change in changes.Take(request.Limit))
             {
