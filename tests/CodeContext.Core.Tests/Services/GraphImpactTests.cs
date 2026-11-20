@@ -479,6 +479,31 @@ public sealed class GraphImpactTests : IDisposable
     }
 
     [Fact]
+    public void AFileIsHashedAsItIsRead_AndCarriageReturnsAcrossReadsAreDropped()
+    {
+        // An 8 MB file with CRLF pairs straddling the 64 KB reads, and a lone CR that stays.
+        var lf = new StringBuilder();
+        while (lf.Length < 8 * 1024 * 1024) lf.Append(new string('x', 65_535 - lf.Length % 65_536)).Append('\n').Append("y\r z\n");
+        var crlf = lf.ToString().Replace("\n", "\r\n");
+        var path = Path.Combine(_root, "big.cs");
+        File.WriteAllText(path, crlf);
+        var lfBytes = Encoding.UTF8.GetBytes(lf.ToString());
+        var tree = new DiffWorkingTree(_root, indexedAsOf: null);
+
+        Assert.Equal(DiffWorkingTree.Verdict.Match, tree.Inspect(path, DiffWorkingTree.BlobId(lfBytes, sha256: true)[..12]).Verdict);
+        var fresh = new DiffWorkingTree(_root, indexedAsOf: null);
+        var asWritten = DiffWorkingTree.BlobId(Encoding.UTF8.GetBytes(crlf), sha256: false);
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        var verdict = fresh.Inspect(path, asWritten).Verdict;
+        var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        Assert.Equal(DiffWorkingTree.Verdict.Match, verdict);
+        Assert.Equal(DiffWorkingTree.Verdict.Mismatch, fresh.Inspect(path, "deadbeef").Verdict);
+        // Not the file's size: it is never held whole.
+        Assert.True(allocated < 1024 * 1024, $"{allocated:N0} bytes allocated to hash an 8 MB file");
+    }
+
+    [Fact]
     public async Task ABlobIdOfASha256Repository_IsCheckedToo()
     {
         var service = Sample().Build();

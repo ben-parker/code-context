@@ -113,19 +113,104 @@ namespace CodeContext.Core.Diffs
                 return (Verdict.ChangedSinceIndexed, null);
             if (blob is null) return (Verdict.Unchecked, null);
             if (info.Length > MaxHashedBytes) return (Verdict.Refused, $"it is larger than {MaxHashedBytes / (1024 * 1024)} MB, so its content was not compared");
-            byte[] content;
             try
             {
-                content = File.ReadAllBytes(fullPath);
+                using var stream = new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete,
+                    bufferSize: 1, FileOptions.SequentialScan);
+                return (Matches(stream, blob) ? Verdict.Match : Verdict.Mismatch, null);
             }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
             {
                 return (Verdict.Refused, exception.Message);
             }
-            if (Matches(content, blob)) return (Verdict.Match, null);
-            // A checkout with core.autocrlf holds CRLF where the blob holds LF.
-            if (Array.IndexOf(content, (byte)'\r') >= 0 && Matches(WithoutCarriageReturns(content), blob)) return (Verdict.Match, null);
-            return (Verdict.Mismatch, null);
+        }
+
+        private const int HashBufferBytes = 64 * 1024;
+
+        /// <summary>
+        /// Whether <paramref name="blob"/> is git's id of what <paramref name="stream"/> holds, as it is or with each CRLF
+        /// read as LF (a checkout with <c>core.autocrlf</c> holds CRLF where the blob holds LF). Read in passes of a fixed
+        /// buffer, never held whole; content whose length changes while it is read matches nothing.
+        /// </summary>
+        internal static bool Matches(Stream stream, string blob)
+        {
+            var length = stream.Length;
+            var buffer = System.Buffers.ArrayPool<byte>.Shared.Rent(HashBufferBytes);
+            byte[]? stripped = null;
+            try
+            {
+                using var sha1 = blob.Length <= 40 ? IncrementalHash.CreateHash(HashAlgorithmName.SHA1) : null;
+                using var sha256 = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+                Header(length);
+                long total = 0, pairs = 0;
+                var afterCarriageReturn = false;
+                int read;
+                while ((read = stream.Read(buffer, 0, HashBufferBytes)) > 0)
+                {
+                    Append(buffer, read);
+                    for (var i = 0; i < read; i++)
+                    {
+                        if (afterCarriageReturn && buffer[i] == '\n') pairs++;
+                        afterCarriageReturn = buffer[i] == '\r';
+                    }
+                    total += read;
+                }
+                if (total != length) return false;
+                if (Found()) return true;
+                if (pairs == 0) return false;
+
+                stream.Position = 0;
+                stripped = System.Buffers.ArrayPool<byte>.Shared.Rent(HashBufferBytes + 1);
+                Header(length - pairs);
+                long written = 0;
+                var pending = false;
+                while ((read = stream.Read(buffer, 0, HashBufferBytes)) > 0)
+                {
+                    var count = 0;
+                    for (var i = 0; i < read; i++)
+                    {
+                        var value = buffer[i];
+                        if (pending && value != '\n') stripped[count++] = (byte)'\r';
+                        pending = value == '\r';
+                        if (!pending) stripped[count++] = value;
+                    }
+                    Append(stripped, count);
+                    written += count;
+                }
+                if (pending)
+                {
+                    stripped[0] = (byte)'\r';
+                    Append(stripped, 1);
+                    written++;
+                }
+                return written == length - pairs && Found();
+
+                void Header(long size)
+                {
+                    var header = Encoding.ASCII.GetBytes($"blob {size}\0");
+                    sha1?.AppendData(header);
+                    sha256.AppendData(header);
+                }
+
+                void Append(byte[] data, int count)
+                {
+                    sha1?.AppendData(data, 0, count);
+                    sha256.AppendData(data, 0, count);
+                }
+
+                bool Found()
+                {
+                    var one = sha1 is null ? null : Convert.ToHexStringLower(sha1.GetHashAndReset());
+                    var two = Convert.ToHexStringLower(sha256.GetHashAndReset());
+                    return (one is not null && one.StartsWith(blob, StringComparison.OrdinalIgnoreCase))
+                        || two.StartsWith(blob, StringComparison.OrdinalIgnoreCase);
+                }
+            }
+            finally
+            {
+                System.Buffers.ArrayPool<byte>.Shared.Return(buffer);
+                if (stripped is not null) System.Buffers.ArrayPool<byte>.Shared.Return(stripped);
+            }
         }
 
         /// <summary>
@@ -145,21 +230,10 @@ namespace CodeContext.Core.Diffs
             {
                 return null;
             }
-            if (blob is not null && !Matches(content, blob)
-                && !(Array.IndexOf(content, (byte)'\r') >= 0 && Matches(WithoutCarriageReturns(content), blob)))
-            {
-                return null;
-            }
+            if (blob is not null && !Matches(new MemoryStream(content, writable: false), blob)) return null;
             var text = new UTF8Encoding(false).GetString(content);
             if (text.EndsWith('\n')) text = text[..^1];
             return text.Split('\n').Select(line => line.EndsWith('\r') ? line[..^1] : line).ToArray();
-        }
-
-        /// <summary>Whether <paramref name="blob"/> (hexadecimal, maybe abbreviated) is git's id of <paramref name="content"/>, SHA-1 or SHA-256.</summary>
-        internal static bool Matches(byte[] content, string blob)
-        {
-            if (blob.Length <= 40 && BlobId(content, sha256: false).StartsWith(blob, StringComparison.OrdinalIgnoreCase)) return true;
-            return BlobId(content, sha256: true).StartsWith(blob, StringComparison.OrdinalIgnoreCase);
         }
 
         /// <summary>git's object id of a blob: the hash of <c>blob &lt;size&gt;\0</c> followed by the content.</summary>
@@ -172,16 +246,5 @@ namespace CodeContext.Core.Diffs
             return Convert.ToHexStringLower(hash.GetHashAndReset());
         }
 
-        private static byte[] WithoutCarriageReturns(byte[] content)
-        {
-            var result = new byte[content.Length];
-            var length = 0;
-            for (var i = 0; i < content.Length; i++)
-            {
-                if (content[i] == '\r' && i + 1 < content.Length && content[i + 1] == '\n') continue;
-                result[length++] = content[i];
-            }
-            return result[..length];
-        }
     }
 }

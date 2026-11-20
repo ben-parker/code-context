@@ -457,7 +457,8 @@ Decisions where the backlog was silent:
    segments, a control character or invalid UTF-8; such a path is never looked at. Paths are relative to the git work
    tree holding the root (the nearest ancestor with `.git`, found by looking, not by asking git). Only line numbers
    are kept. The working tree is read only through `ReportedPaths.RefusedOnDisk` (no link the repository holds, no
-   share but the root's), regular files only, at most 64 MB hashed.
+   share but the root's), regular files only, at most 64 MB hashed, in 64 KB reads (a second pass for a CRLF checkout),
+   never held whole.
 8. REST takes a JSON body, not a query string (a diff is too large and too varied for one), up to 64 MiB, checked as
    strictly as the graph tools' MCP arguments (unknown or miscased names, wrong kinds, missing or blank `diff`);
    a query string is refused.
