@@ -24,7 +24,7 @@ namespace CodeContext.Core.Services;
 /// which every worker re-indexes inside one reconciliation. Until it commits, readers see the
 /// loaded shards, labelled; if it fails, they stay, unverified.
 /// </summary>
-public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
+public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator, IIndexFreshness
 {
     private static readonly TimeSpan QuietWindow = TimeSpan.FromMilliseconds(500);
     private static readonly TimeSpan MaxBatchLatency = TimeSpan.FromSeconds(2);
@@ -117,6 +117,12 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
 
     private int _busy;
     private int _queuedMaintenance;
+
+    /// <summary>File and directory notifications written to the channel and not yet read from it.</summary>
+    private int _queuedChanges;
+
+    /// <summary><see cref="FilesReadAsOfUtc"/> in ticks; 0 until a read of every file has finished.</summary>
+    private long _filesReadAsOfTicks;
     private Action? _mutationObserver;
 
     public IndexCoordinator(
@@ -142,6 +148,27 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
         _progressReporter = scanState is IScanProgressReporter stateReporter
             ? new CompositeScanProgressReporter(consoleReporter, stateReporter)
             : consoleReporter;
+    }
+
+    /// <summary>
+    /// When the last read of every file that finished began: a scan, or a batch that took every change notified
+    /// before it began. A file whose last change is later may be held as it was. A refresh of one file, or a batch
+    /// with notifications still queued behind it, does not move it. A change the watcher has not yet delivered is not
+    /// seen (the window is the watcher's own latency).
+    /// </summary>
+    public DateTime? FilesReadAsOfUtc
+        => Volatile.Read(ref _filesReadAsOfTicks) is var ticks and > 0 ? new DateTime(ticks, DateTimeKind.Utc) : null;
+
+    private void FilesReadAsOf(DateTime startedUtc)
+    {
+        var ticks = startedUtc.Ticks;
+        long current;
+        do
+        {
+            current = Volatile.Read(ref _filesReadAsOfTicks);
+            if (current >= ticks) return;
+        }
+        while (Interlocked.CompareExchange(ref _filesReadAsOfTicks, ticks, current) != current);
     }
 
     public bool IsBusy => Volatile.Read(ref _busy) == 1
@@ -207,12 +234,31 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
 
     public async ValueTask NotifyFileChangedAsync(string fullPath, FileChangeType changeType, CancellationToken ct = default)
     {
-        await _commands.Writer.WriteAsync(new FileChangedCommand(fullPath, changeType), ct);
+        // Counted before it is written, so that a batch never takes the queue for empty while it is not.
+        Interlocked.Increment(ref _queuedChanges);
+        try
+        {
+            await _commands.Writer.WriteAsync(new FileChangedCommand(fullPath, changeType), ct);
+        }
+        catch
+        {
+            Interlocked.Decrement(ref _queuedChanges);
+            throw;
+        }
     }
 
     public async ValueTask NotifySubtreeChangedAsync(string directoryPath, CancellationToken ct = default)
     {
-        await _commands.Writer.WriteAsync(new SubtreeChangedCommand(directoryPath), ct);
+        Interlocked.Increment(ref _queuedChanges);
+        try
+        {
+            await _commands.Writer.WriteAsync(new SubtreeChangedCommand(directoryPath), ct);
+        }
+        catch
+        {
+            Interlocked.Decrement(ref _queuedChanges);
+            throw;
+        }
     }
 
     public async Task<long?> TryRequestFullRescanAsync(CancellationToken ct = default)
@@ -339,6 +385,7 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
             switch (command)
             {
                 case FileChangedCommand or SubtreeChangedCommand:
+                    Interlocked.Decrement(ref _queuedChanges);
                     return await ProcessChangeBatchAsync(command, ct);
 
                 case FullScanCommand:
@@ -469,10 +516,12 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
 
             if (next is FileChangedCommand change)
             {
+                Interlocked.Decrement(ref _queuedChanges);
                 AddPending(pending, change);
             }
             else if (next is SubtreeChangedCommand subtree)
             {
+                Interlocked.Decrement(ref _queuedChanges);
                 subtrees.Add(subtree.Path);
             }
             else if (next is MaintenanceCommand maintenance)
@@ -488,6 +537,9 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
             }
         }
 
+        // Every change notified before this point is in the batch unless one is still queued (behind an interrupting command).
+        var startedUtc = DateTime.UtcNow;
+        var tookEveryChange = Volatile.Read(ref _queuedChanges) <= 0;
         if (subtrees.Count > 0)
         {
             // A directory that appeared, moved or went is reconciled as a whole, here on the loop: one
@@ -524,6 +576,7 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
                 else
                 {
                     await _graphUpdateService.ProcessFileChangesAsync(batch, ct);
+                    if (tookEveryChange) FilesReadAsOf(startedUtc);
                 }
             }
             catch (OperationCanceledException)
@@ -597,6 +650,7 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
     private async Task RunScanAsync(bool resumable, CancellationToken ct)
     {
         Volatile.Write(ref _busy, 1);
+        var startedUtc = DateTime.UtcNow;
         try
         {
             if (resumable)
@@ -610,6 +664,7 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
             // The reconciliation has committed: from here no answer comes from an unchecked snapshot. Ready
             // only after that, so "ready" never shows the previous graph or a cached answer.
             _cacheState?.OnScanCommitted();
+            FilesReadAsOf(startedUtc);
             _scanState.CompleteScan();
         }
         catch (OperationCanceledException)

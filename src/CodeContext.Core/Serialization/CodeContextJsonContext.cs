@@ -326,7 +326,7 @@ public record NativeSyntaxTreeRequestDto(
 [JsonSerializable(typeof(ContextMetrics))]
 [JsonSerializable(typeof(TestFileInfo))]
 [JsonSerializable(typeof(MultiContextRequest))]
-// Whole-graph queries (path, affected, hubs).
+// Whole-graph queries (path, affected, hubs, impact).
 [JsonSerializable(typeof(GraphPathResponse))]
 [JsonSerializable(typeof(GraphAffectedResponse))]
 [JsonSerializable(typeof(GraphHubsResponse))]
@@ -334,6 +334,12 @@ public record NativeSyntaxTreeRequestDto(
 [JsonSerializable(typeof(GraphPathHop))]
 [JsonSerializable(typeof(GraphAffectedNode))]
 [JsonSerializable(typeof(GraphHubNode))]
+// Diff impact.
+[JsonSerializable(typeof(GraphImpactRequest))]
+[JsonSerializable(typeof(GraphImpactResponse))]
+[JsonSerializable(typeof(GraphChangedNode))]
+[JsonSerializable(typeof(GraphImpactNode))]
+[JsonSerializable(typeof(GraphUnmappedChange))]
 [JsonSerializable(typeof(CodeNode))]
 [JsonSerializable(typeof(CodeGraph))]
 [JsonSerializable(typeof(CodeEdge))]

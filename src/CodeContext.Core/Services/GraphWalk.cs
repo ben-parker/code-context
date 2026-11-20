@@ -93,6 +93,20 @@ namespace CodeContext.Core.Services
         /// <summary>Whether the relation filter, if any, lets a hop follow this usage edge.</summary>
         public bool Admits(CodeEdge edge) => _relations is null || _relations.Contains(Kind(edge));
 
+        /// <summary>Whether a containment edge leaves the node: it holds members.</summary>
+        public bool HoldsMembers(string id)
+        {
+            foreach (var shard in _shards)
+            {
+                var edges = shard.GetEdgesBySource(id);
+                for (var i = 0; i < edges.Count; i++)
+                {
+                    if (IsContainment(edges[i])) return true;
+                }
+            }
+            return false;
+        }
+
         // ---- Seeds ----
 
         /// <summary>

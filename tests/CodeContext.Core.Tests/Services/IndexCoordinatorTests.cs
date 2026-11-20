@@ -106,6 +106,48 @@ namespace CodeContext.Core.Tests.Services
         }
 
         [Fact]
+        public async Task FilesReadAsOf_MovesWithAScanOrABatch_NotWithARefreshOfOneFile()
+        {
+            var afterStartup = _coordinator.FilesReadAsOfUtc;
+            Assert.NotNull(afterStartup);
+            Assert.True(afterStartup <= DateTime.UtcNow);
+
+            // One file read again says nothing of the others.
+            await _coordinator.RefreshFileAsync(Path.Combine(_tempDir, "One.cs"));
+            Assert.Equal(afterStartup, _coordinator.FilesReadAsOfUtc);
+
+            var path = Path.Combine(_tempDir, "Changed.cs");
+            await _coordinator.NotifyFileChangedAsync(path, FileChangeType.Changed);
+            await WaitForAsync(() => AllProcessedChanges().Any(c => c.Path == path), "the change to be processed");
+            await WaitForAsync(() => _coordinator.FilesReadAsOfUtc > afterStartup, "the batch to move the time");
+
+            var beforeRescan = _coordinator.FilesReadAsOfUtc;
+            Assert.NotNull(await _coordinator.TryRequestFullRescanAsync());
+            await WaitForAsync(() => _coordinator.FilesReadAsOfUtc > beforeRescan, "the rescan to move the time");
+        }
+
+        [Fact]
+        public async Task FilesReadAsOf_StaysUnsetWhileNoScanHasSucceeded()
+        {
+            var failing = Substitute.For<IGraphUpdateService>();
+            failing.PerformResumableScanAsync(Arg.Any<string>(), Arg.Any<IScanProgressReporter>(), Arg.Any<CancellationToken>())
+                .ThrowsAsync(new InvalidOperationException("worker failed"));
+            var scanState = new ScanStateService();
+            var coordinator = new IndexCoordinator(failing, scanState,
+                Options.Create(new CodeContextOptions { RootPath = _tempDir }), NullLoggerFactory.Instance);
+            await coordinator.StartAsync(CancellationToken.None);
+            try
+            {
+                await WaitForAsync(() => scanState.Phase == ScanPhase.Error, "the scan to fail");
+                Assert.Null(coordinator.FilesReadAsOfUtc);
+            }
+            finally
+            {
+                await coordinator.StopAsync(CancellationToken.None);
+            }
+        }
+
+        [Fact]
         public async Task CreateThenDelete_CoalescesToDelete()
         {
             var path = Path.Combine(_tempDir, "Transient.cs");

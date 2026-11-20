@@ -15,7 +15,14 @@ internal sealed class GraphTestGraph
 
     private readonly List<CodeNode> _nodes = new();
     private readonly List<CodeEdge> _edges = new();
+    private readonly string _root;
     private long _generation;
+
+    /// <param name="root">The root files live under; <see cref="Root"/> unless a test needs real files.</param>
+    public GraphTestGraph(string? root = null) => _root = root ?? Root;
+
+    /// <summary>The index's freshness given to the service (diff impact); null leaves the time check out.</summary>
+    public IIndexFreshness? Freshness { get; set; }
 
     public InMemoryDatabase Database { get; } = new();
 
@@ -29,7 +36,9 @@ internal sealed class GraphTestGraph
     private static Dictionary<string, string> Owner(string name)
         => new() { ["parserId"] = "csharp", ["workspaceId"] = Workspace(name) };
 
-    public GraphTestGraph Node(string name, string type = "Method", string? file = null, int line = 0, bool external = false)
+    /// <param name="line">The 0-based start line; <paramref name="endLine"/> the 0-based end line (the start line when null).</param>
+    public GraphTestGraph Node(string name, string type = "Method", string? file = null, int line = 0, bool external = false,
+        int? endLine = null, string? id = null)
     {
         var metadata = Owner(name);
         if (external)
@@ -39,12 +48,14 @@ internal sealed class GraphTestGraph
         }
         _nodes.Add(new CodeNode
         {
-            Id = Id(name),
+            Id = id ?? Id(name),
             Identifier = Identifier(name),
             Name = name.Contains('.') ? name[(name.LastIndexOf('.') + 1)..] : name,
             Type = type,
-            FilePath = external ? null : $"{Root}/{file ?? "src/" + name.Split('.')[0] + ".cs"}",
+            FilePath = external ? null : Path.Combine(_root, (file ?? "src/" + name.Split('.')[0] + ".cs").Replace('/', Path.DirectorySeparatorChar)),
             StartLine = line,
+            EndLine = endLine ?? line,
+            EndCol = 1,
             Metadata = metadata,
         });
         return this;
@@ -75,16 +86,17 @@ internal sealed class GraphTestGraph
     public ContextService Build()
     {
         Assert.True(Database.TryCommitGeneration(++_generation, _nodes, _edges, scope: null));
-        return Service(Database);
+        return Service(Database, _root, Freshness);
     }
 
     /// <summary>Commits the graph as it is now as a new generation.</summary>
     public void Commit() => Assert.True(Database.TryCommitGeneration(++_generation, _nodes.ToList(), _edges.ToList(), scope: null));
 
-    public static ContextService Service(InMemoryDatabase database)
+    public static ContextService Service(InMemoryDatabase database, string root = Root, IIndexFreshness? freshness = null)
         => new(
             new InMemoryNodeRepository(database),
             new InMemoryEdgeRepository(database),
             new CodeContext.Core.Repositories.InMemoryFileMetadataRepository(),
-            Options.Create(new CodeContextOptions { RootPath = Root }));
+            Options.Create(new CodeContextOptions { RootPath = root }),
+            freshness: freshness);
 }

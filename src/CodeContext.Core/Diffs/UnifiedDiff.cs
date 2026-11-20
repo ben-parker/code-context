@@ -493,6 +493,7 @@ namespace CodeContext.Core.Diffs
             private (string Value, int End) Quoted(string line, int start)
             {
                 var bytes = new List<byte>();
+                Span<byte> buffer = stackalloc byte[4];
                 var i = start + 1;
                 while (true)
                 {
@@ -501,7 +502,6 @@ namespace CodeContext.Core.Diffs
                     if (c == '"') break;
                     if (c != '\\')
                     {
-                        Span<byte> buffer = stackalloc byte[4];
                         var written = Encoding.UTF8.GetBytes([c], buffer);
                         for (var b = 0; b < written; b++) bytes.Add(buffer[b]);
                         continue;

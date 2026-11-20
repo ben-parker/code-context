@@ -7,10 +7,10 @@ namespace CodeContext.Core.Services
 {
     /// <summary>
     /// Whole-graph questions answered in one call from the in-memory store: how one symbol reaches another
-    /// (<see cref="FindPathAsync"/>), what depends on a symbol transitively (<see cref="GetAffectedAsync"/>), and
-    /// which symbols the most others depend on (<see cref="GetHubsAsync"/>). Each answer is read from one graph
-    /// generation. Relationships are static evidence, as in <see cref="IContextService"/>: what the workers recorded,
-    /// not what runs.
+    /// (<see cref="FindPathAsync"/>), what depends on a symbol transitively (<see cref="GetAffectedAsync"/>) or on what
+    /// a diff changes (<see cref="GetImpactAsync"/>), and which symbols the most others depend on
+    /// (<see cref="GetHubsAsync"/>). Each answer is read from one graph generation. Relationships are static evidence, as
+    /// in <see cref="IContextService"/>: what the workers recorded, not what runs.
     /// </summary>
     public interface IGraphQueryService
     {
@@ -19,6 +19,13 @@ namespace CodeContext.Core.Services
         Task<GraphAffectedResponse> GetAffectedAsync(GraphAffectedRequest request, CancellationToken cancellationToken = default);
 
         Task<GraphHubsResponse> GetHubsAsync(GraphHubsRequest request, CancellationToken cancellationToken = default);
+
+        /// <summary>
+        /// What a change could break: the declarations a unified diff changes, mapped by line against the index of the
+        /// working tree, and what depends on them, walked as <see cref="GetAffectedAsync"/> walks one symbol. Part of the
+        /// diff that maps to nothing is reported with the reason, never dropped.
+        /// </summary>
+        Task<GraphImpactResponse> GetImpactAsync(GraphImpactRequest request, CancellationToken cancellationToken = default);
     }
 
     /// <summary>Limits shared by REST, MCP and the CLI.</summary>

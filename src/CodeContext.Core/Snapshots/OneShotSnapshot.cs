@@ -155,7 +155,9 @@ namespace CodeContext.Core.Snapshots
                 var notice = new CacheNotice { State = CacheState.Snapshot, SnapshotAt = snapshotAt };
                 var context = new ContextService(
                     factory.CreateNodeRepository(), factory.CreateEdgeRepository(), factory.CreateFileMetadataRepository(),
-                    Options.Create(options), workers, coverage, new FixedNotice(notice));
+                    Options.Create(options), workers, coverage, new FixedNotice(notice),
+                    // The freshness check above found nothing it was made from newer than the capture.
+                    new FixedFreshness(capturedUtc));
                 return new OneShotSnapshotOpen(
                     new OneShotSnapshot(context, capturedUtc,
                         new OneShotTimings(keyAndDirectory, open, freshness.Elapsed, freshness.Checked, materialize)),
@@ -164,6 +166,11 @@ namespace CodeContext.Core.Snapshots
         }
 
         private static OneShotSnapshotOpen Unavailable(string reason) => new(null, reason);
+
+        private sealed class FixedFreshness(DateTime capturedUtc) : IIndexFreshness
+        {
+            public DateTime? FilesReadAsOfUtc => capturedUtc;
+        }
 
         /// <summary>Every answer carries the same notice: it comes from the snapshot, and nothing here ever verifies it.</summary>
         private sealed class FixedNotice(CacheNotice notice) : ICacheStateProvider
