@@ -65,16 +65,12 @@ namespace CodeContext.Core.Services
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 var version = database.MutationVersion;
-                var adjacency = database.GetAdjacency();
-                var previous = database.Pin(adjacency);
                 T result;
-                try
+                using (var pin = database.PinPublished())
                 {
-                    result = await read(adjacency.Shards);
-                }
-                finally
-                {
-                    database.Pin(previous);
+                    result = await read(pin.Adjacency.Shards);
+                    // Inside a reader that holds its own generation, that generation is the answer's.
+                    if (pin.Nested) return result;
                 }
                 if (AfterGraphReadForTests is { } hook) await hook(attempt);
                 if (database.MutationVersion == version) return result;

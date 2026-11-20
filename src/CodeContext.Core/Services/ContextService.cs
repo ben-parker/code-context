@@ -84,6 +84,7 @@ namespace CodeContext.Core.Services
             string? sourceFile = null,
             bool includeExternal = false)
         {
+            using var generation = OneGeneration();
             ValidateIdentifier(identifier);
             if (depth is < 0 or > 10)
             {
@@ -137,6 +138,15 @@ namespace CodeContext.Core.Services
         /// </summary>
         private CacheNotice? CacheAfterReads(CacheNotice? before) => before ?? _cacheState?.GetNotice();
 
+        /// <summary>
+        /// Pins the published map for the rest of the calling query (see <see cref="InMemoryDatabase.PinPublished"/>):
+        /// every store read it makes, through the repositories or a walk, answers from that one generation, whatever
+        /// commits land meanwhile. The first statement of every public query of this service, in an async method, so the
+        /// pin ends with it; a query called by another (the items of a multi query) keeps the caller's generation.
+        /// <c>ContextGenerationTests</c> checks every method of the query interfaces reads only through it.
+        /// </summary>
+        private InMemoryDatabase.GenerationPin OneGeneration() => _database?.PinPublished() ?? default;
+
         public async Task<CompactContextResponse> GetCompactContextAsync(
             string identifier,
             string? type = null,
@@ -159,6 +169,7 @@ namespace CodeContext.Core.Services
             string? relation = null,
             bool includeExternal = false)
         {
+            using var generation = OneGeneration();
             ValidateIdentifier(identifier);
             ValidateQueryBounds(depth, maxMatches, maxRelationships, maxCallSites, maxTestFiles, maxTestMethods);
             var relationKinds = ParseRelationFilter(relation);
@@ -259,6 +270,7 @@ namespace CodeContext.Core.Services
 
         public async Task<List<CompleteContextResponse>> GetMultipleContextAsync(MultiContextRequest request)
         {
+            using var generation = OneGeneration();
             if (request.RelationshipTypes is { Count: > 0 })
             {
                 throw new ArgumentException(
@@ -294,6 +306,7 @@ namespace CodeContext.Core.Services
 
         public async Task<List<CompactContextResponse>> GetMultipleCompactContextAsync(MultiContextRequest request)
         {
+            using var generation = OneGeneration();
             var results = new List<CompactContextResponse>();
             foreach (var identifier in request.Identifiers)
             {
