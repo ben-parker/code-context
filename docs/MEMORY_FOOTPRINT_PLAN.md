@@ -396,8 +396,12 @@ Decisions where the backlog was silent:
    repository executes what that repository's configuration names (`core.fsmonitor`, `diff.external`, a `textconv`
    driver, `core.pager` on a terminal), so a tool that runs it in a repository it was pointed at would run that
    repository's code; the rest of the host and both workers never run anything a repository names, and this keeps
-   it so. Who runs git, and with which safeguards for an untrusted repository (`--no-ext-diff --no-textconv
-   -c core.fsmonitor=false`), stays the caller's decision. Blob ids are computed in the host (SHA-1 and SHA-256, as git
+   it so. Who runs git, and with which safeguards for an untrusted repository, stays the caller's decision. The skill
+   gives the one form checked to run nothing a repository's configuration names: two commits, not the working tree
+   (`git -c core.fsmonitor=false diff --no-ext-diff --no-textconv --no-color --no-relative --src-prefix=a/
+   --dst-prefix=b/ --full-index <base> HEAD`, the new side checked out); a diff against the working tree runs the
+   repository's `filter.*.clean` drivers whatever the flags (checked with git 2.43), and `--no-color`, the explicit
+   prefixes and `--no-relative` keep a configured colour, `diff.noprefix` or `diff.relative` from reshaping the output. Blob ids are computed in the host (SHA-1 and SHA-256, as git
    computes them), never asked of git. The CLI reads and checks the diff before an instance is asked or started.
 2. The diff must describe the index's own file contents, and where that cannot be shown nothing is mapped:
    - Until a read of every file has finished in this instance (first scan running, `cache verifying`, or a failed

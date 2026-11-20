@@ -122,9 +122,10 @@ git diff $(git merge-base main HEAD) | codecontext query impact   # what this br
   closing line, between members; impact is then walked from the type alone), each with its
   lines and the dependents attributed to it; `affected` lists them as `affected` does, each
   `from` the change that reached it first; `tests` lists the test files in reach. The
-  diff's new side must be the working tree: diff against a base, not between two commits
-  (`git diff $(git merge-base main HEAD)`, or `git diff --cached` for what is staged;
-  untracked files appear only after `git add -N`). A file is mapped only when its content
+  diff's new side must be the working tree: diff against a base (`git diff $(git
+  merge-base main HEAD)`), or from a base to `HEAD` with nothing uncommitted; `git diff
+  --cached` matches only files with no unstaged change, and untracked files appear only
+  after `git add -N`. A file is mapped only when its content
   is the diff's new side (its blob id, so keep git's `index` lines) and the instance read
   it after it last changed; `impact` waits for a finished scan. The first line says
   `complete` or `incomplete`, and `incomplete` exits 2: every part that maps to nothing is
@@ -137,7 +138,14 @@ git diff $(git merge-base main HEAD) | codecontext query impact   # what this br
   `outsideRoot` and `invalidPath`. Blank lines and comment lines no member holds change
   nothing (`ignored`), except a `/*` or `*/` that comments unchanged lines out or back in
   (`blockCommentBoundary`). `--depth`, `--limit` (per list), `--tests` and `--relation` mean what
-  they mean for `affected`. The tool never runs git: you run it.
+  they mean for `affected`. The tool never runs git: you run it. In a repository you do not
+  trust, `git diff` itself runs what its `.git/config` names (an external diff, a textconv
+  or clean filter, an fsmonitor hook), and its config can reshape the output (colour,
+  prefixes, relative paths). There, commit or check out the new side with a clean work
+  tree and diff two commits: `git -c core.fsmonitor=false diff --no-ext-diff --no-textconv
+  --no-color --no-relative --src-prefix=a/ --dst-prefix=b/ --full-index <base> HEAD`. A diff
+  against the working tree (`git diff <base>`) runs the repository's clean filters whatever
+  the flags.
 - **`hubs`** ranks symbols by distinct direct dependents, then by their files. A type's
   count is uses of the type itself, not of its members (`--type Method` ranks members).
   `--within DIR` (repository-relative), `--type`, `--limit`, `--relation` (kinds counted),
