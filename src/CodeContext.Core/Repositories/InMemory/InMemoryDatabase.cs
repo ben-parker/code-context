@@ -1172,8 +1172,14 @@ namespace CodeContext.Core.Repositories.InMemory
         /// <summary>Test seam: runs when a read finds no composite adjacency cached for the version, before it reads the map.</summary>
         internal Action? AdjacencyMissForTests { get; set; }
 
+        /// <summary>Test seam: runs when a read that built a composite is about to cache it.</summary>
+        internal Action? BeforeAdjacencyStoreForTests { get; set; }
+
         /// <summary>Test seam: runs on every read of the store that no pin answers.</summary>
         internal Action? UnpinnedReadForTests { get; set; }
+
+        /// <summary>The composite adjacency cached now, if any. Tests only.</summary>
+        internal object? CachedAdjacencyForTests => _cachedAdjacency?.Value;
 
         /// <summary>
         /// Latches the published shard map, the shards' annotations and the generation they were committed
@@ -1251,7 +1257,16 @@ namespace CodeContext.Core.Repositories.InMemory
             var shards = _shards;
             var composite = CompositeAdjacency.Build(shards);
             // Not cached when a commit ran meanwhile: it would hold that commit's replaced shards.
-            if (Interlocked.Read(ref _version) == version) _cachedAdjacency = new CachedAdjacency(version, composite);
+            if (Interlocked.Read(ref _version) == version)
+            {
+                BeforeAdjacencyStoreForTests?.Invoke();
+                var entry = new CachedAdjacency(version, composite);
+                _cachedAdjacency = entry;
+                // A commit that cleared the cache between the check above and this store would leave the entry holding
+                // its replaced shards until the next read: an entry for a version already gone is taken back. A commit
+                // bumps the version before it clears, so one that lands after this re-read clears the entry itself.
+                if (Interlocked.Read(ref _version) != version) Interlocked.CompareExchange(ref _cachedAdjacency, null, entry);
+            }
             return composite;
         }
 

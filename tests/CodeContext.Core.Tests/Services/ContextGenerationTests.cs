@@ -149,6 +149,27 @@ public class ContextGenerationTests
         Assert.Null(database.Pinned);
     }
 
+    [Fact]
+    public void ACompositeBuiltAsACommitClearsTheCache_IsNotKeptCached()
+    {
+        // A reader builds the composite of generation 1 and passes its version check; a commit publishes generation 2
+        // and clears the cache before the reader stores its composite. That composite must not stay cached, holding a
+        // replaced generation alive until the next read.
+        var database = new InMemoryDatabase();
+        CommitFirst(database);
+        object? built = null;
+        database.BeforeAdjacencyStoreForTests = () =>
+        {
+            database.BeforeAdjacencyStoreForTests = null;
+            CommitSecond(database);
+        };
+
+        built = database.GetAdjacency();
+
+        Assert.NotSame(built, database.CachedAdjacencyForTests);
+        Assert.Null(database.CachedAdjacencyForTests);
+    }
+
     /// <summary>A node repository that runs a step once, right after its <paramref name="afterRead"/>-th read.</summary>
     private sealed class SteppingNodeRepository(ICodeNodeRepository inner, int afterRead, Action step) : ICodeNodeRepository
     {
