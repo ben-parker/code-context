@@ -413,6 +413,26 @@ public sealed class GraphImpactTests : IDisposable
     }
 
     [Fact]
+    public async Task AConditionalDirectiveAroundUnchangedMembers_IsReported_NotOnlyMappedToTheType()
+    {
+        var service = Sample().Build();
+
+        // Other (16-24) compiled out by an "#if" above it and an "#endif" below it: no line of it changed.
+        var wrapped = await Impact(service, Diff("src/Foo.cs", Blob("src/Foo.cs"), "@@ -14,0 +15 @@\n+#if LEGACY", "@@ -23,0 +25 @@\n+  #  endif // LEGACY"));
+
+        var entry = Assert.Single(wrapped.Unmapped);
+        Assert.Equal(("conditionalDirective", "15,25", 2), (entry.Reason, entry.Lines, entry.LineCount));
+        Assert.False(wrapped.Complete);
+        // The lines are the type's own as well.
+        Assert.Equal([(I("Foo"), "container")], wrapped.Changes.Select(change => (change.Identifier, change.Level)));
+
+        // Inside a member the same directive changes the member, as any line there does.
+        var inside = await Impact(service, Diff("src/Foo.cs", Blob("src/Foo.cs"), "@@ -7,0 +8 @@\n+#if DEBUG", "@@ -8,0 +10 @@\n+#endif"));
+        Assert.Equal([(I("Foo.Run"), "8,10")], inside.Changes.Select(change => (change.Identifier, change.ChangedLines)));
+        Assert.True(inside.Complete);
+    }
+
+    [Fact]
     public async Task ALineOfAModuleThatOnlyLooksLikeAComment_ChangesTheModule_AndADocCommentOrFileHeaderDoesNot()
     {
         // A module holds statements no declaration does (here a template literal): its comment-looking lines are read

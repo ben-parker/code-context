@@ -40,6 +40,21 @@ namespace CodeContext.Core.Diffs
         }
 
         /// <summary>
+        /// Whether a line is a preprocessor directive that decides which lines are compiled: <c>#if</c>, <c>#elif</c>,
+        /// <c>#else</c>, <c>#endif</c>, <c>#define</c> or <c>#undef</c> (and C's <c>#ifdef</c>, <c>#ifndef</c>), with
+        /// whitespace allowed after the <c>#</c>. Such a line changes what the unchanged lines under it mean.
+        /// </summary>
+        public static bool IsConditionalDirective(ReadOnlySpan<char> line)
+        {
+            var text = line.TrimStart();
+            if (text.IsEmpty || text[0] != '#') return false;
+            text = text[1..].TrimStart();
+            var length = 0;
+            while (length < text.Length && char.IsAsciiLetter(text[length])) length++;
+            return text[..length] is "if" or "elif" or "else" or "endif" or "define" or "undef" or "ifdef" or "ifndef";
+        }
+
+        /// <summary>
         /// Whether a C# line only directs how its own file binds: <c>using N;</c>, <c>using static N;</c> or
         /// <c>using A = N;</c> (not <c>global using</c>, which binds the whole project), <c>namespace N</c> (with <c>;</c>
         /// or <c>{</c>), a lone <c>{</c> or <c>}</c>, <c>#nullable</c> or <c>#pragma warning</c>. Lexical.

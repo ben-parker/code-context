@@ -22,7 +22,9 @@ namespace CodeContext.Core.Diffs
     /// the same way, by where it stood (and, when it starts like the inside of a block comment, by one being open
     /// there). A comment line that opens or closes a block comment around unchanged lines
     /// (<see cref="DiffFile.CommentBoundaries"/>) is the exception: where no member holds it, what it commented out or
-    /// back in is reported, never counted.
+    /// back in is reported, never counted. So is a conditional-compilation directive
+    /// (<see cref="DiffFile.ConditionalDirectives"/>) that a type or module holds and no member does: it is the
+    /// container's line, and the unchanged lines under it may now be compiled in or out.
     /// </summary>
     public static class DiffMapper
     {
@@ -54,6 +56,9 @@ namespace CodeContext.Core.Diffs
 
             /// <summary>Block-comment boundaries no member holds: the unchanged lines next to them may hold a declaration.</summary>
             public List<DiffLineRange> CommentBoundaries { get; } = new();
+
+            /// <summary>Conditional-compilation directives a container holds and no member does.</summary>
+            public List<DiffLineRange> ConditionalDirectives { get; } = new();
         }
 
         private sealed class Group
@@ -82,11 +87,13 @@ namespace CodeContext.Core.Diffs
         /// <param name="isContainer">Whether a node holds declarations (a type, a module): a removal between its members is not mapped.</param>
         /// <param name="added">Changed new-side lines; <paramref name="comments"/> changed comment lines; <paramref name="removals"/> the removed runs.</param>
         /// <param name="boundaries">The comment lines among <paramref name="comments"/> that open or close a block comment around unchanged lines.</param>
+        /// <param name="conditionals">The lines among <paramref name="added"/> that are conditional-compilation directives.</param>
         /// <param name="readComments">Reads the file's new side, asked once and only when a comment line lies where no member holds it; null when it cannot be read.</param>
         public static Result Map(
             IReadOnlyList<CodeNode> nodes, Func<CodeNode, bool> isContainer,
             IReadOnlyList<DiffLineRange> added, IReadOnlyList<DiffRemoval> removals, IReadOnlyList<DiffLineRange>? comments = null,
-            IReadOnlyList<DiffLineRange>? boundaries = null, Func<CommentRuns?>? readComments = null)
+            IReadOnlyList<DiffLineRange>? boundaries = null, IReadOnlyList<DiffLineRange>? conditionals = null,
+            Func<CommentRuns?>? readComments = null)
         {
             var result = new Result();
             var groups = Groups(nodes);
@@ -104,6 +111,16 @@ namespace CodeContext.Core.Diffs
                     if (gaps.Count > 0) TouchOf(group, result).Lines.AddRange(gaps);
                 }
                 Uncovered(roots, range.Start, range.End, result.Outside);
+            }
+
+            foreach (var range in conditionals ?? [])
+            {
+                for (var line = range.Start; line <= range.End; line++)
+                {
+                    Holding(roots, line, line, holding);
+                    if (holding.Count > 0 && !holding.Exists(group => !IsContainer(group, isContainer) && Owns(group, line)))
+                        result.ConditionalDirectives.Add(new DiffLineRange(line, line));
+                }
             }
 
             CommentRuns? text = null;
@@ -173,6 +190,7 @@ namespace CodeContext.Core.Diffs
             foreach (var touch in result.Touched) Normalize(touch.Lines);
             Normalize(result.Outside);
             Normalize(result.CommentBoundaries);
+            Normalize(result.ConditionalDirectives);
             result.Touched.Sort(static (left, right) =>
             {
                 var order = left.Nodes[0].StartLine.CompareTo(right.Nodes[0].StartLine);

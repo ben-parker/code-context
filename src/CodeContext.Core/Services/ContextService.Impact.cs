@@ -179,7 +179,7 @@ namespace CodeContext.Core.Services
                     : file.Added;
                 var newBlob = file.NewBlob;
                 var mapping = DiffMapper.Map(nodes, node => IsContainer(node, walk), added, file.Removals, file.CommentAdded, file.CommentBoundaries,
-                    () => tree.ReadComments(fullPath, newBlob));
+                    file.ConditionalDirectives, () => tree.ReadComments(fullPath, newBlob));
                 response.IgnoredLines += mapping.IgnoredComments;
 
                 foreach (var touch in mapping.Touched)
@@ -215,6 +215,14 @@ namespace CodeContext.Core.Services
                         + "lines beside it were commented out or back in: a declaration among them may now exist on one side only, "
                         + "and what used it is not in the index. Read the file around these lines.",
                         lines: FormatRanges(mapping.CommentBoundaries), count: mapping.CommentBoundaries.Sum(range => range.Count));
+                }
+                if (mapping.ConditionalDirectives.Count > 0)
+                {
+                    Unmapped("conditionalDirective",
+                        "A conditional-compilation directive (#if, #elif, #else, #endif, #define, #undef) changed here, outside "
+                        + "any member: unchanged lines under it may now be compiled in or out, so a declaration among them may "
+                        + "exist on one side only and what used it is not in the index. Read the file around these lines.",
+                        lines: FormatRanges(mapping.ConditionalDirectives), count: mapping.ConditionalDirectives.Sum(range => range.Count));
                 }
                 if (mapping.RemovedBetween.Count > 0)
                 {

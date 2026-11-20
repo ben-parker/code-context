@@ -66,7 +66,14 @@ namespace CodeContext.Core.Diffs
         /// (see <see cref="SourceLines.IsFileScopedDirective"/>).
         /// </summary>
         public List<DiffLineRange> FileScopedDirectives { get; } = new();
+
+        /// <summary>
+        /// The added lines among <see cref="Added"/> that are conditional-compilation directives
+        /// (<see cref="SourceLines.IsConditionalDirective"/>): the unchanged lines under one may be compiled in or out.
+        /// </summary>
+        public List<DiffLineRange> ConditionalDirectives { get; } = new();
         public List<DiffRemoval> Removals { get; } = new();
+
         public int IgnoredLines { get; internal set; }
 
         /// <summary>Lines the hunks add and remove, blank ones included.</summary>
@@ -449,6 +456,8 @@ namespace CodeContext.Core.Diffs
                             {
                                 CloseComments();
                                 if (addStart == 0) addStart = nextNew;
+                                if (content.TrimStart().StartsWith("#") && SourceLines.IsConditionalDirective(content))
+                                    file.ConditionalDirectives.Add(new DiffLineRange(nextNew, nextNew));
                                 if (file.Status == DiffFileStatus.Added && SourceLines.IsFileScopedDirective(content))
                                     file.FileScopedDirectives.Add(new DiffLineRange(nextNew, nextNew));
                             }

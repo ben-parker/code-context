@@ -66,6 +66,25 @@ public class UnifiedDiffTests
         => Assert.Equal(comment, SourceLines.IsCommentLine(line));
 
     [Theory]
+    [InlineData("#if DEBUG", true)]
+    [InlineData("  #elif NET8_0_OR_GREATER", true)]
+    [InlineData("#else", true)]
+    [InlineData("#  endif // DEBUG", true)]
+    [InlineData("#define TRACE", true)]
+    [InlineData("#undef TRACE", true)]
+    [InlineData("#ifdef __linux__", true)]
+    [InlineData("#ifndef GUARD_H", true)]
+    [InlineData("#region Helpers", false)]
+    [InlineData("#pragma warning disable CS0168", false)]
+    [InlineData("#nullable enable", false)]
+    [InlineData("#include <stdio.h>", false)]
+    [InlineData("#iffy", false)]
+    [InlineData("#", false)]
+    [InlineData("x #if", false)]
+    public void AConditionalDirective_IsToldApartByItsName(string line, bool conditional)
+        => Assert.Equal(conditional, SourceLines.IsConditionalDirective(line));
+
+    [Theory]
     [InlineData("using System;", true)]
     [InlineData("  using static System.Math; // why", true)]
     [InlineData("using Map = System.Collections.Generic.Dictionary<string, int>;", true)]

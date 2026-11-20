@@ -78,7 +78,7 @@ namespace CodeContext.Core.Services
         public string Status { get; set; } = "modified";
 
         /// <summary>
-        /// <c>outsideDeclarations</c>, <c>removedBetweenDeclarations</c>, <c>blockCommentBoundary</c>, <c>deletedFile</c>, <c>renamed</c>, <c>binary</c>,
+        /// <c>outsideDeclarations</c>, <c>removedBetweenDeclarations</c>, <c>blockCommentBoundary</c>, <c>conditionalDirective</c>, <c>deletedFile</c>, <c>renamed</c>, <c>binary</c>,
         /// <c>notIndexed</c>, <c>contentMismatch</c>, <c>notYetIndexed</c>, <c>unreadable</c>, <c>outsideRoot</c>,
         /// <c>invalidPath</c> or <c>combinedDiff</c>.
         /// </summary>
