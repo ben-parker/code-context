@@ -38,6 +38,9 @@ namespace CodeContext.Core.Services
                     + "re-checks the files, or that check failed): changed lines cannot be matched to declarations until one has. "
                     + "Retry when codecontext status shows indexing ready.");
             }
+            // Read before the generation is pinned: the coordinator moves it only once the commit of the read it stands
+            // for is published, so every generation pinned after it holds at least that read. A retry pins a newer
+            // generation and keeps this time, which can only call more files notYetIndexed, never fewer.
             var tree = new DiffWorkingTree(_rootPath, indexedAsOf);
             return ReadOneGenerationAsync(shards => GetImpactOnceAsync(
                 request, files, tree, new GraphWalk(shards, relations, request.IncludeTests, _rootPath, cancellationToken), shards, cancellationToken),
@@ -106,8 +109,10 @@ namespace CodeContext.Core.Services
             }
             if (noWorkerReads is { Candidates.Count: > 0 })
             {
-                var (published, annotations) = _database!.LatchPublished();
-                noWorkerReads.Resolve(published, annotations);
+                // The reports of the generation the declarations and the walk come from: a commit since the pin replaced
+                // them, and then nothing says what was read (the answer is read again unless an outer reader holds the pin).
+                if (_database!.LatchPinned() is { } pinned) noWorkerReads.Resolve(pinned.Shards, pinned.Annotations);
+                else noWorkerReads.KeepAll("the index changed while this answer was read, so what its workers reported reading is not known");
                 var setAside = new List<string>();
                 foreach (var candidate in noWorkerReads.Candidates)
                 {

@@ -121,6 +121,12 @@ namespace CodeContext.Core.Services
             }
         }
 
+        /// <summary>Keeps every candidate, for <paramref name="why"/>: nothing says what the workers read.</summary>
+        public void KeepAll(string why)
+        {
+            foreach (var candidate in _candidates) candidate.Kept ??= why;
+        }
+
         /// <summary>
         /// Reads what the workers reported, once, and marks every candidate a report ties to the index
         /// (<see cref="Candidate.Kept"/>); the rest cannot change an indexed fact.

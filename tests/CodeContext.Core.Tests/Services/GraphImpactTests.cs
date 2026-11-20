@@ -1,5 +1,6 @@
 using System.Text;
 using CodeContext.Core.Diffs;
+using CodeContext.Core.Models;
 using CodeContext.Core.Services;
 
 namespace CodeContext.Core.Tests.Services;
@@ -833,6 +834,9 @@ public sealed class GraphImpactTests : IDisposable
     /// and <paramref name="absent"/> (root-relative) for the first, nothing more for the second.
     /// </summary>
     private ContextService WithReports(string[]? files = null, string[]? absent = null, bool secondReports = true)
+        => ReportingSample(files, absent, secondReports).Service;
+
+    private (GraphTestGraph Graph, ContextService Service) ReportingSample(string[]? files = null, string[]? absent = null, bool secondReports = true)
     {
         var graph = Sample();
         graph.Workers = new ManifestOnly();
@@ -841,7 +845,7 @@ public sealed class GraphImpactTests : IDisposable
         graph.ReportInputs(
             new CodeContext.Parser.Protocol.WorkerInputs((files ?? []).Select(Full).ToList(), (absent ?? []).Select(Full).ToList()),
             secondReports ? new CodeContext.Parser.Protocol.WorkerInputs([], []) : null);
-        return service;
+        return (graph, service);
     }
 
     private static string Modified(string path) => Diff(path, "1234567", "@@ -1 +1 @@\n-old\n+new");
@@ -1357,5 +1361,136 @@ public sealed class GraphImpactTests : IDisposable
 
         Assert.Equal(2, attempts);
         Assert.Equal(["Caller", "Far"], impact.Items.Select(item => item.Name));
+    }
+
+    /// <summary>A file table that runs a step before the first file it is asked about, then answers as the store does.</summary>
+    private sealed class SteppingFiles(Action beforeFirstRead) : CodeContext.Core.Repositories.IFileMetadataRepository
+    {
+        private readonly CodeContext.Core.Repositories.InMemoryFileMetadataRepository _inner = new();
+        private int _reads;
+
+        public Task<FileMetadata?> GetByFilePathAsync(string filePath, CancellationToken cancellationToken = default)
+        {
+            if (Interlocked.Increment(ref _reads) == 1) beforeFirstRead();
+            return _inner.GetByFilePathAsync(filePath, cancellationToken);
+        }
+
+        public Task<IEnumerable<FileMetadata>> GetAllAsync(CancellationToken cancellationToken = default) => _inner.GetAllAsync(cancellationToken);
+        public Task<IEnumerable<FileMetadata>> GetByStatusAsync(FileProcessingStatus status, CancellationToken cancellationToken = default)
+            => _inner.GetByStatusAsync(status, cancellationToken);
+        public Task UpsertAsync(FileMetadata metadata, CancellationToken cancellationToken = default) => _inner.UpsertAsync(metadata, cancellationToken);
+        public Task UpsertBatchAsync(IEnumerable<FileMetadata> metadataList, CancellationToken cancellationToken = default)
+            => _inner.UpsertBatchAsync(metadataList, cancellationToken);
+        public Task DeleteAsync(string filePath, CancellationToken cancellationToken = default) => _inner.DeleteAsync(filePath, cancellationToken);
+        public Task ClearAsync(CancellationToken cancellationToken = default) => _inner.ClearAsync(cancellationToken);
+        public Task<int> GetCountByStatusAsync(FileProcessingStatus status, CancellationToken cancellationToken = default)
+            => _inner.GetCountByStatusAsync(status, cancellationToken);
+        public Task<bool> NeedsProcessingAsync(string filePath, DateTime lastModified, CancellationToken cancellationToken = default)
+            => _inner.NeedsProcessingAsync(filePath, lastModified, cancellationToken);
+    }
+
+    [Fact]
+    public async Task ACommitPublishedButNotYetCounted_IsNeverMixedIntoAnAnswer()
+    {
+        // As for affected (GraphGenerationTests): a commit publishes its map and stops before bumping the store's version,
+        // and another reader caches the new map under the old version, so the answer's own version check cannot see it.
+        // It lands after the file's declarations were read and before they are walked: both must be one generation.
+        // In the next one Run keeps its identifier and span and changes its id, and Fresh is its only caller.
+        WriteFile("src/Other.cs", 5);
+        var next = new GraphTestGraph(_root)
+            .Node("Foo", "Class", file: "src/Foo.cs", line: 2, endLine: 27)
+            .Node("Foo.Run", file: "src/Foo.cs", line: 5, endLine: 11, id: "csharp:b:Foo.Run#2")
+            .Node("Foo.Other", file: "src/Foo.cs", line: 15, endLine: 23)
+            .Node("Fresh", file: "src/Other.cs", line: 1, endLine: 2)
+            .Edge("Foo", "Foo.Run", "HAS_METHOD", targetId: "csharp:b:Foo.Run#2").Edge("Foo", "Foo.Other", "HAS_METHOD")
+            .Edge("Fresh", "Foo.Run", targetId: "csharp:b:Foo.Run#2");
+        var graph = Sample();
+        var database = graph.Database;
+
+        using var otherReaderMissed = new ManualResetEventSlim();
+        using var otherReaderGo = new ManualResetEventSlim();
+        using var published = new ManualResetEventSlim();
+        using var writerGo = new ManualResetEventSlim();
+        Thread? otherReaderThread = null;
+        Thread? writerThread = null;
+        graph.Files = new SteppingFiles(() =>
+        {
+            writerThread = new Thread(() =>
+            {
+                var (nodes, edges) = next.Facts;
+                database.TryCommitGeneration(database.LastCommittedGeneration + 1, nodes, edges, scope: null);
+            })
+            { IsBackground = true };
+            writerThread.Start();
+            Assert.True(published.Wait(TimeSpan.FromSeconds(30)));
+            otherReaderGo.Set();
+            Assert.True(otherReaderThread!.Join(TimeSpan.FromSeconds(30)));
+        });
+        var service = graph.Build();
+        database.AdjacencyMissForTests = () =>
+        {
+            if (Thread.CurrentThread != otherReaderThread) return;
+            otherReaderMissed.Set();
+            otherReaderGo.Wait(TimeSpan.FromSeconds(30));
+        };
+        database.AfterPublishForTests = () =>
+        {
+            published.Set();
+            writerGo.Wait(TimeSpan.FromSeconds(30));
+        };
+        otherReaderThread = new Thread(() => database.GetAdjacency()) { IsBackground = true };
+        otherReaderThread.Start();
+        Assert.True(otherReaderMissed.Wait(TimeSpan.FromSeconds(30)));
+
+        try
+        {
+            var impact = await Impact(service, Diff("src/Foo.cs", Blob("src/Foo.cs"), Replace(8)));
+            Assert.Equal(I("Foo.Run"), Assert.Single(impact.Changes).Identifier);
+            // Run's declaration read in one generation and walked in the other has no users.
+            var users = string.Join(",", impact.Items.Select(item => item.Name));
+            Assert.True(users is "Caller,Far" or "Fresh", $"An answer mixed generations: [{users}].");
+        }
+        finally
+        {
+            writerGo.Set();
+            otherReaderGo.Set();
+            writerThread?.Join(TimeSpan.FromSeconds(30));
+        }
+    }
+
+    [Fact]
+    public async Task AnAnswerInsideAPinnedRead_TakesWhatTheWorkersReportedFromThatGeneration_NotALaterOne()
+    {
+        // An outer reader holds generation 1, in which no worker reported reading README.md. Generation 2 replaces the
+        // facts, and its worker reports reading README.md. The answer is generation 1's: its declarations, its walk, and
+        // no report of generation 2 given as the reason for anything.
+        var (graph, service) = ReportingSample();
+        WriteFile("README.md", 3);
+        var database = graph.Database;
+        var diff = Modified("README.md") + Diff("src/Foo.cs", Blob("src/Foo.cs"), Replace(8));
+
+        GraphImpactResponse impact;
+        using (database.PinPublished())
+        {
+            // Generation 2: Caller is gone, and the first shard's worker now reports reading README.md.
+            var (nodes, edges) = graph.Facts;
+            Assert.True(database.TryCommitGeneration(database.LastCommittedGeneration + 1,
+                nodes.Where(node => node.Name != "Caller").ToList(), edges.Where(edge => edge.SourceId != GraphTestGraph.Id("Caller")).ToList(),
+                scope: null));
+            graph.ReportInputs(new CodeContext.Parser.Protocol.WorkerInputs([Full("README.md")], []), new CodeContext.Parser.Protocol.WorkerInputs([], []));
+
+            impact = await Impact(service, diff);
+        }
+
+        Assert.Equal(["Caller", "Far"], impact.Items.Select(item => item.Name));
+        var readme = Assert.Single(impact.Unmapped);
+        Assert.Equal(("README.md", "notIndexed"), (readme.File, readme.Reason));
+        Assert.DoesNotContain("reported reading it", readme.Detail);
+        Assert.Contains("not known", readme.Detail);
+
+        // Unpinned, the answer is the newest generation's, its reports included.
+        var now = await Impact(service, diff);
+        Assert.Empty(now.Items);
+        Assert.Contains("reported reading it", Assert.Single(now.Unmapped).Detail);
     }
 }

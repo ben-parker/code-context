@@ -16,7 +16,6 @@ internal sealed class GraphTestGraph
     private readonly List<CodeNode> _nodes = new();
     private readonly List<CodeEdge> _edges = new();
     private readonly string _root;
-    private long _generation;
 
     /// <param name="root">The root files live under; <see cref="Root"/> unless a test needs real files.</param>
     public GraphTestGraph(string? root = null) => _root = root ?? Root;
@@ -41,7 +40,7 @@ internal sealed class GraphTestGraph
     {
         foreach (var (workspace, inputs) in new[] { ("a", a), ("b", b) })
         {
-            Assert.True(Database.TryCommitGeneration(++_generation, [], [],
+            Assert.True(Database.TryCommitGeneration(Database.LastCommittedGeneration + 1, [], [],
                 new CodeContext.Core.Repositories.CommitScope("csharp", workspace, [])
                 {
                     Annotation = new CodeContext.Core.Repositories.ShardAnnotation(null, null) { Inputs = inputs },
@@ -92,16 +91,18 @@ internal sealed class GraphTestGraph
         return this;
     }
 
-    public GraphTestGraph Edge(string source, string target, string type = "CALLS", int? line = null, bool staticCall = false)
+    /// <param name="targetId">The target's node id when it was added with its own <c>id</c>.</param>
+    public GraphTestGraph Edge(string source, string target, string type = "CALLS", int? line = null, bool staticCall = false,
+        string? targetId = null)
     {
         var metadata = Owner(source);
         if (line is not null) metadata["line"] = line.Value.ToString();
         if (staticCall) metadata[EdgeMetadataKeys.Dispatch] = EdgeDispatch.Static;
         _edges.Add(new CodeEdge
         {
-            Id = $"{Id(source)}|{type}|{Id(target)}|{line}|{_edges.Count}",
+            Id = $"{Id(source)}|{type}|{targetId ?? Id(target)}|{line}|{_edges.Count}",
             SourceId = Id(source),
-            TargetId = Id(target),
+            TargetId = targetId ?? Id(target),
             Type = type,
             Metadata = metadata,
         });
@@ -116,12 +117,15 @@ internal sealed class GraphTestGraph
 
     public ContextService Build()
     {
-        Assert.True(Database.TryCommitGeneration(++_generation, _nodes, _edges, scope: null));
+        Assert.True(Database.TryCommitGeneration(Database.LastCommittedGeneration + 1, _nodes, _edges, scope: null));
         return Service(Database, _root, Freshness, Files, Workers, Selector);
     }
 
+    /// <summary>The nodes and edges added so far, to commit elsewhere.</summary>
+    public (List<CodeNode> Nodes, List<CodeEdge> Edges) Facts => (_nodes.ToList(), _edges.ToList());
+
     /// <summary>Commits the graph as it is now as a new generation.</summary>
-    public void Commit() => Assert.True(Database.TryCommitGeneration(++_generation, _nodes.ToList(), _edges.ToList(), scope: null));
+    public void Commit() => Assert.True(Database.TryCommitGeneration(Database.LastCommittedGeneration + 1, _nodes.ToList(), _edges.ToList(), scope: null));
 
     public static ContextService Service(InMemoryDatabase database, string root = Root, IIndexFreshness? freshness = null,
         CodeContext.Core.Repositories.IFileMetadataRepository? files = null,

@@ -106,6 +106,8 @@ public class ContextGenerationTests
             [nameof(IGraphQueryService.FindPathAsync)] = () => service.FindPathAsync(new GraphPathRequest { From = "A", To = "B" }),
             [nameof(IGraphQueryService.GetAffectedAsync)] = () => service.GetAffectedAsync(new GraphAffectedRequest { Identifier = "B" }),
             [nameof(IGraphQueryService.GetHubsAsync)] = () => service.GetHubsAsync(new GraphHubsRequest()),
+            [nameof(IGraphQueryService.GetImpactAsync)] = () => service.GetImpactAsync(
+                new GraphImpactRequest { Diff = "--- a/src/B.cs\n+++ b/src/B.cs\n@@ -1 +1 @@\n-a\n+b\n" }),
         };
         var methods = typeof(IContextService).GetMethods().Concat(typeof(IGraphQueryService).GetMethods())
             .Select(method => method.Name).Distinct().Order().ToList();
