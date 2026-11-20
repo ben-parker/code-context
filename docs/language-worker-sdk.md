@@ -225,7 +225,11 @@ The host maps a changed line of a part to the node (`query impact`), as it maps 
 the node's own span; without `parts` such a line maps to nothing (or to whatever encloses
 it) and the answer is incomplete. `parts` belongs to the node's emission: hash it with the
 node, and emit the node's file again whenever a file holding a part is walked again or
-removed, as you do for an id emitted by several files. Older hosts ignore the field.
+removed, as you do for an id emitted by several files. Older hosts ignore the field. The
+host keeps a node's parts only when every one is in a file it supplied to the workspace
+(`approvedFiles` of the last `workspace/open`), ends no earlier than it starts, and overlaps
+neither the node's own span nor another part, and when there are at most 1024; otherwise it
+keeps the node without them and logs a warning.
 
 ## Report what the facts were read from (optional)
 

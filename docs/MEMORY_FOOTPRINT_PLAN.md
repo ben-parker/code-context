@@ -452,7 +452,9 @@ Decisions where the backlog was silent:
    first part's are, in an added file or a modified one, and a doc comment just above a part is that
    declaration's comment. A declaration changed in two parts is listed once per part, at that part's file and
    lines, and walked once; its dependents are counted on the first listed. A worker that sends no parts is mapped
-   as before: such a line belongs to no declaration of the node (`outsideDeclarations`, or the enclosing module).
+   as before: such a line belongs to no declaration of the node (`outsideDeclarations`, or the enclosing module), and
+   so is a node whose parts the host does not keep: one in a file not supplied to the workspace, ending before it
+   starts, overlapping the node's span or another part, or more than 1024 of them (`KeepWellFormedParts`).
 4. Never silently dropped: lines no declaration holds (`outsideDeclarations`: usings, a namespace line, a file
    header). In an added file whose declarations the diff changes, a `using` that is not `global`, a namespace line, a
    lone brace, `#nullable` and `#pragma warning` bind only that file's declarations, every one of them a change, so

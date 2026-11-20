@@ -244,7 +244,7 @@
         "parts": {
           "type": "array",
           "items": { "$ref": "#/$defs/nodePart" },
-          "description": "Optional: the other declarations of this node's symbol, for a symbol declared in more than one place (a partial type or member in several files, declarations merged in one file). The node's own location is one of them and is not repeated. The host maps a changed line of a part to this node (diff impact), as it maps a line of the node's own span. A node carrying parts is re-sent when a part changes, so a worker sends the node again when any file holding a part is walked again or removed. Without it, the lines of the other parts belong to no declaration of that node."
+          "description": "Optional: the other declarations of this node's symbol, for a symbol declared in more than one place (a partial type or member in several files, declarations merged in one file). The node's own location is one of them and is not repeated. The host maps a changed line of a part to this node (diff impact), as it maps a line of the node's own span. A node carrying parts is re-sent when a part changes, so a worker sends the node again when any file holding a part is walked again or removed. Without it, the lines of the other parts belong to no declaration of that node. The host keeps a node's parts only when every part is in a file it supplied to the workspace, ends no earlier than it starts, overlaps neither the node's own span nor another part, and there are at most 1024; otherwise it keeps the node without them."
         }
       }
     },
