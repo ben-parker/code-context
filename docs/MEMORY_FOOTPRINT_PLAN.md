@@ -303,6 +303,80 @@ start. Not built: a stale answer with a count (option b).
 | F5 | Generic tree-sitter worker | Out of process, through the worker protocol, edges labelled inferred; breadth for languages with no semantic worker |
 | F6 | Communities and overview report | Lowest priority |
 
+### Where this stands, and what is next (2026-11-20)
+
+The work is in three stacked pull requests, to merge in this order; each merge to `main`
+runs the release workflow.
+
+| Pull request | Branch | Holds |
+|---|---|---|
+| #8 | `claude/memory-footprint` into `main` | The memory items, the merge with #7, pull-request CI on Windows, macOS and Ubuntu |
+| #9 | `claude/graph-queries` into #8's branch | F1, and one generation per answer for every query |
+| #10 | `claude/festive-brown-l66lze` into #9's branch | F2, node `parts`, snapshot format 4 |
+
+After each merge, bring `main` into the next branch and point that pull request at `main`.
+`claude/confident-cerf-5c3o1u` is superseded by #8 and can be deleted once #8 is merged.
+
+Next features. F3 and F4 come next, each as its own pull request: both are small and make
+existing answers more honest, and F3 follows from F2's `complete`. F5 is a new worker with a
+native parser and its own packaging; ask the owner before starting it. F6 is likely dropped:
+`hubs` covers the useful part.
+
+Follow-ups found while doing the above, none of them blocking. Each is a wrong or stale answer
+unless marked otherwise.
+
+One-shot path (`query --snapshot`); it stays opt-in until these are closed:
+
+- M5f (see the memory items): on Windows a file replaced by a copy of the same size that keeps
+  older times is not seen; on macOS content rewritten in place with its old modification time
+  put back is not seen. The owner works on macOS.
+- Whether it becomes the default on Linux: wants an inotify-watch-limit test and one AOT run
+  with the real workers first, in a pull request of its own.
+
+A running instance:
+
+- A referenced `.dll` rewritten in place is not followed by the watcher (it is not among the
+  C# worker's project inputs), and the C# worker's reference cache is keyed on a manifest's
+  time only, so a module restored on its own is not noticed. One fix covers both.
+- The C# worker's manifest omits `.slnx`, which it looks for.
+- An answer's `coverage` line is read outside the generation its facts come from, so during
+  re-indexing it can describe a later state. Closing it means publishing the annotations with
+  the shard map.
+- On jellyfin the host sits about 24 MB above idle once the C# worker hibernates (180 MB
+  against 155 to 156), and crept from 179 to 190 MB over four minutes; on this repository the
+  two are equal. Not traced: needs a heap dump.
+- From the final pass on the memory items, never taken up: incremental `SettleOwnership`, the
+  next edge-density step (M1b), and a store drift of +8.2 MB to look at first.
+
+Diff impact:
+
+- After a failed batch or refresh, every file changed since is `notYetIndexed` until a full
+  refresh. Per-worker tracking would let that worker's next successful batch lift it.
+- A blank line inside a member marks the member changed, so a commit that only re-spaces
+  method bodies lists them. A string-detecting rule for the bundled languages would narrow it;
+  it cannot be made sound for every language.
+- A replaced signature line or one-line member is `removedBetweenDeclarations`, the routine
+  cause of an incomplete answer. Telling an edit from a rename needs the old side parsed.
+- In a C# tree an added or deleted file no worker reads stays `notIndexed`, because the worker
+  lists every directory. A protocol statement about what a listing is for would let it be set
+  aside.
+- On Windows a file replaced by a copy that keeps older times can be mapped against stale
+  declarations until the watcher's batch for it begins.
+
+Small fixes, for one pull request:
+
+- An identifier whose last dotted part is a worker extension (`Options.Js`) is read as a file
+  path.
+- Argument errors carry a trailing "(Parameter 'relation')".
+- A newly created `.codecontext` directory makes the first `--snapshot` after a stop report
+  that `.` changed.
+- The TypeScript worker binds `require('..')` to `index.d.ts`, so `affected sdk/npm/index.js`
+  finds nothing. This one is a worker accuracy gap, larger than the others.
+- `npm ci` reports audit findings in the TypeScript worker's dependencies.
+
+Not measured anywhere: the cost on Windows of reading a change time through a handle for every
+walked file.
+
 ### F1 as built
 
 Surface. `GET /api/graph/path?from&to[&maxDepth=10][&relation][&includeTests]`,
