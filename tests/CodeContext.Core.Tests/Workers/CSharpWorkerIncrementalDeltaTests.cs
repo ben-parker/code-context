@@ -352,7 +352,8 @@ public sealed class CSharpWorkerIncrementalDeltaTests : IAsyncLifetime
 
     internal static IReadOnlyList<string> NodeRecords(IEnumerable<CodeNode> nodes) =>
         nodes.Select(n =>
-                $"{n.Id}|{n.FilePath}|{n.StartLine}-{n.EndLine}|{n.Signature}|{n.Name}|{n.Type}")
+                $"{n.Id}|{n.FilePath}|{n.StartLine}-{n.EndLine}|{n.Signature}|{n.Name}|{n.Type}"
+                + (n.Parts is null ? "" : "|parts " + string.Join(";", n.Parts.Select(p => $"{p.FilePath}@{p.StartLine},{p.StartCol}-{p.EndLine},{p.EndCol}"))))
             .OrderBy(r => r, StringComparer.Ordinal)
             .ToList();
 

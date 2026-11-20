@@ -216,7 +216,21 @@ public sealed record ProtocolNode(
     [property: JsonPropertyName("returnType")] string? ReturnType = null,
     [property: JsonPropertyName("parameters")] string? Parameters = null,
     [property: JsonPropertyName("modifiers")] string? Modifiers = null,
-    [property: JsonPropertyName("metadata")] IReadOnlyDictionary<string, string>? Metadata = null);
+    [property: JsonPropertyName("metadata")] IReadOnlyDictionary<string, string>? Metadata = null,
+    [property: JsonPropertyName("parts")] IReadOnlyList<ProtocolNodePart>? Parts = null);
+
+/// <summary>
+/// Another declaration of a node's symbol (<see cref="ProtocolNode.Parts"/>), for a symbol declared in more than one
+/// place: a partial type or member in several files, declarations merged in one file. Its file, as the host supplied
+/// it, and its span, in the worker's declared <see cref="SpanSemantics"/> like the node's. The node's own location is
+/// one of the declarations and is not repeated. Optional: a worker that sends none reports one place per node.
+/// </summary>
+public sealed record ProtocolNodePart(
+    [property: JsonPropertyName("filePath")] string FilePath,
+    [property: JsonPropertyName("startLine")] int StartLine,
+    [property: JsonPropertyName("endLine")] int EndLine,
+    [property: JsonPropertyName("startColumn")] int StartColumn,
+    [property: JsonPropertyName("endColumn")] int EndColumn);
 
 /// <summary>
 /// A normalized graph edge. <c>kind</c> is a versioned string (e.g. "calls",

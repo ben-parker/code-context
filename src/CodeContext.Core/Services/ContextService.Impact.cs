@@ -77,11 +77,20 @@ namespace CodeContext.Core.Services
             var noWorkerReads = _workerService is not null && _fileSelector is not null && _database is not null
                 ? new ChangedFilesNoWorkerReads(_workerService, _fileSelector, tree.Refused)
                 : null;
+            // The declarations a file holds: its own nodes, and the parts there of declarations made in several places.
+            Dictionary<string, List<CodeNode>>? partsByFile = null;
+            List<CodeNode> DeclarationsIn(string fullPath)
+            {
+                var nodes = NodesIn(shards, fullPath);
+                partsByFile ??= PartsByFile(shards);
+                if (partsByFile.TryGetValue(fullPath, out var parts)) nodes.AddRange(parts);
+                return nodes;
+            }
             foreach (var file in files)
             {
                 if (noWorkerReads is not null && !file.ModeOnly && file.PathProblem is null && !file.Combined && Placed(file) is { } placed)
                 {
-                    switch (noWorkerReads.Ask(file, placed.Display, placed.Paths, path => NodesIn(shards, path).Count > 0, out var why))
+                    switch (noWorkerReads.Ask(file, placed.Display, placed.Paths, path => DeclarationsIn(path).Count > 0, out var why))
                     {
                         case ChangedFilesNoWorkerReads.ByName.Deferred:
                             continue;
@@ -190,7 +199,7 @@ namespace CodeContext.Core.Services
                         mismatched++;
                         Unmapped("contentMismatch", "The diff deletes it, but it is in the working tree: the diff's new side is not what is checked out.");
                     }
-                    else if (NodesIn(shards, deletedPath).Count > 0)
+                    else if (DeclarationsIn(deletedPath).Count > 0)
                     {
                         Unmapped("notYetIndexed", "Deleted from the working tree but still in the index; retry once the instance has re-indexed.");
                     }
@@ -220,7 +229,7 @@ namespace CodeContext.Core.Services
                         return;
                 }
 
-                var nodes = NodesIn(shards, fullPath);
+                var nodes = DeclarationsIn(fullPath);
                 if (nodes.Count == 0)
                 {
                     Unmapped("notIndexed", NotIndexed(kept));
@@ -276,7 +285,6 @@ namespace CodeContext.Core.Services
                     };
                     entry.Lines.AddRange(touch.Lines);
                     changes.Add(entry);
-                    foreach (var node in ordered) changeOf[node.Id!] = entry;
                 }
                 // An added file's own using and namespace lines bind only its declarations, every one of them a change here.
                 var outside = mapping.Outside;
@@ -324,12 +332,16 @@ namespace CodeContext.Core.Services
 
             // One walk from every changed declaration, as affected walks from one, the changes in file and line order: a
             // dependent two changes reach at one distance is the first one's.
+            // A declaration in parts is a change per part the diff changes, and is walked once, as its first part listed.
             changes.Sort(static (left, right) => CompareByPlace(left.Node, right.Node));
             var seeds = new List<string>(changes.Count);
             for (var index = 0; index < changes.Count; index++)
             {
                 changes[index].Order = index;
-                foreach (var copy in changes[index].Copies) seeds.Add(copy.Id!);
+                foreach (var copy in changes[index].Copies)
+                {
+                    if (changeOf.TryAdd(copy.Id!, changes[index])) seeds.Add(copy.Id!);
+                }
             }
             var affected = new List<GraphWalk.Affected>();
             if (seeds.Count > 0)
@@ -477,6 +489,42 @@ namespace CodeContext.Core.Services
                 }
             }
             return nodes;
+        }
+
+        /// <summary>
+        /// The other parts of every declaration the workers report made in several places (<see cref="CodeNode.Parts"/>),
+        /// by file: each a copy of its node at the part's span, which the mapping treats as a declaration of that file. A
+        /// part that repeats the node's own place, or another part, is left out.
+        /// </summary>
+        private static Dictionary<string, List<CodeNode>> PartsByFile(IGraphShard[] shards)
+        {
+            var comparer = OperatingSystem.IsLinux() ? StringComparer.Ordinal : StringComparer.OrdinalIgnoreCase;
+            var byFile = new Dictionary<string, List<CodeNode>>(comparer);
+            foreach (var shard in shards)
+            {
+                foreach (var node in shard.GetAllNodes())
+                {
+                    if (node.Parts is not { Count: > 0 } parts || string.IsNullOrEmpty(node.Id) || IsExternal(node)) continue;
+                    var seen = new HashSet<CodeNodePart>();
+                    foreach (var part in parts)
+                    {
+                        if (string.IsNullOrEmpty(part.FilePath)
+                            || (comparer.Equals(part.FilePath, node.FilePath ?? string.Empty) && (part.StartLine, part.EndLine, part.StartCol, part.EndCol)
+                                == (node.StartLine, node.EndLine, node.StartCol, node.EndCol))
+                            || !seen.Add(part))
+                            continue;
+                        if (!byFile.TryGetValue(part.FilePath, out var list)) byFile[part.FilePath] = list = [];
+                        list.Add(new CodeNode
+                        {
+                            Id = node.Id, Identifier = node.Identifier, Name = node.Name, Type = node.Type, Language = node.Language,
+                            FilePath = part.FilePath, StartLine = part.StartLine, EndLine = part.EndLine, StartCol = part.StartCol, EndCol = part.EndCol,
+                            Namespace = node.Namespace, Visibility = node.Visibility, Signature = node.Signature, ReturnType = node.ReturnType,
+                            Parameters = node.Parameters, Modifiers = node.Modifiers, Metrics = node.Metrics, Metadata = node.Metadata,
+                        });
+                    }
+                }
+            }
+            return byFile;
         }
 
         /// <summary>Whether a node holds declarations: a type or module kind, or anything with a containment edge out of it.</summary>

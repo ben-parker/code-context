@@ -113,6 +113,9 @@ internal sealed class SnapshotGraphGenerator
             Modifiers = Maybe(Pick(["static", "async static", ""])),
             Metrics = Maybe("{\"loc\":" + _random.Next(100) + "}"),
             Metadata = metadata,
+            // Now and then a symbol declared in several places: the other parts, in any file, any span.
+            Parts = _random.Next(5) != 0 ? null
+                : Enumerable.Range(0, 1 + _random.Next(3)).Select(_ => new CodeNodePart(Pick(PathPool) ?? "/p" + RandomText(), Number(), Number(), Number(), Number())).ToList(),
         };
     }
 

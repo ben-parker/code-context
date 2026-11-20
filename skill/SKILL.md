@@ -119,8 +119,9 @@ git diff $(git merge-base main HEAD) | codecontext query impact   # what this br
 - **`impact`** reads a unified diff from stdin or `--diff FILE` and answers `affected` for
   everything it changes, in one walk: `changed` lists the declarations its changed lines
   fall in (`member`, or `container` for a type's or module's own lines: its header, its
-  closing line, between members; impact is then walked from the type alone), each with its
-  lines and the dependents attributed to it; `affected` lists them as `affected` does, each
+  closing line, between members; impact is then walked from the type alone; a second part
+  of a `partial` type, or of merged TypeScript declarations, counts as the type's own and
+  is listed at that part's file), each with its lines and the dependents attributed to it; `affected` lists them as `affected` does, each
   `from` the change that reached it first; `tests` lists the test files in reach. A changed
   declaration is never listed as a dependent: `used by N other change(s)` on a change names
   the other changes that use it directly, so `0 dependents` there does not mean unused.

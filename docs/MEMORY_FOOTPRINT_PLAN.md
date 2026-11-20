@@ -444,7 +444,15 @@ Decisions where the backlog was silent:
    appended to a file does not change the module. Nodes with one span are one change (`sameDeclaration`). Added
    lines of a type's own (header, closing line, between members) change the type as a `container`, walked from the
    type alone, not from every member (`affected <type>` seeds its members too: the two differ there on purpose). A
-   copied file changes every declaration in it; an added file changes what its hunks add, which is all of it.
+   copied file changes every declaration in it; an added file changes what its hunks add, which is all of it. A
+   symbol declared in several places (a C# `partial` type or member over files, TypeScript declarations merged in
+   one file) is one node at one of them; the workers report the others as the node's `parts` (protocol
+   `node.parts`, optional, protocol version still 1), and each part is a declaration of its file here, with the
+   node's identity: the header, base list and braces of a second part are the type's `container` lines, as the
+   first part's are, in an added file or a modified one, and a doc comment just above a part is that
+   declaration's comment. A declaration changed in two parts is listed once per part, at that part's file and
+   lines, and walked once; its dependents are counted on the first listed. A worker that sends no parts is mapped
+   as before: such a line belongs to no declaration of the node (`outsideDeclarations`, or the enclosing module).
 4. Never silently dropped: lines no declaration holds (`outsideDeclarations`: usings, a namespace line, a file
    header). In an added file whose declarations the diff changes, a `using` that is not `global`, a namespace line, a
    lone brace, `#nullable` and `#pragma warning` bind only that file's declarations, every one of them a change, so

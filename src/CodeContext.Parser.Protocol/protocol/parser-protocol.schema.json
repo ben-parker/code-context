@@ -240,7 +240,24 @@
         "returnType": { "type": "string" },
         "parameters": { "type": "string" },
         "modifiers": { "type": "string" },
-        "metadata": { "type": "object", "additionalProperties": { "type": "string" } }
+        "metadata": { "type": "object", "additionalProperties": { "type": "string" } },
+        "parts": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/nodePart" },
+          "description": "Optional: the other declarations of this node's symbol, for a symbol declared in more than one place (a partial type or member in several files, declarations merged in one file). The node's own location is one of them and is not repeated. The host maps a changed line of a part to this node (diff impact), as it maps a line of the node's own span. A node carrying parts is re-sent when a part changes, so a worker sends the node again when any file holding a part is walked again or removed. Without it, the lines of the other parts belong to no declaration of that node."
+        }
+      }
+    },
+    "nodePart": {
+      "type": "object",
+      "required": ["filePath", "startLine", "endLine", "startColumn", "endColumn"],
+      "description": "One other declaration of a node's symbol: its file and span, in the worker's declared span semantics like the node's.",
+      "properties": {
+        "filePath": { "type": "string", "description": "The verbatim path string the host supplied for the file holding the part, as for a node's filePath." },
+        "startLine": { "type": "integer" },
+        "endLine": { "type": "integer" },
+        "startColumn": { "type": "integer" },
+        "endColumn": { "type": "integer" }
       }
     },
     "edge": {

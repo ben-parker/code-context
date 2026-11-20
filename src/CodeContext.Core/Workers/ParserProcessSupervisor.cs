@@ -611,7 +611,7 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
         return Task.CompletedTask;
     }
 
-    private static AnalysisDelta NormalizeSpans(AnalysisDelta delta, SpanSemantics semantics)
+    internal static AnalysisDelta NormalizeSpans(AnalysisDelta delta, SpanSemantics semantics)
     {
         if (semantics.LineBase == 0 && semantics.ColumnBase == 0 && !semantics.EndIsInclusive)
         {
@@ -625,6 +625,14 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
             StartColumn = Math.Max(0, node.StartColumn - semantics.ColumnBase),
             EndColumn = Math.Max(0, node.EndColumn - semantics.ColumnBase)
                 + (semantics.EndIsInclusive ? 1 : 0),
+            Parts = node.Parts?.Select(part => part with
+            {
+                StartLine = Math.Max(0, part.StartLine - semantics.LineBase),
+                EndLine = Math.Max(0, part.EndLine - semantics.LineBase),
+                StartColumn = Math.Max(0, part.StartColumn - semantics.ColumnBase),
+                EndColumn = Math.Max(0, part.EndColumn - semantics.ColumnBase)
+                    + (semantics.EndIsInclusive ? 1 : 0),
+            }).ToList(),
         }).ToList();
         var edges = delta.Edges.Select(edge => edge with
         {

@@ -114,6 +114,21 @@ public class ParserProtocolContractTests
     }
 
     [Fact]
+    public void ProtocolNode_Parts_RoundTrip_AndAreOmittedWhenNull()
+    {
+        var node = new ProtocolNode("csharp:default:Demo.P", "csharp:Demo.P", "P", "Class", "csharp", "/repo/P1.cs", 2, 2, 0, 70,
+            Parts: [new ProtocolNodePart("/repo/P2.cs", 3, 9, 0, 1)]);
+        var json = JsonSerializer.Serialize(node, ParserProtocolJsonContext.Default.ProtocolNode);
+        Assert.Contains("\"parts\":[{\"filePath\":\"/repo/P2.cs\",\"startLine\":3,\"endLine\":9,\"startColumn\":0,\"endColumn\":1}]", json);
+        Assert.Equal(new ProtocolNodePart("/repo/P2.cs", 3, 9, 0, 1),
+            JsonSerializer.Deserialize(json, ParserProtocolJsonContext.Default.ProtocolNode)!.Parts!.Single());
+        Assert.DoesNotContain("parts", JsonSerializer.Serialize(node with { Parts = null }, ParserProtocolJsonContext.Default.ProtocolNode));
+        // A node from a worker that does not send parts reads as having none.
+        Assert.Null(JsonSerializer.Deserialize("""{"id":"a","identifier":"a","name":"a","kind":"Class","language":"x"}""",
+            ParserProtocolJsonContext.Default.ProtocolNode)!.Parts);
+    }
+
+    [Fact]
     public void SaveState_RoundTrips_AndOptionalResultFieldsAreOmittedWhenNull()
     {
         var parameters = new SaveStateParams("default", Baseline.StatePath, Baseline.StateId);
@@ -160,6 +175,13 @@ public class ParserProtocolContractTests
             JsonNames(Written(new WorkerInputs(["/a"], ["/b"]), ParserProtocolJsonContext.Default.WorkerInputs)));
         Assert.Equal("#/$defs/workerInputs", Schema().GetProperty("$defs").GetProperty("analysisDelta")
             .GetProperty("properties").GetProperty("inputs").GetProperty("$ref").GetString());
+
+        Assert.Equal(SchemaProperties("nodePart"),
+            JsonNames(Written(new ProtocolNodePart("/a", 1, 2, 3, 4), ParserProtocolJsonContext.Default.ProtocolNodePart)));
+        Assert.Equal("#/$defs/nodePart", Schema().GetProperty("$defs").GetProperty("node").GetProperty("properties")
+            .GetProperty("parts").GetProperty("items").GetProperty("$ref").GetString());
+        Assert.Contains("parts", JsonNames(Written(new ProtocolNode("i", "i", "n", "k", "l", "/a", Parts: [new("/b", 0, 0, 0, 0)]),
+            ParserProtocolJsonContext.Default.ProtocolNode)));
 
         var methods = Schema().GetProperty("methods");
         Assert.Equal("#/$defs/saveStateParams", methods.GetProperty(ParserProtocolMethods.SaveState).GetProperty("params").GetProperty("$ref").GetString());

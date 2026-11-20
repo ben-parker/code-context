@@ -64,7 +64,7 @@ public class SnapshotGoldenTests
 
         // Header.
         Assert.Equal("CCSNAP\r\n"u8.ToArray(), bytes[..8]);
-        Assert.Equal(3u, U32(8));
+        Assert.Equal(4u, U32(8));
         Assert.Equal(0x01020304u, U32(12));
         Assert.Equal(256u, U32(16));
         Assert.Equal(1u, U32(20));                                 // paths compared case-insensitively
@@ -110,17 +110,17 @@ public class SnapshotGoldenTests
 
         // Shard header: magic "SHRD", sectionCount, N, E, S, stringCount, F, then reserved zeros.
         Assert.Equal("SHRD"u8.ToArray(), bytes[blob..(blob + 4)]);
-        Assert.Equal(11u, U32(blob + 4));
+        Assert.Equal(12u, U32(blob + 4));
         Assert.Equal(3u, U32(blob + 8));
         Assert.Equal(3u, U32(blob + 12));
         var fileCount = (int)U32(blob + 24);
         Assert.All(bytes[(blob + 28)..(blob + 128)], b => Assert.Equal(0, b));
 
-        // Section table: 11 entries of u32 kind, u32 elementSize, u64 offset, u64 length, dense and 8-byte aligned.
-        var elementSizes = new uint[] { 1, 4, 1, 80, 32, 8, 24, 4, 1, 1, 1 };
-        var sections = new (int Offset, int Length)[12];
-        var end = 128 + 11 * 24;
-        for (var k = 1; k <= 11; k++)
+        // Section table: 12 entries of u32 kind, u32 elementSize, u64 offset, u64 length, dense and 8-byte aligned.
+        var elementSizes = new uint[] { 1, 4, 1, 80, 32, 8, 24, 4, 1, 1, 1, 4 };
+        var sections = new (int Offset, int Length)[13];
+        var end = 128 + 12 * 24;
+        for (var k = 1; k <= 12; k++)
         {
             var entry = blob + 128 + (k - 1) * 24;
             Assert.Equal((uint)k, U32(entry));
@@ -151,7 +151,19 @@ public class SnapshotGoldenTests
         Assert.Equal(0u, U32(sections[7].Offset));
         Assert.Equal(7, BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(record + 24)));
         Assert.Equal(1u, U32(record + 72));                        // flags: external
-        Assert.Equal(0u, U32(record + 76));
+        Assert.Equal(0u, U32(record + 76));                        // no parts
+
+        // The class's parts: list 1 of the parts section, u32 count, offsets, then u32 parts and per part path and span.
+        var owner = Enumerable.Range(0, 3).Select(i => sections[4].Offset + 80 * i).Single(at => Id(U32(at)) == "fake:ws:A.Class");
+        Assert.Equal(1u, U32(owner + 76));
+        var parts = sections[12].Offset;
+        Assert.Equal(1u, U32(parts));
+        Assert.Equal(12u, U32(parts + 4));
+        Assert.Equal((uint)sections[12].Length, U32(parts + 8));
+        Assert.Equal(1u, U32(parts + 12));
+        Assert.Equal("/r/A2.cs", Str(U32(parts + 16)));
+        Assert.Equal([3, 9, 0, 1], Enumerable.Range(0, 4).Select(i => BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(parts + 20 + 4 * i))));
+        Assert.Equal(4 + 8 + 4 + 20, sections[12].Length);
 
         // EdgeRecord, 32 bytes: the fake worker's composed id, line held in the record, column absent.
         var edge = Enumerable.Range(0, 3).Select(j => sections[5].Offset + 32 * j).Single(at => (U32(at + 28) & 3) == 1);
@@ -180,7 +192,7 @@ public class SnapshotGoldenTests
                 {
                     Id = "fake:ws:A.Class", Identifier = "fake:A.Class", Name = "AClass", Type = "class", Language = "fake",
                     FilePath = "/r/A.cs", StartLine = 1, EndLine = 10, StartCol = 1, EndCol = 1,
-                    Metadata = SnapshotTestSupport.Owned(key, ("gen", "1")),
+                    Metadata = SnapshotTestSupport.Owned(key, ("gen", "1")), Parts = [new CodeNodePart("/r/A2.cs", 3, 9, 0, 1)],
                 },
                 new CodeNode
                 {

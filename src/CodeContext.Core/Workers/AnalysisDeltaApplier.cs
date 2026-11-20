@@ -376,7 +376,21 @@ public sealed class AnalysisDeltaApplier : IAnalysisDeltaSink
             Parameters = _pool.Intern(node.Parameters),
             Modifiers = _pool.Intern(node.Modifiers),
             Metadata = OwnedMetadata(node.Metadata),
+            Parts = ToParts(node.Parts),
         };
+
+        // A node's other declarations, their paths pooled with the request's (a part names a file of the request).
+        private List<CodeNodePart>? ToParts(IReadOnlyList<ProtocolNodePart>? parts)
+        {
+            if (parts is not { Count: > 0 }) return null;
+            var stored = new List<CodeNodePart>(parts.Count);
+            foreach (var part in parts)
+            {
+                if (part?.FilePath is not { Length: > 0 } path) continue;
+                stored.Add(new CodeNodePart(_pool.Intern(path)!, part.StartLine, part.EndLine, part.StartColumn, part.EndColumn));
+            }
+            return stored.Count == 0 ? null : stored;
+        }
 
         // The id is kept as parts (the endpoint instances and two pooled pieces) when it is exactly its
         // source + a piece + its target + a piece, and as the string sent otherwise (EdgeId.Compose).

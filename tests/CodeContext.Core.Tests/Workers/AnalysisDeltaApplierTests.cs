@@ -96,6 +96,25 @@ public class AnalysisDeltaApplierTests
     }
 
     [Fact]
+    public async Task Apply_KeepsANodesOtherParts_InTheStoredSpanForm()
+    {
+        // A worker that counts from 1 with inclusive ends: the node and its parts are normalized alike.
+        var delta = Delta(1, [new ProtocolNode("fake:ws-1:P", "fake:P", "P", "class", "fake", "/repo/p1.fake", 3, 3, 1, 40,
+            Parts: [new ProtocolNodePart("/repo/p2.fake", 4, 10, 1, 1), new ProtocolNodePart("", 1, 1, 1, 1)])]);
+        var normalized = ParserProcessSupervisor.NormalizeSpans(delta, new SpanSemantics(LineBase: 1, ColumnBase: 1, EndIsInclusive: true));
+        Assert.True(await _applier.ApplyAsync(normalized));
+
+        var node = (await ((ICodeGraphRepository)_store).GetGraphAsync())!.Nodes.Single();
+        Assert.Equal((2, 2, 0, 40), (node.StartLine, node.EndLine, node.StartCol, node.EndCol));
+        // A part without a path names no file and is dropped.
+        Assert.Equal([new CodeNodePart("/repo/p2.fake", 3, 9, 0, 1)], node.Parts);
+    }
+
+    [Fact]
+    public async Task Apply_ANodeWithoutParts_HasNone()
+        => Assert.Null((await ApplyAndGetSingleNode(Node("fake:ws-1:A", "a.fake"))).Parts);
+
+    [Fact]
     public async Task Apply_CommitsNodesWithOwnershipMetadata()
     {
         var applied = await _applier.ApplyAsync(Delta(1, [Node("fake:ws-1:A", "a.fake")]));

@@ -627,6 +627,112 @@ public sealed class GraphImpactTests : IDisposable
         Assert.False(impact.Complete);
     }
 
+    /// <summary>
+    /// A partial type in three files, as the C# worker reports it: one node, at the ordinally first file's part, with
+    /// the other parts' spans. P1.cs holds P and X on one line; P2.cs a second part over several lines; P3.cs a part
+    /// with no member, which only adds an interface. UsesP references P, CallsY calls Y.
+    /// </summary>
+    private (ContextService Service, string P2Blob, string P2Text, string P3Blob) Partial()
+    {
+        WriteUtf8("src/P1.cs", "namespace Demo;\n\npublic partial class P { private int n; public int X() => n; }\n", bom: false);
+        const string p2 = "namespace Demo;\n\n/// <inheritdoc />\npublic partial class P\n    : System.IDisposable\n{\n    public int Y() => n;\n\n"
+            + "    public void Dispose() { }\n}\n";
+        var p2Blob = WriteUtf8("src/P2.cs", p2, bom: false);
+        var p3Blob = WriteUtf8("src/P3.cs", "namespace Demo;\n\npublic partial class P : System.IComparable { public int CompareTo(object? o) => 0; }\n", bom: false);
+        var service = new GraphTestGraph(_root) { Freshness = new Fresh(DateTime.UtcNow.AddHours(1)) }
+            .Node("P", "Class", file: "src/P1.cs", line: 2, endCol: 70, parts: [("src/P2.cs", 3, 9), ("src/P3.cs", 2, 2)])
+            .Node("P.X", file: "src/P1.cs", line: 2, col: 40, endCol: 65).Node("P.Y", file: "src/P2.cs", line: 6).Node("P.Dispose", file: "src/P2.cs", line: 8)
+            .Node("P.CompareTo", file: "src/P3.cs", line: 2, col: 50, endCol: 80)
+            .Node("UsesP", file: "src/Use.cs").Node("CallsY", file: "src/Call.cs")
+            .Edge("P", "P.X", "HAS_METHOD").Edge("P", "P.Y", "HAS_METHOD").Edge("P", "P.Dispose", "HAS_METHOD").Edge("P", "P.CompareTo", "HAS_METHOD")
+            .Edge("UsesP", "P", "REFERENCES").Edge("CallsY", "P.Y")
+            .Build();
+        return (service, p2Blob, p2, p3Blob);
+    }
+
+    [Fact]
+    public async Task AnAddedPartOfAPartialType_ChangesTheType_AsItsFirstPartsHeaderWould()
+    {
+        var (service, blob, text, _) = Partial();
+
+        var impact = await Impact(service, AddedFile("src/P2.cs", blob, text, bom: false));
+
+        Assert.Empty(impact.Unmapped);
+        Assert.True(impact.Complete);
+        // The part's header, base list, braces: the type's own lines in this file, as a container change.
+        Assert.Equal([(I("P"), "container", "4-6,10", "src/P2.cs"), (I("P.Y"), "member", "7", "src/P2.cs"), (I("P.Dispose"), "member", "9", "src/P2.cs")],
+            impact.Changes.Select(change => (change.Identifier, change.Level, change.ChangedLines, change.File)));
+        // The namespace line, two blank lines and the doc comment just above the part.
+        Assert.Equal(4, impact.IgnoredLines);
+        Assert.Equal([("CallsY", I("P.Y")), ("UsesP", I("P"))], impact.Items.Select(item => (item.Name, item.Seed)).Order());
+    }
+
+    [Fact]
+    public async Task AChangedHeaderOfAnotherPart_IsAChangeOfTheType_NeverIgnored()
+    {
+        var (service, blob, _, p3Blob) = Partial();
+
+        // The base list of the second part, in a file that existed before: the type changed.
+        var baseList = await Impact(service, Diff("src/P2.cs", blob, "@@ -5 +5 @@\n-    : System.ICloneable\n+    : System.IDisposable"));
+        var change = Assert.Single(baseList.Changes);
+        Assert.Equal((I("P"), "container", "5"), (change.Identifier, change.Level, change.ChangedLines));
+        Assert.Equal(["UsesP"], baseList.Items.Select(item => item.Name));
+        // The replaced line is reported as any replaced line of a type's own is.
+        var removed = Assert.Single(baseList.Unmapped);
+        Assert.Equal(("removedBetweenDeclarations", "5"), (removed.Reason, removed.OldLines));
+        Assert.Contains(I("P"), removed.Detail);
+
+        // The part's modifiers.
+        var header = await Impact(service, Diff("src/P2.cs", blob, "@@ -4 +4 @@\n-internal partial class P\n+public partial class P"));
+        Assert.Equal([(I("P"), "container", "4")], header.Changes.Select(c => (c.Identifier, c.Level, c.ChangedLines)));
+        Assert.False(header.Complete);
+
+        // A part with no member of its own, on one line: the file holds a declaration's part, so it is mapped.
+        var lone = await Impact(service, Diff("src/P3.cs", p3Blob, "@@ -3 +3 @@\n-public partial class P { public int CompareTo(object? o) => 0; }\n"
+            + "+public partial class P : System.IComparable { public int CompareTo(object? o) => 0; }"));
+        Assert.Contains((I("P"), "container", "3"), lone.Changes.Select(c => (c.Identifier, c.Level, c.ChangedLines)));
+        Assert.DoesNotContain(lone.Unmapped, entry => entry.Reason is "outsideDeclarations" or "notIndexed");
+    }
+
+    [Fact]
+    public async Task TwoPartsOfOneType_ChangedTogether_AreListedAtTheirOwnFiles_AndWalkedOnce()
+    {
+        var (service, blob, text, _) = Partial();
+        var p1 = "namespace Demo;\n\npublic partial class P { private int n; public int X() => n; }\n";
+
+        var impact = await Impact(service, AddedFile("src/P1.cs", Blob("src/P1.cs"), p1, bom: false) + AddedFile("src/P2.cs", blob, text, bom: false));
+
+        Assert.True(impact.Complete);
+        Assert.Equal(
+            [(I("P"), "src/P1.cs"), (I("P.X"), "src/P1.cs"), (I("P"), "src/P2.cs"), (I("P.Y"), "src/P2.cs"), (I("P.Dispose"), "src/P2.cs")],
+            impact.Changes.Select(change => (change.Identifier, change.File)));
+        // One walk from the type: its dependent is counted once, on the first part listed.
+        Assert.Equal(["CallsY", "UsesP"], impact.Items.Select(item => item.Name).Order());
+        Assert.Equal([1, 0, 0, 1, 0], impact.Changes.Select(change => change.Dependents));
+    }
+
+    [Fact]
+    public async Task MergedDeclarationsInOneFile_MapTheEarlierOnesHeaderToTheMergedNode_NotToTheModule()
+    {
+        // TypeScript merges two interfaces of one name; the worker keeps the last as the node and reports the first as
+        // a part. Its header was read as the module's own line before: a change of Shared walked from the module.
+        const string content = "interface Shared {\n  a: number;\n}\n\ninterface Shared {\n  b: string;\n}\n";
+        var blob = WriteUtf8("src/g.ts", content, bom: false);
+        var service = new GraphTestGraph(_root) { Freshness = new Fresh(DateTime.UtcNow.AddHours(1)) }
+            .Node("Module", "Module", file: "src/g.ts", line: 0, endLine: 6)
+            .Node("Shared", "Interface", file: "src/g.ts", line: 4, endLine: 6, parts: [("src/g.ts", 0, 2)])
+            .Node("Shared.a", "Property", file: "src/g.ts", line: 1).Node("Shared.b", "Property", file: "src/g.ts", line: 5)
+            .Node("UsesShared", file: "src/u.ts").Node("Importer", file: "src/i.ts")
+            .Edge("Shared", "Shared.a", "HAS_PROPERTY").Edge("Shared", "Shared.b", "HAS_PROPERTY")
+            .Edge("UsesShared", "Shared", "REFERENCES").Edge("Importer", "Module", "IMPORTS")
+            .Build();
+
+        var impact = await Impact(service, Diff("src/g.ts", blob, "@@ -1 +1 @@\n-interface Shared extends Base {\n+interface Shared {"));
+
+        Assert.Equal([(I("Shared"), "container", "1")], impact.Changes.Select(change => (change.Identifier, change.Level, change.ChangedLines)));
+        Assert.Equal(["UsesShared"], impact.Items.Select(item => item.Name));
+    }
+
     [Fact]
     public async Task AnAddedOrCopiedFile_ChangesEveryDeclarationInIt()
     {

@@ -57,7 +57,12 @@ internal sealed class WorkerStateFormatException(string message) : Exception(mes
 /// from a count the remaining bytes could not hold, and never naming a type to create. A path in the file
 /// is a key only: it is matched against the files the host approved, never opened.
 ///
-/// Layout, little-endian (format version 2):
+/// Format version 3 has version 2's layout; its fact hashes cover the parts a bucket's nodes carry (a symbol declared
+/// in several places), which version 2's did not, so a version 2 file is refused and the worker walks afresh rather
+/// than compare hashes of facts that lacked them. Walks are stored before settlement and never carry parts: settlement
+/// rebuilds them from the walks.
+///
+/// Layout, little-endian (format version 3):
 /// <code>
 /// header      "CCWSTATE", u32 version, u32 reserved (0), u64 file length,
 ///             str workerIdentity, str stateId, str workspaceId, str rootPath   (str: u32 length, UTF-8)
@@ -78,7 +83,7 @@ internal sealed class WorkerStateFormatException(string message) : Exception(mes
 /// </summary>
 internal static class WorkerStateFile
 {
-    public const int FormatVersion = 2;
+    public const int FormatVersion = 3;
 
     /// <summary>A state file longer than this is refused before a byte is read.</summary>
     public const long MaxFileLength = 1L << 30;
@@ -342,6 +347,8 @@ internal static class WorkerStateFile
         facts.U32((uint)nodes.Count);
         foreach (var node in nodes)
         {
+            // Parts are settlement's, rebuilt from the walks; a walk holding them would lose them here.
+            if (node.Parts is not null) throw new InvalidOperationException("A walked node carries parts, which the state does not store.");
             facts.U32(strings.Ref(node.Id));
             facts.U32(strings.Ref(node.Identifier));
             facts.U32(strings.Ref(node.Name));

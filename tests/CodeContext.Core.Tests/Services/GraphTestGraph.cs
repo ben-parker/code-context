@@ -60,8 +60,13 @@ internal sealed class GraphTestGraph
         => new() { ["parserId"] = "csharp", ["workspaceId"] = Workspace(name) };
 
     /// <param name="line">The 0-based start line; <paramref name="endLine"/> the 0-based end line (the start line when null).</param>
+    /// <param name="parts">
+    /// Other declarations of the node (a partial type's other parts): each part's file and 0-based lines, from column 0
+    /// to column 200 of its last line.
+    /// </param>
+    /// <param name="col">The 0-based start column; <paramref name="endCol"/> the end column (one past the start when null).</param>
     public GraphTestGraph Node(string name, string type = "Method", string? file = null, int line = 0, bool external = false,
-        int? endLine = null, string? id = null)
+        int? endLine = null, string? id = null, (string File, int Line, int EndLine)[]? parts = null, int col = 0, int? endCol = null)
     {
         var metadata = Owner(name);
         if (external)
@@ -78,8 +83,11 @@ internal sealed class GraphTestGraph
             FilePath = external ? null : Path.Combine(_root, (file ?? "src/" + name.Split('.')[0] + ".cs").Replace('/', Path.DirectorySeparatorChar)),
             StartLine = line,
             EndLine = endLine ?? line,
-            EndCol = 1,
+            StartCol = col,
+            EndCol = endCol ?? col + 1,
             Metadata = metadata,
+            Parts = parts?.Select(part => new CodeNodePart(
+                Path.Combine(_root, part.File.Replace('/', Path.DirectorySeparatorChar)), part.Line, part.EndLine, 0, 200)).ToList(),
         });
         return this;
     }

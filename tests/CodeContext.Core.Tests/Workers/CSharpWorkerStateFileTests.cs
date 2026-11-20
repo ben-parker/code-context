@@ -261,6 +261,21 @@ public sealed class CSharpWorkerStateFileTests : IDisposable
         Assert.Equal(message, refused.Message);
     }
 
+    /// <summary>
+    /// A version 2 file, whose fact hashes did not cover a node's parts, is refused rather than compared: the worker walks
+    /// afresh. A walk never carries parts (settlement adds them), so one that does is not written.
+    /// </summary>
+    [Fact]
+    public void AVersion2File_IsRefused_AndAWalkWithPartsIsNotWritten()
+    {
+        var bytes = StateOf(Walk(nodes: [GoodNode]));
+        Assert.Equal(3u, System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(8)));
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(8), 2);
+        Assert.Equal("unknown state format version", Assert.Throws<WorkerStateFormatException>(() => WorkerStateFile.Read(bytes)).Message);
+
+        Assert.Throws<InvalidOperationException>(() => StateOf(Walk(nodes: [GoodNode with { Parts = [new ProtocolNodePart("b.cs", 0, 1, 0, 1)] }])));
+    }
+
     /// <summary>What the worker does record at the edges of those checks reads back: zero-based positions, one-line spans, no position at all.</summary>
     [Fact]
     public void TheValuesTheWorkerDoesRecord_AreRead()

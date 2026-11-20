@@ -23,7 +23,7 @@ internal static class GraphFacts
                 "N", F(node.Id), F(node.Identifier), F(node.Name), F(node.Type), F(node.FilePath),
                 I(node.StartLine), I(node.EndLine), I(node.StartCol), I(node.EndCol),
                 F(node.Namespace), F(node.Visibility), F(node.Signature), F(node.Language), F(node.ReturnType),
-                F(node.Parameters), F(node.Modifiers), F(node.Metrics), M(node.Metadata)))
+                F(node.Parameters), F(node.Modifiers), F(node.Metrics), M(node.Metadata), ShardReadMatrix.Parts(node.Parts)))
             .Concat(edges.Select(edge => string.Join('|',
                 "E", F(edge.Id), F(edge.SourceId), F(edge.TargetId), F(edge.Type), M(edge.Metadata))))
             .Order(StringComparer.Ordinal)

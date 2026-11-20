@@ -147,7 +147,11 @@ internal sealed class ShardReadMatrix
             ? "-"
             : string.Join("|", node.Id, node.Identifier ?? "<null>", Str(node.Name), Str(node.Type), Str(node.Language), Str(node.FilePath),
                 Int(node.StartLine), Int(node.EndLine), Int(node.StartCol), Int(node.EndCol), Str(node.Namespace), Str(node.Visibility),
-                Str(node.Signature), Str(node.ReturnType), Str(node.Parameters), Str(node.Modifiers), Str(node.Metrics), Meta(node.Metadata));
+                Str(node.Signature), Str(node.ReturnType), Str(node.Parameters), Str(node.Modifiers), Str(node.Metrics), Meta(node.Metadata),
+                Parts(node.Parts));
+
+    internal static string Parts(IReadOnlyList<CodeNodePart>? parts)
+        => parts is null ? "<null>" : "[" + string.Join(";", parts.Select(part => $"{part.FilePath}@{part.StartLine},{part.StartCol}-{part.EndLine},{part.EndCol}")) + "]";
 
     internal static string Edge(CodeEdge? edge)
         => edge is null ? "-" : string.Join("|", edge.Id, Str(edge.SourceId), Str(edge.TargetId), Str(edge.Type), Meta(edge.Metadata));

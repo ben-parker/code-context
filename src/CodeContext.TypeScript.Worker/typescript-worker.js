@@ -2301,6 +2301,42 @@ function filterOwned(items, idOf, owner, bucketPath) {
 }
 
 /**
+ * Gives each kept node the other declarations of its id as `parts` (protocol node.parts): declaration merging (two
+ * `interface Shared`, a class and a namespace of one name) mints one id from several declarations in one file, and
+ * the last is kept, so the earlier ones' headers would otherwise belong to no declaration of that node. A part is
+ * an earlier declaration's own span, in the same 1-based form; the kept node's own is not repeated, nor is a span
+ * twice. A node declared once gets no `parts` key, so its bucket hashes as before. `all` holds the walk's nodes,
+ * `kept` what filterOwned kept of them (the same array when nothing was dropped).
+ */
+function withMergedParts(all, kept) {
+    if (kept === all) return kept;
+    const keptIds = new Set(kept.map(node => node.id));
+    const spans = new Map();
+    for (const node of all) {
+        if (!keptIds.has(node.id)) continue;
+        if (!spans.has(node.id)) spans.set(node.id, []);
+        spans.get(node.id).push(node);
+    }
+    return kept.map(node => {
+        const parts = [];
+        const seen = new Set([`${node.filePath}\0${node.startLine}\0${node.startColumn}\0${node.endLine}\0${node.endColumn}`]);
+        for (const other of spans.get(node.id) ?? []) {
+            const key = `${other.filePath}\0${other.startLine}\0${other.startColumn}\0${other.endLine}\0${other.endColumn}`;
+            if (other === node || seen.has(key)) continue;
+            seen.add(key);
+            parts.push({
+                filePath: other.filePath,
+                startLine: other.startLine,
+                endLine: other.endLine,
+                startColumn: other.startColumn,
+                endColumn: other.endColumn,
+            });
+        }
+        return parts.length === 0 ? node : { ...node, parts };
+    });
+}
+
+/**
  * Deterministic, length-and-type-framed serialization of any emitted fact value. Every
  * string carries a length prefix, every object emits sorted keys, and each type gets a
  * distinct tag, so two distinct fact sets can never collide by field-boundary ambiguity.
@@ -2424,7 +2460,7 @@ async function analyzeWorkspace(workspace, workspaceId, token, progressContext =
 
     const buckets = rawBuckets.map(raw => ({
         path: raw.path,
-        nodes: filterOwned(raw.nodes, n => n.id, nodeOwner, raw.path),
+        nodes: withMergedParts(raw.nodes, filterOwned(raw.nodes, n => n.id, nodeOwner, raw.path)),
         edges: filterOwned(raw.edges, e => e.id, edgeOwner, raw.path),
     }));
 

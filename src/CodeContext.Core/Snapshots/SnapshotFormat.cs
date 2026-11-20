@@ -18,10 +18,14 @@ namespace CodeContext.Core.Snapshots
         Coverage = 9,
         Fingerprints = 10,
         Inputs = 11,
+        Parts = 12,
     }
 
     /// <summary>
-    /// Constants and record layouts of the snapshot file, format version 3. Version 1 had no
+    /// Constants and record layouts of the snapshot file, format version 4. Version 3 had no
+    /// <see cref="SnapshotSectionKind.Parts"/> section (a node's other declarations, <see cref="CodeNode.Parts"/>), its
+    /// node records' last word was reserved, and a snapshot written before workers reported parts would describe less
+    /// than a scan does: it is refused. Version 1 had no
     /// <see cref="SnapshotSectionKind.Inputs"/> section and no <see cref="FlagUnverified"/>. Version 2 also held ten
     /// index sections per shard (id, identifier and edge-id hashes, by-source and by-target runs, a name table with
     /// postings, cross-shard edges, a type histogram) for a shard read in place from the mapping, which was never
@@ -42,7 +46,7 @@ namespace CodeContext.Core.Snapshots
     /// </summary>
     internal static class SnapshotFormat
     {
-        public const uint FormatVersion = 3;
+        public const uint FormatVersion = 4;
         public const uint EndianTag = 0x01020304;
         public const int HeaderSize = 256;
         public const int FooterSize = 40;
@@ -51,7 +55,7 @@ namespace CodeContext.Core.Snapshots
         public const int DirectoryEntrySize = 64;
         public const int ShardHeaderSize = 128;
         public const int SectionEntrySize = 24;
-        public const int SectionCount = 11;
+        public const int SectionCount = 12;
         public const int NodeRecordSize = 80;
         public const int EdgeRecordSize = 32;
         public const int IdEntrySize = 8;
@@ -65,6 +69,18 @@ namespace CodeContext.Core.Snapshots
         /// label <c>unverified</c>). A host loads it as any other; a process without a worker never answers from it.
         /// </summary>
         public const uint FlagUnverified = 2;
+
+        /// <summary>
+        /// The byte offset in a node record of its parts reference: 0 for none, else the 1-based list of the
+        /// <see cref="SnapshotSectionKind.Parts"/> section. That section is <c>u32 count</c>, <c>count + 1</c> u32 byte
+        /// offsets (from the section's start; the first just after them, the last the section's length), then each
+        /// list: <c>u32 parts</c>, then per part <c>u32 path</c> (a string reference, never 0), <c>i32 start line, end
+        /// line, start column, end column</c>.
+        /// </summary>
+        public const int NodePartsOffset = 76;
+
+        /// <summary>The bytes of one part in a parts list.</summary>
+        public const int PartSize = 20;
 
         /// <summary>NodeRecord flag bit 0: <c>metadata.external == "true"</c>.</summary>
         public const uint NodeFlagExternal = 1;
