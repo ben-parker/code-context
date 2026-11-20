@@ -307,6 +307,37 @@ public sealed class GraphImpactTests : IDisposable
     }
 
     [Fact]
+    public async Task ALineOfAModuleThatOnlyLooksLikeAComment_ChangesTheModule_AndADocCommentOrFileHeaderDoesNot()
+    {
+        // A module holds statements no declaration does (here a template literal): its comment-looking lines are read
+        // in the file, and only those above a declaration, or in the file's leading comment, change nothing.
+        const string content = "// header\n\n/** Helper. */\nexport function helper() {\n  return 1;\n}\n"
+            + "export const help = `\n* run\n`;\n";
+        var path = Path.Combine(_root, "src", "a.ts");
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(path, content);
+        var blob = DiffWorkingTree.BlobId(Encoding.UTF8.GetBytes(content), sha256: false)[..7];
+        var service = new GraphTestGraph(_root) { Freshness = new Fresh(DateTime.UtcNow.AddHours(1)) }
+            .Node("Module", "Module", file: "src/a.ts", line: 0, endLine: 8)
+            .Node("Module.helper", "Function", file: "src/a.ts", line: 3, endLine: 5)
+            .Node("Importer", file: "src/b.ts")
+            .Edge("Importer", "Module", "IMPORTS")
+            .Build();
+
+        var inString = await Impact(service, Diff("src/a.ts", blob, "@@ -8 +8 @@\n-* stop\n+* run"));
+        var change = Assert.Single(inString.Changes);
+        Assert.Equal((I("Module"), "container", "8"), (change.Identifier, change.Level, change.ChangedLines));
+        Assert.Equal(["Importer"], inString.Items.Select(item => item.Name));
+        Assert.Equal(0, inString.IgnoredLines);
+        Assert.True(inString.Complete);
+
+        var docAndHeader = await Impact(service, Diff("src/a.ts", blob, "@@ -1 +1 @@\n-// old header\n+// header", "@@ -3 +3 @@\n-/** Old. */\n+/** Helper. */"));
+        Assert.Empty(docAndHeader.Changes);
+        Assert.Equal(4, docAndHeader.IgnoredLines);
+        Assert.True(docAndHeader.Complete);
+    }
+
+    [Fact]
     public async Task AnAddedOrCopiedFile_ChangesEveryDeclarationInIt()
     {
         var blob = WriteFile("src/New.cs", 6);

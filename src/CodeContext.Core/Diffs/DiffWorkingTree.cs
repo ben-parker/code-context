@@ -128,6 +128,33 @@ namespace CodeContext.Core.Diffs
             return (Verdict.Mismatch, null);
         }
 
+        /// <summary>
+        /// The lines of the file at <paramref name="fullPath"/> (UTF-8, carriage returns dropped), read as <see cref="Inspect"/>
+        /// reads it and only when its content is still <paramref name="blob"/> (when given); null otherwise.
+        /// </summary>
+        public IReadOnlyList<string>? ReadLines(string fullPath, string? blob)
+        {
+            if (_refused(fullPath)) return null;
+            byte[] content;
+            try
+            {
+                if (new FileInfo(fullPath) is not { Exists: true } info || info.Length > MaxHashedBytes) return null;
+                content = File.ReadAllBytes(fullPath);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+            {
+                return null;
+            }
+            if (blob is not null && !Matches(content, blob)
+                && !(Array.IndexOf(content, (byte)'\r') >= 0 && Matches(WithoutCarriageReturns(content), blob)))
+            {
+                return null;
+            }
+            var text = new UTF8Encoding(false).GetString(content);
+            if (text.EndsWith('\n')) text = text[..^1];
+            return text.Split('\n').Select(line => line.EndsWith('\r') ? line[..^1] : line).ToArray();
+        }
+
         /// <summary>Whether <paramref name="blob"/> (hexadecimal, maybe abbreviated) is git's id of <paramref name="content"/>, SHA-1 or SHA-256.</summary>
         internal static bool Matches(byte[] content, string blob)
         {

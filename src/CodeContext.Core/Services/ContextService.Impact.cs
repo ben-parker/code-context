@@ -176,7 +176,9 @@ namespace CodeContext.Core.Services
                 IReadOnlyList<DiffLineRange> added = file.Status == DiffFileStatus.Copied
                     ? [new DiffLineRange(1, Math.Max(1, nodes.Max(node => Math.Max(node.EndLine, node.StartLine)) + 1))]
                     : file.Added;
-                var mapping = DiffMapper.Map(nodes, node => IsContainer(node, walk), added, file.Removals, file.CommentAdded, file.CommentBoundaries);
+                var newBlob = file.NewBlob;
+                var mapping = DiffMapper.Map(nodes, node => IsContainer(node, walk), added, file.Removals, file.CommentAdded, file.CommentBoundaries,
+                    HoldsStatements, () => tree.ReadLines(fullPath, newBlob));
                 response.IgnoredLines += mapping.IgnoredComments;
 
                 foreach (var touch in mapping.Touched)
@@ -372,6 +374,9 @@ namespace CodeContext.Core.Services
         /// <summary>Whether a node holds declarations: a type or module kind, or anything with a containment edge out of it.</summary>
         private static bool IsContainer(CodeNode node, GraphWalk walk)
             => (node.Type is { } type && ContainerTypes.Contains(type)) || walk.HoldsMembers(node.Id!);
+
+        /// <summary>Whether a container holds statements beside its declarations, so that a line in it may lie in a string.</summary>
+        private static bool HoldsStatements(CodeNode node) => string.Equals(node.Type, "Module", StringComparison.OrdinalIgnoreCase);
 
         /// <summary>Ranges as <c>12-14,20</c>.</summary>
         internal static string FormatRanges(IEnumerable<DiffLineRange> ranges)

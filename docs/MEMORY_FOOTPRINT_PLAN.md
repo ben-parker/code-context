@@ -433,7 +433,11 @@ Decisions where the backlog was silent:
    lines of one change block that leave a block comment open, or close one, where the lines they replace did not (a
    `/*` added above unchanged members and a `*/` below them) comment unchanged lines out or back in; outside a member
    they are `blockCommentBoundary`, and such a removed run is no comments-only removal. Read lexically from outside a
-   comment, on comment lines only (a `/*` in a code line is not followed).
+   comment, on comment lines only (a `/*` in a code line is not followed). In a container that holds statements beside
+   declarations (a `Module`: the TypeScript worker indexes no module-level variable), a comment-looking line may lie
+   in a string (a template literal of Markdown bullets): there the working-tree file is read (through the guard, its
+   blob id checked again) and only a line of the comment just above a declaration, or of the file's leading comment,
+   is ignored; any other changes the module, and a removed comments-only run there is the module's removed lines.
 6. One walk: `GraphWalk.AffectedBy` over the union of changed node ids, the function `affected` uses, so propagation,
    dispatch, the static-call stop, the test-double stop, `testsHidden`, depth, cancellation and the test-file rule are
    the same; seeds are never listed (a changed declaration that uses another is a change, not a dependent). A

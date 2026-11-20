@@ -16,7 +16,10 @@ namespace CodeContext.Core.Diffs
     /// no member holds them (a doc comment above a member, which a declaration's span leaves out, or a file header) they
     /// change nothing and are only counted, and a removed run of comments only is no removed declaration. A comment line
     /// that opens or closes a block comment around unchanged lines (<see cref="DiffFile.CommentBoundaries"/>) is the
-    /// exception: where no member holds it, what it commented out or back in is reported, never counted.
+    /// exception: where no member holds it, what it commented out or back in is reported, never counted. In a container
+    /// that also holds statements no declaration does (a module), a line that looks like a comment may lie in a string:
+    /// there the file is read, and only a line of the comment just above a declaration, or of the file's leading comment,
+    /// changes nothing; any other changes the container.
     /// </summary>
     public static class DiffMapper
     {
@@ -64,14 +67,20 @@ namespace CodeContext.Core.Diffs
         /// <param name="isContainer">Whether a node holds declarations (a type, a module): a removal between its members is not mapped.</param>
         /// <param name="added">Changed new-side lines; <paramref name="comments"/> changed comment lines; <paramref name="removals"/> the removed runs.</param>
         /// <param name="boundaries">The comment lines among <paramref name="comments"/> that open or close a block comment around unchanged lines.</param>
+        /// <param name="holdsStatements">Whether a container holds statements as well as declarations (a module).</param>
+        /// <param name="readLines">The file's new-side lines, read when a comment line lies in such a container; null when they cannot be read.</param>
         public static Result Map(
             IReadOnlyList<CodeNode> nodes, Func<CodeNode, bool> isContainer,
             IReadOnlyList<DiffLineRange> added, IReadOnlyList<DiffRemoval> removals, IReadOnlyList<DiffLineRange>? comments = null,
-            IReadOnlyList<DiffLineRange>? boundaries = null)
+            IReadOnlyList<DiffLineRange>? boundaries = null,
+            Func<CodeNode, bool>? holdsStatements = null, Func<IReadOnlyList<string>?>? readLines = null)
         {
             var result = new Result();
             var groups = Groups(nodes);
             var roots = groups.Where(group => group.Parent is null).ToList();
+            IReadOnlyList<string>? text = null;
+            var textRead = false;
+            HashSet<int>? starts = null;
 
             foreach (var range in added)
             {
@@ -103,8 +112,26 @@ namespace CodeContext.Core.Diffs
                     }
                     if (member) continue;
                     if (boundaries?.Any(boundary => boundary.Start <= line && line <= boundary.End) == true)
+                    {
                         Merge(result.CommentBoundaries, new DiffLineRange(line, line));
-                    else result.IgnoredComments++;
+                        continue;
+                    }
+                    if (holdsStatements is not null && Innermost(groups, line) is { } holder && holder.Nodes.Exists(node => holdsStatements(node)))
+                    {
+                        if (!textRead)
+                        {
+                            text = readLines?.Invoke();
+                            textRead = true;
+                        }
+                        starts ??= groups.Select(group => group.Start).ToHashSet();
+                        if (text is null || line > text.Count || !UnifiedDiff.IsCommentLine(text[line - 1])
+                            || !IsDocCommentOrHeader(text, line - 1, line + 1, starts))
+                        {
+                            Merge(TouchOf(holder, result).Lines, new DiffLineRange(line, line));
+                            continue;
+                        }
+                    }
+                    result.IgnoredComments++;
                 }
             }
 
@@ -128,6 +155,20 @@ namespace CodeContext.Core.Diffs
                     TouchOf(around, result).RemovedLines += removal.Old.Count;
                     continue;
                 }
+                if (removal.CommentsOnly && around is not null && around.Nodes.Exists(node => holdsStatements?.Invoke(node) == true))
+                {
+                    if (!textRead)
+                    {
+                        text = readLines?.Invoke();
+                        textRead = true;
+                    }
+                    starts ??= groups.Select(group => group.Start).ToHashSet();
+                    if (text is null || !IsDocCommentOrHeader(text, removal.NewBefore, removal.NewAfter, starts))
+                    {
+                        TouchOf(around, result).RemovedLines += removal.Old.Count;
+                        continue;
+                    }
+                }
                 if (removal.CommentsOnly)
                 {
                     result.IgnoredComments += removal.Old.Count;
@@ -142,6 +183,32 @@ namespace CodeContext.Core.Diffs
                 return order != 0 ? order : string.CompareOrdinal(left.Nodes[0].Id, right.Nodes[0].Id);
             });
             return result;
+        }
+
+        /// <summary>The deepest group holding <paramref name="line"/>, or null.</summary>
+        private static Group? Innermost(List<Group> groups, int line)
+        {
+            Group? innermost = null;
+            foreach (var group in groups)
+            {
+                if (group.Start <= line && line <= group.End && (innermost is null || Depth(group) > Depth(innermost))) innermost = group;
+            }
+            return innermost;
+        }
+
+        /// <summary>
+        /// Whether a comment between 1-based lines <paramref name="before"/> and <paramref name="after"/> of
+        /// <paramref name="text"/> is, with the comment and blank lines around it, the file's leading comment or the
+        /// comment just above a declaration (one of <paramref name="starts"/>).
+        /// </summary>
+        private static bool IsDocCommentOrHeader(IReadOnlyList<string> text, int before, int after, HashSet<int> starts)
+        {
+            static bool Quiet(string value) => string.IsNullOrWhiteSpace(value) || UnifiedDiff.IsCommentLine(value);
+            before = Math.Min(before, text.Count);
+            while (before >= 1 && Quiet(text[before - 1])) before--;
+            if (before == 0) return true;
+            while (after >= 1 && after <= text.Count && Quiet(text[after - 1])) after++;
+            return starts.Contains(after);
         }
 
         private static Touch TouchOf(Group group, Result result)
