@@ -460,7 +460,10 @@ Decisions where the backlog was silent:
      --cached` matches only where the working tree equals the index; untracked files appear only after `git add
      -N`. The skill says so.
    - Blind spots: a change made before the last batch began that the watcher had not delivered yet; a file system
-     whose clock is not this machine's.
+     whose clock is not this machine's; on Windows, a file copied over another (`CopyFile` carries the source's change
+     and write times) with times older than that read, until the watcher's batch for it begins and marks it as being
+     read. The blob id check does not cover this: it compares the working tree with the diff, not with what the index
+     read.
 3. Lines map to the innermost declarations holding them (no nested declaration on that line); a declaration's first
    and last lines are its own where it has text of its own there (a header before anything nested, a closing line
    after): a module is the whole file, starting with its first declaration and ending with the text, so a function

@@ -127,8 +127,9 @@ git diff $(git merge-base main HEAD) | codecontext query impact   # what this br
   fall in (`member`, or `container` for a type's or module's own lines: its header, its
   closing line, between members; impact is then walked from the type alone; a second part
   of a `partial` type, or of merged TypeScript declarations, counts as the type's own and
-  is listed at that part's file), each with its lines and the dependents attributed to it; `affected` lists them as `affected` does, each
-  `from` the change that reached it first; `tests` lists the test files in reach. A changed
+  is listed at that part's file), each with its lines and the dependents attributed to
+  it; `affected` lists them as `affected` does, each `from` the change that reached it
+  first; `tests` lists the test files in reach. A changed
   declaration is never listed as a dependent: `used by N other change(s)` on a change names
   the other changes that use it directly, so `0 dependents` there does not mean unused.
   The diff's new side must be the working tree. Uncommitted work: `git diff HEAD` (after
@@ -136,8 +137,9 @@ git diff $(git merge-base main HEAD) | codecontext query impact   # what this br
   merge-base main HEAD)`. Commits only, nothing uncommitted: `git diff main...HEAD`. `git
   diff --cached` matches only files with no unstaged change. A file is mapped only when
   its content is the diff's new side (its blob id, so keep git's `index` lines; a CRLF
-  checkout matches) and the instance read it after it last changed; `impact` waits for a
-  finished scan. The first line says `complete` or `incomplete`, and `incomplete` exits 2:
+  checkout matches) and the instance read it after it last changed (on Windows a file
+  copied over another keeps the source's older times, so until the instance has re-read
+  it such a copy passes this check); `impact` waits for a finished scan. The first line says `complete` or `incomplete`, and `incomplete` exits 2:
   every part that maps to nothing is listed under `unmapped` with its reason:
   `outsideDeclarations` (imports, usings, a namespace line: they can rebind every symbol
   of the file, so `query affected <file>`; in an added file only a `global using`, an
@@ -161,8 +163,8 @@ git diff $(git merge-base main HEAD) | codecontext query impact   # what this br
   (`ignored`); a comment line elsewhere outside a
   member changes the type or module holding it. Text shows the first 8 ranges of a long
   line list and how many there are (`--json` keeps them all). `--depth`, `--limit` (per
-  list), `--tests` and `--relation` mean what they mean for `affected`. The tool never runs git: you run
-  it. That matters only where the repository's `.git` is not yours (received as a
+  list), `--tests` and `--relation` mean what they mean for `affected`. The tool never
+  runs git: you run it. That matters only where the repository's `.git` is not yours (received as a
   directory or an archive rather than cloned): there git runs what `.git/config` names,
   an external diff, a textconv, a clean or smudge filter, an fsmonitor hook, and `git
   add`, `git commit`, `git stash` and `git checkout` run filters and hooks as well. One
