@@ -452,7 +452,7 @@ namespace CodeContext.Core.Services
 
             response.Complete = response.UnmappedCount == 0 && response.ContentUnchecked == 0;
             response.Hint = ImpactHint(request, response, walk, mismatched);
-            response.Coverage = CoverageOf(changes.Count > 0 ? changes.Select(change => change.Node.Id) : null);
+            response.Coverage = CoverageOf(changes.Select(change => change.Node.Id));
             response.Cache = CacheAfterReads(response.Cache);
             return response;
         }

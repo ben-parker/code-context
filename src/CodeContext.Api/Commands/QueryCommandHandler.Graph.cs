@@ -456,6 +456,7 @@ public static partial class QueryCommandHandler
         foreach (var hub in response.Items)
             WriteAgentNode($"\t{hub.Dependents} dependents\t{hub.DependentFiles} files\t", hub, output);
         if (!string.IsNullOrWhiteSpace(response.Hint)) output.WriteLine($"hint\t{Clean(response.Hint)}");
+        WriteCoverage(response.Coverage, "coverage\t{0}\t", response.Cache, output);
     }
 
     private static void WriteAgentImpact(GraphImpactResponse response, TextWriter output)
@@ -683,5 +684,6 @@ public static partial class QueryCommandHandler
                 + $"{hub.Identifier} [{hub.Type ?? "Unknown"}]{HumanLocation(hub)}");
         }
         if (!string.IsNullOrWhiteSpace(response.Hint)) output.WriteLine(response.Hint);
+        WriteCoverage(response.Coverage, "Coverage ({0}): ", response.Cache, output);
     }
 }

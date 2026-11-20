@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeContext.CSharp.Worker;
 using CodeContext.Parser.Protocol;
+using CodeContext.Core.Workers;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 
@@ -584,8 +585,47 @@ public class CSharpWorkerProjectCompilationTests : IDisposable
         Assert.Equal(ProjectCoverageStates.Partial, coverage.State);
         Assert.Null(coverage.MissingReferences);
         Assert.Equal(60, coverage.UnresolvedNames);
-        Assert.Contains(coverage.Notes!, note => note.Contains("60 of 61 name uses did not bind", StringComparison.Ordinal)
+        Assert.Contains(coverage.Notes!, note => note.Contains("60 names did not bind, against 1 references that did", StringComparison.Ordinal)
             && note.Contains("Generated0", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(49, ProjectCoverageStates.Complete)]
+    [InlineData(50, ProjectCoverageStates.Partial)]
+    public void FiftyUnboundNamesIsWhereManyStarts(int unbound, string expected)
+    {
+        var result = Analyze(
+            ("App/App.csproj", Project()),
+            ("App/Code.cs", $"public class Code {{ public void Run() {{ {Calls("Generated", unbound)} }} }}"));
+
+        Assert.Equal(expected, Coverage(result, "App").State);
+    }
+
+    [Theory]
+    // 50 unbound against 950 bound is 5.0% of the 1,000; against 951 it is just under.
+    [InlineData(950, ProjectCoverageStates.Partial)]
+    [InlineData(951, ProjectCoverageStates.Complete)]
+    public void FivePercentOfReferencesIsWhereManyStarts(int known, string expected)
+    {
+        var calls = string.Concat(Enumerable.Range(0, known).Select(_ => "Known(); "));
+        var result = Analyze(
+            ("App/App.csproj", Project()),
+            ("App/Code.cs", $"public class Code {{ public void Run() {{ {Calls("Generated", 50)} {calls} }} void Known() {{ }} }}"));
+
+        Assert.Equal(expected, Coverage(result, "App").State);
+    }
+
+    [Fact]
+    public void AnUnrestoredProjectIsNotAlsoBlamedOnGenerators()
+    {
+        // Its missing package explains its misses; the generator note would point the wrong way.
+        var result = Analyze(
+            ("App/App.csproj", Project("""<PackageReference Include="No.Such.Package" Version="1.0.0" />""")),
+            ("App/Code.cs", $"public class Code {{ public void Run() {{ {Calls("Widget", 60)} }} }}"));
+
+        var coverage = Coverage(result, "App");
+        Assert.Equal(ProjectCoverageStates.Partial, coverage.State);
+        Assert.DoesNotContain(coverage.Notes!, note => note.Contains("did not bind", StringComparison.Ordinal));
     }
 
     [Fact]

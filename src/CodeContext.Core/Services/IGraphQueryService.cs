@@ -187,7 +187,7 @@ namespace CodeContext.Core.Services
         /// <summary>Why no path was found, in words, and what to try.</summary>
         public string? Explanation { get; set; }
 
-        /// <summary>Set when this answer may be short because some project was analyzed without all it declares.</summary>
+        /// <summary>Set when this answer may be short because a project of its worker was not fully analyzed.</summary>
         public CoverageSummary? Coverage { get; set; }
     }
 

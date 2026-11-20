@@ -57,6 +57,35 @@ public class GraphAffectedTests
         Assert.Equal(1, response.Coverage.TotalProjects);
     }
 
+    [Fact]
+    public async Task CoverageCommittedWithTheShards_IsReadByParser()
+    {
+        // The host's wiring: coverage comes from the store's published annotations, not from reports.
+        var graph = new GraphTestGraph();
+        graph.Coverage = new CodeContext.Core.Workers.AnalysisCoverageRegistry(graph.Database.PublishedCoverage);
+        var service = graph.Node("Seed").Node("Direct").Edge("Direct", "Seed").Build();
+        // Commits that carry each worker's report and change no fact, as a worker's terminal delta would.
+        foreach (var (parser, workspace, project) in new[]
+        {
+            ("csharp", "a", new ProjectCoverage("Api", "src/Api/Api.csproj", ProjectCoverageStates.Partial, 4, MissingReferences: ["Lib"])),
+            ("csharp", "b", new ProjectCoverage("Core", "src/Core/Core.csproj", ProjectCoverageStates.Complete, 9)),
+            ("typescript", "web", new ProjectCoverage("web", null, ProjectCoverageStates.Fallback, 2)),
+        })
+        {
+            Assert.True(graph.Database.TryCommitGeneration(graph.Database.LastCommittedGeneration + 1, [], [],
+                new CodeContext.Core.Repositories.CommitScope(parser, workspace, [])
+                {
+                    Annotation = new CodeContext.Core.Repositories.ShardAnnotation("1.0.0-test", [project]),
+                }));
+        }
+
+        var response = await Affected(service, I("Seed"));
+
+        Assert.Equal(["Api"], response.Coverage!.Names);
+        Assert.Equal(2, response.Coverage.TotalProjects);
+        Assert.Equal(["csharp", "typescript"], graph.Coverage.GetProjectsByParser().Select(worker => worker.Key));
+    }
+
     [Theory]
     [InlineData(1)]
     [InlineData(5)]

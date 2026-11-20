@@ -263,11 +263,11 @@ anything else, cross-check with `rg -w <Name>`.
   project, as in `csharp:ToolA#Program.Main()`. A bare identifier then returns all of them
   as ambiguous.
 - **A `coverage` line** on any answer, found or not, means a project of that language was
-  analyzed without all it needs, so `usedBy`, `affected`, `impact` and `hubs` counts may be
+  not fully analyzed, so `usedBy`, `affected`, `impact` and `hubs` counts may be
   short there. Usually it was never restored (missing references), or much of its code
   fails to bind although nothing declared is missing, as code a source generator writes
   does. `codecontext status --path .` lists each project's state, its missing references,
-  how many name uses failed to bind and which names. Run `dotnet restore`, then
+  how many names failed to bind and which. Run `dotnet restore`, then
   `rg -w <Name>` as the cross-check.
 - **C# is blind to these, so an empty `usedBy` proves nothing here; run `rg -w <Name>`:**
   - **Code the active build leaves out.** Each project is analyzed for `Debug`, or the

@@ -298,8 +298,7 @@ public static class ProjectCoverageStates
 
     /// <summary>
     /// Analyzed as its own project, but some of what it declares was not found, or much of its
-    /// code fails to bind although every declared reference was (code a source generator writes
-    /// looks like this). Either way its answers can be short.
+    /// code fails to bind although every declared reference was. Either way its answers can be short.
     /// </summary>
     public const string Partial = "partial";
 

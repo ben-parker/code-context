@@ -367,7 +367,7 @@ public class WorkerStatePairingStoreTests
             // The commit holds the lock: the coverage read returns at once, with the published coverage.
             // (A read that waited would time out here, since the commit cannot finish until released.)
             var read = await Task.Run(() => database.PublishedCoverage()).WaitAsync(TimeSpan.FromSeconds(5));
-            Assert.Equal("One", read.Single().Name);
+            Assert.Equal("One", read.SelectMany(projects => projects).Single().Name);
         }
         finally
         {
@@ -375,7 +375,7 @@ public class WorkerStatePairingStoreTests
         }
         await commit;
         database.InsideCommitLock = null;
-        Assert.Equal("Two", database.PublishedCoverage().Single().Name);
+        Assert.Equal("Two", database.PublishedCoverage().SelectMany(projects => projects).Single().Name);
     }
 
     /// <summary>

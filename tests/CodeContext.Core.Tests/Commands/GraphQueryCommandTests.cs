@@ -246,6 +246,24 @@ public partial class GraphQueryCommandTests
             error.ToString().Trim());
     }
 
+    [Theory]
+    [InlineData(false, "coverage\tpartial\t1 of 3 projects not fully analyzed: Api.")]
+    [InlineData(true, "Coverage (partial): 1 of 3 projects not fully analyzed: Api.")]
+    public async Task HubsFound_StillPrintTheCoverageLine(bool human, string expected)
+    {
+        var body = """
+            {"totalCount":1,"returnedCount":1,"items":[{"identifier":"csharp:App.Core","name":"Core","type":"Class","dependents":4,"dependentFiles":2}],
+             "coverage":{"state":"partial","incompleteProjects":1,"totalProjects":3,"names":["Api"]}}
+            """;
+
+        var (exit, output) = human
+            ? await RunAsync(body, "query", "hubs", "--human", "--path", Root)
+            : await RunAsync(body, "query", "hubs", "--path", Root);
+
+        Assert.Equal(0, exit);
+        Assert.Contains(expected, output);
+    }
+
     [Fact]
     public async Task CopiesOfOneDeclaration_AreNamedBeforeTheAnswer()
     {

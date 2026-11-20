@@ -285,7 +285,7 @@ namespace CodeContext.Core.Services
 
             response.ReturnedMatches = response.Matches.Count;
             response.Truncated = response.ReturnedMatches < response.TotalMatches;
-            response.Coverage = CoverageOf(candidates.Take(maxMatches).Select(candidate => candidate.Id));
+            response.Coverage = CoverageOf(candidates.Select(candidate => candidate.Id));
             response.Cache = CacheAfterReads(response.Cache);
             return response;
         }

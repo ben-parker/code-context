@@ -337,6 +337,7 @@ namespace CodeContext.Core.Services
                 return true;
             });
             response.TotalCount = hubs.Count;
+            var listed = new List<string>();
             foreach (var hub in Leading(hubs, request.Limit, static (left, right) =>
             {
                 var order = right.Dependents.CompareTo(left.Dependents);
@@ -344,6 +345,7 @@ namespace CodeContext.Core.Services
                 return order != 0 ? order : CompareByPlace(left.Node, right.Node);
             }))
             {
+                listed.Add(hub.Node.Id);
                 var compact = ToCompact<GraphHubNode>(hub.Node);
                 compact.Dependents = hub.Dependents;
                 compact.DependentFiles = hub.DependentFiles;
@@ -363,7 +365,7 @@ namespace CodeContext.Core.Services
                 response.Hint = $"None of the {considered} symbol(s) passing the filters has a recorded dependent.";
             }
             // Dependents a project hid are missing from these counts too.
-            response.Coverage = CoverageOf(hubs.Count > 0 ? hubs.Select(hub => hub.Node.Id) : null);
+            response.Coverage = CoverageOf(listed);
             response.Cache = CacheAfterReads(response.Cache);
             return response;
         }
@@ -496,22 +498,20 @@ namespace CodeContext.Core.Services
                 && string.Equals(left.Signature, right.Signature, StringComparison.Ordinal);
 
         /// <summary>
-        /// Which projects were analyzed without all they declare, if any, among the projects of the workers whose
-        /// facts the answer is about: those whose node ids <paramref name="about"/> names, or every worker when it
-        /// names none (an answer of nothing). A project that was not fully seen can hide users and dependents
-        /// from any answer about its worker's code, found or not, so an answer that lists some still says so.
+        /// Which projects were not fully analyzed, if any, among those of the workers whose facts the answer is
+        /// about: the parsers that the node ids in <paramref name="about"/> start with, or every worker when it
+        /// names none (an answer of nothing). Such a project can hide users and dependents from any answer about
+        /// its worker's code, found or not, so an answer that lists some still says so.
         /// </summary>
         private CoverageSummary? CoverageOf(IEnumerable<string>? about = null)
         {
             if (_coverage is null) return null;
-            var byParser = _coverage.GetProjectsByParser();
-            var ids = about as IReadOnlyCollection<string> ?? about?.ToList();
-            var projects = new List<ProjectCoverage>();
-            foreach (var (parserId, reported) in byParser)
-            {
-                if (ids is { Count: > 0 } && !ids.Any(id => IsOfParser(id, parserId))) continue;
-                projects.AddRange(reported);
-            }
+            // Every worker-owned id starts with "<parserId>:".
+            var parsers = about?.Select(id => id[..Math.Max(0, id.IndexOf(':'))]).ToHashSet(StringComparer.Ordinal);
+            var projects = _coverage.GetProjectsByParser()
+                .Where(worker => parsers is not { Count: > 0 } || parsers.Contains(worker.Key))
+                .SelectMany(worker => worker)
+                .ToList();
             var incomplete = projects.Where(project => project.State != ProjectCoverageStates.Complete).ToList();
             return incomplete.Count == 0
                 ? null
@@ -523,10 +523,6 @@ namespace CodeContext.Core.Services
                     Names = incomplete.Take(MaxCoverageNames).Select(project => project.Name).ToList(),
                 };
         }
-
-        /// <summary>Every worker-owned id starts with <c>&lt;parserId&gt;:</c>.</summary>
-        private static bool IsOfParser(string id, string parserId)
-            => id.Length > parserId.Length && id[parserId.Length] == ':' && id.StartsWith(parserId, StringComparison.Ordinal);
 
         private static void RequireIdentifier(string? value, string name)
         {

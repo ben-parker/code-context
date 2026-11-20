@@ -14,13 +14,18 @@ public interface IAnalysisCoverageRegistry
 {
     void Report(string parserId, string workspaceId, IReadOnlyList<ProjectCoverage> projects);
 
-    IReadOnlyList<ProjectCoverage> GetProjects();
-
     /// <summary>
-    /// The same projects, grouped by the parser that reported them. A worker's gaps can only hide
-    /// that worker's facts, so an answer about one language is judged against its own projects.
+    /// Every project, by the parser that reported it, in parser then workspace order. A worker's gaps can
+    /// only hide that worker's facts, so an answer about one language is judged against its own projects.
     /// </summary>
-    IReadOnlyList<KeyValuePair<string, IReadOnlyList<ProjectCoverage>>> GetProjectsByParser();
+    ILookup<string, ProjectCoverage> GetProjectsByParser();
+}
+
+public static class AnalysisCoverageRegistryExtensions
+{
+    /// <summary>Every project, in parser then workspace order.</summary>
+    public static IReadOnlyList<ProjectCoverage> GetProjects(this IAnalysisCoverageRegistry registry)
+        => registry.GetProjectsByParser().SelectMany(projects => projects).ToList();
 }
 
 /// <summary>
@@ -33,36 +38,27 @@ public interface IAnalysisCoverageRegistry
 public sealed class AnalysisCoverageRegistry : IAnalysisCoverageRegistry
 {
     private readonly ConcurrentDictionary<(string ParserId, string WorkspaceId), IReadOnlyList<ProjectCoverage>> _reports = new();
-    private readonly InMemoryDatabase? _published;
+    private readonly Func<ILookup<string, ProjectCoverage>>? _published;
 
     public AnalysisCoverageRegistry()
     {
     }
 
-    internal AnalysisCoverageRegistry(InMemoryDatabase published) => _published = published;
+    internal AnalysisCoverageRegistry(Func<ILookup<string, ProjectCoverage>> published) => _published = published;
 
     /// <summary>The registry for a host's store: read through the published annotations when it is the in-memory store.</summary>
     public static IAnalysisCoverageRegistry ForStore(IRepositoryFactory factory)
         => factory is InMemoryRepositoryFactory memory
-            ? new AnalysisCoverageRegistry(memory.Database)
+            ? new AnalysisCoverageRegistry(memory.Database.PublishedCoverage)
             : new AnalysisCoverageRegistry();
 
     public void Report(string parserId, string workspaceId, IReadOnlyList<ProjectCoverage> projects)
         => _reports[(parserId, workspaceId)] = projects;
 
-    public IReadOnlyList<ProjectCoverage> GetProjects()
-        => _published?.PublishedCoverage()
-            ?? OrderedReports().SelectMany(report => report.Value).ToList();
-
-    public IReadOnlyList<KeyValuePair<string, IReadOnlyList<ProjectCoverage>>> GetProjectsByParser()
-        => _published?.PublishedCoverageByParser()
-            ?? OrderedReports()
-                .GroupBy(report => report.Key.ParserId, StringComparer.Ordinal)
-                .Select(group => new KeyValuePair<string, IReadOnlyList<ProjectCoverage>>(
-                    group.Key, group.SelectMany(report => report.Value).ToList()))
-                .ToList();
-
-    private IOrderedEnumerable<KeyValuePair<(string ParserId, string WorkspaceId), IReadOnlyList<ProjectCoverage>>> OrderedReports()
-        => _reports.OrderBy(report => report.Key.ParserId, StringComparer.Ordinal)
-            .ThenBy(report => report.Key.WorkspaceId, StringComparer.Ordinal);
+    public ILookup<string, ProjectCoverage> GetProjectsByParser()
+        => _published?.Invoke()
+            ?? _reports.OrderBy(report => report.Key.ParserId, StringComparer.Ordinal)
+                .ThenBy(report => report.Key.WorkspaceId, StringComparer.Ordinal)
+                .SelectMany(report => report.Value.Select(project => (report.Key.ParserId, project)))
+                .ToLookup(entry => entry.ParserId, entry => entry.project, StringComparer.Ordinal);
 }

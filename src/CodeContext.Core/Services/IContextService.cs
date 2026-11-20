@@ -96,8 +96,8 @@ namespace CodeContext.Core.Services
         public CompactMatchFacets? Facets { get; set; }
 
         /// <summary>
-        /// Set when this answer may be short because some project was analyzed without all
-        /// it declares. Absent means no such doubt, not that nothing was checked.
+        /// Set when this answer may be short because a project of its worker was not fully
+        /// analyzed. Absent means no such doubt, not that nothing was checked.
         /// </summary>
         public CoverageSummary? Coverage { get; set; }
 
@@ -117,7 +117,7 @@ namespace CodeContext.Core.Services
         public string? SnapshotAt { get; set; }
     }
 
-    /// <summary>Which projects were analyzed without all they declare.</summary>
+    /// <summary>Which projects were not fully analyzed.</summary>
     public class CoverageSummary
     {
         public string State { get; set; } = string.Empty;

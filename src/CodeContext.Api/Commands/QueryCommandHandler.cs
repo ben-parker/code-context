@@ -644,7 +644,7 @@ public static partial class QueryCommandHandler
         var more = coverage.IncompleteProjects - coverage.Names.Count;
         var names = string.Join(", ", coverage.Names.Select(Clean)) + (more > 0 ? $" and {more} more" : string.Empty);
         output.WriteLine(string.Format(CultureInfo.InvariantCulture, prefix, coverage.State)
-            + $"{coverage.IncompleteProjects} of {coverage.TotalProjects} projects analyzed without all they declare: {names}. "
+            + $"{coverage.IncompleteProjects} of {coverage.TotalProjects} projects not fully analyzed: {names}. "
             + "This answer may be incomplete; codecontext status has details."
             + (cache is null ? string.Empty : " Coverage is from the saved index."));
     }

@@ -281,7 +281,7 @@
       "properties": {
         "name": { "type": "string" },
         "path": { "type": "string", "description": "The project file relative to the workspace root, when there is one." },
-        "state": { "type": "string", "enum": ["complete", "partial", "fallback"], "description": "complete: everything the project declares was found and its code binds. partial: analyzed as its own project, with something missing, including when much of its code fails to bind although every declared reference was found (code a source generator writes looks like this). fallback: analyzed without knowing its project." },
+        "state": { "type": "string", "enum": ["complete", "partial", "fallback"], "description": "complete: everything the project declares was found and its code binds. partial: analyzed as its own project, with something missing, including when much of its code fails to bind although every declared reference was found. fallback: analyzed without knowing its project." },
         "files": { "type": "integer" },
         "targetFramework": { "type": "string" },
         "inactiveTargetFrameworks": { "type": "array", "items": { "type": "string" } },
