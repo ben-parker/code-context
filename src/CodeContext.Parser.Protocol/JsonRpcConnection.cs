@@ -146,8 +146,13 @@ public sealed class JsonRpcConnection : IAsyncDisposable
 
         var hasMethod = message.Method is not null;
         var hasId = message.Id is not null;
-        var hasResult = message.Result is not null;
         var hasError = message.Error is not null;
+        // "result": null is read as present, because shutdown's answer is exactly that. It counts as a
+        // result only where it can be one: beside an error (the JSON-RPC 1.0 style of an error response)
+        // it is the absence of a result, and on a request or notification it means nothing and is
+        // ignored. A non-null result keeps its meaning everywhere.
+        var hasNullResult = message.Result is { ValueKind: JsonValueKind.Null };
+        var hasResult = message.Result is not null && !(hasNullResult && (hasError || hasMethod));
 
         if (hasMethod)
         {

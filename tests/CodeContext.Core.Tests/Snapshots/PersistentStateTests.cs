@@ -51,9 +51,10 @@ public sealed class PersistentStateTests : IAsyncLifetime
         return Task.CompletedTask;
     }
 
-    private Instance Start(string behavior, Func<SnapshotServiceSettings, SnapshotServiceSettings>? configure = null, bool cache = true)
+    private Instance Start(string behavior, Func<SnapshotServiceSettings, SnapshotServiceSettings>? configure = null, bool cache = true,
+        bool checkFileTimes = false)
     {
-        var instance = new Instance(Root, KeyPath, ["--behavior", behavior, "--fail-marker", FailMarker], configure, cache);
+        var instance = new Instance(Root, KeyPath, ["--behavior", behavior, "--fail-marker", FailMarker], configure, cache, checkFileTimes);
         _started.Add(instance);
         return instance;
     }
@@ -277,6 +278,9 @@ public sealed class PersistentStateTests : IAsyncLifetime
         Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(30), $"took {stopwatch.Elapsed}");
         Assert.Null(Newest().Shards.Single().Info.StateFileName);
         Assert.Empty(StateFiles());
+        // Facts no worker confirmed: a one-shot query does not answer from them, however old the files are.
+        AgeTheFiles();
+        Assert.Contains("saved without its worker's state", OpenOneShot().Reason);
         Assert.Equal(CacheState.Replaced, await NextVerificationAsync());
     }
 
@@ -418,6 +422,193 @@ public sealed class PersistentStateTests : IAsyncLifetime
             Assert.Equal(1, instance.Sessions.GetSnapshots().Single().RestartCount);
         });
 
+    // The time a one-shot open compares files with in place of the capture time, once the tree has "aged".
+    private DateTime? _checkAgainst;
+
+    /// <summary>
+    /// As if the snapshot were newer than every file: a one-shot open from here on compares with now in place of the
+    /// capture time (a status change time cannot be set back), so only what changes after this call counts.
+    /// </summary>
+    private void AgeTheFiles()
+    {
+        _checkAgainst = DateTime.UtcNow + SnapshotFreshness.Tolerance;
+        Thread.Sleep(20);
+    }
+
+    private OneShotSnapshotOpen OpenOneShot()
+        => OneShotSnapshot.TryOpen(new CodeContextOptions { RootPath = Root, CacheKeyPath = KeyPath },
+            new StaticWorkerCatalog(Instance.FakeWorker(["--behavior", "persistent-state"])), _checkAgainst);
+
+    [Fact]
+    public async Task TouchedWithTheSameContent_TheVerifiedStoreIsWrittenAgain_SoOneShotQueriesCanUseIt()
+    {
+        await FirstRunAsync();
+        AgeTheFiles();
+        Assert.NotNull(OpenOneShot().Snapshot);
+        // A checkout and back: new times, the same bytes. The worker confirms its baseline and nothing changes.
+        File.SetLastWriteTimeUtc(Path.Combine(Root, "a.fake"), DateTime.UtcNow);
+        Assert.Contains("a.fake", OpenOneShot().Reason);
+
+        await using (var second = Start("persistent-state", checkFileTimes: true))
+        {
+            await second.StartAsync();
+            await second.WaitForAsync(() => second.ScanState.Phase == ScanPhase.Ready, "the verification scan");
+            Assert.Equal(CacheState.Baseline, second.CacheState.GetStatus()!.Verification!["fake"]);
+            await second.StopAsync();
+            Assert.Equal(1, second.Snapshots.Status.WritesCompleted);
+        }
+        Assert.Equal(2UL, NewestSequence());
+        Assert.NotNull(Newest().Shards.Single().Info.StateFileName);
+        AgeTheFiles();
+        Assert.NotNull(OpenOneShot().Snapshot);
+    }
+
+    [Fact]
+    public async Task TouchedWithTheSameContent_AStopWhileTheLoadedSnapshotIsChecked_StillWritesTheStore()
+    {
+        // The check of the loaded snapshot runs off the coordinator after the verifying scan; a host stopped while it
+        // runs (a short-lived instance, or a slow disk) must still write the store it found older than its files.
+        await FirstRunAsync();
+        AgeTheFiles();
+        File.SetLastWriteTimeUtc(Path.Combine(Root, "a.fake"), DateTime.UtcNow);
+        using var checking = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+
+        await using (var second = Start("persistent-state", checkFileTimes: true))
+        {
+            second.BeforeFileTimeCheck = () =>
+            {
+                checking.Set();
+                release.Wait(TimeSpan.FromSeconds(30));
+            };
+            await second.StartAsync();
+            await second.WaitForAsync(() => checking.IsSet, "the check of the loaded snapshot");
+            var stop = second.StopAsync();
+            // The check finishes only once the stop is under way (or done, if the stop does not wait for it).
+            await Task.WhenAny(stop, Task.Delay(500));
+            release.Set();
+            await stop;
+            Assert.Equal(1, second.Snapshots.Status.WritesCompleted);
+        }
+        Assert.Equal(2UL, NewestSequence());
+        AgeTheFiles();
+        Assert.NotNull(OpenOneShot().Snapshot);
+    }
+
+    [Fact]
+    public async Task TouchedWithTheSameContent_AStopBeforeTheObserverSeesTheScanEnd_StillWritesTheStore()
+    {
+        // The scan's phase reads Ready before the coordinator tells the snapshot service its work ended; a stop in
+        // between must still see the verified scan and check the loaded snapshot. The observer here never arrives.
+        await FirstRunAsync();
+        AgeTheFiles();
+        File.SetLastWriteTimeUtc(Path.Combine(Root, "a.fake"), DateTime.UtcNow);
+        using var arrived = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+
+        await using (var second = Start("persistent-state", checkFileTimes: true))
+        {
+            second.Sink.OnDelta = _ =>
+            {
+                arrived.Set();
+                release.Wait(TimeSpan.FromSeconds(30));
+            };
+            await second.StartAsync();
+            await second.WaitForAsync(() => arrived.IsSet, "the verification scan's delta");
+            second.Coordinator.SetMutationObserver(() => { });
+            release.Set();
+            await second.WaitForAsync(() => second.ScanState.Phase == ScanPhase.Ready && !second.Coordinator.IsBusy, "the verification scan");
+            await second.StopAsync();
+            Assert.Equal(1, second.Snapshots.Status.WritesCompleted);
+        }
+        Assert.Equal(2UL, NewestSequence());
+        AgeTheFiles();
+        Assert.NotNull(OpenOneShot().Snapshot);
+    }
+
+    [Fact]
+    public async Task AStopWithAChangedStore_DoesNotWaitForTheCheckOfTheLoadedSnapshot()
+    {
+        // The store changed, so the stop writes it whatever the check says: a slow check must not spend the stop's
+        // budget (here 2 s, the check held for 30) and leave the change unwritten.
+        await FirstRunAsync();
+        AgeTheFiles();
+        File.WriteAllText(Path.Combine(Root, "added.fake"), "new facts");
+        using var checking = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+
+        await using (var second = Start("persistent-state",
+            settings => settings with { QuietPeriod = TimeSpan.FromHours(1), ShutdownFlushTimeout = TimeSpan.FromSeconds(2) },
+            checkFileTimes: true))
+        {
+            second.BeforeFileTimeCheck = () =>
+            {
+                checking.Set();
+                release.Wait(TimeSpan.FromSeconds(30));
+            };
+            await second.StartAsync();
+            await second.WaitForAsync(() => checking.IsSet, "the check of the loaded snapshot");
+            await second.StopAsync();
+            release.Set();
+            Assert.Equal(1, second.Snapshots.Status.WritesCompleted);
+        }
+        Assert.Equal(2UL, NewestSequence());
+    }
+
+    [Fact]
+    public async Task NothingTouched_WithTheFileTimeCheck_StillWritesNothing()
+    {
+        await FirstRunAsync();
+        AgeTheFiles();
+        await using var second = Start("persistent-state", checkFileTimes: true);
+        await second.StartAsync();
+        await second.WaitForAsync(() => second.ScanState.Phase == ScanPhase.Ready, "the verification scan");
+        await second.StopAsync();
+
+        Assert.Equal(0, second.Snapshots.Status.WritesCompleted);
+        Assert.Equal(1UL, NewestSequence());
+    }
+
+    [Fact]
+    public async Task AModificationTimeInTheFuture_IsNoReasonToRewriteOnEveryStart()
+    {
+        File.SetLastWriteTimeUtc(Path.Combine(Root, "a.fake"), DateTime.UtcNow + TimeSpan.FromDays(365));
+        await FirstRunAsync();
+        AgeTheFiles();
+        var oneShot = OpenOneShot();
+        // Where the status change time is read, the future time is not believed and does not matter; elsewhere it makes
+        // the one-shot path refuse, as no snapshot could be newer.
+        if (FileChangeTime.ReadsChangeTime) Assert.True(oneShot.Snapshot is not null, oneShot.Reason);
+        else Assert.Contains("in the future", oneShot.Reason);
+
+        for (var start = 0; start < 2; start++)
+        {
+            await using var next = Start("persistent-state", checkFileTimes: true);
+            await next.StartAsync();
+            await next.WaitForAsync(() => next.ScanState.Phase == ScanPhase.Ready, "the verification scan");
+            await Task.Delay(200);
+            await next.StopAsync();
+            Assert.Equal(0, next.Snapshots.Status.WritesCompleted);
+        }
+        Assert.Equal(1UL, NewestSequence());
+    }
+
+    [Fact]
+    public async Task TouchedThenTheVerificationFails_TheLoadedStoreIsNotStampedNewer()
+    {
+        await FirstRunAsync();
+        AgeTheFiles();
+        File.SetLastWriteTimeUtc(Path.Combine(Root, "a.fake"), DateTime.UtcNow);
+        File.WriteAllText(FailMarker, "fail");
+        await using var second = Start("persistent-state", checkFileTimes: true);
+        await second.StartAsync();
+        await second.WaitForAsync(() => second.ScanState.Phase == ScanPhase.Error, "the failed verification scan");
+        await second.StopAsync();
+
+        Assert.Equal(0, second.Snapshots.Status.WritesCompleted);
+        Assert.Equal(1UL, NewestSequence());
+    }
+
     [Fact]
     public async Task FailedVerification_ThenAChange_WritesNoState_AndTheNextStartReWalks()
     {
@@ -436,6 +627,10 @@ public sealed class PersistentStateTests : IAsyncLifetime
         }
         Assert.Null(Newest().Shards.Single().Info.StateFileName);
         Assert.Empty(StateFiles());
+        Assert.True(Newest().Header!.Unverified);
+        // Facts no worker confirmed: a one-shot query does not answer from them, however old the files are.
+        AgeTheFiles();
+        Assert.Contains("written while the index was unverified", OpenOneShot().Reason);
         Assert.Equal(CacheState.Replaced, await NextVerificationAsync());
     }
 
@@ -458,15 +653,20 @@ public sealed class PersistentStateTests : IAsyncLifetime
     {
         public ConcurrentQueue<AnalysisDelta> Deltas { get; } = new();
 
+        /// <summary>Runs as each delta arrives, before it is applied (for instance, fake time passing during an index).</summary>
+        public Action<AnalysisDelta>? OnDelta { get; set; }
+
         public Task<bool> ApplyAsync(AnalysisDelta delta, CancellationToken ct = default)
         {
             Deltas.Enqueue(delta);
+            OnDelta?.Invoke(delta);
             return inner.ApplyAsync(delta, ct);
         }
 
         Task<bool> IAnalysisDeltaSink.ApplyAsync(AnalysisDelta delta, DeltaOrigin? origin, CancellationToken ct)
         {
             Deltas.Enqueue(delta);
+            OnDelta?.Invoke(delta);
             return inner.ApplyAsync(delta, origin, ct);
         }
     }
@@ -477,40 +677,63 @@ public sealed class PersistentStateTests : IAsyncLifetime
         private bool _stopped;
 
         public Instance(string root, string keyPath, string[] workerArgs,
-            Func<SnapshotServiceSettings, SnapshotServiceSettings>? configure, bool cache)
-            : this(root, keyPath, FakeWorker(workerArgs), configure, cache)
+            Func<SnapshotServiceSettings, SnapshotServiceSettings>? configure, bool cache, bool checkFileTimes = false)
+            : this(root, keyPath, FakeWorker(workerArgs), configure, cache, checkFileTimes)
         {
         }
 
+        /// <param name="checkFileTimes">Wire the host's check of the loaded snapshot against file times, with no tolerance.</param>
         public Instance(string root, string keyPath, RegisteredWorker worker,
-            Func<SnapshotServiceSettings, SnapshotServiceSettings>? configure, bool cache)
+            Func<SnapshotServiceSettings, SnapshotServiceSettings>? configure, bool cache, bool checkFileTimes = false)
+            : this(root, keyPath, [worker], configure, cache, checkFileTimes)
         {
+        }
+
+        /// <param name="checkFileTimes">Wire the host's check of the loaded snapshot against file times, with no tolerance.</param>
+        public Instance(string root, string keyPath, RegisteredWorker[] workers,
+            Func<SnapshotServiceSettings, SnapshotServiceSettings>? configure, bool cache, bool checkFileTimes = false)
+        {
+            Catalog = new StaticWorkerCatalog(workers);
             Factory = new InMemoryRepositoryFactory(NullLogger<InMemoryRepositoryFactory>.Instance);
             Factory.InitializeAsync(root).Wait();
             var options = Options.Create(new CodeContextOptions { RootPath = root, CacheKeyPath = keyPath, CacheEnabled = cache });
             var metadata = new InMemoryFileMetadataRepository();
             var coverage = AnalysisCoverageRegistry.ForStore(Factory);
             var store = (IGenerationalGraphStore)Factory.CreateGraphRepository();
-            Sink = new RecordingSink(new AnalysisDeltaApplier(store, NullLogger<AnalysisDeltaApplier>.Instance, coverage));
-            Workers = new LanguageWorkerService(new StaticWorkerCatalog(worker), Sink,
+            var applier = new AnalysisDeltaApplier(store, NullLogger<AnalysisDeltaApplier>.Instance, coverage);
+            Sink = new RecordingSink(applier);
+            Workers = new LanguageWorkerService(Catalog, Sink,
                 Sessions, options, new WorkerLogFactory(WorkerLog), TestWorkerOptions.Patient());
+            // Behind the recording decorator the worker service does not find the applier itself.
+            applier.InputsReadBoundary = Workers.InputsReadBoundary;
             var graphUpdate = new GraphUpdateService(Factory, options, NullLogger<GraphUpdateService>.Instance, metadata, Workers);
             GraphUpdate = graphUpdate;
 
             var settings = SnapshotServiceSettings.From(options.Value);
             settings = configure?.Invoke(settings) ?? settings;
             Startup = new SnapshotStartup(settings, Factory.Database, coverage, Workers.IsIndexedParser,
-                Workers.MarkLoadedFromSnapshot, SnapshotLog);
+                Workers.MarkLoadedFromSnapshot, SnapshotLog, Workers.WorkerSetFingerprint());
             CacheState = new CacheState(settings.Enabled, Startup.Run);
             SnapshotServiceCollectionExtensions.ConnectWorkers(Workers, CacheState, Startup, Factory.Database);
             Coordinator = new IndexCoordinator(graphUpdate, ScanState, options, NullLoggerFactory.Instance, cacheState: CacheState);
             Snapshots = new SnapshotService(Coordinator, Factory.Database, ScanState, settings, Startup, TimeProvider.System,
-                SnapshotLog, CacheState, Workers);
+                SnapshotLog, CacheState, Workers,
+                filesSince: checkFileTimes
+                    ? (captured, inputs, rootTicks) =>
+                    {
+                        BeforeFileTimeCheck?.Invoke();
+                        return SnapshotFreshness.For(options.Value, Workers, captured, inputs, rootTicks, TimeSpan.Zero);
+                    }
+                    : null);
             Status = new StatusService(Factory.CreateNodeRepository(), Factory.CreateEdgeRepository(), metadata, Factory, options,
                 ScanState, Sessions, new ApiMetrics(), coverage: coverage, cacheState: CacheState);
         }
 
+        /// <summary>Runs as the host's check of the loaded snapshot against file times begins (with <c>checkFileTimes</c>).</summary>
+        public Action? BeforeFileTimeCheck { get; set; }
+
         public InMemoryRepositoryFactory Factory { get; }
+        public StaticWorkerCatalog Catalog { get; }
         public ListLogger<LanguageWorkerService> WorkerLog { get; } = new();
         public ListLogger<SnapshotService> SnapshotLog { get; } = new();
 
@@ -573,19 +796,22 @@ public sealed class PersistentStateTests : IAsyncLifetime
             }
         }
 
-        private static RegisteredWorker FakeWorker(string[] args)
+        /// <summary>The fake worker; with <c>--parser-id</c> among <paramref name="args"/> it answers as that parser, claiming <c>.&lt;id&gt;</c>.</summary>
+        internal static RegisteredWorker FakeWorker(string[] args)
         {
+            var index = Array.IndexOf(args, "--parser-id");
+            var parserId = index >= 0 && index + 1 < args.Length ? args[index + 1] : "fake";
             var baseDirectory = AppContext.BaseDirectory;
             var apphost = Path.Combine(baseDirectory,
                 OperatingSystem.IsWindows() ? "CodeContext.FakeWorker.exe" : "CodeContext.FakeWorker");
             var spec = File.Exists(apphost)
-                ? new WorkerLaunchSpec("fake", "Fake Worker", apphost, args)
-                : new WorkerLaunchSpec("fake", "Fake Worker", "dotnet",
+                ? new WorkerLaunchSpec(parserId, "Fake Worker", apphost, args)
+                : new WorkerLaunchSpec(parserId, "Fake Worker", "dotnet",
                     [Path.Combine(baseDirectory, "CodeContext.FakeWorker.dll"), .. args]);
             var manifest = new WorkerManifest(
-                ManifestVersion: 1, ParserId: "fake", DisplayName: "Fake Worker", Version: "1.0.0-test",
+                ManifestVersion: 1, ParserId: parserId, DisplayName: "Fake Worker", Version: "1.0.0-test",
                 Command: "test", Args: [], MinProtocolVersion: ParserProtocol.Version, MaxProtocolVersion: ParserProtocol.Version,
-                Languages: ["fake"], Extensions: [".fake"], ProjectMarkers: ["fake.proj"]);
+                Languages: ["fake"], Extensions: ["." + parserId], ProjectMarkers: ["fake.proj"]);
             return new RegisteredWorker(manifest, spec, "<in-test>");
         }
     }

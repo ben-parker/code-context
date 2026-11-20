@@ -297,7 +297,13 @@ function createGuard({ platform = process.platform, io } = {}) {
         forget();
     }
 
-    return { refused, allow, addRoot, forget };
+    /**
+     * The paths of a list that are not refused. For what the worker hands to the host, which
+     * reads with no guard: a refused path looks missing here and must not be named there.
+     */
+    const readable = paths => paths.filter(given => !refused(given));
+
+    return { refused, readable, allow, addRoot, forget };
 }
 
 function absent(name, value) {

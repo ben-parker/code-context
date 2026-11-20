@@ -1,4 +1,5 @@
 using CodeContext.Core.Models;
+using CodeContext.Core.Paths;
 using CodeContext.Core.Repositories;
 using CodeContext.Core.Workers;
 using Microsoft.Extensions.Logging;
@@ -50,6 +51,10 @@ public class GraphUpdateService : IGraphUpdateService
         _fileSelector = fileSelector ?? new RepositoryFileSelector(options);
     }
 
+    // Workers whose files went with a removed directory (ExpandSubtreesAsync): the batch that deletes those files
+    // also has them reread their projects. Both run on the coordinator loop, one after the other.
+    private readonly HashSet<string> _projectsOfRemovedDirectories = new(StringComparer.Ordinal);
+
     private bool TryGetWorkerForPath(string path, out string parserId)
     {
         parserId = string.Empty;
@@ -63,11 +68,16 @@ public class GraphUpdateService : IGraphUpdateService
     public async Task ProcessFileChangesAsync(IReadOnlyList<FileChange> changes, CancellationToken ct)
     {
         var workerBatches = new Dictionary<string, List<FileChange>>(StringComparer.Ordinal);
-        var projectChanges = new HashSet<string>(StringComparer.Ordinal);
+        var projectChanges = new HashSet<string>(_projectsOfRemovedDirectories, StringComparer.Ordinal);
+        _projectsOfRemovedDirectories.Clear();
+        var throughALink = ReportedPaths.RefusedOnDisk(_options.RootPath);
 
         foreach (var change in changes)
         {
-            if (_workerService?.TryGetParserForProjectInput(change.Path, _fileSelector.IsIncluded(change.Path), out var inputOwner) == true)
+            // A link the repository holds, or a path beneath one, is never selected, as a scan follows none; it is
+            // recognised before anything looks at the path, the selector's ignore rules included.
+            var included = !throughALink(change.Path) && _fileSelector.IsIncluded(change.Path);
+            if (_workerService?.TryGetParserForProjectInput(change.Path, included, out var inputOwner) == true)
             {
                 projectChanges.Add(inputOwner);
                 continue;
@@ -76,7 +86,7 @@ public class GraphUpdateService : IGraphUpdateService
             // The same selector governs explicit refresh and watcher paths. An
             // excluded file is forwarded as a deletion so stale facts cannot remain
             // after a rule change or a direct refresh of an ignored path.
-            var effectiveChange = !_fileSelector.IsIncluded(change.Path)
+            var effectiveChange = !included
                 ? new FileChange(change.Path, FileChangeType.Deleted)
                 : change;
             if (TryGetWorkerForPath(change.Path, out var parserId))
@@ -132,6 +142,115 @@ public class GraphUpdateService : IGraphUpdateService
         {
             throw failures[0];
         }
+    }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<FileChange>> ExpandSubtreesAsync(IReadOnlyCollection<string> directories, CancellationToken ct)
+    {
+        var comparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+        var roots = new HashSet<string>(comparer);
+        foreach (var directory in directories)
+        {
+            try { roots.Add(Path.TrimEndingDirectorySeparator(Path.GetFullPath(directory))); }
+            catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException) { }
+        }
+        var changes = new List<FileChange>();
+        if (roots.Count == 0) return changes;
+
+        // What the index knows under the roots, found from each known file's ancestors: one pass over the
+        // file table however many roots there are.
+        var known = new Dictionary<string, DateTime>(comparer);
+        foreach (var metadata in await _fileMetadataRepository.GetAllAsync(ct))
+        {
+            for (var parent = Path.GetDirectoryName(metadata.FilePath); !string.IsNullOrEmpty(parent); parent = Path.GetDirectoryName(parent))
+            {
+                if (!roots.Contains(parent)) continue;
+                known[metadata.FilePath] = metadata.LastModified;
+                break;
+            }
+        }
+
+        // What is there now, by the scan's own selection; a root inside another is walked with it. A root that is a
+        // link the repository holds, or lies beneath one, holds nothing a scan would index: it is recognised from the
+        // listing of the plain directory above it before anything probes or enumerates it, which would follow it.
+        var present = new HashSet<string>(comparer);
+        var throughALink = ReportedPaths.RefusedOnDisk(_options.RootPath);
+        foreach (var root in roots)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (throughALink(root)) continue;
+            var nested = false;
+            for (var parent = Path.GetDirectoryName(root); !nested && !string.IsNullOrEmpty(parent); parent = Path.GetDirectoryName(parent))
+                nested = roots.Contains(parent) && Directory.Exists(parent);
+            if (nested || !Directory.Exists(root) || !_fileSelector.IsIncluded(root, isDirectory: true)) continue;
+            WalkSubtree(root, present, changes);
+        }
+
+        foreach (var path in present)
+        {
+            if (!known.TryGetValue(path, out var lastModified)) changes.Add(new FileChange(path, FileChangeType.Created));
+            else if (LastWriteOrDefault(path) != lastModified) changes.Add(new FileChange(path, FileChangeType.Changed));
+        }
+        foreach (var path in known.Keys)
+        {
+            if (present.Contains(path)) continue;
+            changes.Add(new FileChange(path, FileChangeType.Deleted));
+            // The directory took its project files with it, and no event names them.
+            if (TryGetWorkerForPath(path, out var owner)) _projectsOfRemovedDirectories.Add(owner);
+        }
+        return changes;
+    }
+
+    /// <summary>
+    /// The files under <paramref name="root"/> a scan would index, into <paramref name="present"/>; ignore files and
+    /// project inputs, which are read and not indexed, into <paramref name="changes"/> (an ignore file there makes
+    /// the batch a reconciliation, as its own event would). Links are not followed, as in a scan: the caller has
+    /// refused a root that is one, and an entry that is one is skipped from its listing.
+    /// </summary>
+    private void WalkSubtree(string root, HashSet<string> present, List<FileChange> changes)
+    {
+        var options = new EnumerationOptions { RecurseSubdirectories = false, IgnoreInaccessible = true, AttributesToSkip = 0 };
+        var directories = new Stack<string>();
+        directories.Push(root);
+        while (directories.TryPop(out var directory))
+        {
+            try
+            {
+                foreach (var entry in new DirectoryInfo(directory).EnumerateFileSystemInfos("*", options))
+                {
+                    if ((entry.Attributes & (FileAttributes.ReparsePoint | FileAttributes.System)) != 0) continue;
+                    var isDirectory = (entry.Attributes & FileAttributes.Directory) != 0;
+                    if (!isDirectory && _fileSelector.IsIgnoreFile(entry.FullName))
+                    {
+                        changes.Add(new FileChange(entry.FullName, FileChangeType.Changed));
+                        continue;
+                    }
+                    var included = _fileSelector.IsIncluded(entry.FullName, isDirectory);
+                    if (isDirectory)
+                    {
+                        if (included) directories.Push(entry.FullName);
+                    }
+                    else if (_workerService?.TryGetParserForProjectInput(entry.FullName, included, out _) == true)
+                    {
+                        changes.Add(new FileChange(entry.FullName, FileChangeType.Changed));
+                    }
+                    else if (included && TryGetWorkerForPath(entry.FullName, out _))
+                    {
+                        present.Add(entry.FullName);
+                    }
+                }
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                // Gone or unreadable while it was listed: what was listed stands, as in a scan.
+            }
+        }
+    }
+
+    private static DateTime LastWriteOrDefault(string path)
+    {
+        try { return File.GetLastWriteTimeUtc(path); }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { return default; }
     }
 
     /// <summary>

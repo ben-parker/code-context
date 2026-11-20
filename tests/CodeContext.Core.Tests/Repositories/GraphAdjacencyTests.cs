@@ -53,6 +53,34 @@ public class GraphAdjacencyTests
     // ---- Invalidation ------------------------------------------------------
 
     [Fact]
+    public void Build_AllocatesLittleMoreThanItsBuckets()
+    {
+        // The first read after every commit builds the touched shard's snapshot, so the build itself is on
+        // the edit path: no growing list per key and no second table of the keys. For 20,000 nodes and
+        // 80,000 edges it allocates about 9 MB; with a list and a frozen table per index it allocated 20 MB.
+        var nodes = new List<CodeNode>();
+        for (var i = 0; i < 20_000; i++)
+            nodes.Add(new CodeNode { Id = $"p:w:Namespace.Type{i / 40}.Member{i}", Name = $"Member{i}", FilePath = $"/repo/src/Type{i / 40}.cs" });
+        var edges = new List<CodeEdge>();
+        for (var i = 0; i < 80_000; i++)
+        {
+            var source = nodes[i / 4].Id!;
+            var target = nodes[(int)(i * 2654435761L % nodes.Count)].Id!;
+            edges.Add(new CodeEdge { Id = $"{source}->{target}@{i}", SourceId = source, TargetId = target, Type = "CALLS" });
+        }
+        GraphAdjacency.Build(nodes.Take(100).ToList(), edges.Take(100).ToList());
+
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        var adjacency = GraphAdjacency.Build(nodes, edges);
+        var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        Assert.True(allocated < 12_000_000, $"Building the snapshot allocated {allocated:N0} bytes.");
+        Assert.Equal(4, adjacency.GetEdgesBySource(nodes[7].Id!).Count);
+        Assert.Equal(40, adjacency.FindNodesByPath("/repo/src/Type3.cs").Count);
+        Assert.Equal(40, adjacency.FindNodesByPath("src/type3.cs").Count);
+    }
+
+    [Fact]
     public void GetAdjacency_CachedWhenVersionUnchanged_ReturnsSameInstance()
     {
         _database.UpsertNode(Node("n1", "/a/A.cs"));

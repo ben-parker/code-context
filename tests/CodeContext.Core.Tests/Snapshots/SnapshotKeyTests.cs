@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using CodeContext.Core.Snapshots;
 
@@ -37,13 +38,62 @@ public class SnapshotKeyTests
     }
 
     [Fact]
-    public async Task ConcurrentFirstUse_AgreesOnOneKey()
+    public void ConcurrentFirstUse_AgreesOnOneKey()
     {
+        // Many rounds of many callers released together: a creator that can replace another's key
+        // (a check-then-rename publish) shows up within a few rounds; one that cannot never does.
+        const int Rounds = 200;
+        const int Callers = 16;
+        for (var round = 0; round < Rounds; round++)
+        {
+            using var temp = new SnapshotTempDirectory();
+            var path = temp.File("cache.key");
+            using var start = new Barrier(Callers);
+            var threads = new Thread[Callers];
+            var keys = new byte[Callers][];
+            var errors = new Exception?[Callers];
+            for (var i = 0; i < Callers; i++)
+            {
+                var index = i;
+                threads[i] = new Thread(() =>
+                {
+                    start.SignalAndWait();
+                    try { keys[index] = SnapshotKey.LoadOrCreate(path); }
+                    catch (Exception ex) { errors[index] = ex; }
+                });
+                threads[i].Start();
+            }
+            foreach (var thread in threads) thread.Join();
+            Assert.All(errors, Assert.Null);
+            var onDisk = File.ReadAllBytes(path);
+            Assert.All(keys, key => Assert.Equal(onDisk, key));
+            Assert.Equal(["cache.key"], Directory.GetFiles(temp.Path).Select(Path.GetFileName));
+        }
+    }
+
+    [Fact]
+    public void ReaderOfAKeyBeingWritten_WaitsForTheWholeKey()
+    {
+        // A first user that lost the race may open the winner's file before the key is in it: it must
+        // wait for the whole key, not refuse the file or take a short read.
         using var temp = new SnapshotTempDirectory();
         var path = temp.File("cache.key");
-        var keys = await Task.WhenAll(Enumerable.Range(0, 8).Select(_ => Task.Run(() => SnapshotKey.LoadOrCreate(path))));
-        Assert.All(keys, key => Assert.Equal(keys[0], key));
-        Assert.Equal(["cache.key"], Directory.GetFiles(temp.Path).Select(Path.GetFileName));
+        var key = Enumerable.Range(1, SnapshotKey.Length).Select(b => (byte)b).ToArray();
+        var options = new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write, Share = FileShare.Read };
+        if (!OperatingSystem.IsWindows()) options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+        byte[] read;
+        using (var writer = new FileStream(path, options))
+        {
+            writer.Write(key, 0, 7);
+            writer.Flush();
+            var reader = Task.Run(() => SnapshotKey.LoadOrCreate(path));
+            Thread.Sleep(200);
+            Assert.False(reader.IsCompleted);
+            writer.Write(key, 7, key.Length - 7);
+            writer.Flush();
+            read = reader.GetAwaiter().GetResult();
+        }
+        Assert.Equal(key, read);
     }
 
     [Fact]
@@ -51,8 +101,13 @@ public class SnapshotKeyTests
     {
         using var temp = new SnapshotTempDirectory();
         var path = temp.File("cache.key");
+        // Created user-only, as a key would be: with a typical umask (022) File.WriteAllBytes makes a
+        // 0644 file, which the mode check refuses before the length is ever looked at.
         File.WriteAllBytes(path, new byte[5]);
-        Assert.Throws<InvalidDataException>(() => SnapshotKey.LoadOrCreate(path));
+        if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        var refusal = Assert.Throws<InvalidDataException>(() => SnapshotKey.LoadOrCreate(path));
+        // The person reading the warning is told what to do: nothing here repairs a key file.
+        Assert.Contains("Delete this file", refusal.Message);
         Assert.Equal(5, new FileInfo(path).Length);
     }
 

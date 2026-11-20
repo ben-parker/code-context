@@ -229,8 +229,9 @@ public record ParserStatusDto(
 
 /// <summary>
 /// Per-parser session detail (plan: notNeeded/starting/indexing/ready/unavailable/
-/// failed/stopped). Process fields are null for in-process parsers. Clients must treat
-/// empty query results as conclusive only when the relevant session is "ready".
+/// failed/stopped/hibernated). Process fields are null for in-process parsers and for a
+/// hibernated worker. Clients must treat empty query results as conclusive only when the
+/// relevant session is "ready" or "hibernated" (idle, its committed facts are current).
 /// </summary>
 public record ParserSessionDto(
     [property: JsonPropertyName("parserId")] string ParserId,

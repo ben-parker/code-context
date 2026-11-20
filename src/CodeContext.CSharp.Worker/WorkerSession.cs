@@ -129,7 +129,7 @@ internal sealed class WorkerSession(IWorkerOutput output, Func<string, string?, 
                     index.WorkspaceId, index.Generation, requestId,
                     emission.Nodes, emission.EdgeFacts,
                     replacesWorkspace: false, replacesFiles: emission.ReplacesFiles,
-                    analysis.Diagnostics, analysis.Coverage, analysis.Fingerprints, ct);
+                    analysis.Diagnostics, analysis.Coverage, analysis.Fingerprints, analysis.Inputs, ct);
                 workspace.CommitIncremental(emission);
             }
             else
@@ -219,6 +219,23 @@ internal sealed class WorkerSession(IWorkerOutput output, Func<string, string?, 
         }
     }
 
+    /// <summary>
+    /// Drops what the compilations of every workspace have bound, between requests: it waits for a request that
+    /// is running and holds the next one off for the moment it takes. Returns how many units were released.
+    /// </summary>
+    public int ReleaseBoundState()
+    {
+        _lock.Wait();
+        try
+        {
+            return _workspaces.Values.Sum(workspace => workspace.ReleaseBoundState());
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
     private CSharpWorkspaceAnalyzer GetWorkspace(string workspaceId)
     {
         if (!_workspaces.TryGetValue(workspaceId, out var workspace))
@@ -249,7 +266,7 @@ internal sealed class WorkerSession(IWorkerOutput output, Func<string, string?, 
             workspaceId, generation, requestId,
             analysis.Nodes, analysis.Buckets.SelectMany(bucket => bucket.Edges).ToList(),
             replacesWorkspace: true, replacesFiles: [],
-            analysis.Diagnostics, analysis.Coverage, analysis.Fingerprints, ct);
+            analysis.Diagnostics, analysis.Coverage, analysis.Fingerprints, analysis.Inputs, ct);
         // Seed only after every chunk was sent, mirroring the incremental path's
         // commit-after-send rule: a cancelled mid-index emission must not leave the
         // hash baseline claiming facts the host never received.
@@ -273,7 +290,7 @@ internal sealed class WorkerSession(IWorkerOutput output, Func<string, string?, 
                 workspaceId, generation, requestId,
                 analysis.Nodes, analysis.Buckets.SelectMany(bucket => bucket.Edges).ToList(),
                 replacesWorkspace: true, replacesFiles: [],
-                analysis.Diagnostics, analysis.Coverage, analysis.Fingerprints, ct);
+                analysis.Diagnostics, analysis.Coverage, analysis.Fingerprints, analysis.Inputs, ct);
             workspace.SeedFactHashes(analysis);
             return replaced;
         }
@@ -283,7 +300,7 @@ internal sealed class WorkerSession(IWorkerOutput output, Func<string, string?, 
             workspaceId, generation, requestId,
             emission.Nodes, emission.EdgeFacts,
             replacesWorkspace: false, replacesFiles: emission.ReplacesFiles,
-            analysis.Diagnostics, analysis.Coverage, analysis.Fingerprints, ct);
+            analysis.Diagnostics, analysis.Coverage, analysis.Fingerprints, analysis.Inputs, ct);
         workspace.CommitIncremental(emission);
         return emitted;
     }
@@ -292,14 +309,14 @@ internal sealed class WorkerSession(IWorkerOutput output, Func<string, string?, 
     /// Streams a node/edge set as one or more <c>analysis/delta</c> notifications, chunked
     /// at <see cref="MaxItemsPerDelta"/>. Always emits at least one delta (the supervisor
     /// requires ≥1 per mutation), so an empty incremental batch still sends a single
-    /// terminal delta with no facts. Diagnostics, coverage and fingerprints ride on the first chunk only.
+    /// terminal delta with no facts. Diagnostics, coverage, fingerprints and inputs ride on the first chunk only.
     /// </summary>
     private async Task<int> PublishAsync(
         string workspaceId, long generation, long requestId,
         List<ProtocolNode> allNodes, List<CSharpWorkspaceAnalyzer.EdgeFact> allEdges,
         bool replacesWorkspace, IReadOnlyList<string> replacesFiles,
         List<ProtocolDiagnostic> diagnostics, IReadOnlyList<ProjectCoverage> coverage,
-        IReadOnlyList<UnitFingerprint> fingerprints, CancellationToken ct)
+        IReadOnlyList<UnitFingerprint> fingerprints, WorkerInputs inputs, CancellationToken ct)
     {
         var nodeChunks = Chunk(allNodes, MaxItemsPerDelta);
         var edgeChunks = Chunk(allEdges, MaxItemsPerDelta);
@@ -328,7 +345,8 @@ internal sealed class WorkerSession(IWorkerOutput output, Func<string, string?, 
                 IsLastForRequest: i == totalChunks - 1,
                 Diagnostics: i == 0 && diagnostics.Count > 0 ? diagnostics : null,
                 Coverage: i == 0 ? coverage : null,
-                Fingerprints: i == 0 ? fingerprints : null);
+                Fingerprints: i == 0 ? fingerprints : null,
+                Inputs: i == 0 ? inputs : null);
 
             await output.DeltaAsync(delta, ct);
             emitted++;

@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text.Json;
 using CodeContext.Api.Lifecycle;
 using CodeContext.Core.Instances;
+using CodeContext.Core.Memory;
 using CodeContext.Core.Repositories;
 using CodeContext.Core.Services;
 
@@ -160,14 +161,18 @@ public static class StartCommandHandler
 
         var idleTracker = app.Services.GetRequiredService<IdleTracker>();
         var apiMetrics = app.Services.GetRequiredService<IApiMetrics>();
+        var memoryTrim = app.Services.GetService<QuietTimeTrim>();
         app.Use(async (context, next) =>
         {
-            // /healthz is a liveness probe; it must not keep an otherwise idle instance alive.
-            if (!context.Request.Path.StartsWithSegments("/healthz"))
+            // /healthz is a liveness probe; it must not keep an otherwise idle instance alive,
+            // nor hold off the quiet-time memory trim.
+            var probe = context.Request.Path.StartsWithSegments("/healthz");
+            if (!probe)
             {
                 idleTracker.Touch();
             }
             var startedAt = Stopwatch.GetTimestamp();
+            using var activity = probe ? null : memoryTrim?.BeginActivity();
             try
             {
                 await next();

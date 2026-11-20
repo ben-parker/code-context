@@ -124,7 +124,7 @@ public class MethodFamilyContextTests
             "csharp:Example.Base.Save()", depth: 1, maxRelationships: 10)).Matches).Relationships!;
         var caller = Assert.Single(relationships.UsedBy!);
         Assert.Equal("csharp:Example.Derived.Save()", caller.Identifier);
-        Assert.Equal(["base"], caller.Bindings);
+        Assert.Equal(["static"], caller.Bindings);
     }
 
     [Fact]
@@ -158,6 +158,10 @@ public class MethodFamilyContextTests
             "csharp:Example.Folder.Validate()", depth: 1, maxRelationships: 10)).Matches).Relationships!;
         Assert.Equal(["csharp:Example.AggregateFolder.Validate()", "csharp:Example.Refresh()"],
             named.UsedBy!.Select(node => node.Identifier).Order());
+        // The call that dispatches names an overridden method; the base call is bound to it alone.
+        Assert.Equal(["static"], named.UsedBy!.Single(node => node.Name == "Validate").Bindings);
+        Assert.Equal(["overridden"], named.UsedBy!.Single(node => node.Name == "Refresh").Bindings);
+        Assert.Equal(["overridden"], Assert.Single(sibling.UsedBy!).Bindings);
     }
 
     [Fact]
@@ -209,6 +213,44 @@ public class MethodFamilyContextTests
         var named = Assert.Single((await service.GetCompactContextAsync(
             "csharp:Example.Base.Save()", depth: 1, maxRelationships: 10)).Matches).Relationships!;
         Assert.Equal(["csharp:Example.Derived.SaveQuietly()"], named.UsedBy!.Select(node => node.Identifier));
+        Assert.Equal(["static"], Assert.Single(named.UsedBy!).Bindings);
+    }
+
+    [Fact]
+    public async Task MethodUsedBy_ACallerWithABaseCallAndADispatchingCall_ShowsBothBindings()
+    {
+        // The override calls base.Save() and also Save() on another instance: the second may land on any
+        // override, the first on Base.Save alone. Asked about the override, only the call that dispatches counts.
+        var nodes = new[]
+        {
+            Node("base", "csharp:Example.Base.Save()", "Save", "Method"),
+            Node("derived", "csharp:Example.Derived.Save()", "Save", "Method"),
+            Node("other", "csharp:Example.Other.Save()", "Save", "Method"),
+        };
+        var edges = new[]
+        {
+            Edge("derived", "base", "OVERRIDES_MEMBER"), Edge("other", "base", "OVERRIDES_MEMBER"),
+            Edge("derived", "base", "CALLS", 5, staticCall: true),
+            Edge("derived", "base", "CALLS", 6),
+        };
+        var service = CreateService(nodes, edges);
+
+        var named = Assert.Single((await service.GetCompactContextAsync(
+            "csharp:Example.Base.Save()", depth: 1, maxRelationships: 10)).Matches).Relationships!;
+        var caller = Assert.Single(named.UsedBy!);
+        Assert.Equal(["overridden", "static"], caller.Bindings);
+        Assert.Equal([6, 7], caller.Lines);
+
+        var sibling = Assert.Single((await service.GetCompactContextAsync(
+            "csharp:Example.Other.Save()", depth: 1, maxRelationships: 10)).Matches).Relationships!;
+        caller = Assert.Single(sibling.UsedBy!);
+        Assert.Equal(["overridden"], caller.Bindings);
+        Assert.Equal([7], caller.Lines);
+
+        // The full view's staticallyBoundTargets are the family members some usage names, whether or not a
+        // call to them is marked statically bound.
+        var full = Assert.Single((await service.GetCompleteContextAsync("csharp:Example.Other.Save()", depth: 1)).Matches);
+        Assert.Equal(["csharp:Example.Base.Save()"], full.Relationships.StaticallyBoundTargets.Select(node => node.Identifier));
     }
 
     [Fact]

@@ -13,24 +13,19 @@ namespace CodeContext.Core.Snapshots
         Nodes = 4,
         Edges = 5,
         IdTable = 6,
-        IdHash = 7,
-        IdentifierHash = 8,
-        EdgeIdHash = 9,
-        BySourceOffsets = 10,
-        ByTargetOffsets = 11,
-        ByTargetEdges = 12,
-        Files = 13,
-        NameTable = 14,
-        NamePostings = 15,
-        Metadata = 16,
-        CrossShardEdges = 17,
-        TypeHistogram = 18,
-        Coverage = 19,
-        Fingerprints = 20,
+        Files = 7,
+        Metadata = 8,
+        Coverage = 9,
+        Fingerprints = 10,
+        Inputs = 11,
     }
 
     /// <summary>
-    /// Constants and record layouts of the snapshot file, format version 1. All integers are
+    /// Constants and record layouts of the snapshot file, format version 3. Version 1 had no
+    /// <see cref="SnapshotSectionKind.Inputs"/> section and no <see cref="FlagUnverified"/>. Version 2 also held ten
+    /// index sections per shard (id, identifier and edge-id hashes, by-source and by-target runs, a name table with
+    /// postings, cross-shard edges, a type histogram) for a shard read in place from the mapping, which was never
+    /// built: every load materializes, and nothing read them. Earlier versions are refused as any other. All integers are
     /// little-endian. Offsets in the file header and shard directory are absolute; offsets inside
     /// a shard blob are relative to the blob start. Every blob and section starts on an 8-byte
     /// boundary, and the layout is dense: host meta at 256, the directory at the next 8-byte
@@ -47,7 +42,7 @@ namespace CodeContext.Core.Snapshots
     /// </summary>
     internal static class SnapshotFormat
     {
-        public const uint FormatVersion = 1;
+        public const uint FormatVersion = 3;
         public const uint EndianTag = 0x01020304;
         public const int HeaderSize = 256;
         public const int FooterSize = 40;
@@ -56,15 +51,20 @@ namespace CodeContext.Core.Snapshots
         public const int DirectoryEntrySize = 64;
         public const int ShardHeaderSize = 128;
         public const int SectionEntrySize = 24;
-        public const int SectionCount = 20;
+        public const int SectionCount = 11;
         public const int NodeRecordSize = 80;
         public const int EdgeRecordSize = 32;
         public const int IdEntrySize = 8;
         public const int FileEntrySize = 24;
-        public const int NameEntrySize = 12;
 
         /// <summary>Header flag bit 0: paths were compared case-insensitively by the writer.</summary>
         public const uint FlagPathsCaseInsensitive = 1;
+
+        /// <summary>
+        /// Header flag bit 1: written by a host whose verification of a loaded snapshot failed (status <c>error</c>,
+        /// label <c>unverified</c>). A host loads it as any other; a process without a worker never answers from it.
+        /// </summary>
+        public const uint FlagUnverified = 2;
 
         /// <summary>NodeRecord flag bit 0: <c>metadata.external == "true"</c>.</summary>
         public const uint NodeFlagExternal = 1;
@@ -122,11 +122,15 @@ namespace CodeContext.Core.Snapshots
         public const int HeaderShardCount = 68;
         public const int HeaderShardDirectoryOffset = 72;
         public const int HeaderInstanceId = 80;
+        public const int HeaderRootTimeTicks = 96;
 
         // Host meta keys.
         public const string HostVersionKey = "hostVersion";
         public const string RootPathKey = "rootPath";
         public const string PlatformKey = "platform";
+
+        /// <summary>Optional: the writer's worker set. Read only by a query without an instance.</summary>
+        public const string WorkerSetKey = "workerSet";
 
         // Shard meta keys.
         public const string ParserIdKey = "parserId";
@@ -135,6 +139,12 @@ namespace CodeContext.Core.Snapshots
         public const string StateFileKey = "stateFile";
         public const string StateIdKey = "stateId";
         public const string StateSha256Key = "stateSha256";
+
+        /// <summary>
+        /// Optional: when the shard's worker began the operation that read its inputs, UTC ticks in decimal. Absent (a
+        /// file written before it was recorded) leaves the shard's inputs not known to the one-shot check.
+        /// </summary>
+        public const string InputsReadKey = "inputsReadUtcTicks";
 
         // Edge metadata keys held in the record when canonical.
         public const string LineKey = "line";
@@ -151,45 +161,13 @@ namespace CodeContext.Core.Snapshots
             SnapshotSectionKind.Edges => EdgeRecordSize,
             SnapshotSectionKind.IdTable => IdEntrySize,
             SnapshotSectionKind.Files => FileEntrySize,
-            SnapshotSectionKind.NameTable => NameEntrySize,
             SnapshotSectionKind.Coverage => 1,
             SnapshotSectionKind.Fingerprints => 1,
+            SnapshotSectionKind.Inputs => 1,
             _ => 4,
         };
 
-        /// <summary>
-        /// Capacity of a hash section holding <paramref name="count"/> keys: the next power of two at or
-        /// above <c>count / 0.75</c>, and 0 for no key.
-        /// </summary>
-        public static long HashCapacity(long count)
-        {
-            if (count <= 0) return 0;
-            var minimum = (count * 4 + 2) / 3;
-            long capacity = 1;
-            while (capacity < minimum) capacity <<= 1;
-            return capacity;
-        }
-
         public static long Align8(long value) => (value + 7) & ~7L;
-
-        /// <summary>The slot a 64-bit key hash starts probing at.</summary>
-        public static long Slot(ulong hash, long capacity) => (long)((hash ^ (hash >> 32)) & (ulong)(capacity - 1));
-
-        /// <summary>
-        /// The UTF-8 form of <paramref name="value"/>, or false when it holds a lone surrogate. No
-        /// replacement character is ever substituted, so a lookup key never matches a different string.
-        /// </summary>
-        public static bool TryEncodeStrict(string value, out byte[] bytes)
-        {
-            var buffer = new byte[Encoding.UTF8.GetMaxByteCount(value.Length)];
-            if (Utf8.FromUtf16(value, buffer, out _, out var written, replaceInvalidSequences: false) != System.Buffers.OperationStatus.Done)
-            {
-                bytes = Array.Empty<byte>();
-                return false;
-            }
-            bytes = written == buffer.Length ? buffer : buffer.AsSpan(0, written).ToArray();
-            return true;
-        }
 
         /// <summary>Whether a string survives a strict UTF-8 round trip (no lone surrogate).</summary>
         public static bool IsWellFormed(string? value)

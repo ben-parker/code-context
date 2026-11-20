@@ -21,6 +21,7 @@ using CodeContext.Parser.Protocol;
 //   invalid-progress-file reports a current file outside the approved set
 //   invalid-progress-request reports progress for an unknown request id
 //   native-advertised-missing advertises native trees but omits the handler
+//   ignore-shutdown   never answers shutdown, and stays up for 60 s after stdin EOF
 //
 // Persistent state (plan phase 5). Every behaviour that does not declare persistentState fails a request
 // that carries a baseline, and workspace/saveState, with InvalidRequest: the host must never send them.
@@ -43,12 +44,20 @@ using CodeContext.Parser.Protocol;
 //   reject-with-file-scope  persistent-state that answers rejected with a file-scoped delta
 //   unsolicited-baseline normal, but answers baseline "accepted" to every workspace/index
 //
+// --parser-id <id>: answers as parser <id> claiming extension .<id> (default fake), so a test can run two fake workers.
+//
 // --fail-marker <path>: while that file exists, workspace/index and workspace/applyChanges emit their delta
 // and then answer complete:false (a request that fails after its delta committed).
+//
+// Inputs: every delta reports protocol `inputs`; each --input <path> (repeatable) is reported as read when it
+// exists at the request, absent otherwise. Behaviour no-inputs reports none.
 
 var behavior = GetOption(args, "--behavior") ?? "normal";
 var markerPath = GetOption(args, "--marker");
 var failMarker = GetOption(args, "--fail-marker");
+var parserId = GetOption(args, "--parser-id") ?? "fake";
+var inputPaths = args.Select((arg, i) => (arg, i)).Where(pair => pair.arg == "--input" && pair.i + 1 < args.Length)
+    .Select(pair => Path.GetFullPath(args[pair.i + 1])).ToList();
 
 var stdin = Console.OpenStandardInput();
 var stdout = Console.OpenStandardOutput();
@@ -72,7 +81,7 @@ if (behavior == "stderr-flood")
     Console.Error.Flush();
 }
 
-var state = new WorkerState(behavior, markerPath, failMarker);
+var state = new WorkerState(behavior, markerPath, failMarker, parserId, inputPaths);
 var connection = new JsonRpcConnection(stdin, stdout);
 
 connection.AddRequestHandler(ParserProtocolMethods.Initialize, (p, ct) => state.HandleInitializeAsync(p, ct));
@@ -82,10 +91,11 @@ connection.AddRequestHandlerWithId(ParserProtocolMethods.IndexWorkspace,
 connection.AddRequestHandlerWithId(ParserProtocolMethods.ApplyChanges,
     (requestId, p, ct) => state.HandleApplyChangesAsync(requestId, p, ct, connection));
 connection.AddRequestHandler(ParserProtocolMethods.SaveState, (p, ct) => state.HandleSaveStateAsync(p, ct));
-connection.AddRequestHandler(ParserProtocolMethods.Shutdown, (_, _) =>
+connection.AddRequestHandler(ParserProtocolMethods.Shutdown, async (_, _) =>
 {
     state.ShutdownRequested = true;
-    return Task.FromResult<JsonElement?>(null);
+    if (behavior == "ignore-shutdown") await Task.Delay(Timeout.Infinite);
+    return null;
 });
 
 // The read loop ends on stdin EOF — the mandatory self-cleaning exit signal.
@@ -98,6 +108,7 @@ catch (ParserProtocolViolationException ex)
     Console.Error.WriteLine($"fake-worker: protocol violation from host: {ex.Message}");
     return 1;
 }
+if (behavior == "ignore-shutdown") await Task.Delay(TimeSpan.FromSeconds(60));
 return 0;
 
 static string? GetOption(string[] args, string name)
@@ -109,9 +120,10 @@ static string? GetOption(string[] args, string name)
     return null;
 }
 
-internal sealed class WorkerState(string behavior, string? markerPath, string? failMarker)
+internal sealed class WorkerState(
+    string behavior, string? markerPath, string? failMarker, string parserId, List<string> inputPaths)
 {
-    private const string ParserId = "fake";
+    private string ParserId { get; } = parserId;
     private const string ParserVersion = "1.0.0-test";
 
     // The files whose facts this process has emitted, which is all its "state" holds.
@@ -144,7 +156,7 @@ internal sealed class WorkerState(string behavior, string? markerPath, string? f
             DisplayName: "Fake Worker",
             ProtocolVersion: version,
             Languages: ["fake"],
-            Extensions: [".fake"],
+            Extensions: ["." + ParserId],
             ProjectMarkers: ["fake.proj"],
             Capabilities: new WorkerCapabilities(
                 WorkspaceAnalysis: true, IncrementalUpdates: true,
@@ -437,7 +449,10 @@ internal sealed class WorkerState(string behavior, string? markerPath, string? f
             ReplacesFiles: replacesFiles ?? files,
             Nodes: nodes,
             Edges: edges,
-            IsLastForRequest: true);
+            IsLastForRequest: true,
+            Inputs: behavior == "no-inputs"
+                ? null
+                : new WorkerInputs(inputPaths.Where(File.Exists).ToList(), inputPaths.Where(path => !File.Exists(path)).ToList()));
     }
 
     private static T Deserialize<T>(JsonElement? paramsElement, System.Text.Json.Serialization.Metadata.JsonTypeInfo<T> typeInfo)

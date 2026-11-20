@@ -34,6 +34,9 @@ public sealed class AnalysisDeltaApplier : IAnalysisDeltaSink
         /// <summary>The first chunk's fingerprints, which is where a worker sends them; later chunks' are ignored.</summary>
         public IReadOnlyList<UnitFingerprint>? Fingerprints { get; } = first.Fingerprints;
 
+        /// <summary>The first chunk's inputs, as for <see cref="Fingerprints"/>.</summary>
+        public WorkerInputs? Inputs { get; } = first.Inputs;
+
         public void Append(AnalysisDelta delta)
         {
             if (!string.Equals(ParserVersion, delta.ParserVersion, StringComparison.Ordinal))
@@ -50,7 +53,15 @@ public sealed class AnalysisDeltaApplier : IAnalysisDeltaSink
         }
     }
 
+    /// <summary>
+    /// For a parser, when its worker last began an operation that read all its inputs (UTC ticks, 0 when not known):
+    /// recorded with the inputs a commit carries (<see cref="ShardAnnotation.InputsReadUtcTicks"/>). Set by the worker
+    /// service that owns the workers.
+    /// </summary>
+    internal Func<string, long>? InputsReadBoundary { get; set; }
+
     private readonly IGenerationalGraphStore _store;
+    private readonly IStoredNodeIds? _storedNodeIds;
     private readonly ILogger<AnalysisDeltaApplier> _logger;
     private readonly IAnalysisCoverageRegistry? _coverage;
     private readonly SemaphoreSlim _commitLock = new(1, 1);
@@ -64,6 +75,7 @@ public sealed class AnalysisDeltaApplier : IAnalysisDeltaSink
         IAnalysisCoverageRegistry? coverage = null)
     {
         _store = store;
+        _storedNodeIds = store as IStoredNodeIds;
         _logger = logger;
         _coverage = coverage;
     }
@@ -136,8 +148,13 @@ public sealed class AnalysisDeltaApplier : IAnalysisDeltaSink
             }
 
             _pending.Remove(pendingKey);
-            var nodes = pending.Nodes.Select(n => ToCodeNode(n, pending)).ToList();
-            var edges = pending.Edges.Select(e => ToCodeEdge(e, pending)).ToList();
+            // One pool per request: facts of the commit with equal metadata share one immutable instance,
+            // and repeated strings one instance.
+            var mapper = new FactMapper(pending, _storedNodeIds);
+            var nodes = new List<CodeNode>(pending.Nodes.Count);
+            foreach (var node in pending.Nodes) nodes.Add(mapper.ToCodeNode(node));
+            var edges = new List<CodeEdge>(pending.Edges.Count);
+            foreach (var edge in pending.Edges) edges.Add(mapper.ToCodeEdge(edge));
 
             // The scope names the (parser, workspace) shard this delta replaces (optionally narrowed
             // to the listed files). The store routes and partitions by the ownership metadata that
@@ -153,6 +170,8 @@ public sealed class AnalysisDeltaApplier : IAnalysisDeltaSink
                 Annotation = new ShardAnnotation(pending.ParserVersion, pending.Coverage)
                 {
                     Fingerprints = pending.Fingerprints,
+                    Inputs = pending.Inputs,
+                    InputsReadUtcTicks = pending.Inputs is null ? 0 : InputsReadBoundary?.Invoke(pending.ParserId) ?? 0,
                     Lineage = origin is null
                         ? null
                         : new ShardLineage(origin.Incarnation, origin.Request,
@@ -208,76 +227,180 @@ public sealed class AnalysisDeltaApplier : IAnalysisDeltaSink
             "[{ParserId}] discarded stale delta: generation {Stale} <= newest {Newest} for workspace {WorkspaceId}.",
             delta.ParserId, delta.Generation, newestGeneration, delta.WorkspaceId);
 
-    // The node/edge metadata dictionaries arrive freshly deserialized on this delta and are
-    // never read again after this mapping (pending.Nodes/Edges are each projected exactly once
-    // and then discarded), so we take ownership of the dictionary in place and stamp the two
-    // ownership keys onto it instead of allocating a fresh dictionary and copying every entry.
-    // The ownership keys are assigned last so they always win over any same-named source key
-    // (matching the previous ownership-first + TryAdd precedence).
-    private static Dictionary<string, string> BuildOwnedMetadata(
-        IReadOnlyDictionary<string, string>? source, PendingDelta delta)
+    /// <summary>
+    /// Maps one request's facts to stored ones through one pool, so facts of the commit with equal metadata
+    /// share one immutable instance and repeated strings one instance.
+    /// </summary>
+    private sealed class FactMapper
     {
-        if (source is null)
+        private readonly FactMetadataPool _pool;
+        private readonly string _parserId;
+        private readonly string _workspaceId;
+        private readonly FactMetadata _ownershipOnly;
+        private string[] _scratch = new string[16];
+
+        public FactMapper(PendingDelta delta, IStoredNodeIds? stored)
         {
-            return new Dictionary<string, string>(2)
-            {
-                [ParserIdKey] = delta.ParserId,
-                [WorkspaceIdKey] = delta.WorkspaceId,
-            };
+            // An endpoint the request carries no node for (a node of a file it does not replace) is stored
+            // as the instance that node holds in the store, so editing a file does not add a copy of the
+            // id of everything the file uses.
+            _storedId = stored is null ? static _ => null : stored.FindStoredNodeId;
+            // Node ids, paths and the other repeated text of the request: presized for about two per node.
+            _pool = new FactMetadataPool(stringCapacity: 2 * delta.Nodes.Count + 64);
+            _parserId = _pool.Intern(delta.ParserId);
+            _workspaceId = _pool.Intern(delta.WorkspaceId);
+            _ownershipOnly = _pool.Get([ParserIdKey, _parserId, WorkspaceIdKey, _workspaceId]);
+            _share = piece => _pool.Intern(piece);
         }
 
-        if (source is not Dictionary<string, string> owned)
+        private readonly Func<ReadOnlySpan<char>, string> _share;
+        private readonly Func<string, string?> _storedId;
+
+        // The fact's metadata: the source's entries in their order, with the two ownership keys set to the
+        // delta's values (in place where the source has them, appended in this order where it does not), so
+        // the ownership keys always win over a same-named source key. A key the source yields twice keeps its
+        // first position and its last value, as a dictionary assignment would. The source is only read; the
+        // result is the pool's shared, immutable instance for that content, found without allocating when
+        // the request already holds it.
+        private FactMetadata OwnedMetadata(IReadOnlyDictionary<string, string>? source)
         {
-            // Defensive: an IReadOnlyDictionary that is not a mutable Dictionary must be copied.
-            owned = new Dictionary<string, string>(source.Count + 2);
-            foreach (var (key, value) in source)
+            var count = source?.Count ?? 0;
+            if (count == 0) return _ownershipOnly;
+
+            var needed = 2 * count + 4;
+            if (_scratch.Length < needed) _scratch = new string[Math.Max(needed, 2 * _scratch.Length)];
+            _length = 0;
+            _parserAt = _workspaceAt = -1;
+            _positions = null;
+            // A dictionary with an ordinal-consistent comparer cannot yield a key twice; it is also read
+            // through its own enumerator rather than the interface's.
+            if (source is Dictionary<string, string> dictionary
+                && (ReferenceEquals(dictionary.Comparer, EqualityComparer<string>.Default)
+                    || ReferenceEquals(dictionary.Comparer, StringComparer.Ordinal)
+                    || ReferenceEquals(dictionary.Comparer, StringComparer.OrdinalIgnoreCase)))
             {
-                owned[key] = value;
+                foreach (var (key, value) in dictionary) Put(key, value, checkRepeats: false);
             }
+            else
+            {
+                foreach (var (key, value) in source!) Put(key, value, checkRepeats: true);
+            }
+            var pairs = _scratch;
+            var length = _length;
+            if (_parserAt < 0)
+            {
+                pairs[length++] = ParserIdKey;
+                pairs[length++] = _parserId;
+            }
+            if (_workspaceAt < 0)
+            {
+                pairs[length++] = WorkspaceIdKey;
+                pairs[length++] = _workspaceId;
+            }
+            var shared = _pool.Get(new ReadOnlySpan<string>(pairs, 0, length));
+            Array.Clear(pairs, 0, length);
+            return shared;
         }
 
-        owned[ParserIdKey] = delta.ParserId;
-        owned[WorkspaceIdKey] = delta.WorkspaceId;
-        return owned;
-    }
+        private int _length;
+        private int _parserAt;
+        private int _workspaceAt;
+        private Dictionary<string, int>? _positions;
 
-    private static CodeNode ToCodeNode(ProtocolNode node, PendingDelta delta)
-    {
-        var metadata = BuildOwnedMetadata(node.Metadata, delta);
-
-        return new CodeNode
+        private void Put(string key, string value, bool checkRepeats)
         {
-            Id = node.Id,
+            if (key == ParserIdKey)
+            {
+                if (_parserAt >= 0) return;
+                _parserAt = _length;
+                value = _parserId;
+            }
+            else if (key == WorkspaceIdKey)
+            {
+                if (_workspaceAt >= 0) return;
+                _workspaceAt = _length;
+                value = _workspaceId;
+            }
+            else if (checkRepeats && Find(_scratch, _length, key, ref _positions) is var at and >= 0)
+            {
+                _scratch[at + 1] = value;
+                return;
+            }
+            // Room for this pair and the two ownership pairs (a map may yield more pairs than its count).
+            if (_length + 6 > _scratch.Length) Array.Resize(ref _scratch, 2 * _scratch.Length);
+            _scratch[_length] = key;
+            _scratch[_length + 1] = value;
+            _positions?.Add(key, _length);
+            _length += 2;
+        }
+
+        // The position of key among the first length pairs, or -1: in order for a few, through an index for many.
+        private static int Find(string[] pairs, int length, string key, ref Dictionary<string, int>? positions)
+        {
+            if (positions is null && length >= 32)
+            {
+                positions = new Dictionary<string, int>(StringComparer.Ordinal);
+                for (var i = 0; i < length; i += 2) positions.TryAdd(pairs[i], i);
+            }
+            if (positions is not null) return positions.TryGetValue(key, out var at) ? at : -1;
+            for (var i = 0; i < length; i += 2)
+                if (string.Equals(pairs[i], key, StringComparison.Ordinal)) return i;
+            return -1;
+        }
+
+        private string? _lastSource;
+        private string? _lastSourcePooled;
+
+        // A worker sends a member's edges together, so most sources repeat the previous edge's: one compare
+        // instead of a hash and a probe of the pool.
+        private string? InternSource(string? source)
+        {
+            if (source is not null && string.Equals(source, _lastSource, StringComparison.Ordinal)) return _lastSourcePooled;
+            _lastSource = source;
+            return _lastSourcePooled = _pool.Intern(source, _storedId);
+        }
+
+        // Strings that repeat across the facts of a request (paths, kinds, languages, names, and node ids
+        // that edges name as endpoints) arrive as one instance per occurrence from the deserializer; each is
+        // stored through the request's pool, as a snapshot load shares them through the shard's string
+        // table. Nodes are mapped before edges, so an endpoint is the instance its node holds: the
+        // request's node, or else the stored one.
+        public CodeNode ToCodeNode(ProtocolNode node) => new()
+        {
+            Id = _pool.Intern(node.Id),
             Identifier = node.Identifier,
-            Name = node.Name,
-            Type = node.Kind,
-            Language = node.Language,
-            FilePath = node.FilePath,
+            Name = _pool.Intern(node.Name),
+            Type = _pool.Intern(node.Kind),
+            Language = _pool.Intern(node.Language),
+            FilePath = _pool.Intern(node.FilePath),
             StartLine = node.StartLine,
             EndLine = node.EndLine,
             StartCol = node.StartColumn,
             EndCol = node.EndColumn,
-            Namespace = node.Namespace,
-            Visibility = node.Visibility,
-            Signature = node.Signature,
-            ReturnType = node.ReturnType,
-            Parameters = node.Parameters,
-            Modifiers = node.Modifiers,
-            Metadata = metadata,
+            Namespace = _pool.Intern(node.Namespace),
+            Visibility = _pool.Intern(node.Visibility),
+            Signature = _pool.Intern(node.Signature),
+            ReturnType = _pool.Intern(node.ReturnType),
+            Parameters = _pool.Intern(node.Parameters),
+            Modifiers = _pool.Intern(node.Modifiers),
+            Metadata = OwnedMetadata(node.Metadata),
         };
-    }
 
-    private static CodeEdge ToCodeEdge(ProtocolEdge edge, PendingDelta delta)
-    {
-        var metadata = BuildOwnedMetadata(edge.Metadata, delta);
-
-        return new CodeEdge
+        // The id is kept as parts (the endpoint instances and two pooled pieces) when it is exactly its
+        // source + a piece + its target + a piece, and as the string sent otherwise (EdgeId.Compose).
+        public CodeEdge ToCodeEdge(ProtocolEdge edge)
         {
-            Id = edge.Id,
-            SourceId = edge.SourceId,
-            TargetId = edge.TargetId,
-            Type = edge.Kind,
-            Metadata = metadata,
-        };
+            var source = InternSource(edge.SourceId);
+            var target = _pool.Intern(edge.TargetId, _storedId);
+            var stored = new CodeEdge
+            {
+                SourceId = source,
+                TargetId = target,
+                Type = _pool.Intern(edge.Kind),
+                Metadata = OwnedMetadata(edge.Metadata),
+            };
+            stored.UseIdKey(EdgeId.Compose(edge.Id, source, target, _share));
+            return stored;
+        }
     }
 }

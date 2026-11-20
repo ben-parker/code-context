@@ -2,10 +2,12 @@ using CodeContext.Core.Repositories;
 using CodeContext.Core.Workers;
 using CodeContext.Parser.Protocol;
 using Microsoft.Extensions.Options;
+using System.Buffers;
 using System.Collections.Frozen;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
@@ -734,14 +736,16 @@ namespace CodeContext.Core.Services
                     var familyEdges = (await _edgeRepository.GetBySourceIdAsync(familyId))
                         .Concat(await _edgeRepository.GetByTargetIdAsync(familyId))
                         .Where(edge => edge.Type is not null && MethodFamilyEdgeKinds.Contains(edge.Type));
+                    // The role of the member a call names. A call the worker marks statically bound, as
+                    // base.M() and super.m() are, is labelled static instead (below): it reaches that member alone.
                     var label = "exact";
                     foreach (var edge in familyEdges)
                     {
                         if (edge.Type == "IMPLEMENTS_MEMBER")
                             label = edge.TargetId == familyId ? "interface" : "implementation";
                         else if (edge.Type == "OVERRIDES_MEMBER")
-                            label = edge.TargetId == familyId ? "base" : "implementation";
-                        if (label is "interface" or "base") break;
+                            label = edge.TargetId == familyId ? "overridden" : "implementation";
+                        if (label is "interface" or "overridden") break;
                     }
                     bindingByTarget[familyId] = label;
                 }
@@ -804,8 +808,8 @@ namespace CodeContext.Core.Services
                     if (!outgoing && family.Count > 0)
                     {
                         compact.Bindings = item.Edges
-                            .Select(edge => edge.TargetId is not null
-                                ? bindingByTarget.GetValueOrDefault(edge.TargetId, "exact")
+                            .Select(edge => IsStaticallyBound(edge) ? "static"
+                                : edge.TargetId is not null ? bindingByTarget.GetValueOrDefault(edge.TargetId, "exact")
                                 : "exact")
                             .Distinct(StringComparer.Ordinal)
                             .Order(StringComparer.Ordinal)
@@ -1085,9 +1089,12 @@ namespace CodeContext.Core.Services
         // order), so expansion inputs must be ordered on a stable key before iteration to
         // keep the output byte-identical across builds. Edge Ids are worker-assigned stable
         // strings; the extra keys are pure tie-breakers for null/duplicate Ids.
+        // Ordinal order of the id text, compared on the parts of an id the store keeps as parts.
+        private static readonly IComparer<object> EdgeIdOrder = Comparer<object>.Create(EdgeIdKeys.Compare);
+
         private static IEnumerable<CodeEdge> OrderForTraversal(IEnumerable<CodeEdge> edges)
             => edges
-                .OrderBy(edge => edge.Id ?? string.Empty, StringComparer.Ordinal)
+                .OrderBy(edge => edge.IdKey ?? string.Empty, EdgeIdOrder)
                 .ThenBy(edge => edge.SourceId ?? string.Empty, StringComparer.Ordinal)
                 .ThenBy(edge => edge.TargetId ?? string.Empty, StringComparer.Ordinal)
                 .ThenBy(edge => edge.Type ?? string.Empty, StringComparer.Ordinal);
@@ -1218,8 +1225,11 @@ namespace CodeContext.Core.Services
         /// the member it names alone, so it counts only when that is the queried method.
         /// </summary>
         private static bool ReachesQueriedMethod(CodeEdge edge, string selfId)
-            => edge.TargetId == selfId
-                || edge.Metadata?.GetValueOrDefault(EdgeMetadataKeys.Dispatch) != EdgeDispatch.Static;
+            => edge.TargetId == selfId || !IsStaticallyBound(edge);
+
+        /// <summary>Whether the worker marked a usage as bound to its target alone, as <c>base.M()</c> and <c>super.m()</c> are.</summary>
+        private static bool IsStaticallyBound(CodeEdge edge)
+            => edge.Metadata?.GetValueOrDefault(EdgeMetadataKeys.Dispatch) == EdgeDispatch.Static;
 
         /// <summary>
         /// What reaches any member of <paramref name="familyIds"/>, the method family of
@@ -1544,6 +1554,9 @@ namespace CodeContext.Core.Services
         {
             var nodesInFile = await FindNodesByFilePathAsync(filePath);
             var relatedPaths = new List<string>();
+            // A file's nodes share one path instance within a shard, and a file with many edges into
+            // another names it once per edge: each instance is matched and made a display path once.
+            var seenPaths = new HashSet<string>(ReferenceEqualityComparer.Instance);
 
             foreach (var node in nodesInFile)
             {
@@ -1565,6 +1578,7 @@ namespace CodeContext.Core.Services
                     var relatedNode = await _nodeRepository.GetByIdAsync(relatedNodeId);
                     if (string.IsNullOrEmpty(relatedNode?.FilePath)
                         || IsExternal(relatedNode)
+                        || !seenPaths.Add(relatedNode.FilePath)
                         || PathsReferToSameFile(relatedNode.FilePath, filePath))
                         continue;
 
@@ -1659,10 +1673,14 @@ namespace CodeContext.Core.Services
             var fileNameMatchesTarget = Path.GetFileNameWithoutExtension(testFilePath)
                 .Contains(targetNode.Name, StringComparison.OrdinalIgnoreCase);
 
-            // The target's name patterns depend only on the target, not the candidate method:
-            // build them once per call instead of rebuilding ~15 interpolated strings per method.
-            var targetName = targetNode.Name.ToLowerInvariant();
-            var targetPatterns = fileNameMatchesTarget ? null : BuildTargetTestPatterns(targetName);
+            // The target's name patterns depend only on the target, not on the file or the candidate
+            // method, and a tests query asks about every test file: they are built once per name instance.
+            var (targetName, targetPatterns) = TargetTestPatterns.GetValue(
+                targetNode.Name, static name =>
+                {
+                    var lower = name.ToLowerInvariant();
+                    return new Tuple<string, string[]>(lower, BuildTargetTestPatterns(lower));
+                });
 
             var testMethods = actualTestMethods
                 .Where(n => fileNameMatchesTarget
@@ -1671,6 +1689,9 @@ namespace CodeContext.Core.Services
 
             return testMethods;
         }
+
+        // Keyed by the name's string instance, which a stored node holds for as long as it is stored.
+        private static readonly ConditionalWeakTable<string, Tuple<string, string[]>> TargetTestPatterns = new();
 
         private static string[] BuildTargetTestPatterns(string targetName) =>
         [
@@ -1704,10 +1725,14 @@ namespace CodeContext.Core.Services
             if (string.IsNullOrEmpty(testMethod.Name))
                 return false;
 
-            var testMethodName = testMethod.Name.ToLowerInvariant();
+            using var lowered = new InvariantLower(testMethod.Name);
+            var testMethodName = lowered.Text;
+            foreach (var pattern in targetPatterns)
+            {
+                if (testMethodName.Contains(pattern, StringComparison.Ordinal)) return true;
+            }
 
-            return targetPatterns.Any(pattern => testMethodName.Contains(pattern)) ||
-                   testMethodName.Contains(targetName) ||
+            return testMethodName.Contains(targetName, StringComparison.Ordinal) ||
                    // Check if method signature or content might reference the target
                    // (targetNode.Name is non-empty: the caller guards it before building patterns).
                    (testMethod.Signature?.Contains(targetNode.Name!, StringComparison.OrdinalIgnoreCase) ?? false);
@@ -1718,16 +1743,15 @@ namespace CodeContext.Core.Services
             if (string.IsNullOrEmpty(method.Name))
                 return false;
 
-            var methodName = method.Name.ToLowerInvariant();
-            var signature = method.Signature?.ToLowerInvariant() ?? "";
-
             if (method.Metadata?.TryGetValue("isTest", out var isTest) == true &&
                 string.Equals(isTest, "true", StringComparison.OrdinalIgnoreCase))
             {
                 return true;
             }
 
-            return methodName.StartsWith("test") ||
+            using var loweredName = new InvariantLower(method.Name);
+            var methodName = loweredName.Text;
+            if (methodName.StartsWith("test") ||
                 methodName.EndsWith("test") ||
                 methodName.EndsWith("tests") ||
                 methodName.StartsWith("should") ||
@@ -1735,12 +1759,39 @@ namespace CodeContext.Core.Services
                 methodName.StartsWith("given") ||
                 methodName.StartsWith("when") ||
                 methodName.StartsWith("then") ||
-                methodName.Contains("_should_") ||
-                signature.Contains("[test") ||
-                signature.Contains("[fact") ||
-                signature.Contains("[theory") ||
-                signature.Contains("[testmethod") ||
-                signature.Contains("[testcase");
+                methodName.Contains("_should_", StringComparison.Ordinal))
+            {
+                return true;
+            }
+
+            using var loweredSignature = new InvariantLower(method.Signature ?? "");
+            var signature = loweredSignature.Text;
+            return signature.Contains("[test", StringComparison.Ordinal) ||
+                signature.Contains("[fact", StringComparison.Ordinal) ||
+                signature.Contains("[theory", StringComparison.Ordinal) ||
+                signature.Contains("[testmethod", StringComparison.Ordinal) ||
+                signature.Contains("[testcase", StringComparison.Ordinal);
+        }
+
+        /// <summary>
+        /// A text's <see cref="string.ToLowerInvariant()"/> in a pooled buffer. The test-name rules run over
+        /// every method of every test file for each tests query; a string per name and signature was most
+        /// of what such a query allocated.
+        /// </summary>
+        private readonly ref struct InvariantLower
+        {
+            private readonly char[] _buffer;
+            private readonly int _length;
+
+            public InvariantLower(string text)
+            {
+                _buffer = ArrayPool<char>.Shared.Rent(text.Length);
+                _length = text.AsSpan().ToLowerInvariant(_buffer);
+            }
+
+            public ReadOnlySpan<char> Text => _buffer.AsSpan(0, _length);
+
+            public void Dispose() => ArrayPool<char>.Shared.Return(_buffer);
         }
 
         private async Task<bool> MightContainTestsForTargetAsync(string? testFilePath, CodeNode targetNode)

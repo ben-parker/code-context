@@ -3,6 +3,7 @@
 // guard sits. A test fails if the suppression appears anywhere else.
 #pragma warning disable RS0030
 
+using System.Reflection.PortableExecutable;
 using System.Xml;
 using System.Xml.Linq;
 using Microsoft.CodeAnalysis;
@@ -38,6 +39,8 @@ public sealed class Disk
 
     private static readonly StringComparison PathComparison =
         OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+    private static readonly StringComparer PathComparer =
+        OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
 
     private readonly PathGuard _guard;
 
@@ -133,18 +136,83 @@ public sealed class Disk
     }
 
     /// <summary>
-    /// An assembly to compile against. Given a file, Roslyn opens any further modules of the
-    /// assembly itself, later, by a plain file name beside it, and asks nobody. Beside a file
-    /// in the repository that name could be a link, so such an assembly is read whole here and
-    /// Roslyn is given the bytes, from which it can open nothing.
+    /// An assembly to compile against, held as its metadata alone: binding reads nothing else, and the
+    /// rest of the image (the code, most of an implementation assembly) would only take up memory. The
+    /// metadata is read here and the file closed before this returns, so no handle is kept on it.
+    ///
+    /// The further modules of an assembly that has them are read here the same way, each by the name its
+    /// manifest gives, beside it, and through the guard: given a file, Roslyn would open them itself,
+    /// later, asking nobody, and keep them open. A module that is a link the repository holds, that is
+    /// refused, missing, or that cannot be read is left out, and what it declares does not bind.
+    /// <see cref="ModuleLookupsFor"/> names every module looked for, and which were missing.
     /// </summary>
     /// <exception cref="FileNotFoundException">The file is missing or refused.</exception>
     public MetadataReference Reference(string path)
     {
         if (Refused(path)) throw Absent(path);
-        return _guard.InRepository(path)
-            ? MetadataReference.CreateFromImage(File.ReadAllBytes(path), filePath: path)
-            : MetadataReference.CreateFromFile(path);
+        var modules = new List<ModuleMetadata> { ReadModule(path) };
+        try
+        {
+            var looked = new List<string>();
+            var absent = new List<string>();
+            var directory = Path.GetDirectoryName(path)!;
+            foreach (var name in modules[0].GetModuleNames())
+            {
+                // A name that is no plain file name beside the manifest names nothing this reads; it changes only with it.
+                if (name.Length == 0 || Path.GetFileName(name) != name) continue;
+                var modulePath = Path.Combine(directory, name);
+                // Not read, but looked for: a refused path the report leaves out, a link the host will not look at.
+                if (Refused(modulePath) || _guard.ThroughALink(modulePath))
+                {
+                    looked.Add(modulePath);
+                    continue;
+                }
+                try
+                {
+                    modules.Add(ReadModule(modulePath));
+                    looked.Add(modulePath);
+                }
+                catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+                {
+                    absent.Add(modulePath);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or BadImageFormatException)
+                {
+                    // There, and not bound: repairing it moves its time.
+                    looked.Add(modulePath);
+                }
+            }
+            _modules[path] = new ModuleLookups(looked, absent);
+            return AssemblyMetadata.Create(modules).GetReference(filePath: path);
+        }
+        catch
+        {
+            foreach (var module in modules) module.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// The further modules <see cref="Reference"/> last looked for beside an assembly: those that were there, read or
+    /// not, and those that were missing. Both are inputs: restoring a missing one, or repairing one that did not read,
+    /// changes what the assembly binds.
+    /// </summary>
+    public ModuleLookups ModuleLookupsFor(string assemblyPath)
+        => _modules.TryGetValue(assemblyPath, out var lookups) ? lookups : ModuleLookups.None;
+
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, ModuleLookups> _modules = new(PathComparer);
+
+    /// <param name="Files">Modules that were there when looked for, whether or not they were bound.</param>
+    /// <param name="Absent">Modules that were missing.</param>
+    public sealed record ModuleLookups(IReadOnlyList<string> Files, IReadOnlyList<string> Absent)
+    {
+        public static readonly ModuleLookups None = new([], []);
+    }
+
+    private static ModuleMetadata ReadModule(string path)
+    {
+        using var stream = File.OpenRead(path);
+        return ModuleMetadata.CreateFromStream(stream, PEStreamOptions.PrefetchMetadata);
     }
 
     /// <summary>
@@ -204,7 +272,12 @@ public sealed class Disk
     /// <summary><see cref="Path.GetRelativePath"/>, which normalizes both of its arguments.</summary>
     public string RelativePath(string relativeTo, string path) => PathGuard.RelativePath(relativeTo, path);
 
-    /// <summary>Private, because a refused path already looks missing and so no caller has anything to check.</summary>
+    /// <summary>
+    /// Whether this worker may not read a path. For one use: a path the worker hands to the host, which reads
+    /// with no guard, must not be one of these. No reader asks, since a refused path already looks missing.
+    /// </summary>
+    public bool Refuses(string path) => _guard.Refused(path);
+
     private bool Refused(string path) => _guard.Refused(path);
 
     private static FileNotFoundException Absent(string path) => new($"Could not find file '{path}'.", path);

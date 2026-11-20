@@ -278,6 +278,14 @@ carry a condition or a note because they touch something the brief wrote down.
 
 ### 3.2 Snapshot file format, version 1
 
+Format version 3 (final review of the memory work) is this layout without the sections of
+kinds 7 to 12, 14, 15, 17 and 18 below, which only the mapped shard of phase 8 would read and
+no code did: a shard blob holds 11 sections, numbered 1 ShardMeta, 2 StringOffsets,
+3 StringBytes, 4 Nodes, 5 Edges, 6 IdTable, 7 Files, 8 Metadata, 9 Coverage, 10 Fingerprints,
+11 Inputs. The shard header's `nameCount` and `foldedNameFirstRef` are reserved zeros, and the
+folded names are no longer in the string table. Versions 1 and 2 are refused at the header and
+rebuilt. What follows describes version 2 and the reads planned over it.
+
 All integers little-endian. Offsets in the file header and shard directory are absolute;
 offsets inside a shard blob are relative to the blob start. Every blob and section starts on
 an 8-byte boundary.
@@ -291,10 +299,10 @@ Header, 256 bytes:
 | Offset | Type | Field |
 |---|---|---|
 | 0 | 8 bytes | magic `43 43 53 4E 41 50 0D 0A` ("CCSNAP\r\n") |
-| 8 | u32 | formatVersion = 1 |
+| 8 | u32 | formatVersion = 3 (1 had no Inputs section, no bit 1, no root time; 2 held ten more sections per shard; both refused like any other version) |
 | 12 | u32 | endianTag = 0x01020304 |
 | 16 | u32 | headerSize = 256 |
-| 20 | u32 | flags; bit 0 = paths compared case-insensitively by the writer |
+| 20 | u32 | flags; bit 0 = paths compared case-insensitively by the writer; bit 1 = written while no scan had verified the store (never answered from without a worker) |
 | 24 | u64 | fileLength, including the footer |
 | 32 | u64 | snapshotSequence |
 | 40 | u64 | storeGeneration at capture |
@@ -304,7 +312,8 @@ Header, 256 bytes:
 | 68 | u32 | shardCount |
 | 72 | u64 | shardDirectoryOffset |
 | 80 | 16 bytes | writer instance id |
-| 96 | 160 bytes | reserved, zero |
+| 96 | i64 | the root directory's change time once the cache directory existed (0 for none), for the one-shot check |
+| 104 | 152 bytes | reserved, zero |
 
 Host meta: `u32 count`, then per entry `u16 keyLength, key, u32 valueLength, value` in UTF-8.
 Keys: `hostVersion` (informational version), `rootPath`, `platform`.
@@ -344,6 +353,7 @@ u64 offset, u64 length`.
 | 18 | TypeHistogram | node kinds then edge kinds, each `u32 count, (u32 typeStr, u32 n)*` |
 | 19 | Coverage | UTF-8 JSON array of `ProjectCoverage`, or empty |
 | 20 | Fingerprints | UTF-8 JSON array exactly as the worker sent it, or empty |
+| 21 | Inputs | UTF-8 JSON `{files, absent}` as the host kept the worker's `inputs` (sorted, fully qualified), or empty when it reported none |
 
 Strings. Reference 0 is null; reference k is entry k - 1. The empty string is a real entry.
 Strings are deduplicated ordinally per shard. Folded names (`Name.ToUpperInvariant()`) occupy
@@ -405,11 +415,11 @@ or differs, this list is the format. A reader requires exactly this layout.
    after it; each blob at the boundary after the previous part; the footer at the boundary
    after the last blob. Inside a blob each section starts at the boundary after the
    previous one and the blob ends at the boundary after its last section. Padding is zero.
-2. Section table: kinds 1 to 20, each once, in kind order. Element sizes: ShardMeta 1,
+2. Section table: kinds 1 to 21, each once, in kind order. Element sizes: ShardMeta 1,
    StringOffsets 4, StringBytes 1, Nodes 80, Edges 32, IdTable 8, the three hashes 4,
    BySourceOffsets 4, ByTargetOffsets 4, ByTargetEdges 4, Files 24, NameTable 12,
    NamePostings 4, Metadata 4, CrossShardEdges 4, TypeHistogram 4, Coverage 1,
-   Fingerprints 1.
+   Fingerprints 1, Inputs 1.
 3. Host meta keys are written in the order hostVersion, rootPath, platform, at most 1 MiB;
    `platform` is not checked on read. ShardMeta holds parserId and workspaceId, then
    `parserVersion`, `stateFile`, `stateId`, `stateSha256` when present. A key/value block
@@ -466,8 +476,8 @@ or differs, this list is the format. A reader requires exactly this layout.
     non-null target is no node of the shard. TypeHistogram writes node kinds then edge
     kinds, each in ordinal type order, skipping null and empty types.
 18. Sections whose length no count fixes: IdentifierHash, CrossShardEdges, the null-target
-    tail of ByTargetEdges, and the self-describing Metadata, ShardMeta, Coverage and
-    Fingerprints. All other section lengths must match their counts exactly.
+    tail of ByTargetEdges, and the self-describing Metadata, ShardMeta, Coverage,
+    Fingerprints and Inputs. All other section lengths must match their counts exactly.
 19. Validation order, replacing steps 1 to 5 above: (1) the name is
     `graph.<10 digits>.<8 lowercase hex>.ccsnap` and the header sequence equals the
     name's, so an older authentic file cannot be renamed to look newer; (2) on Unix,

@@ -1,8 +1,8 @@
 using System;
-using System.Collections.Frozen;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Threading;
 using static System.StringComparison;
 using CodeContext.Core.Services;
@@ -28,8 +28,9 @@ namespace CodeContext.Core.Repositories.InMemory
         internal static readonly Comparison<CodeNode> ById =
             static (left, right) => string.CompareOrdinal(left.Id, right.Id);
 
+        // Ordinal order of the id text, compared on the parts of an id kept as parts (no text is produced).
         internal static readonly Comparison<CodeEdge> EdgeById =
-            static (left, right) => string.CompareOrdinal(left.Id, right.Id);
+            static (left, right) => EdgeIdKeys.Compare(left.IdKey, right.IdKey);
 
         // Sorting is deferred to first use everywhere: the edit path (commit, then a keyed query)
         // rebuilds this snapshot and should sort only what it reads.
@@ -86,76 +87,99 @@ namespace CodeContext.Core.Repositories.InMemory
             var nodes = new CodeNode[nodeValues.Count];
             nodeValues.CopyTo(nodes, 0);
 
-            var byFilePath = new Dictionary<string, List<CodeNode>>(StringComparer.OrdinalIgnoreCase);
+            var byFilePath = new BucketIndex<CodeNode>.Builder(StringComparer.OrdinalIgnoreCase, nodes.Length);
             foreach (var node in nodes)
-            {
-                if (string.IsNullOrWhiteSpace(node.FilePath)) continue;
-                var key = FilePathMatcher.Normalize(node.FilePath);
-                if (!byFilePath.TryGetValue(key, out var bucket))
-                    byFilePath[key] = bucket = new List<CodeNode>();
-                bucket.Add(node);
-            }
+                byFilePath.Count(string.IsNullOrWhiteSpace(node.FilePath) ? null : FilePathMatcher.Normalize(node.FilePath));
 
             var edges = new CodeEdge[edgeValues.Count];
             edgeValues.CopyTo(edges, 0);
-            var bySource = new Dictionary<string, List<CodeEdge>>(StringComparer.Ordinal);
-            var byTarget = new Dictionary<string, List<CodeEdge>>(StringComparer.Ordinal);
+            var bySource = new BucketIndex<CodeEdge>.Builder(StringComparer.Ordinal, edges.Length);
+            var byTarget = new BucketIndex<CodeEdge>.Builder(StringComparer.Ordinal, edges.Length);
             foreach (var edge in edges)
             {
-                if (edge.SourceId is not null)
-                {
-                    if (!bySource.TryGetValue(edge.SourceId, out var bucket))
-                        bySource[edge.SourceId] = bucket = new List<CodeEdge>();
-                    bucket.Add(edge);
-                }
-                if (edge.TargetId is not null)
-                {
-                    if (!byTarget.TryGetValue(edge.TargetId, out var bucket))
-                        byTarget[edge.TargetId] = bucket = new List<CodeEdge>();
-                    bucket.Add(edge);
-                }
+                bySource.Count(edge.SourceId);
+                byTarget.Count(edge.TargetId);
             }
 
             return new GraphAdjacency(
                 nodes,
                 edges,
-                new BucketIndex<CodeEdge>(bySource, EdgeById),
-                new BucketIndex<CodeEdge>(byTarget, EdgeById),
-                new BucketIndex<CodeNode>(byFilePath, ById));
+                bySource.Build(edges, EdgeById),
+                byTarget.Build(edges, EdgeById),
+                byFilePath.Build(nodes, ById));
         }
 
         /// <summary>
         /// Lists grouped by key, each sorted into id order on first read. A shard has a bucket per
         /// distinct source, target and file, so the buckets are slots of one array with one array
-        /// of flags rather than an object each. A bucket's sort runs once, under a lock on its
+        /// of flags rather than an object each, and the keys are in a plain dictionary: a frozen one
+        /// took as long to make as the rest of the snapshot. A bucket's sort runs once, under a lock on its
         /// array; the array is handed out only after it, and never changes again.
         /// </summary>
         private sealed class BucketIndex<T>
         {
-            private readonly FrozenDictionary<string, int> _slots;
+            // Written only by the builder, before the index exists: any number of readers may share it.
+            private readonly Dictionary<string, int> _slots;
             private readonly T[][] _buckets;
             private readonly bool[] _sorted;
             private readonly Comparison<T> _comparison;
 
-            public BucketIndex(Dictionary<string, List<T>> groups, Comparison<T> comparison)
+            private BucketIndex(Dictionary<string, int> slots, T[][] buckets, Comparison<T> comparison)
             {
-                _buckets = new T[groups.Count][];
-                _sorted = new bool[groups.Count];
-                var slots = new KeyValuePair<string, int>[groups.Count];
-                var slot = 0;
-                foreach (var (key, items) in groups)
-                {
-                    _buckets[slot] = items.ToArray();
-                    _sorted[slot] = items.Count < 2;
-                    slots[slot] = KeyValuePair.Create(key, slot);
-                    slot++;
-                }
-                _slots = slots.ToFrozenDictionary(groups.Comparer);
+                _slots = slots;
+                _buckets = buckets;
+                _sorted = new bool[buckets.Length];
+                for (var i = 0; i < buckets.Length; i++) _sorted[i] = buckets[i].Length < 2;
                 _comparison = comparison;
             }
 
-            /// <summary>Every key with its slot, in the frozen dictionary's (unspecified) order.</summary>
-            public FrozenDictionary<string, int> Slots => _slots;
+            /// <summary>
+            /// Groups items in two passes. The first gives each item's key a slot and counts it; the second
+            /// fills arrays of exactly those sizes. A key is hashed once per item, and no list grows.
+            /// </summary>
+            public sealed class Builder(IEqualityComparer<string> comparer, int itemCount)
+            {
+                private readonly Dictionary<string, int> _slots = new(comparer);
+                private readonly int[] _slotOfItem = new int[itemCount];
+                private int[] _counts = new int[16];
+                private int _item;
+
+                /// <summary>Records the next item's key; a null key leaves that item out of the index.</summary>
+                public void Count(string? key)
+                {
+                    if (key is null)
+                    {
+                        _slotOfItem[_item++] = -1;
+                        return;
+                    }
+                    ref var slot = ref CollectionsMarshal.GetValueRefOrAddDefault(_slots, key, out var known);
+                    if (!known)
+                    {
+                        slot = _slots.Count - 1;
+                        if (slot == _counts.Length) Array.Resize(ref _counts, 2 * _counts.Length);
+                    }
+                    _counts[slot]++;
+                    _slotOfItem[_item++] = slot;
+                }
+
+                /// <summary>The index over <paramref name="items"/>, the items whose keys were counted, in that order.</summary>
+                public BucketIndex<T> Build(T[] items, Comparison<T> comparison)
+                {
+                    var buckets = new T[_slots.Count][];
+                    for (var slot = 0; slot < buckets.Length; slot++) buckets[slot] = new T[_counts[slot]];
+                    var filled = _counts;
+                    Array.Clear(filled, 0, buckets.Length);
+                    for (var i = 0; i < items.Length; i++)
+                    {
+                        var slot = _slotOfItem[i];
+                        if (slot >= 0) buckets[slot][filled[slot]++] = items[i];
+                    }
+                    return new BucketIndex<T>(_slots, buckets, comparison);
+                }
+            }
+
+            /// <summary>Every key with its slot, in no specified order.</summary>
+            public Dictionary<string, int> Slots => _slots;
 
             public bool TryGetValue(string key, out T[] items)
             {

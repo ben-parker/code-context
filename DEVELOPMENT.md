@@ -60,6 +60,18 @@ Release on an otherwise idle machine:
 dotnet test tests/CodeContext.Core.Tests/CodeContext.Core.Tests.csproj -c Release --filter "Category=Benchmark" --logger "console;verbosity=detailed"
 ```
 
+To measure memory, build in Release and run `scripts/bench/measure-memory.sh` (Linux,
+needs `jq`; `--heap` needs `dotnet-gcdump`). It starts an instance on `--path`, cached by
+default or with `--no-cache`, and prints RSS and anonymous/file PSS per process once the
+index is ready, the snapshot written after the start is on disk, and the processes have
+been quiet for `--settle` seconds (default 20) and their RSS is stable; `--queries` adds
+a reading after a fixed query mix, `--heap` the live managed heap of the host and C#
+worker by type. It stops the instance and removes a `.codecontext` it created:
+
+```bash
+scripts/bench/measure-memory.sh --path . --queries --heap
+```
+
 Test the standalone worker SDKs as well:
 
 ```bash
@@ -122,10 +134,36 @@ has its own identity, uncommitted edits included) refuses that state and re-walk
 everything, as do workers without the capability. To start without the saved index,
 use `--no-cache` or delete `<root>/.codecontext/cache/` first.
 
+`codecontext query --snapshot` (or with `CodeContext__QueryFromSnapshot=true`) with no
+instance running reads the newest snapshot in its own process (`OneShotSnapshot`) and
+answers from it, labelled `cache snapshot`, when nothing it was made from changed since
+by file time (`SnapshotFreshness`): the files and folders a scan walks, plus exactly what
+each worker reported it read (`inputs` in `analysis/delta`, stored in the snapshot): files
+that must be there and no newer than when the host asked the worker for the index or project
+reread that read them (recorded beside each shard, `inputsReadUtcTicks`; a snapshot without it
+is not answered from and is written again), paths that must still be absent. Times come from
+`FileChangeTime` (the status change time on Linux, the file system's change time read
+from the entry itself on Windows, the later of write and creation time on macOS; the
+limits each leaves are in `FileChangeTime` and the skill's operations reference). It creates, locks and writes nothing
+and starts no worker; anything else (changed files, no key, a refused snapshot, a shard
+whose worker reported no inputs or saved no state, a snapshot written unverified, the
+cache off) starts an instance as before. After a verification, a host rewrites, in the
+background, a snapshot older than some input even when no fact changed, so a touched
+file does not keep later queries off the saved index.
+
 To clear the cache, stop the instance and delete `<root>/.codecontext/cache/`;
 deleting `~/.codecontext/cache.key` invalidates every snapshot of that user. To run
 without it, start with `--no-cache` (or set `CodeContext__CacheEnabled=false`): no
 key, no directory, nothing loaded or written.
+
+After a burst of work (the start-up load and scan, a snapshot write, a run of queries, a
+C# worker index or update) the host and the C# worker each run one aggressive compacting
+garbage collection once they have been quiet for 15 seconds, which returns the burst's
+garbage to the operating system (a pause of about 0.1 to 0.25 s, never while a request,
+commit, snapshot write or worker request is in flight, at most once per 30 s, and only
+after 32 MB or more was allocated since the last). The host's log has one line per trim,
+the C# worker's (`[csharp stderr] trim:`) as well. `CodeContext__MemoryTrimSeconds` sets
+the quiet period in seconds for both; `0` turns it off.
 
 Keep `.codecontext/` out of version control. The cache directory writes its own
 `.gitignore`, and this repository ignores `.codecontext/` too. A committed snapshot

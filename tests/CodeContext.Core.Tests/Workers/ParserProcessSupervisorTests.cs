@@ -1,8 +1,10 @@
+using Microsoft.Extensions.Logging;
 using System.Diagnostics;
 using CodeContext.Core.Repositories;
 using CodeContext.Core.Repositories.InMemory;
 using CodeContext.Core.Workers;
 using CodeContext.Parser.Protocol;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace CodeContext.Core.Tests.Workers;
@@ -34,10 +36,11 @@ public class ParserProcessSupervisorTests
     private static ParserProcessSupervisor CreateSupervisor(
         WorkerLaunchSpec spec,
         ParserWorkerOptions? options = null,
-        IParserSessionRegistry? registry = null)
+        IParserSessionRegistry? registry = null,
+        ILogger<ParserProcessSupervisor>? logger = null)
         => new(spec,
             options ?? TestWorkerOptions.Patient(),
-            NullLogger<ParserProcessSupervisor>.Instance,
+            logger ?? NullLogger<ParserProcessSupervisor>.Instance,
             registry,
             new CodeContextOptions { RootPath = Path.GetTempPath() });
 
@@ -324,6 +327,133 @@ public class ParserProcessSupervisorTests
         await supervisor.DisposeAsync();
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task TheWorkersShutdownAnswer_IsAcceptedAsClean(bool hibernate)
+    {
+        // The fake worker answers shutdown as the schema says: "result": null. The host used to refuse that envelope,
+        // end the read loop and fall back to EOF; the stop went on, so only this log line showed it.
+        var logger = new CodeContext.Core.Tests.Snapshots.ListLogger<ParserProcessSupervisor>();
+        await using var supervisor = CreateSupervisor(FakeWorkerSpec(), logger: logger);
+        supervisor.DeltaHandler = (_, _) => Task.FromResult(true);
+        await supervisor.IndexWorkspaceAsync(new IndexWorkspaceParams("ws-1", 1, ["a.fake"]));
+
+        if (hibernate) Assert.True(await supervisor.HibernateAsync());
+        else await supervisor.ShutdownAsync();
+
+        Assert.DoesNotContain(logger.Entries, entry => entry.Message.Contains("shutdown request", StringComparison.Ordinal));
+        Assert.DoesNotContain(logger.Entries, entry => entry.Message.Contains("malformed", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task Hibernate_OfAWorkerThatIgnoresShutdownAndEof_IsBounded_ThenKills()
+    {
+        // Production waits: 5 s for the shutdown answer and 5 s for the exit after EOF. A stop at host shutdown may
+        // take them; a hibernation runs on the coordinator's loop under the worker's lock and must not.
+        var options = new ParserWorkerOptions { InitializeTimeout = TimeSpan.FromSeconds(60) };
+        await using var supervisor = CreateSupervisor(FakeWorkerSpec("--behavior", "ignore-shutdown"), options);
+        supervisor.DeltaHandler = (_, _) => Task.FromResult(true);
+        await supervisor.IndexWorkspaceAsync(new IndexWorkspaceParams("ws-1", 1, ["a.fake"]));
+        var pid = supervisor.Snapshot.ProcessId!.Value;
+
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        Assert.True(await supervisor.HibernateAsync());
+        watch.Stop();
+
+        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(4), $"Hibernating took {watch.Elapsed.TotalSeconds:0.0} s.");
+        Assert.True(HasProcessExited(pid), "The worker process should have been killed.");
+        Assert.Equal(ParserSessionState.Hibernated, supervisor.Snapshot.State);
+    }
+
+    [Fact]
+    public async Task Hibernate_StopsTheProcessWithoutCountingARestart()
+    {
+        var registry = new ParserSessionRegistry();
+        await using var supervisor = CreateSupervisor(FakeWorkerSpec(), registry: registry);
+        supervisor.DeltaHandler = (_, _) => Task.FromResult(true);
+        await supervisor.IndexWorkspaceAsync(new IndexWorkspaceParams("ws-1", 1, ["a.fake"]));
+        var pid = supervisor.Snapshot.ProcessId!.Value;
+
+        Assert.True(await supervisor.HibernateAsync());
+
+        Assert.True(HasProcessExited(pid), "The worker process should have exited.");
+        var session = Assert.Single(registry.GetSnapshots());
+        Assert.True(session.State == ParserSessionState.Hibernated, $"{session.State}: {session.LastError}");
+        Assert.Null(session.ProcessId);
+        Assert.Null(session.LastError);
+        Assert.Equal(0, session.RestartCount);
+        Assert.False(supervisor.IsLive);
+        // Nothing left to stop: a second hibernate does nothing.
+        Assert.False(await supervisor.HibernateAsync());
+    }
+
+    [Fact]
+    public async Task RequestAfterHibernate_StartsANewProcess()
+    {
+        await using var supervisor = CreateSupervisor(FakeWorkerSpec());
+        supervisor.DeltaHandler = (_, _) => Task.FromResult(true);
+        await supervisor.IndexWorkspaceAsync(new IndexWorkspaceParams("ws-1", 1, ["a.fake"]));
+        var pid = supervisor.Snapshot.ProcessId;
+        var incarnation = supervisor.Incarnation;
+        Assert.True(await supervisor.HibernateAsync());
+
+        var result = await supervisor.IndexWorkspaceAsync(new IndexWorkspaceParams("ws-1", 2, ["a.fake"]));
+
+        Assert.True(result.Complete);
+        Assert.Equal(ParserSessionState.Ready, supervisor.Snapshot.State);
+        Assert.NotEqual(pid, supervisor.Snapshot.ProcessId);
+        Assert.NotEqual(incarnation, supervisor.Incarnation);
+        Assert.Equal(0, supervisor.Snapshot.RestartCount);
+    }
+
+    [Fact]
+    public async Task CrashAfterAWake_StillCountsAgainstTheRestartBudget()
+    {
+        var marker = Path.Combine(Path.GetTempPath(), $"cc-crash-once-{Guid.NewGuid():N}");
+        try
+        {
+            await using var supervisor = CreateSupervisor(FakeWorkerSpec("--behavior", "crash-once", "--marker", marker));
+            supervisor.DeltaHandler = (_, _) => Task.FromResult(true);
+            await supervisor.EnsureInitializedAsync();
+            Assert.True(await supervisor.HibernateAsync());
+
+            // The woken process crashes: a failure like any other, then a counted restart.
+            await Assert.ThrowsAsync<ParserWorkerFailedException>(
+                () => supervisor.IndexWorkspaceAsync(new IndexWorkspaceParams("ws-1", 1, ["a.fake"])));
+            Assert.Equal(ParserSessionState.Failed, supervisor.Snapshot.State);
+            await supervisor.IndexWorkspaceAsync(new IndexWorkspaceParams("ws-1", 2, ["a.fake"]));
+            Assert.Equal(1, supervisor.Snapshot.RestartCount);
+            Assert.Equal(ParserSessionState.Ready, supervisor.Snapshot.State);
+        }
+        finally
+        {
+            File.Delete(marker);
+        }
+    }
+
+    [Fact]
+    public async Task Hibernate_DoesNothingBeforeAStartOrAfterAStop()
+    {
+        await using var supervisor = CreateSupervisor(FakeWorkerSpec());
+        Assert.False(await supervisor.HibernateAsync());
+        await supervisor.EnsureInitializedAsync();
+        await supervisor.ShutdownAsync();
+        Assert.False(await supervisor.HibernateAsync());
+        Assert.Equal(ParserSessionState.Stopped, supervisor.Snapshot.State);
+    }
+
+    [Fact]
+    public async Task ShutdownOfAHibernatedWorker_Stops()
+    {
+        await using var supervisor = CreateSupervisor(FakeWorkerSpec());
+        await supervisor.EnsureInitializedAsync();
+        Assert.True(await supervisor.HibernateAsync());
+        await supervisor.ShutdownAsync();
+        Assert.Equal(ParserSessionState.Stopped, supervisor.Snapshot.State);
+        await Assert.ThrowsAsync<ParserWorkerUnavailableException>(() => supervisor.EnsureInitializedAsync());
+    }
+
     [Fact]
     public async Task StdinEof_MakesWorkerExitOnItsOwn()
     {
@@ -452,6 +582,40 @@ public class ParserProcessSupervisorTests
         var startInfo = ParserProcessSupervisor.BuildStartInfo(spec, options);
 
         Assert.Equal("from-options", startInfo.Environment["KEY"]);
+    }
+
+    [Fact]
+    public void BuildStartInfo_CommonEnvironment_ReachesEveryWorker_AndAParserEntryWins()
+    {
+        var options = new ParserWorkerOptions
+        {
+            CommonEnvironment = new Dictionary<string, string> { ["SHARED"] = "common", ["KEY"] = "common" },
+            WorkerEnvironment = new Dictionary<string, IReadOnlyDictionary<string, string>>
+            {
+                ["csharp"] = new Dictionary<string, string> { ["KEY"] = "from-options" },
+            },
+        };
+        var spec = new WorkerLaunchSpec("csharp", "C#", "worker", [],
+            Environment: new Dictionary<string, string> { ["SHARED"] = "from-spec" });
+
+        var csharp = ParserProcessSupervisor.BuildStartInfo(spec, options);
+        var typescript = ParserProcessSupervisor.BuildStartInfo(new WorkerLaunchSpec("typescript", "TS", "worker", []), options);
+
+        Assert.Equal("common", csharp.Environment["SHARED"]);
+        Assert.Equal("from-options", csharp.Environment["KEY"]);
+        Assert.Equal("common", typescript.Environment["KEY"]);
+    }
+
+    [Fact]
+    public void FromConfiguration_ForwardsTheMemoryTrimSetting_ToEveryWorker()
+    {
+        var configured = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["CodeContext:MemoryTrimSeconds"] = "0" })
+            .Build();
+        var unconfigured = new ConfigurationBuilder().Build();
+
+        Assert.Equal("0", ParserWorkerOptions.FromConfiguration(configured).CommonEnvironment!["CodeContext__MemoryTrimSeconds"]);
+        Assert.Null(ParserWorkerOptions.FromConfiguration(unconfigured).CommonEnvironment);
     }
 
     [Fact]

@@ -1,4 +1,5 @@
 using System.Threading.Channels;
+using CodeContext.Core.Memory;
 using CodeContext.Core.Snapshots;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -30,6 +31,7 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
 
     private abstract record Command;
     private sealed record FileChangedCommand(string Path, FileChangeType Type) : Command;
+    private sealed record SubtreeChangedCommand(string Path) : Command;
     private sealed record FullScanCommand : Command;
     private sealed record RefreshFileCommand(string Path, TaskCompletionSource Completion) : Command;
 
@@ -70,6 +72,33 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
         public override void Abandon() => Completion.TrySetResult(null);
     }
 
+    /// <summary>Maintenance work handed in as a delegate (a worker hibernation check). The loop waits for it.</summary>
+    private sealed record DelegateMaintenanceCommand(Func<CancellationToken, Task> Work, TaskCompletionSource Completion)
+        : MaintenanceCommand
+    {
+        public override async Task RunAsync(CancellationToken ct)
+        {
+            try
+            {
+                await Work(ct).ConfigureAwait(false);
+                Completion.TrySetResult();
+            }
+            catch (OperationCanceledException)
+            {
+                Completion.TrySetCanceled();
+            }
+            catch (Exception ex)
+            {
+                Completion.TrySetException(ex);
+            }
+        }
+
+        public override void Abandon() => Completion.TrySetCanceled();
+    }
+
+    /// <summary>A mutation handed in as a delegate (a worker's wake re-index): indexing work, ordered with the rest.</summary>
+    private sealed record DelegateMutationCommand(Func<CancellationToken, Task> Work, TaskCompletionSource Completion) : Command;
+
     private readonly Channel<Command> _commands = Channel.CreateBounded<Command>(
         new BoundedChannelOptions(4096)
         {
@@ -84,6 +113,7 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
     private readonly ILogger<IndexCoordinator> _logger;
     private readonly IRepositoryFileSelector _fileSelector;
     private readonly CacheState? _cacheState;
+    private readonly QuietTimeTrim? _memoryTrim;
 
     private int _busy;
     private int _queuedMaintenance;
@@ -95,8 +125,10 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
         IOptions<CodeContextOptions> options,
         ILoggerFactory loggerFactory,
         IRepositoryFileSelector? fileSelector = null,
-        CacheState? cacheState = null)
+        CacheState? cacheState = null,
+        QuietTimeTrim? memoryTrim = null)
     {
+        _memoryTrim = memoryTrim;
         _graphUpdateService = graphUpdateService;
         _scanState = scanState;
         _options = options.Value;
@@ -148,9 +180,39 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
         return command.Completion.Task;
     }
 
+    /// <summary>
+    /// Queues <paramref name="work"/> to run on the loop between commands, as maintenance: it never makes
+    /// <see cref="IsBusy"/> true and is not followed by the mutation observer, so it must not change the store. One that
+    /// arrives while a file batch is being coalesced runs after that batch. Completes with the work; cancelled when the
+    /// coordinator has stopped or its queue is full.
+    /// </summary>
+    internal Task RunMaintenanceAsync(Func<CancellationToken, Task> work)
+    {
+        var command = new DelegateMaintenanceCommand(work, new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously));
+        if (_commands.Writer.TryWrite(command)) Interlocked.Increment(ref _queuedMaintenance);
+        else command.Abandon();
+        return command.Completion.Task;
+    }
+
+    /// <summary>
+    /// Queues <paramref name="work"/>, which may commit, as a mutation command: ordered with scans, batches and refreshes,
+    /// busy while it runs, and followed by the mutation observer. Completes with the work.
+    /// </summary>
+    internal async Task RunMutationAsync(Func<CancellationToken, Task> work, CancellationToken ct = default)
+    {
+        var command = new DelegateMutationCommand(work, new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously));
+        await _commands.Writer.WriteAsync(command, ct);
+        await command.Completion.Task.WaitAsync(ct);
+    }
+
     public async ValueTask NotifyFileChangedAsync(string fullPath, FileChangeType changeType, CancellationToken ct = default)
     {
         await _commands.Writer.WriteAsync(new FileChangedCommand(fullPath, changeType), ct);
+    }
+
+    public async ValueTask NotifySubtreeChangedAsync(string directoryPath, CancellationToken ct = default)
+    {
+        await _commands.Writer.WriteAsync(new SubtreeChangedCommand(directoryPath), ct);
     }
 
     public async Task<long?> TryRequestFullRescanAsync(CancellationToken ct = default)
@@ -202,18 +264,22 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
             // are published in one swap, and status says "scanning" until then. The load itself is not
             // cancellable (it is bounded by the candidate cap and the size cap); a stop that arrived
             // during it is honoured before the scan starts.
-            var loaded = RunLoadStep();
-            stoppingToken.ThrowIfCancellationRequested();
-
-            // Startup scan: resumable, so an instance restarted over a warm metadata
-            // store only re-processes what changed; after a load, the full-scan flow, so
-            // every worker replaces what the snapshot holds. Runs after the HTTP host has
-            // bound, and inside the try so a shutdown mid-scan still drains queued refresh
-            // waiters in the finally below.
-            if (_scanState.TryBeginScan())
+            // The load and the startup scan are one burst for the quiet-time memory trim.
+            using (_memoryTrim?.BeginActivity())
             {
-                await RunScanAsync(resumable: !loaded, stoppingToken);
-                NotifyMutationObserver();
+                var loaded = RunLoadStep();
+                stoppingToken.ThrowIfCancellationRequested();
+
+                // Startup scan: resumable, so an instance restarted over a warm metadata
+                // store only re-processes what changed; after a load, the full-scan flow, so
+                // every worker replaces what the snapshot holds. Runs after the HTTP host has
+                // bound, and inside the try so a shutdown mid-scan still drains queued refresh
+                // waiters in the finally below.
+                if (_scanState.TryBeginScan())
+                {
+                    await RunScanAsync(resumable: !loaded, stoppingToken);
+                    NotifyMutationObserver();
+                }
             }
 
             while (await _commands.Reader.WaitToReadAsync(stoppingToken))
@@ -241,6 +307,10 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
                 {
                     refresh.Completion.TrySetCanceled();
                 }
+                else if (remaining is DelegateMutationCommand mutation)
+                {
+                    mutation.Completion.TrySetCanceled();
+                }
                 else if (remaining is MaintenanceCommand maintenance)
                 {
                     Interlocked.Decrement(ref _queuedMaintenance);
@@ -253,6 +323,7 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
     /// <summary>Processes one command; returns a follow-up command if one was read while draining.</summary>
     private async Task<Command?> ProcessCommandAsync(Command command, CancellationToken ct)
     {
+        using var activity = _memoryTrim?.BeginActivity();
         if (command is MaintenanceCommand maintenance)
         {
             // Not indexing work: _busy stays as it is.
@@ -267,8 +338,8 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
         {
             switch (command)
             {
-                case FileChangedCommand firstChange:
-                    return await ProcessChangeBatchAsync(firstChange, ct);
+                case FileChangedCommand or SubtreeChangedCommand:
+                    return await ProcessChangeBatchAsync(command, ct);
 
                 case FullScanCommand:
                     await RunScanAsync(resumable: false, ct);
@@ -303,6 +374,25 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
                     }
                     return null;
 
+                case DelegateMutationCommand mutation:
+                    try
+                    {
+                        await mutation.Work(ct);
+                        notified = true;
+                        NotifyMutationObserver();
+                        mutation.Completion.TrySetResult();
+                    }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                    {
+                        mutation.Completion.TrySetCanceled(ct);
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        mutation.Completion.TrySetException(ex);
+                    }
+                    return null;
+
                 default:
                     return null;
             }
@@ -332,18 +422,20 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
     /// while draining ends the batch and is returned to the caller, except a maintenance
     /// command, which waits and runs once the batch is applied.
     /// </summary>
-    private async Task<Command?> ProcessChangeBatchAsync(FileChangedCommand first, CancellationToken ct)
+    private async Task<Command?> ProcessChangeBatchAsync(Command first, CancellationToken ct)
     {
-        var pending = new Dictionary<string, FileChangeType>(
-            OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
-        AddPending(pending, first);
+        var comparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+        var pending = new Dictionary<string, FileChangeType>(comparer);
+        var subtrees = new HashSet<string>(comparer);
+        if (first is FileChangedCommand firstChange) AddPending(pending, firstChange);
+        else subtrees.Add(((SubtreeChangedCommand)first).Path);
 
         Command? interrupting = null;
         List<MaintenanceCommand>? deferred = null;
         var applied = false;
         try
         {
-            interrupting = await CoalesceAndApplyAsync(pending, ct, maintenance => (deferred ??= []).Add(maintenance));
+            interrupting = await CoalesceAndApplyAsync(pending, subtrees, ct, maintenance => (deferred ??= []).Add(maintenance));
             applied = true;
         }
         finally
@@ -362,7 +454,7 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
     }
 
     private async Task<Command?> CoalesceAndApplyAsync(
-        Dictionary<string, FileChangeType> pending, CancellationToken ct, Action<MaintenanceCommand> defer)
+        Dictionary<string, FileChangeType> pending, HashSet<string> subtrees, CancellationToken ct, Action<MaintenanceCommand> defer)
     {
         Command? interrupting = null;
         var deadline = DateTimeOffset.UtcNow + MaxBatchLatency;
@@ -379,6 +471,10 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
             {
                 AddPending(pending, change);
             }
+            else if (next is SubtreeChangedCommand subtree)
+            {
+                subtrees.Add(subtree.Path);
+            }
             else if (next is MaintenanceCommand maintenance)
             {
                 // Maintenance does not end the batch; it runs once the batch is applied.
@@ -389,6 +485,25 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator
             {
                 interrupting = next;
                 break;
+            }
+        }
+
+        if (subtrees.Count > 0)
+        {
+            // A directory that appeared, moved or went is reconciled as a whole, here on the loop: one
+            // notification, however many files it holds. A file's own event in this batch keeps its type.
+            try
+            {
+                foreach (var change in await _graphUpdateService.ExpandSubtreesAsync(subtrees, ct))
+                    pending.TryAdd(change.Path, change.Type);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to reconcile {Count} changed directories.", subtrees.Count);
             }
         }
 

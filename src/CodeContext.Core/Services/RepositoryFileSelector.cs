@@ -88,6 +88,30 @@ public sealed class RepositoryFileSelector : IRepositoryFileSelector
             .ToFrozenSet(StringComparer.OrdinalIgnoreCase);
         var extensionLookup = extensions.GetAlternateLookup<ReadOnlySpan<char>>();
         var files = new List<string>();
+        Walk(withTimes: false, entry =>
+        {
+            if (!entry.IsDirectory && extensionLookup.Contains(Path.GetExtension(entry.Path.AsSpan())))
+                files.Add(entry.Path);
+            return true;
+        });
+        return files;
+    }
+
+    /// <summary>
+    /// Every file and directory under the root that this policy includes, whatever its extension, with
+    /// its last write and creation times (UTC) when <paramref name="withTimes"/> (free on Windows, a stat per
+    /// entry elsewhere): the walk <see cref="EnumerateIncludedFiles"/> makes, so a caller that checks files
+    /// against a saved index sees exactly the files a scan would. The root itself is not visited. The walk
+    /// stops when <paramref name="visit"/> returns false.
+    /// </summary>
+    internal void WalkIncluded(bool withTimes, Func<ScannedEntry, bool> visit)
+    {
+        Invalidate();
+        Walk(withTimes, visit);
+    }
+
+    private void Walk(bool withTimes, Func<ScannedEntry, bool> visit)
+    {
         var directories = new Stack<string>();
         directories.Push(_rootPath);
 
@@ -105,11 +129,18 @@ public sealed class RepositoryFileSelector : IRepositoryFileSelector
         while (directories.TryPop(out var directory))
         {
             RulesFor(directory);
-            var entries = new FileSystemEnumerable<ScannedEntry>(
-                directory,
-                static (ref FileSystemEntry entry) =>
-                    new ScannedEntry(entry.ToFullPath(), entry.IsDirectory, entry.Attributes),
-                enumerationOptions);
+            var entries = withTimes
+                ? new FileSystemEnumerable<ScannedEntry>(
+                    directory,
+                    static (ref FileSystemEntry entry) => new ScannedEntry(
+                        entry.ToFullPath(), entry.IsDirectory, entry.Attributes,
+                        entry.LastWriteTimeUtc.UtcDateTime, entry.CreationTimeUtc.UtcDateTime),
+                    enumerationOptions)
+                : new FileSystemEnumerable<ScannedEntry>(
+                    directory,
+                    static (ref FileSystemEntry entry) =>
+                        new ScannedEntry(entry.ToFullPath(), entry.IsDirectory, entry.Attributes),
+                    enumerationOptions);
 
             try
             {
@@ -123,14 +154,8 @@ public sealed class RepositoryFileSelector : IRepositoryFileSelector
                         continue;
                     }
 
-                    if (entry.IsDirectory)
-                    {
-                        directories.Push(entry.Path);
-                    }
-                    else if (extensionLookup.Contains(Path.GetExtension(entry.Path.AsSpan())))
-                    {
-                        files.Add(entry.Path);
-                    }
+                    if (entry.IsDirectory) directories.Push(entry.Path);
+                    if (!visit(entry)) return;
                 }
             }
             catch (UnauthorizedAccessException)
@@ -142,11 +167,11 @@ public sealed class RepositoryFileSelector : IRepositoryFileSelector
                 // Broken links and disappearing directories do not fail the scan.
             }
         }
-
-        return files;
     }
 
-    private readonly record struct ScannedEntry(string Path, bool IsDirectory, FileAttributes Attributes);
+    internal readonly record struct ScannedEntry(
+        string Path, bool IsDirectory, FileAttributes Attributes,
+        DateTime LastWriteTimeUtc = default, DateTime CreationTimeUtc = default);
 
     public bool IsIncluded(string path, bool isDirectory = false)
     {
@@ -230,6 +255,18 @@ public sealed class RepositoryFileSelector : IRepositoryFileSelector
         return included;
     }
 
+    private static bool IsLink(string path)
+    {
+        try
+        {
+            return (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return true;
+        }
+    }
+
     private IEnumerable<string> AncestorDirectories(string directory)
     {
         var chain = new Stack<string>();
@@ -258,7 +295,9 @@ public sealed class RepositoryFileSelector : IRepositoryFileSelector
             if (_rulesByDirectory.TryGetValue(directory, out var loaded)) return loaded;
             var ignoreFile = Path.Combine(directory, ".gitignore");
             var rules = new List<IgnorePattern>();
-            if (File.Exists(ignoreFile))
+            // A link is not read, as Git reads none for .gitignore: the rules would be whatever the repository points
+            // it at, outside the tree or on a share, and no scan follows a link.
+            if (File.Exists(ignoreFile) && !IsLink(ignoreFile))
             {
                 try
                 {

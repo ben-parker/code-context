@@ -384,6 +384,191 @@ public sealed class DiskTests : IDisposable
         Assert.Equal(inside, reference.FilePath);
     }
 
+    /// <summary>The files this process holds open, by where each descriptor leads. Linux only.</summary>
+    private static List<string> OpenFiles()
+        => Directory.EnumerateFileSystemEntries("/proc/self/fd")
+            .Select(descriptor => new FileInfo(descriptor).LinkTarget ?? string.Empty)
+            .ToList();
+
+    [Fact]
+    public void AnAssemblyIsHeldAsItsMetadata_WithNoHandleLeftOnTheFile()
+    {
+        // One below the repository and one outside it, as a package or the SDK is.
+        var outside = Directory.CreateTempSubdirectory("cc-disk-outside-").FullName;
+        try
+        {
+            var inside = Path.Combine(_directory, "Held.dll");
+            var packaged = Path.Combine(outside, "Packaged.dll");
+            File.Copy(typeof(object).Assembly.Location, inside);
+            File.Copy(typeof(object).Assembly.Location, packaged);
+            var disk = On(_directory);
+
+            var references = new[] { inside, packaged }
+                .Select(path => (Microsoft.CodeAnalysis.PortableExecutableReference)disk.Reference(path))
+                .ToList();
+
+            // Nothing is left open, so a build or a restore can replace either file while the worker runs.
+            if (OperatingSystem.IsLinux()) Assert.DoesNotContain(OpenFiles(), open => open == inside || open == packaged);
+            File.Delete(inside);
+            File.Delete(packaged);
+
+            // What was read answers without the file, and it binds: the declarations are all there.
+            var compilation = Microsoft.CodeAnalysis.CSharp.CSharpCompilation.Create(
+                "Uses",
+                [Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText("class C { int M(string s) => s.Length; }")],
+                [references[1]],
+                new Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions(Microsoft.CodeAnalysis.OutputKind.DynamicallyLinkedLibrary));
+            Assert.Empty(compilation.GetDiagnostics().Where(diagnostic => diagnostic.Severity == Microsoft.CodeAnalysis.DiagnosticSeverity.Error));
+
+            // The metadata alone: the code of the assembly, most of the file, is not held.
+            Assert.All(references, reference =>
+            {
+                var module = ((Microsoft.CodeAnalysis.AssemblyMetadata)reference.GetMetadata()).GetModules().Single();
+                Assert.Throws<InvalidOperationException>(() => HeldImage(module));
+            });
+        }
+        finally
+        {
+            Directory.Delete(outside, recursive: true);
+        }
+    }
+
+    /// <summary>The whole image a module holds, which only one read whole has: Roslyn's own reader says so.</summary>
+    private static object HeldImage(Microsoft.CodeAnalysis.ModuleMetadata module)
+    {
+        var internalModule = typeof(Microsoft.CodeAnalysis.ModuleMetadata)
+            .GetProperty("Module", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(module)!;
+        var reader = (System.Reflection.PortableExecutable.PEReader)internalModule.GetType()
+            .GetField("_peReaderOpt", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(internalModule)!;
+        try
+        {
+            return reader.GetEntireImage();
+        }
+        catch (TargetInvocationException ex) when (ex.InnerException is not null)
+        {
+            throw ex.InnerException;
+        }
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("not an assembly at all, only text of some length to read")]
+    public void AFileThatIsNoAssemblyIsRefusedAsABadImage(string content)
+    {
+        // The analyzer leaves such a reference out; it must hear of it here, not while binding.
+        var path = Path.Combine(_directory, "Broken.dll");
+        File.WriteAllText(path, content);
+
+        Assert.Throws<BadImageFormatException>(() => On(_directory).Reference(path));
+        if (OperatingSystem.IsLinux()) Assert.DoesNotContain(path, OpenFiles());
+    }
+
+    /// <summary>
+    /// An assembly of several modules, in the repository or outside it, binds every module, and its modules are read
+    /// as its manifest is: into memory, through the guard, with no handle left on any of them (a handle kept on a
+    /// build's output blocks its next build on Windows). What was read besides the manifest is reported as read.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AnAssemblyOfSeveralModulesBindsEveryModule_WithNoHandleLeftOnAny(bool inRepository)
+    {
+        var outside = Directory.CreateTempSubdirectory("cc-disk-modules-").FullName;
+        var at = inRepository ? Directory.CreateDirectory(Path.Combine(_directory, "lib")).FullName : outside;
+        try
+        {
+            var options = new Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions(Microsoft.CodeAnalysis.OutputKind.NetModule);
+            var core = Microsoft.CodeAnalysis.MetadataReference.CreateFromFile(typeof(object).Assembly.Location);
+            var module = Microsoft.CodeAnalysis.CSharp.CSharpCompilation.Create(
+                "Part", [Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText("public class InModule { public int Value => 1; }")], [core], options);
+            var modulePath = Path.Combine(at, "Part.netmodule");
+            using (var written = File.Create(modulePath)) Assert.True(module.Emit(written).Success);
+            var wholePath = Path.Combine(at, "Whole.dll");
+            using (var part = Microsoft.CodeAnalysis.ModuleMetadata.CreateFromFile(modulePath))
+            {
+                var whole = Microsoft.CodeAnalysis.CSharp.CSharpCompilation.Create(
+                    "Whole",
+                    [Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText("public class InMain { }")],
+                    [core, part.GetReference()],
+                    options.WithOutputKind(Microsoft.CodeAnalysis.OutputKind.DynamicallyLinkedLibrary));
+                using var written = File.Create(wholePath);
+                Assert.True(whole.Emit(written).Success);
+            }
+            var disk = On(_directory);
+
+            var reference = disk.Reference(wholePath);
+
+            if (OperatingSystem.IsLinux()) Assert.DoesNotContain(OpenFiles(), open => open == wholePath || open == modulePath);
+            var (files, absent) = Lookups(disk, wholePath);
+            Assert.Equal([modulePath], files);
+            Assert.Empty(absent);
+            File.Delete(modulePath);
+            File.Delete(wholePath);
+            var uses = Microsoft.CodeAnalysis.CSharp.CSharpCompilation.Create(
+                "Uses",
+                [Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText("class C { int M() => new InModule().Value; InMain Main; }")],
+                [core, reference],
+                options.WithOutputKind(Microsoft.CodeAnalysis.OutputKind.DynamicallyLinkedLibrary));
+            Assert.Empty(uses.GetDiagnostics().Where(diagnostic => diagnostic.Severity == Microsoft.CodeAnalysis.DiagnosticSeverity.Error));
+        }
+        finally
+        {
+            Directory.Delete(outside, recursive: true);
+        }
+    }
+
+    private static (string[] Files, string[] Absent) Lookups(Disk disk, string assembly)
+    {
+        var lookups = disk.ModuleLookupsFor(assembly);
+        return (lookups.Files.ToArray(), lookups.Absent.ToArray());
+    }
+
+    /// <summary>
+    /// A module that could not be bound is reported as looked for all the same, so restoring or repairing it is seen:
+    /// one that is missing as absent, one that is there and does not read as a module as a file that was read.
+    /// </summary>
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("malformed")]
+    public void AModuleThatIsNotBound_IsStillReportedAsLookedFor(string how)
+    {
+        var at = Directory.CreateTempSubdirectory("cc-disk-modules-").FullName;
+        try
+        {
+            var options = new Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions(Microsoft.CodeAnalysis.OutputKind.NetModule);
+            var core = Microsoft.CodeAnalysis.MetadataReference.CreateFromFile(typeof(object).Assembly.Location);
+            var modulePath = Path.Combine(at, "Part.netmodule");
+            using (var written = File.Create(modulePath))
+            {
+                Assert.True(Microsoft.CodeAnalysis.CSharp.CSharpCompilation.Create(
+                    "Part", [Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText("public class InModule { }")], [core], options)
+                    .Emit(written).Success);
+            }
+            var wholePath = Path.Combine(at, "Whole.dll");
+            using (var part = Microsoft.CodeAnalysis.ModuleMetadata.CreateFromFile(modulePath))
+            using (var written = File.Create(wholePath))
+            {
+                Assert.True(Microsoft.CodeAnalysis.CSharp.CSharpCompilation.Create(
+                    "Whole", [Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText("public class InMain { }")],
+                    [core, part.GetReference()], options.WithOutputKind(Microsoft.CodeAnalysis.OutputKind.DynamicallyLinkedLibrary))
+                    .Emit(written).Success);
+            }
+            if (how == "missing") File.Delete(modulePath);
+            else File.WriteAllText(modulePath, "not a module");
+            var disk = On(_directory);
+
+            disk.Reference(wholePath);
+
+            var (files, absent) = Lookups(disk, wholePath);
+            Assert.Equal(how == "missing" ? [] : [modulePath], files);
+            Assert.Equal(how == "missing" ? [modulePath] : [], absent);
+        }
+        finally
+        {
+            Directory.Delete(at, recursive: true);
+        }
+    }
+
     [Fact]
     public void ADocumentTypeIsNotFollowed()
     {

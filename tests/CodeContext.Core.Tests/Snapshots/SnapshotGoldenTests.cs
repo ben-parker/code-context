@@ -13,7 +13,7 @@ namespace CodeContext.Core.Tests.Snapshots;
 using ShardKey = InMemoryDatabase.ShardKey;
 
 /// <summary>
-/// Pins the format-version-1 layout: a tiny graph written with a fixed key, time, sequence,
+/// Pins the format-version-3 layout: a tiny graph written with a fixed key, time, sequence,
 /// generation and instance id must give exactly the checked-in bytes. A change here is a format
 /// change and needs a new <c>formatVersion</c>. To regenerate after a deliberate change, set
 /// <c>CODECONTEXT_SNAPSHOT_GOLDEN_OUT</c> to the absolute path of the fixture file and run this test.
@@ -52,8 +52,7 @@ public class SnapshotGoldenTests
     /// <summary>
     /// Reads the fixture's bytes by the offsets of plan section 3.2 alone (no <see cref="SnapshotFile"/>,
     /// no <see cref="SnapshotShardReader"/>): the header fields, host meta, the first directory entry, the
-    /// first shard header, the section table (kinds, element sizes, alignment, dense layout), the hash
-    /// capacity rule, one node record (the external node with a null file path) and one edge record
+    /// first shard header, the section table (kinds, element sizes, alignment, dense layout), one node record (the external node with a null file path) and one edge record
     /// (the composed fake-worker edge).
     /// </summary>
     [Fact]
@@ -65,7 +64,7 @@ public class SnapshotGoldenTests
 
         // Header.
         Assert.Equal("CCSNAP\r\n"u8.ToArray(), bytes[..8]);
-        Assert.Equal(1u, U32(8));
+        Assert.Equal(3u, U32(8));
         Assert.Equal(0x01020304u, U32(12));
         Assert.Equal(256u, U32(16));
         Assert.Equal(1u, U32(20));                                 // paths compared case-insensitively
@@ -78,7 +77,8 @@ public class SnapshotGoldenTests
         Assert.Equal(2u, U32(68));
         var directory = (int)U64(72);
         Assert.Equal(new Guid("5d0c9a1e-7b3f-4c0e-9a6d-2f8b1c4e7a90"), new Guid(bytes.AsSpan(80, 16)));
-        Assert.All(bytes[96..256], b => Assert.Equal(0, b));
+        Assert.Equal(0UL, U64(96));                                // root time: none recorded
+        Assert.All(bytes[104..256], b => Assert.Equal(0, b));
 
         // Host meta: u32 count, (u16 keyLength, key, u32 valueLength, value)*.
         var meta = new Dictionary<string, string>();
@@ -108,20 +108,19 @@ public class SnapshotGoldenTests
         Assert.Equal(0u, U32(directory + 56));
         Assert.Equal(0u, U32(directory + 60));
 
-        // Shard header: magic "SHRD", sectionCount, N, E, S, stringCount, F, nameCount, foldedNameFirstRef, flags.
+        // Shard header: magic "SHRD", sectionCount, N, E, S, stringCount, F, then reserved zeros.
         Assert.Equal("SHRD"u8.ToArray(), bytes[blob..(blob + 4)]);
-        Assert.Equal(20u, U32(blob + 4));
+        Assert.Equal(11u, U32(blob + 4));
         Assert.Equal(3u, U32(blob + 8));
         Assert.Equal(3u, U32(blob + 12));
-        var idCount = (int)U32(blob + 16);
         var fileCount = (int)U32(blob + 24);
-        Assert.Equal(1u, U32(blob + 32));
+        Assert.All(bytes[(blob + 28)..(blob + 128)], b => Assert.Equal(0, b));
 
-        // Section table: 20 entries of u32 kind, u32 elementSize, u64 offset, u64 length, dense and 8-byte aligned.
-        var elementSizes = new uint[] { 1, 4, 1, 80, 32, 8, 4, 4, 4, 4, 4, 4, 24, 12, 4, 4, 4, 4, 1, 1 };
-        var sections = new (int Offset, int Length)[21];
-        var end = 128 + 20 * 24;
-        for (var k = 1; k <= 20; k++)
+        // Section table: 11 entries of u32 kind, u32 elementSize, u64 offset, u64 length, dense and 8-byte aligned.
+        var elementSizes = new uint[] { 1, 4, 1, 80, 32, 8, 24, 4, 1, 1, 1 };
+        var sections = new (int Offset, int Length)[12];
+        var end = 128 + 11 * 24;
+        for (var k = 1; k <= 11; k++)
         {
             var entry = blob + 128 + (k - 1) * 24;
             Assert.Equal((uint)k, U32(entry));
@@ -132,11 +131,7 @@ public class SnapshotGoldenTests
             end = offset + sections[k].Length;
         }
         Assert.Equal((end + 7) & ~7, blobLength);
-        // Hash capacity: the next power of two at or above count / 0.75.
-        static int Capacity(int count) { var capacity = 1; while (capacity * 3 < count * 4) capacity <<= 1; return count == 0 ? 0 : capacity; }
-        Assert.Equal(4 * Capacity(idCount), sections[7].Length);
-        Assert.Equal(4 * Capacity(3), sections[9].Length);
-        Assert.Equal(fileCount * 24, sections[13].Length);
+        Assert.Equal(fileCount * 24, sections[7].Length);
 
         string? Str(uint reference)
         {
@@ -153,7 +148,7 @@ public class SnapshotGoldenTests
         Assert.Equal("Straße", Str(U32(record + 8)));
         Assert.Equal("class", Str(U32(record + 12)));
         Assert.Equal(0u, U32(record + 20));
-        Assert.Equal(0u, U32(sections[13].Offset));
+        Assert.Equal(0u, U32(sections[7].Offset));
         Assert.Equal(7, BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(record + 24)));
         Assert.Equal(1u, U32(record + 72));                        // flags: external
         Assert.Equal(0u, U32(record + 76));

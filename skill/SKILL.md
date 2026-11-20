@@ -33,12 +33,14 @@ codecontext query ContextService --tests    # add static test evidence (off by d
 codecontext query multi Foo Bar             # several identifiers, one round trip, in order
 ```
 
-`query` auto-discovers (or starts) the repo's instance, waits up to 30 seconds for
-indexing (exit code 3 on timeout; see [operations](references/operations.md)), and
-prints compact agent-oriented text; progress goes to stderr. Options: `--depth N`
+`query` uses the repo's running instance, or starts one and waits up to 30 seconds for
+indexing (exit code 3 on timeout; see [operations](references/operations.md)). It prints compact
+agent-oriented text; progress goes to stderr. Options: `--depth N`
 (`0` = cheap identity lookup), `--relation CALLS,REFERENCES`, `--exact`,
 `--limit N` (entries per relationship list, 1-100, default 10), `--external` (include
-library symbols), `--path DIR`, `--human`, `--json`.
+library symbols), `--path DIR`, `--human`, `--json`, `--snapshot` (with no instance
+running, answer in this process from the saved index when nothing it records changed,
+leaving nothing running; see [operations](references/operations.md)).
 
 Reading results:
 
@@ -61,6 +63,15 @@ Reading results:
   - `unverified`: the re-check failed (`indexing.status` `error`) and the answers stay
     saved ones. Do not wait: confirm with `rg -w <Name>` or by reading the file, or run
     `POST /api/index/refresh` (or restart) and query again once `ready`.
+- `cache snapshot` (only with `--snapshot`; `--json`: `"cache":{"state":"snapshot",...}`)
+  means no instance was running and the answer was read from the saved index after a
+  check by file times of what it was made from (see [operations](references/operations.md));
+  no worker re-analysed anything. It can miss a change that check cannot see: on Windows,
+  a file replaced by a copy of the same size that keeps older times; on macOS, content
+  rewritten in place with its old modification time put back. A running instance does
+  not rely on these times: it follows source and project file edits as they happen.
+  Before editing on it or concluding absence, confirm with `rg` or query without
+  `--snapshot`.
 - `relationships not loaded` means nothing was fetched: the name was ambiguous
   (re-query with a target's identifier) or the depth was 0. It says nothing about
   whether the symbol has users.
@@ -72,8 +83,21 @@ Reading results:
 - `uses` is the selected symbol's own outgoing behavior; sibling implementations do
   not lend it theirs.
 - Method `usedBy` unifies statically known interface, implementation, and override
-  callers; `bindings` identifies the called family role. This is potential
+  callers: a call counts for every member it may dispatch to. This is potential
   dispatch, not runtime certainty.
+- `bindings` (in `--json` only; the text output omits it) says, per caller, how its
+  call sites reach the queried method's family. A caller with several kinds of call
+  site lists each kind:
+  - `interface`: the call names an interface member and may dispatch to any
+    implementation of it.
+  - `overridden`: the call names a method that others override and may dispatch to
+    any override of it.
+  - `implementation`: the call names an implementation or override that nothing
+    indexed overrides, and lands on that one member.
+  - `exact`: the call names a method with no implementation or override relation.
+  - `static`: the call is written `base.M()` (C#) or `super.m()` (TypeScript), or
+    takes such a member as a value. It is bound to the method it names and cannot
+    dispatch to an override, so it is listed only in that method's `usedBy`.
 - `fileDependencies` / `fileDependents` aggregate resolved semantic edges crossing
   the selected file, excluding unresolved, same-file, and proximity-only links.
   They describe the whole file named after `of`, not the queried member: a file

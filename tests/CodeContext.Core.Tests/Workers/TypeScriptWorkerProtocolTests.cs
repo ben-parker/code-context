@@ -51,7 +51,10 @@ public class TypeScriptWorkerProtocolTests : IAsyncLifetime
             MaxProtocolVersion: ParserProtocol.Version,
             Languages: ["typescript", "javascript"],
             Extensions: [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".vue"],
-            ProjectMarkers: ["tsconfig.json", "package.json"]);
+            ProjectMarkers: ["tsconfig.json", "package.json"],
+            // As shipped: the configs a running instance hands to the worker when they change.
+            ProjectInputs: JsonSerializer.Deserialize(
+                File.ReadAllText(Path.Combine(workerDir, "worker-manifest.json")), ParserProtocolJsonContext.Default.WorkerManifest)!.ProjectInputs);
         var spec = new WorkerLaunchSpec(
             "typescript", "TypeScript", "node", ["typescript-worker.js"], WorkingDirectory: workerDir);
         return new RegisteredWorker(manifest, spec, Path.Combine(workerDir, "worker-manifest.json"));
@@ -1217,6 +1220,24 @@ namespace Mixed { public class Service { public string Run() => ""ok""; } }");
             var call = Assert.Single(edges, edge => edge.SourceId!.Contains(form, StringComparison.Ordinal));
             Assert.Equal(EdgeDispatch.Static, call.Metadata![EdgeMetadataKeys.Dispatch]);
         }
+
+        // Asked about the base method, the super calls are shown as bound to it and the call on another
+        // instance as one that may dispatch; asked about the override, only that one is listed.
+        var context = new ContextService(_pipeline.RepositoryFactory.CreateNodeRepository(),
+            _pipeline.RepositoryFactory.CreateEdgeRepository(), _pipeline.FileMetadataRepository);
+        var nodeRepository = _pipeline.RepositoryFactory.CreateNodeRepository();
+        var baseSave = (await nodeRepository.GetByIdAsync(superCall.TargetId!))!.Identifier!;
+        var derivedSave = (await nodeRepository.GetByIdAsync(superCall.SourceId!))!.Identifier!;
+        var usedBy = Assert.Single((await context.GetCompactContextAsync(baseSave, depth: 1, maxRelationships: 10)).Matches)
+            .Relationships!.UsedBy!;
+        foreach (var form in new[] { "#Derived.save()", "#Derived.later", "#Derived.computed", "#Derived.wrapped" })
+            Assert.Equal(["static"], usedBy.Single(node => node.Identifier.Contains(form, StringComparison.Ordinal)).Bindings);
+        Assert.Equal(["overridden"], usedBy.Single(node => node.Identifier.Contains("#Derived.again", StringComparison.Ordinal)).Bindings);
+        var overriding = Assert.Single((await context.GetCompactContextAsync(derivedSave, depth: 1, maxRelationships: 10)).Matches)
+            .Relationships!.UsedBy!;
+        var dispatcher = Assert.Single(overriding);
+        Assert.Contains("#Derived.again", dispatcher.Identifier, StringComparison.Ordinal);
+        Assert.Equal(["overridden"], dispatcher.Bindings);
     }
 
     [Fact]

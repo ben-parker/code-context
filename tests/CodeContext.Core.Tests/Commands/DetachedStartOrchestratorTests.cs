@@ -8,7 +8,9 @@ namespace CodeContext.Core.Tests.Commands;
 
 public class DetachedStartOrchestratorTests
 {
-    private const string Root = "C:\\repo";
+    // A root as the platform spells one: the commands normalize paths natively, so a Windows path
+    // elsewhere is a relative file name and no instance's root.
+    private static readonly string Root = OperatingSystem.IsWindows() ? "C:\\repo" : "/repo";
 
     [Fact]
     public async Task ExistingInstanceShortCircuitsUnderStartLock()
@@ -48,7 +50,7 @@ public class DetachedStartOrchestratorTests
         });
 
         var result = await new DetachedStartOrchestrator(registry, runtime).StartAsync(
-            Root + "\\src\\sub", null, 120, null, CancellationToken.None);
+            Path.Combine(Root, "src", "sub"), null, 120, null, CancellationToken.None);
 
         Assert.True(result.Success);
         Assert.False(result.WasStarted);

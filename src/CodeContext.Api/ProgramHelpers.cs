@@ -1,5 +1,6 @@
 using CodeContext.Api.Endpoints;
 using CodeContext.Core;
+using CodeContext.Core.Memory;
 using CodeContext.Core.Repositories;
 using CodeContext.Core.Serialization;
 using CodeContext.Core.Services;
@@ -7,6 +8,7 @@ using CodeContext.Core.Snapshots;
 using CodeContext.Core.Workers;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace CodeContext.Api;
@@ -28,20 +30,39 @@ public static class ProgramHelpers
     public static void AddRestApi(IServiceCollection services)
     {
         // Configure JSON serialization for AOT
-        services.ConfigureHttpJsonOptions(options =>
-        {
-            options.SerializerOptions.TypeInfoResolverChain.Insert(0, CodeContextJsonContext.Default);
-            options.SerializerOptions.DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull;
-            // ASP.NET's options instance has its own depth limit; the context's attribute
-            // does not reach it. Syntax trees at maxDepth 32 need more than the default 64.
-            options.SerializerOptions.MaxDepth = Parser.Protocol.ParserProtocol.MaxJsonDepth;
-        });
+        services.ConfigureHttpJsonOptions(options => ConfigureApiJson(options.SerializerOptions));
 
 #if ENABLE_OPENAPI
         // OpenAPI is a development-only convenience; the package and this registration are
         // excluded from Release/published binaries (see OpenApiSupport / CodeContext.Api.csproj).
         OpenApiSupport.AddOpenApi(services);
 #endif
+    }
+
+    /// <summary>
+    /// The REST API's JSON settings over ASP.NET's web defaults. <c>query</c> answering in its own process from a
+    /// snapshot serializes with <see cref="ApiJsonOptions"/>, built the same way, so <c>--json</c> prints what the
+    /// API would send.
+    /// </summary>
+    internal static void ConfigureApiJson(JsonSerializerOptions options)
+    {
+        options.TypeInfoResolverChain.Insert(0, CodeContextJsonContext.Default);
+        options.DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull;
+        // ASP.NET's options instance has its own depth limit; the context's attribute
+        // does not reach it. Syntax trees at maxDepth 32 need more than the default 64.
+        options.MaxDepth = Parser.Protocol.ParserProtocol.MaxJsonDepth;
+    }
+
+    internal static readonly JsonSerializerOptions ApiJsonOptions = CreateApiJsonOptions();
+
+    private static JsonSerializerOptions CreateApiJsonOptions()
+    {
+        // ASP.NET's own starting point, not a copy of it: the web defaults plus its relaxed encoder (an apostrophe,
+        // '+', '&' or a letter past ASCII is written as itself), so the bytes are the API's.
+        var options = new JsonSerializerOptions(new Microsoft.AspNetCore.Http.Json.JsonOptions().SerializerOptions);
+        ConfigureApiJson(options);
+        options.MakeReadOnly();
+        return options;
     }
 
     public static void ConfigureCoreServices(
@@ -68,6 +89,8 @@ public static class ProgramHelpers
 
         // Register services
         services.AddSingleton<IParserSessionRegistry, ParserSessionRegistry>();
+        // Returns the garbage of a burst (load, scan, snapshot write, queries) once the host is quiet.
+        services.AddCodeContextMemoryTrim();
         // Reads the coverage recorded with the published shards, so it always describes the facts served.
         services.AddSingleton(sp => AnalysisCoverageRegistry.ForStore(sp.GetRequiredService<IRepositoryFactory>()));
         services.AddSingleton<IRepositoryFileSelector, RepositoryFileSelector>();
@@ -106,6 +129,8 @@ public static class ProgramHelpers
         // order, so the final capture runs while the coordinator loop and the workers are alive.
         // On by default; `start --no-cache` (TurnCacheOff) or CodeContext:CacheEnabled=false turn it off.
         services.AddCodeContextSnapshots();
+        // Stops workers idle for CodeContext:WorkerHibernateSeconds; the next change wakes them through the coordinator.
+        services.AddCodeContextWorkerHibernation();
         services.AddHostedService<FileWatcherService>();
     }
 

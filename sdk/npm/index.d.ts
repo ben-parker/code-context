@@ -26,6 +26,19 @@ export interface UnitFingerprint {
     value: string;
 }
 
+/**
+ * `analysis/delta`'s optional `inputs`, on the first chunk of a request: everything besides the request's own files
+ * that the workspace's facts depend on, complete each time, as absolute paths. `files`: files read and directories
+ * listed, which exist; `absent`: paths looked for and not found. A host uses it only to decide, with no worker running,
+ * whether a saved snapshot is still current; a shard whose worker never sends it is never answered that way.
+ * Leave out of `absent` any path under another path listed there (the host drops it anyway); a report of more than
+ * 500,000 paths is kept as none.
+ */
+export interface WorkerInputs {
+    files: string[];
+    absent: string[];
+}
+
 /** `workspace/index` params' optional `baseline`, sent only to a worker that declared `persistentState`. */
 export interface IndexBaseline {
     statePath: string;

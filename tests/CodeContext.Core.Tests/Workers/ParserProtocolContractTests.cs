@@ -27,6 +27,15 @@ public class ParserProtocolContractTests
     private static HashSet<string> JsonNames(JsonElement element)
         => element.EnumerateObject().Select(property => property.Name).ToHashSet(StringComparer.Ordinal);
 
+    /// <summary>The schema tells a worker author the limit the host applies to one report of inputs, and what leaving nested absent paths out means.</summary>
+    [Fact]
+    public void WorkerInputs_SchemaStatesTheHostsLimit_AndTheAbsentPathRule()
+    {
+        var description = Schema().GetProperty("$defs").GetProperty("workerInputs").GetProperty("description").GetString()!;
+        Assert.Contains(CodeContext.Core.Workers.ParserProcessSupervisor.MaxInputs.ToString("N0", System.Globalization.CultureInfo.InvariantCulture), description);
+        Assert.Contains("SHOULD", description);
+    }
+
     [Fact]
     public void InitializeResult_WithoutPersistentState_ReadsAsFalse_AndFalseIsNotWritten()
     {
@@ -91,6 +100,20 @@ public class ParserProtocolContractTests
     }
 
     [Fact]
+    public void AnalysisDelta_Inputs_RoundTrip_AndAreOmittedWhenNull()
+    {
+        var delta = new AnalysisDelta("typescript", "1", "default", 1, 1, true, [], [], [], true,
+            Inputs: new WorkerInputs(["/repo/tsconfig.json"], ["/repo/jsconfig.json"]));
+        var json = JsonSerializer.Serialize(delta, ParserProtocolJsonContext.Default.AnalysisDelta);
+        Assert.Contains("\"inputs\":{\"files\":[\"/repo/tsconfig.json\"],\"absent\":[\"/repo/jsconfig.json\"]}", json);
+        var back = JsonSerializer.Deserialize(json, ParserProtocolJsonContext.Default.AnalysisDelta)!.Inputs!;
+        Assert.Equal(["/repo/tsconfig.json"], back.Files);
+        Assert.Equal(["/repo/jsconfig.json"], back.Absent);
+        Assert.DoesNotContain("inputs",
+            JsonSerializer.Serialize(delta with { Inputs = null }, ParserProtocolJsonContext.Default.AnalysisDelta));
+    }
+
+    [Fact]
     public void SaveState_RoundTrips_AndOptionalResultFieldsAreOmittedWhenNull()
     {
         var parameters = new SaveStateParams("default", Baseline.StatePath, Baseline.StateId);
@@ -130,9 +153,13 @@ public class ParserProtocolContractTests
         Assert.Equal(capabilities, JsonNames(Written(new WorkerCapabilities(true, true, true, true, true), ParserProtocolJsonContext.Default.WorkerCapabilities)));
 
         var deltaFields = SchemaProperties("analysisDelta");
-        var delta = Written(new AnalysisDelta("p", "1", "w", 1, 1, true, [], [], [], true, [], [], [], [new("u", "v")]),
+        var delta = Written(new AnalysisDelta("p", "1", "w", 1, 1, true, [], [], [], true, [], [], [], [new("u", "v")], new WorkerInputs([], [])),
             ParserProtocolJsonContext.Default.AnalysisDelta);
         Assert.Equal(deltaFields, JsonNames(delta));
+        Assert.Equal(SchemaProperties("workerInputs"),
+            JsonNames(Written(new WorkerInputs(["/a"], ["/b"]), ParserProtocolJsonContext.Default.WorkerInputs)));
+        Assert.Equal("#/$defs/workerInputs", Schema().GetProperty("$defs").GetProperty("analysisDelta")
+            .GetProperty("properties").GetProperty("inputs").GetProperty("$ref").GetString());
 
         var methods = Schema().GetProperty("methods");
         Assert.Equal("#/$defs/saveStateParams", methods.GetProperty(ParserProtocolMethods.SaveState).GetProperty("params").GetProperty("$ref").GetString());

@@ -2,10 +2,18 @@
 // holding a tilde. Here they are given only shielded paths, which hold none.
 #pragma warning disable RS0030
 
+// One source file, compiled into the C# worker and linked into the host (CodeContext.Core), which
+// applies the same rule to the paths a worker reports before it looks at one. It depends on
+// nothing of the worker's. Each copy gets its own namespace so a test assembly that sees both
+// can name either.
 using System.Collections.Concurrent;
 using System.Text;
 
+#if CODECONTEXT_CSHARP_WORKER
 namespace CodeContext.CSharp.Worker.Projects;
+#else
+namespace CodeContext.Core.Paths;
+#endif
 
 /// <summary>
 /// What <see cref="PathGuard"/> may see of the disk. None of it follows a link, so asking
@@ -155,7 +163,7 @@ internal sealed class PathGuard
     /// stream of a directory is the directory by another name, which no comparison of names
     /// would see; nothing the worker reads has one.
     /// </summary>
-    private bool AllowedAsSpelled(string full)
+    internal bool AllowedAsSpelled(string full)
         => full.IndexOf(':', 2) < 0 && (IsOnDrive(full) || (ShareOf(full) is { } share && _shares.Contains(share)));
 
     /// <summary>
@@ -317,14 +325,14 @@ internal sealed class PathGuard
 
     private static string Shielded(string path) => path.Replace('~', Shield);
 
-    private static bool IsOnDrive(string fullPath)
+    internal static bool IsOnDrive(string fullPath)
         => fullPath.Length >= 3 && char.IsAsciiLetter(fullPath[0]) && fullPath[1] == ':' && fullPath[2] == '\\';
 
     /// <summary>
     /// <c>host\share</c> of a plain network path. A device path such as <c>\\?\UNC\host\share</c>
     /// has none: the system does not normalize those, so its segments cannot be taken at their word.
     /// </summary>
-    private static string? ShareOf(string fullPath)
+    internal static string? ShareOf(string fullPath)
     {
         if (!fullPath.StartsWith(@"\\", StringComparison.Ordinal)) return null;
         var parts = fullPath[2..].Split('\\');

@@ -101,8 +101,12 @@ codecontext query ContextService --tests
 codecontext query multi ContextService StartCommandHandler
 ```
 
-`query` finds the closest instance watching the requested path, starts one in the
-background when necessary, waits for indexing, and queries the compact API. Compact,
+`query` finds the closest instance watching the requested path and queries its compact
+API. With none running, it starts an instance in the background and waits for indexing.
+`--snapshot` (or `CodeContext__QueryFromSnapshot=true`, which `--start` overrides) first
+tries to answer in its own process from the saved index, labelled `cache snapshot`, leaving
+nothing running. It checks by file time the files a scan walks and what each worker
+reported it read; see [operations](skill/references/operations.md) for what that misses. Compact,
 line-oriented agent text is the default. Use `--human` for expanded human-readable
 output or `--json` for the exact API response; progress stays on stderr. Test evidence
 is omitted by default, so add `--tests` whenever it matters. Other options include
@@ -131,6 +135,7 @@ codecontext start --path . --port 8080      # fixed port
 codecontext init --path .                   # pre-warm: start the scan ahead of time
 codecontext init --path . --wait            # pre-warm and block until the index is ready
 codecontext query ContextService            # discover/start, wait, and query
+codecontext query ContextService --snapshot # no instance: try the saved index in process
 codecontext query multi A B --tests         # ordered multi-query with test evidence
 codecontext list                            # human-readable instances
 codecontext list --json                     # machine-readable instances
@@ -149,6 +154,12 @@ instance record to stdout.
 
 Instances shut down after 120 minutes without API activity by default. Set
 `--idle-timeout 0` to disable idle shutdown or pass another number of minutes.
+Inside that, a language worker with no file change, refresh or syntax-tree request exits
+and the instance answers from its index; the next change restarts it. The idle time
+follows the restart cost: 2 minutes for a worker whose last index from its files took
+under 5 seconds, 15 minutes for any other, including one that restored its saved state
+(`CodeContext__WorkerHibernateSeconds` sets one time for every worker, `0` keeps workers
+running). The C# worker does so only with the cache on, so it restarts from its saved state.
 
 ## REST API
 
