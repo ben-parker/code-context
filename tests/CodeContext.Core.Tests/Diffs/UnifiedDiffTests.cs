@@ -76,6 +76,38 @@ public class UnifiedDiffTests
     }
 
     [Fact]
+    public void ABlockCommentOpenedOrClosedAroundUnchangedLines_IsMarked_AndAWholeDocCommentIsNot()
+    {
+        var file = Assert.Single(UnifiedDiff.Parse(Lines(
+            "--- a/a.cs",
+            "+++ b/a.cs",
+            "@@ -1,10 +1,13 @@",
+            " class A {",
+            "+/*",
+            "     void Gone() {}",
+            "+*/",
+            "     void Mid() {}",
+            "+    /**",
+            "+     * A whole doc comment.",
+            "+     */",
+            "     void Kept() {}",
+            "-    /** Old summary",
+            "+    /** New summary",
+            "      */",
+            "-/*",
+            "     void Back() {}",
+            "-*/",
+            " }")));
+
+        // Lines 2 and 4 open and close a comment around line 3; the doc comment at 6-8 and the edited summary at 10 close
+        // within what they change (or change nothing about where a comment ends).
+        Assert.Equal([new DiffLineRange(2, 2), new DiffLineRange(4, 4)], file.CommentBoundaries);
+        Assert.Equal([new DiffLineRange(2, 2), new DiffLineRange(4, 4), new DiffLineRange(6, 8), new DiffLineRange(10, 10)], file.CommentAdded);
+        // Removing the markers around Back brings it back: those removals are not comments only.
+        Assert.Equal([true, false, false], file.Removals.Select(removal => removal.CommentsOnly));
+    }
+
+    [Fact]
     public void ZeroContextHunks_PlaceAPureRemovalBetweenTheNewLinesAroundIt()
     {
         // git diff -U0: a side with no lines names the line before the hunk.

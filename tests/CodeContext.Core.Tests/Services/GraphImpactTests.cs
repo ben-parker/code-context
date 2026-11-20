@@ -286,6 +286,27 @@ public sealed class GraphImpactTests : IDisposable
     }
 
     [Fact]
+    public async Task ABlockCommentAroundUnchangedMembers_IsReported_NotIgnored()
+    {
+        var service = Sample().Build();
+
+        // Other (16-24) commented out by a "/*" above it and a "*/" below it: it is gone from the new side, though no
+        // line of it changed.
+        var wrapped = await Impact(service, Diff("src/Foo.cs", Blob("src/Foo.cs"), "@@ -14,0 +15 @@\n+/*", "@@ -23,0 +25 @@\n+*/"));
+
+        Assert.Empty(wrapped.Changes);
+        var entry = Assert.Single(wrapped.Unmapped);
+        Assert.Equal(("blockCommentBoundary", "15,25", 2), (entry.Reason, entry.Lines, entry.LineCount));
+        Assert.Equal(0, wrapped.IgnoredLines);
+        Assert.False(wrapped.Complete);
+
+        // Inside a member the same marker changes the member, as any line there does.
+        var inside = await Impact(service, Diff("src/Foo.cs", Blob("src/Foo.cs"), "@@ -7,0 +8 @@\n+        /*"));
+        Assert.Equal([(I("Foo.Run"), "8")], inside.Changes.Select(change => (change.Identifier, change.ChangedLines)));
+        Assert.True(inside.Complete);
+    }
+
+    [Fact]
     public async Task AnAddedOrCopiedFile_ChangesEveryDeclarationInIt()
     {
         var blob = WriteFile("src/New.cs", 6);

@@ -176,7 +176,7 @@ namespace CodeContext.Core.Services
                 IReadOnlyList<DiffLineRange> added = file.Status == DiffFileStatus.Copied
                     ? [new DiffLineRange(1, Math.Max(1, nodes.Max(node => Math.Max(node.EndLine, node.StartLine)) + 1))]
                     : file.Added;
-                var mapping = DiffMapper.Map(nodes, node => IsContainer(node, walk), added, file.Removals, file.CommentAdded);
+                var mapping = DiffMapper.Map(nodes, node => IsContainer(node, walk), added, file.Removals, file.CommentAdded, file.CommentBoundaries);
                 response.IgnoredLines += mapping.IgnoredComments;
 
                 foreach (var touch in mapping.Touched)
@@ -197,6 +197,14 @@ namespace CodeContext.Core.Services
                         "Changed lines that no declaration holds (imports or usings, a namespace line, a file header): a change here "
                         + $"can alter how every symbol of the file binds; query affected {relative} walks them all.",
                         lines: FormatRanges(mapping.Outside), count: mapping.Outside.Sum(range => range.Count));
+                }
+                if (mapping.CommentBoundaries.Count > 0)
+                {
+                    Unmapped("blockCommentBoundary",
+                        "A block comment opens or closes here and its other end is not among the lines changed with it, so unchanged "
+                        + "lines beside it were commented out or back in: a declaration among them may now exist on one side only, "
+                        + "and what used it is not in the index. Read the file around these lines.",
+                        lines: FormatRanges(mapping.CommentBoundaries), count: mapping.CommentBoundaries.Sum(range => range.Count));
                 }
                 if (mapping.RemovedBetween.Count > 0)
                 {

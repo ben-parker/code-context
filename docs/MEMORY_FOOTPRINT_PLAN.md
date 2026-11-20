@@ -424,11 +424,16 @@ Decisions where the backlog was silent:
    they held exists only on the old side); `deletedFile` (or `notYetIndexed` while still indexed, `contentMismatch`
    while still on disk); `renamed` (the new path is mapped by its hunks; what named the old path is not in the
    index); `binary`; `notIndexed` (no declaration in the file: unparsed, excluded, or a project or config file);
-   `unreadable`; `outsideRoot`; `invalidPath`; `combinedDiff`. Removed lines inside a member change that member.
+   `unreadable`; `outsideRoot`; `invalidPath`; `combinedDiff`; `blockCommentBoundary` (item 5). Removed lines inside a
+   member change that member.
 5. Changed lines that change nothing are counted, not mapped: whitespace-only lines and comment lines no member holds
    (read lexically: `//`, `/*`, `*`, `*/`, `#region`; a doc comment lies outside the span a worker gives its member,
    and treating it as the type's change listed every user of the type). A removed run of comments only is no removed
-   declaration. Inside a member any line, a comment too, changes it. Mode-only files are counted.
+   declaration. Inside a member any line, a comment too, changes it. Mode-only files are counted. Exception: comment
+   lines of one change block that leave a block comment open, or close one, where the lines they replace did not (a
+   `/*` added above unchanged members and a `*/` below them) comment unchanged lines out or back in; outside a member
+   they are `blockCommentBoundary`, and such a removed run is no comments-only removal. Read lexically from outside a
+   comment, on comment lines only (a `/*` in a code line is not followed).
 6. One walk: `GraphWalk.AffectedBy` over the union of changed node ids, the function `affected` uses, so propagation,
    dispatch, the static-call stop, the test-double stop, `testsHidden`, depth, cancellation and the test-file rule are
    the same; seeds are never listed (a changed declaration that uses another is a change, not a dependent). A

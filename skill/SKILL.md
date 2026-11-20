@@ -135,7 +135,8 @@ git diff $(git merge-base main HEAD) | codecontext query impact   # what this br
   `notIndexed` (a file no worker parses: a project or config file can still matter),
   `contentMismatch` (the working tree is not the diff's new side), `notYetIndexed` (retry),
   `outsideRoot` and `invalidPath`. Blank lines and comment lines no member holds change
-  nothing (`ignored`). `--depth`, `--limit` (per list), `--tests` and `--relation` mean what
+  nothing (`ignored`), except a `/*` or `*/` that comments unchanged lines out or back in
+  (`blockCommentBoundary`). `--depth`, `--limit` (per list), `--tests` and `--relation` mean what
   they mean for `affected`. The tool never runs git: you run it.
 - **`hubs`** ranks symbols by distinct direct dependents, then by their files. A type's
   count is uses of the type itself, not of its members (`--type Method` ranks members).

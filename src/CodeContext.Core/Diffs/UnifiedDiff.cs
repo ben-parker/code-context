@@ -50,6 +50,12 @@ namespace CodeContext.Core.Diffs
         public bool HasHunks { get; internal set; }
         public List<DiffLineRange> Added { get; } = new();
         public List<DiffLineRange> CommentAdded { get; } = new();
+
+        /// <summary>
+        /// Added comment lines that open or close a block comment whose other end is not among the lines changed with
+        /// them: the unchanged lines next to them were commented out or back in (see <see cref="UnifiedDiff.IsCommentLine"/>).
+        /// </summary>
+        public List<DiffLineRange> CommentBoundaries { get; } = new();
         public List<DiffRemoval> Removals { get; } = new();
         public int IgnoredLines { get; internal set; }
 
@@ -371,6 +377,10 @@ namespace CodeContext.Core.Diffs
                 var removedBlank = 0;
                 var addStart = 0;
                 var commentStart = 0;
+                // Where the block's comment lines leave a block comment, read from outside one: added and removed apart.
+                var addedMarks = new CommentMarks();
+                var removedMarks = new CommentMarks();
+                List<int>? markedLines = null;
 
                 while (oldLeft > 0 || newLeft > 0)
                 {
@@ -393,7 +403,11 @@ namespace CodeContext.Core.Diffs
                             if (removedStart == 0) removedStart = nextOld;
                             removedEnd = nextOld;
                             if (IsBlank(line)) removedBlank++;
-                            else if (IsCommentLine(line.AsSpan(1))) removedComment = true;
+                            else if (IsCommentLine(line.AsSpan(1)))
+                            {
+                                removedComment = true;
+                                removedMarks.Follow(line.AsSpan(1));
+                            }
                             else removedCode = true;
                             file.RemovedLineCount++;
                             oldLeft--;
@@ -412,6 +426,7 @@ namespace CodeContext.Core.Diffs
                             {
                                 CloseCode();
                                 if (commentStart == 0) commentStart = nextNew;
+                                if (addedMarks.Follow(line.AsSpan(1))) (markedLines ??= []).Add(nextNew);
                             }
                             else
                             {
@@ -461,6 +476,15 @@ namespace CodeContext.Core.Diffs
                 {
                     CloseAdded();
                     if (blockNewBefore < 0) return;
+                    // Comment lines that leave a comment open, or close one, where the lines they replace did not: the
+                    // unchanged lines beside them changed meaning. Removed, they are no comments-only removal.
+                    if (addedMarks != removedMarks)
+                    {
+                        foreach (var marked in markedLines ?? []) file.CommentBoundaries.Add(new DiffLineRange(marked, marked));
+                        if (removedComment) removedCode = true;
+                    }
+                    addedMarks = removedMarks = default;
+                    markedLines = null;
                     if (removedStart > 0)
                     {
                         if (removedCode || removedComment)
@@ -473,6 +497,35 @@ namespace CodeContext.Core.Diffs
                     blockNewBefore = -1;
                     removedStart = removedEnd = removedBlank = 0;
                     removedCode = removedComment = false;
+                }
+            }
+
+            /// <summary>
+            /// Where a run of comment lines leaves a block comment, read from outside one: whether one is open at its end,
+            /// and how many <c>*/</c> it holds that close a comment it did not open. Lexical, as <see cref="IsCommentLine"/>.
+            /// </summary>
+            private record struct CommentMarks(bool Open, int StrayCloses)
+            {
+                /// <summary>Reads one comment line; true when it holds a block-comment marker.</summary>
+                public bool Follow(ReadOnlySpan<char> text)
+                {
+                    var marked = false;
+                    for (var i = 0; i + 1 < text.Length; i++)
+                    {
+                        var pair = (text[i], text[i + 1]);
+                        if (Open)
+                        {
+                            if (pair is not ('*', '/')) continue;
+                            Open = false;
+                        }
+                        else if (pair is ('/', '/')) break;
+                        else if (pair is ('/', '*')) Open = true;
+                        else if (pair is ('*', '/')) StrayCloses++;
+                        else continue;
+                        marked = true;
+                        i++;
+                    }
+                    return marked;
                 }
             }
 
