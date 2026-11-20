@@ -131,7 +131,7 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
     private readonly SemaphoreSlim _lifecycleLock = new(1, 1);
     private readonly CancellationTokenSource _shutdown = new();
     private readonly ConcurrentDictionary<long, ActiveMutation> _activeMutations = new();
-    // The files of each workspace's last workspace/open, which bound the files a part may name (MaxPartsPerNode).
+    // The files of each workspace's last workspace/open: the files a part may name (KeepWellFormedParts).
     private readonly ConcurrentDictionary<string, IReadOnlyList<string>> _openedFiles = new(StringComparer.Ordinal);
     // Which reported input paths the host may not look at, by spelling; null where none is refused (off Windows).
     private readonly Func<string, bool>? _refusedInput;
