@@ -99,8 +99,8 @@ namespace CodeContext.Core.Services
             }
             ValidateTestBounds(maxTestFiles, maxTestMethods);
 
-            // Read before the store and again after it (CacheAfterReads): labelled if either says cached.
-            var response = new CompleteContextResponse { Cache = _cacheState?.GetNotice() };
+            // Read before the store (the pin) and again after it (CacheAfterReads): labelled if either says cached.
+            var response = new CompleteContextResponse { Cache = generation.CacheBefore };
             var (candidates, isFilePath) = await FindCandidatesAsync(
                 identifier, type, exact, containingType, @namespace, signature, sourceFile);
 
@@ -150,8 +150,36 @@ namespace CodeContext.Core.Services
         /// commits land meanwhile. The first statement of every public query of this service, in an async method, so the
         /// pin ends with it; a query called by another (the items of a multi query) keeps the caller's generation.
         /// <c>ContextGenerationTests</c> checks every method of the query interfaces reads only through it.
+        /// Taking the pin is the store read that chooses the answer's facts, so the cache notice to label them is
+        /// read just before it (<see cref="QueryGeneration.CacheBefore"/>): read after, a scan that commits and is
+        /// reported in between would leave facts of the loaded snapshot unlabelled.
         /// </summary>
-        private InMemoryDatabase.GenerationPin OneGeneration() => _database?.PinPublished() ?? default;
+        private QueryGeneration OneGeneration()
+        {
+            var cacheBefore = _cacheState?.GetNotice();
+            return new QueryGeneration(_database?.PinPublished() ?? default, cacheBefore);
+        }
+
+        /// <summary>A query's pin and the cache notice read just before it was taken.</summary>
+        private readonly struct QueryGeneration : IDisposable
+        {
+            private readonly InMemoryDatabase.GenerationPin _pin;
+
+            internal QueryGeneration(InMemoryDatabase.GenerationPin pin, CacheNotice? cacheBefore)
+            {
+                _pin = pin;
+                CacheBefore = cacheBefore;
+            }
+
+            /// <summary>
+            /// The notice before the pin. Inside a caller's pin it is read after that pin, so a multi query labels
+            /// its answers with its own as well: its pin may hold the loaded snapshot's facts after the scan that
+            /// replaced them was reported.
+            /// </summary>
+            internal CacheNotice? CacheBefore { get; }
+
+            public void Dispose() => _pin.Dispose();
+        }
 
         public async Task<CompactContextResponse> GetCompactContextAsync(
             string identifier,
@@ -179,8 +207,8 @@ namespace CodeContext.Core.Services
             ValidateIdentifier(identifier);
             ValidateQueryBounds(depth, maxMatches, maxRelationships, maxCallSites, maxTestFiles, maxTestMethods);
             var relationKinds = ParseRelationFilter(relation);
-            // Read before the store and again after it (CacheAfterReads): labelled if either says cached.
-            var cacheNotice = _cacheState?.GetNotice();
+            // Read before the store (the pin) and again after it (CacheAfterReads): labelled if either says cached.
+            var cacheNotice = generation.CacheBefore;
 
             List<CodeNode> candidates;
             bool isFilePath;
@@ -307,6 +335,7 @@ namespace CodeContext.Core.Services
                 results.Add(context);
             }
 
+            foreach (var result in results) result.Cache ??= generation.CacheBefore;
             return results;
         }
 
@@ -341,6 +370,7 @@ namespace CodeContext.Core.Services
                     includeExternal: request.IncludeExternal));
             }
 
+            foreach (var result in results) result.Cache ??= generation.CacheBefore;
             return results;
         }
 

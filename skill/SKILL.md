@@ -76,8 +76,9 @@ Reading results:
   not rely on these times: it follows source and project file edits as they happen.
   Before editing on it or concluding absence, confirm with `rg` or query without
   `--snapshot`.
-- An answer is read from one state of the index, even while it is re-indexing: never
-  half of one commit and half of the next. The answers of one `query multi` share it.
+- An answer's facts are read from one state of the index, even while it is re-indexing:
+  never half of one commit and half of the next. The answers of one `query multi` share
+  it. Only its `coverage` line can describe a later state.
 - `relationships not loaded` means nothing was fetched: the name was ambiguous
   (re-query with a target's identifier) or the depth was 0. It says nothing about
   whether the symbol has users.
