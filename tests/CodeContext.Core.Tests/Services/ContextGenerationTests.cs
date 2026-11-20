@@ -1,6 +1,7 @@
 using System.Reflection;
 using CodeContext.Core.Repositories;
 using CodeContext.Core.Repositories.InMemory;
+using CodeContext.Core.Serialization;
 using CodeContext.Core.Services;
 using Microsoft.Extensions.Options;
 
@@ -36,9 +37,9 @@ public class ContextGenerationTests
             [Node("csharp:a:b2", "csharp:Demo.B", "/repo/src/B.cs"), Node("csharp:a:C", "csharp:Demo.C", "/repo/src/C.cs")],
             [Edge("csharp:a:C", "csharp:a:b2")], scope: null));
 
-    private static ContextService Service(InMemoryDatabase database, ICodeNodeRepository? nodes = null)
+    private static ContextService Service(InMemoryDatabase database, ICodeNodeRepository? nodes = null, ICacheStateProvider? cache = null)
         => new(nodes ?? new InMemoryNodeRepository(database), new InMemoryEdgeRepository(database),
-            new InMemoryFileMetadataRepository(), Options.Create(new CodeContextOptions { RootPath = "/repo" }));
+            new InMemoryFileMetadataRepository(), Options.Create(new CodeContextOptions { RootPath = "/repo" }), cacheState: cache);
 
     private static string UsedBy(CompactContextResponse response)
         => string.Join(",", Assert.Single(response.Matches).Relationships?.UsedBy?.Select(node => node.Identifier) ?? []);
@@ -168,6 +169,75 @@ public class ContextGenerationTests
 
         Assert.NotSame(built, database.CachedAdjacencyForTests);
         Assert.Null(database.CachedAdjacencyForTests);
+    }
+
+    [Fact]
+    public async Task AnAnswerFromTheLoadedSnapshot_IsLabelledWhenTheScanCommitsAsItBegins()
+    {
+        // The pinned generation is the store read: the "before" cache notice must be read before it, or a scan that
+        // commits and reports verified between the pin and that read leaves facts of the snapshot unlabelled.
+        var database = new InMemoryDatabase();
+        CommitFirst(database);
+        var service = Service(database, cache: new VerifiedOnNotice(flipOnCall: 1, () => CommitSecond(database)));
+
+        var compact = await service.GetCompactContextAsync("csharp:Demo.B", depth: 1);
+
+        Assert.True(UsedBy(compact) != "csharp:Demo.A" || compact.Cache is not null, "snapshot facts answered unlabelled");
+
+        database = new InMemoryDatabase();
+        CommitFirst(database);
+        service = Service(database, cache: new VerifiedOnNotice(flipOnCall: 1, () => CommitSecond(database)));
+
+        var full = await service.GetCompleteContextAsync("csharp:Demo.B", depth: 1);
+
+        var users = Assert.Single(full.Matches).Relationships.UsedBy.Select(node => node.Identifier).ToList();
+        Assert.True(users is not ["csharp:Demo.A"] || full.Cache is not null, "snapshot facts answered unlabelled");
+    }
+
+    [Fact]
+    public async Task EveryAnswerOfAMultiQueryFromTheLoadedSnapshot_IsLabelled()
+    {
+        // The multi query pins the snapshot's generation; the scan commits and reports verified while its first answer
+        // is read, so the later notices say nothing, yet every answer comes from the snapshot.
+        var database = new InMemoryDatabase();
+        CommitFirst(database);
+        var service = Service(database, cache: new VerifiedOnNotice(flipOnCall: 2, () => CommitSecond(database)));
+
+        var compact = await service.GetMultipleCompactContextAsync(new MultiContextRequest { Identifiers = ["csharp:Demo.B", "csharp:Demo.B"] });
+
+        Assert.All(compact, answer => Assert.True(UsedBy(answer) != "csharp:Demo.A" || answer.Cache is not null, "snapshot facts answered unlabelled"));
+
+        database = new InMemoryDatabase();
+        CommitFirst(database);
+        service = Service(database, cache: new VerifiedOnNotice(flipOnCall: 2, () => CommitSecond(database)));
+
+        var full = await service.GetMultipleContextAsync(new MultiContextRequest { Identifiers = ["csharp:Demo.B", "csharp:Demo.B"] });
+
+        Assert.All(full, answer => Assert.True(
+            Assert.Single(answer.Matches).Relationships.UsedBy.Select(node => node.Identifier).ToList() is not ["csharp:Demo.A"]
+                || answer.Cache is not null, "snapshot facts answered unlabelled"));
+    }
+
+    /// <summary>
+    /// Serves the loaded snapshot until its <paramref name="flipOnCall"/>-th notice, where the scan commits (the step)
+    /// and is then reported, in the host's order: from that call on, nothing is labelled.
+    /// </summary>
+    private sealed class VerifiedOnNotice(int flipOnCall, Action commit) : ICacheStateProvider
+    {
+        private int _calls;
+        private bool _verified;
+
+        public CacheStatusDto? GetStatus() => null;
+
+        public CacheNotice? GetNotice()
+        {
+            if (++_calls == flipOnCall)
+            {
+                commit();
+                _verified = true;
+            }
+            return _verified ? null : new CacheNotice { State = CacheState.Verifying };
+        }
     }
 
     /// <summary>A node repository that runs a step once, right after its <paramref name="afterRead"/>-th read.</summary>
