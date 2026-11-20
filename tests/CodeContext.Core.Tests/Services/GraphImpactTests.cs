@@ -110,6 +110,72 @@ public sealed class GraphImpactTests : IDisposable
         Assert.Equal(["tests/FooTests.cs"], impact.TestFiles);
     }
 
+    /// <summary>
+    /// Members, one per file of 5 lines, wired with every rule affected applies: interface and base dispatch, a call
+    /// marked static, an implementation of a changed declaration, a test double implementing what production calls,
+    /// REFERENCES beside CALLS, and a chain long enough for the depth limit.
+    /// </summary>
+    private GraphTestGraph Dispatching()
+    {
+        var graph = new GraphTestGraph(_root) { Freshness = new Fresh(DateTime.UtcNow.AddHours(1)) };
+        foreach (var (name, file) in new[]
+        {
+            ("IFoo.Run", "src/IFoo.cs"), ("Base.Run", "src/Base.cs"), ("Foo.Run", "src/Foo.cs"), ("Bar.Run", "src/Bar.cs"),
+            ("ThroughInterface", "src/A.cs"), ("ThroughBase", "src/B.cs"), ("StaticBase", "src/C.cs"), ("Refers", "src/D.cs"),
+            ("Chain1", "src/E.cs"), ("Chain2", "src/F.cs"), ("Chain3", "src/G.cs"),
+            ("StubFoo.Run", "tests/StubFoo.cs"), ("StubTests.Check", "tests/StubTests.cs"), ("Seedling", "src/H.cs"),
+        })
+        {
+            WriteFile(file, 5);
+            graph.Node(name, file: file, line: 0, endLine: 4);
+        }
+        return graph
+            .Edge("Foo.Run", "Base.Run", "OVERRIDES_MEMBER").Edge("Base.Run", "IFoo.Run", "IMPLEMENTS_MEMBER")
+            .Edge("Bar.Run", "IFoo.Run", "IMPLEMENTS_MEMBER")
+            .Edge("ThroughInterface", "IFoo.Run").Edge("ThroughBase", "Base.Run").Edge("StaticBase", "Base.Run", staticCall: true)
+            .Edge("Refers", "Foo.Run", "REFERENCES").Edge("Chain1", "ThroughInterface").Edge("Chain2", "Chain1").Edge("Chain3", "Chain2")
+            .Edge("StubFoo.Run", "IFoo.Run", "IMPLEMENTS_MEMBER").Edge("StubFoo.Run", "Seedling")
+            .Edge("StubTests.Check", "StubFoo.Run");
+    }
+
+    [Theory]
+    [InlineData(null, false, 5)]
+    [InlineData(null, true, 5)]
+    [InlineData(null, false, 2)]
+    [InlineData("CALLS", false, 5)]
+    [InlineData("CALLS", true, 1)]
+    [InlineData("REFERENCES,CALLS", true, 20)]
+    public async Task AOneMemberDiff_AgreesWithAffectedOnThatMember_UnderEveryRuleAndFilter(string? relation, bool includeTests, int maxDepth)
+    {
+        var service = Dispatching().Build();
+        var listed = 0;
+
+        foreach (var (name, file) in new[]
+        {
+            ("IFoo.Run", "src/IFoo.cs"), ("Base.Run", "src/Base.cs"), ("Foo.Run", "src/Foo.cs"), ("Seedling", "src/H.cs"),
+            ("ThroughInterface", "src/A.cs"), ("StubFoo.Run", "tests/StubFoo.cs"),
+        })
+        {
+            var impact = await Impact(service, Diff(file, Blob(file), Replace(3)), includeTests: includeTests, relation: relation, maxDepth: maxDepth);
+            var affected = await service.GetAffectedAsync(new GraphAffectedRequest
+            {
+                Identifier = I(name), IncludeTests = includeTests, Relation = relation, MaxDepth = maxDepth,
+            });
+
+            Assert.Equal([I(name)], impact.Changes.Select(change => change.Identifier));
+            Assert.True(impact.Complete, name);
+            Assert.Equal(
+                affected.Items.Select(item => (item.Identifier, item.Distance, item.Relation, item.Via, item.Through)),
+                impact.Items.Select(item => (item.Identifier, item.Distance, item.Relation, item.Via, item.Through)));
+            Assert.Equal((affected.TotalCount, affected.ReturnedCount, affected.Truncated, affected.TestsHidden, affected.FileCount, affected.DepthLimited),
+                (impact.TotalCount, impact.ReturnedCount, impact.Truncated, impact.TestsHidden, impact.FileCount, impact.DepthLimited));
+            Assert.All(impact.Items, item => Assert.Equal(I(name), item.Seed));
+            listed += impact.TotalCount + impact.TestsHidden;
+        }
+        // The rules were exercised, not two empty answers compared.
+        Assert.True(listed >= 6, $"only {listed} dependents in all");
+    }
+
     [Fact]
     public async Task ALineOfTheTypeItself_ChangesTheTypeAlone_NotEveryMember()
     {
@@ -329,6 +395,19 @@ public sealed class GraphImpactTests : IDisposable
     }
 
     [Fact]
+    public async Task ABlobIdOfASha256Repository_IsCheckedToo()
+    {
+        var service = Sample().Build();
+        var content = File.ReadAllBytes(Path.Combine(_root, "src", "Foo.cs"));
+
+        var full = await Impact(service, Diff("src/Foo.cs", DiffWorkingTree.BlobId(content, sha256: true), Replace(8)));
+        var abbreviated = await Impact(service, Diff("src/Foo.cs", DiffWorkingTree.BlobId(content, sha256: true)[..12], Replace(8)));
+
+        Assert.Equal((1, true), (full.ContentChecked, full.Complete));
+        Assert.Equal((1, true), (abbreviated.ContentChecked, abbreviated.Complete));
+    }
+
+    [Fact]
     public async Task AFileChangedAfterTheIndexLastReadTheTree_IsNotMapped()
     {
         var service = Sample(indexedAsOf: DateTime.UtcNow.AddHours(-1)).Build();
@@ -477,6 +556,17 @@ public sealed class GraphImpactTests : IDisposable
         Assert.Contains("limit", (await Assert.ThrowsAsync<ArgumentException>(() => Impact(service, "x", limit: 101))).Message);
         Assert.Contains("empty", (await Assert.ThrowsAsync<ArgumentException>(() => Impact(service, ""))).Message);
         Assert.Contains("ends early", (await Assert.ThrowsAsync<ArgumentException>(() => Impact(service, "--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n x\n"))).Message);
+    }
+
+    [Fact]
+    public async Task ACancelledRequest_IsNotAnswered()
+    {
+        var service = Sample().Build();
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => service.GetImpactAsync(
+            new GraphImpactRequest { Diff = Diff("src/Foo.cs", Blob("src/Foo.cs"), Replace(8)) }, cancelled.Token));
     }
 
     [Fact]
