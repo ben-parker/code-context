@@ -34,8 +34,9 @@ public class UnifiedDiffTests
         Assert.Equal(
             [new DiffRemoval(new DiffLineRange(11, 11), 10, 13), new DiffRemoval(new DiffLineRange(13, 13), 13, 14)],
             file.Removals);
-        // The blank added line is not a change of anything on its own.
-        Assert.Equal(1, file.IgnoredLines);
+        // The blank added line is kept apart for the mapping, which knows whether a member (a string in it) holds it.
+        Assert.Equal([new DiffLineRange(15, 15)], file.BlankAdded);
+        Assert.Equal(0, file.IgnoredLines);
         Assert.Equal((3, 2), (file.AddedLineCount, file.RemovedLineCount));
     }
 
@@ -90,6 +91,25 @@ public class UnifiedDiffTests
             replaced.Removals);
         Assert.Equal([new DiffLineRange(1, 1)], replaced.CommentAdded);
         Assert.Equal([new DiffLineRange(3, 3)], replaced.Added);
+    }
+
+    [Fact]
+    public void BlankLines_AreKeptForTheMapping_AddedAsRangesAndRemovedAsRuns()
+    {
+        var file = Assert.Single(UnifiedDiff.Parse(Lines(
+            "diff --git a/A.cs b/A.cs", "index 1111111..2222222 100644", "--- a/A.cs", "+++ b/A.cs",
+            "@@ -1,7 +1,9 @@", " a", "+", "+  ", "+x", "+", " b", "-", "-\t", " c", "-   ", "+", " d")));
+
+        Assert.Equal([new DiffLineRange(2, 3), new DiffLineRange(5, 5), new DiffLineRange(8, 8)], file.BlankAdded);
+        Assert.Equal([new DiffLineRange(4, 4)], file.Added);
+        // Runs of blank lines only, which no code was removed with, are judged by where they stood.
+        Assert.Equal(
+            [
+                new DiffRemoval(new DiffLineRange(3, 4), 6, 7, CommentsOnly: true, BlankOnly: true),
+                new DiffRemoval(new DiffLineRange(6, 6), 7, 9, CommentsOnly: true, BlankOnly: true),
+            ],
+            file.Removals);
+        Assert.Equal(0, file.IgnoredLines);
     }
 
     [Theory]

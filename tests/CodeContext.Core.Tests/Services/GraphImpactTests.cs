@@ -259,11 +259,12 @@ public sealed class GraphImpactTests : IDisposable
     }
 
     [Fact]
-    public async Task WhitespaceOnlyLines_ChangeNothing()
+    public async Task AWhitespaceOnlyLineBetweenMembers_ChangesNothing()
     {
         var service = Sample().Build();
+        var blob = WriteFooWithBlanks();
 
-        var impact = await Impact(service, Diff("src/Foo.cs", Blob("src/Foo.cs"), "@@ -13,2 +13,3 @@\n line 13\n+   \n line 14"));
+        var impact = await Impact(service, Diff("src/Foo.cs", blob, "@@ -12,2 +12,3 @@\n line 12\n+   \n "));
 
         Assert.Empty(impact.Changes);
         Assert.Equal(1, impact.IgnoredLines);
@@ -1361,6 +1362,62 @@ public sealed class GraphImpactTests : IDisposable
 
         Assert.Equal(2, attempts);
         Assert.Equal(["Caller", "Far"], impact.Items.Select(item => item.Name));
+    }
+
+    /// <summary>
+    /// src/Foo.cs as the sample's spans have it, Run (6-12) holding a raw string whose line 9 is blank, blank lines 13-15
+    /// between Run and Other (16-24), and line 26 blank between Other and the class's closing line 28.
+    /// </summary>
+    private string WriteFooWithBlanks()
+    {
+        var lines = Enumerable.Range(1, 30).Select(line => $"line {line}").ToArray();
+        foreach (var blank in new[] { 9, 13, 14, 15, 26 }) lines[blank - 1] = "";
+        lines[7] = "        var sql = \"\"\"";
+        lines[9] = "            \"\"\";";
+        return WriteText("src/Foo.cs", string.Join("\n", lines) + "\n");
+    }
+
+    [Fact]
+    public async Task ABlankLineAddedOrRemovedInsideAMember_ChangesIt()
+    {
+        // Inside a raw string (or a template literal, or any language where whitespace counts) a blank line is part of a
+        // value: the member changed, whatever the line holds.
+        var service = Sample().Build();
+        var blob = WriteFooWithBlanks();
+
+        var added = await Impact(service, Diff("src/Foo.cs", blob, "@@ -8,0 +9 @@\n+"));
+        Assert.Equal([I("Foo.Run")], added.Changes.Select(change => change.Identifier));
+        Assert.Equal("9", added.Changes[0].ChangedLines);
+        Assert.Equal(["Caller", "Far"], added.Items.Select(item => item.Name));
+
+        var removed = await Impact(service, Diff("src/Foo.cs", blob, "@@ -9,2 +8,0 @@\n-\n-   "));
+        Assert.Equal([I("Foo.Run")], removed.Changes.Select(change => change.Identifier));
+        Assert.Equal(2, removed.Changes[0].RemovedLines);
+
+        // Whitespace changed on a blank line: removed and added at once.
+        var respaced = await Impact(service, Diff("src/Foo.cs", blob, "@@ -9 +9 @@\n-  \n+"));
+        Assert.Equal([I("Foo.Run")], respaced.Changes.Select(change => change.Identifier));
+        Assert.Equal(0, respaced.IgnoredLines);
+    }
+
+    [Fact]
+    public async Task ABlankLineNoMemberHolds_IsJudgedAsACommentLineIs()
+    {
+        var service = Sample().Build();
+        var blob = WriteFooWithBlanks();
+
+        // Between two members, in the run just above Other: nothing changed; counted.
+        var between = await Impact(service, Diff("src/Foo.cs", blob, "@@ -13,0 +14 @@\n+", "@@ -16 +15,0 @@\n-"));
+        Assert.Empty(between.Changes);
+        Assert.Empty(between.Unmapped);
+        Assert.Equal(2, between.IgnoredLines);
+        Assert.True(between.Complete);
+
+        // After the last member, above the class's closing line: a line of the class, as a comment there would be.
+        var trailing = await Impact(service, Diff("src/Foo.cs", blob, "@@ -25,0 +26 @@\n+"));
+        var change = Assert.Single(trailing.Changes);
+        Assert.Equal((I("Foo"), "container"), (change.Identifier, change.Level));
+        Assert.Equal(0, trailing.IgnoredLines);
     }
 
     /// <summary>A file table that runs a step before the first file it is asked about, then answers as the store does.</summary>

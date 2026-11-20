@@ -210,6 +210,9 @@ namespace CodeContext.Core.Diffs
 
         public bool IsComment(int line) => line >= 1 && line <= Count && (_kind[line] & Comment) != 0;
 
+        /// <summary>Whether 1-based <paramref name="line"/> holds only whitespace.</summary>
+        public bool IsBlank(int line) => line >= 1 && line <= Count && (_kind[line] & (Comment | Quiet)) == Quiet;
+
         /// <summary>Whether a block comment that a comment line opened is still open after 1-based <paramref name="line"/>.</summary>
         public bool IsOpenAfter(int line) => line >= 1 && line <= Count && (_kind[line] & Open) != 0;
 

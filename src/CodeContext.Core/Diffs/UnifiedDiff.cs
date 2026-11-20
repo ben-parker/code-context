@@ -12,22 +12,28 @@ namespace CodeContext.Core.Diffs
     }
 
     /// <summary>
-    /// Removed lines that are not all blank: <see cref="Old"/> on the old side, and the new-side lines around the change
+    /// A run of removed lines: <see cref="Old"/> on the old side, and the new-side lines around the change
     /// block they belong to: <see cref="NewBefore"/> is the last new-side line before it (0 at the top of the file) and
     /// <see cref="NewAfter"/> the first after it, past any lines the block adds. <see cref="CommentsOnly"/> when every
-    /// removed line that is not blank is a comment line (see <see cref="SourceLines.IsCommentLine"/>);
+    /// removed line is blank or a comment line (see <see cref="SourceLines.IsCommentLine"/>): no code, so where it stood
+    /// decides, as for an added comment or blank line;
     /// <see cref="ContinuesBlockComment"/> when such a run starts like the inside or the end of a block comment
-    /// (<c>* text</c>, <c>*/</c>), so that it was a comment only if one was open above it.
+    /// (<c>* text</c>, <c>*/</c>), so that it was a comment only if one was open above it; <see cref="BlankOnly"/> when
+    /// every removed line holds only whitespace.
     /// </summary>
     public readonly record struct DiffRemoval(
-        DiffLineRange Old, int NewBefore, int NewAfter, bool CommentsOnly = false, bool ContinuesBlockComment = false);
+        DiffLineRange Old, int NewBefore, int NewAfter, bool CommentsOnly = false, bool ContinuesBlockComment = false,
+        bool BlankOnly = false);
 
     /// <summary>
     /// One file of a unified diff, as data. Paths are as the diff names them, relative, <c>/</c>-separated, with git's
     /// quoting undone and its one-letter prefix (<c>a/</c>, <c>b/</c>, ...) removed; null for <c>/dev/null</c>. Only line
     /// numbers are kept, never the text: <see cref="Added"/> holds the new-side lines a hunk adds that are neither blank
-    /// nor comment lines, <see cref="CommentAdded"/> the added comment lines, <see cref="Removals"/> the removed runs that
-    /// are not all blank, and <see cref="IgnoredLines"/> counts the changed lines that hold only whitespace.
+    /// nor comment lines, <see cref="CommentAdded"/> the added comment lines, <see cref="BlankAdded"/> the added lines
+    /// that hold only whitespace, <see cref="Removals"/> the removed runs, and <see cref="IgnoredLines"/> counts line 1
+    /// changed only by a byte-order mark. A blank line is never set aside here: inside a multi-line string (a C# raw or
+    /// verbatim string, a TypeScript template literal, any language where whitespace counts) it is part of a value, and
+    /// only the mapping knows where it lies (<see cref="DiffMapper"/>).
     /// </summary>
     public sealed class DiffFile
     {
@@ -68,6 +74,9 @@ namespace CodeContext.Core.Diffs
         public bool HasHunks { get; internal set; }
         public List<DiffLineRange> Added { get; } = new();
         public List<DiffLineRange> CommentAdded { get; } = new();
+
+        /// <summary>Added lines that hold only whitespace, which the mapping judges as it does comment lines.</summary>
+        public List<DiffLineRange> BlankAdded { get; } = new();
 
         /// <summary>
         /// Added comment lines that open or close a block comment whose other end is not among the lines changed with
@@ -439,9 +448,9 @@ namespace CodeContext.Core.Diffs
                 var removedCode = false;
                 var removedComment = false;
                 var removedContinues = false;
-                var removedBlank = 0;
                 var addStart = 0;
                 var commentStart = 0;
+                var blankStart = 0;
                 // Where the block's comment lines leave a block comment, read from outside one: added and removed apart.
                 var addedMarks = new CommentMarks();
                 var removedMarks = new CommentMarks();
@@ -492,14 +501,17 @@ namespace CodeContext.Core.Diffs
                             OpenBlock();
                             if (removedStart == 0) removedStart = nextOld;
                             removedEnd = nextOld;
-                            if (SourceLines.IsBlank(content)) removedBlank++;
-                            else if (SourceLines.IsCommentLine(content))
+                            // A blank line is neither code nor comment: a run of only such lines is judged by where it stood.
+                            if (!SourceLines.IsBlank(content))
                             {
-                                if (!removedMarks.Open && content.TrimStart()[0] == '*') removedContinues = true;
-                                removedComment = true;
-                                removedMarks.Follow(content);
+                                if (!SourceLines.IsCommentLine(content)) removedCode = true;
+                                else
+                                {
+                                    if (!removedMarks.Open && content.TrimStart()[0] == '*') removedContinues = true;
+                                    removedComment = true;
+                                    removedMarks.Follow(content);
+                                }
                             }
-                            else removedCode = true;
                             file.RemovedLineCount++;
                             oldLeft--;
                             nextOld++;
@@ -510,18 +522,21 @@ namespace CodeContext.Core.Diffs
                             file.AddedLineCount++;
                             if (SourceLines.IsBlank(content))
                             {
-                                file.IgnoredLines++;
-                                CloseAdded();
+                                CloseCode();
+                                CloseComments();
+                                if (blankStart == 0) blankStart = nextNew;
                             }
                             else if (SourceLines.IsCommentLine(content))
                             {
                                 CloseCode();
+                                CloseBlanks();
                                 if (commentStart == 0) commentStart = nextNew;
                                 if (addedMarks.Follow(content)) (markedLines ??= []).Add(nextNew);
                             }
                             else
                             {
                                 CloseComments();
+                                CloseBlanks();
                                 if (addStart == 0) addStart = nextNew;
                                 if (content.TrimStart().StartsWith("#") && SourceLines.IsConditionalDirective(content))
                                     file.ConditionalDirectives.Add(new DiffLineRange(nextNew, nextNew));
@@ -554,6 +569,14 @@ namespace CodeContext.Core.Diffs
                 {
                     CloseCode();
                     CloseComments();
+                    CloseBlanks();
+                }
+
+                void CloseBlanks()
+                {
+                    if (blankStart == 0) return;
+                    file.BlankAdded.Add(new DiffLineRange(blankStart, nextNew - 1));
+                    blankStart = 0;
                 }
 
                 void CloseCode()
@@ -583,18 +606,16 @@ namespace CodeContext.Core.Diffs
                     }
                     addedMarks = removedMarks = default;
                     markedLines = null;
+                    // A run of blank lines too: inside a multi-line string they were part of a value.
                     if (removedStart > 0)
                     {
-                        if (removedCode || removedComment)
-                        {
-                            file.Removals.Add(new DiffRemoval(
-                                new DiffLineRange(removedStart, removedEnd), blockNewBefore, nextNew, CommentsOnly: !removedCode,
-                                ContinuesBlockComment: !removedCode && removedContinues));
-                        }
-                        else file.IgnoredLines += removedBlank;
+                        file.Removals.Add(new DiffRemoval(
+                            new DiffLineRange(removedStart, removedEnd), blockNewBefore, nextNew, CommentsOnly: !removedCode,
+                            ContinuesBlockComment: !removedCode && removedComment && removedContinues,
+                            BlankOnly: !removedCode && !removedComment));
                     }
                     blockNewBefore = -1;
-                    removedStart = removedEnd = removedBlank = 0;
+                    removedStart = removedEnd = 0;
                     removedCode = removedComment = removedContinues = false;
                 }
             }

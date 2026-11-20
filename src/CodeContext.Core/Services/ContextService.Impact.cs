@@ -281,7 +281,7 @@ namespace CodeContext.Core.Services
                     : file.Added;
                 var newBlob = file.NewBlob;
                 var mapping = DiffMapper.Map(nodes, node => IsContainer(node, walk), added, file.Removals, file.CommentAdded, file.CommentBoundaries,
-                    file.ConditionalDirectives, () => tree.ReadComments(fullPath, newBlob));
+                    file.ConditionalDirectives, () => tree.ReadComments(fullPath, newBlob), file.BlankAdded);
                 response.IgnoredLines += mapping.IgnoredComments;
 
                 foreach (var touch in mapping.Touched)

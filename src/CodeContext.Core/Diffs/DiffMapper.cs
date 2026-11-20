@@ -15,7 +15,9 @@ namespace CodeContext.Core.Diffs
     /// deletion, a rename, a changed signature), which exists only on the old side: that is reported, never mapped.
     /// Lines no declaration holds at all (imports, a namespace line, a file header) are reported too.
     ///
-    /// Comment lines (<see cref="SourceLines.IsCommentLine"/>) change a member that holds them, as any line does. Where
+    /// Comment lines (<see cref="SourceLines.IsCommentLine"/>) and blank lines change a member that holds them, as any line
+    /// does: inside a multi-line string either is part of a value, and nothing lexical here can tell soundly for every
+    /// language a worker reads. Where
     /// no member holds one (a doc comment above a member, which a declaration's span leaves out; a file header; a line
     /// of a string that only looks like a comment) the file itself is read (<see cref="CommentRuns"/>): a line of the
     /// comment just above a declaration, or of the file's leading comment, changes nothing and is only counted; any
@@ -52,7 +54,7 @@ namespace CodeContext.Core.Diffs
             public List<DiffLineRange> Outside { get; } = new();
             public List<RemovedBetween> RemovedBetween { get; } = new();
 
-            /// <summary>Comment lines above a declaration or at the head of the file, added or removed: counted, not mapped.</summary>
+            /// <summary>Comment and blank lines above a declaration or at the head of the file, added or removed: counted, not mapped.</summary>
             public int IgnoredComments { get; set; }
 
             /// <summary>Block-comment boundaries no member holds: the unchanged lines next to them may hold a declaration.</summary>
@@ -98,12 +100,13 @@ namespace CodeContext.Core.Diffs
         /// <param name="added">Changed new-side lines; <paramref name="comments"/> changed comment lines; <paramref name="removals"/> the removed runs.</param>
         /// <param name="boundaries">The comment lines among <paramref name="comments"/> that open or close a block comment around unchanged lines.</param>
         /// <param name="conditionals">The lines among <paramref name="added"/> that are conditional-compilation directives.</param>
-        /// <param name="readComments">Reads the file's new side, asked once and only when a comment line lies where no member holds it; null when it cannot be read.</param>
+        /// <param name="readComments">Reads the file's new side, asked once and only when a comment or blank line lies where no member holds it; null when it cannot be read.</param>
+        /// <param name="blanks">Added lines that hold only whitespace, judged as comment lines are.</param>
         public static Result Map(
             IReadOnlyList<CodeNode> nodes, Func<CodeNode, bool> isContainer,
             IReadOnlyList<DiffLineRange> added, IReadOnlyList<DiffRemoval> removals, IReadOnlyList<DiffLineRange>? comments = null,
             IReadOnlyList<DiffLineRange>? boundaries = null, IReadOnlyList<DiffLineRange>? conditionals = null,
-            Func<CommentRuns?>? readComments = null)
+            Func<CommentRuns?>? readComments = null, IReadOnlyList<DiffLineRange>? blanks = null)
         {
             var result = new Result();
             var groups = Groups(nodes);
@@ -155,28 +158,41 @@ namespace CodeContext.Core.Diffs
                 for (var line = boundary.Start; line <= boundary.End; line++) (boundaryLines ??= []).Add(line);
             }
 
-            foreach (var range in comments ?? [])
+            // A comment or blank line a member holds changes it: inside a multi-line string either is part of a value,
+            // and nothing here can tell. Where no member holds it, the file says whether it is the comment (with its
+            // blank lines) just above a declaration or at the head of the file, which changes nothing.
+            void Quiet(IReadOnlyList<DiffLineRange>? ranges, bool comment)
             {
-                for (var line = range.Start; line <= range.End; line++)
+                foreach (var range in ranges ?? [])
                 {
-                    var here = new DiffLineRange(line, line);
-                    Holding(roots, line, line, holding);
-                    var member = false;
-                    Group? innermost = null;
-                    foreach (var group in holding)
+                    for (var line = range.Start; line <= range.End; line++)
                     {
-                        if (innermost is null || group.Depth > innermost.Depth) innermost = group;
-                        if (IsContainer(group, isContainer) || !Owns(group, line)) continue;
-                        TouchOf(group, result).Lines.Add(here);
-                        member = true;
+                        var here = new DiffLineRange(line, line);
+                        Holding(roots, line, line, holding);
+                        var member = false;
+                        Group? innermost = null;
+                        foreach (var group in holding)
+                        {
+                            if (innermost is null || group.Depth > innermost.Depth) innermost = group;
+                            if (IsContainer(group, isContainer) || !Owns(group, line)) continue;
+                            TouchOf(group, result).Lines.Add(here);
+                            member = true;
+                        }
+                        if (member) continue;
+                        if (comment && boundaryLines?.Contains(line) == true) result.CommentBoundaries.Add(here);
+                        else if (AboveADeclarationOrAtTheHead(line - 1, line + 1) && (comment ? text!.IsComment(line) : text!.IsBlank(line)))
+                            result.IgnoredComments++;
+                        else if (innermost is not null) TouchOf(innermost, result).Lines.Add(here);
+                        // A blank line no declaration holds (among the usings, before a namespace line) is in no value
+                        // either: the bundled workers hold all code that can carry one (C# top-level statements are
+                        // <Main>, a TypeScript module is its whole file).
+                        else if (!comment) result.IgnoredComments++;
+                        else result.Outside.Add(here);
                     }
-                    if (member) continue;
-                    if (boundaryLines?.Contains(line) == true) result.CommentBoundaries.Add(here);
-                    else if (AboveADeclarationOrAtTheHead(line - 1, line + 1) && text!.IsComment(line)) result.IgnoredComments++;
-                    else if (innermost is not null) TouchOf(innermost, result).Lines.Add(here);
-                    else result.Outside.Add(here);
                 }
             }
+            Quiet(comments, comment: true);
+            Quiet(blanks, comment: false);
 
             foreach (var removal in removals)
             {
@@ -194,6 +210,8 @@ namespace CodeContext.Core.Diffs
                 else if (!removal.CommentsOnly) result.RemovedBetween.Add(new RemovedBetween(removal.Old, around is null ? null : NodesOf(around)));
                 else if (AboveADeclarationOrAtTheHead(removal.NewBefore, removal.NewAfter, removal.ContinuesBlockComment)) result.IgnoredComments += removal.Old.Count;
                 else if (around is not null) TouchOf(around, result).RemovedLines += removal.Old.Count;
+                // Blank lines no declaration held, as for added ones.
+                else if (removal.BlankOnly) result.IgnoredComments += removal.Old.Count;
                 else result.RemovedBetween.Add(new RemovedBetween(removal.Old, null));
             }
 

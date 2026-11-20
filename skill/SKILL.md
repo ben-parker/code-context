@@ -162,10 +162,12 @@ git diff $(git merge-base main HEAD) | codecontext query impact   # what this br
   reported reading, or one added to or removed from a directory a worker lists). Changed
   files that cannot change an indexed fact (a README, documentation, an image) are listed
   under `setAside` and leave the answer `complete`; nothing is set aside while a worker
-  does not report what it reads. Blank lines, a byte-order mark added or removed alone,
-  and comment lines just above a declaration or at the head of a file, change nothing
-  (`ignored`); a comment line elsewhere outside a
-  member changes the type or module holding it. Text shows the first 8 ranges of a long
+  does not report what it reads. Any changed line inside a member changes it, a blank or
+  comment line too (inside a multi-line string either is part of a value), so a
+  formatting change marks members changed. Outside members, blank and comment lines just
+  above a declaration or at the head of a file, blank lines no declaration holds, and a
+  byte-order mark added or removed alone change nothing (`ignored`); a blank or comment
+  line elsewhere changes the type or module holding it. Text shows the first 8 ranges of a long
   line list and how many there are (`--json` keeps them all). `--depth`, `--limit` (per
   list), `--tests` and `--relation` mean what they mean for `affected`. The tool never
   runs git: you run it. That matters only where the repository's `.git` is not yours

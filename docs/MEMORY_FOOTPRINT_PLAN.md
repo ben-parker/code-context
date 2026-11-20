@@ -513,9 +513,20 @@ Decisions where the backlog was silent:
    of it: cut short after a header, or made with `-w`); `notIndexed` (no declaration in the file, and it may feed
    the index: item 9); `unreadable`; `outsideRoot`; `invalidPath`; `combinedDiff`; `blockCommentBoundary` and
    `conditionalDirective` (item 5). Removed lines inside a member change that member.
-5. Changed lines that change nothing are counted, not mapped: whitespace-only lines, line 1 replaced by itself with
-   only a byte-order mark added or removed (two lines), and comment lines that the file shows to be the comment just
-   above a declaration or the file's leading comment. A file's line 1 is read without a leading byte-order mark
+5. Changed lines that change nothing are counted, not mapped: line 1 replaced by itself with only a byte-order mark
+   added or removed (two lines), comment and whitespace-only lines that the file shows to be in the run just above a
+   declaration or the file's leading run, and whitespace-only lines no declaration holds at all (among the usings,
+   before a namespace line). A whitespace-only line is never set aside by the diff reader (until the pull-request
+   review it was, added or removed, wherever it stood): inside a multi-line string (a C# raw or verbatim string, a
+   TypeScript template literal, any language where whitespace counts) it is part of a value, so a member that holds
+   one changed, and the answer said `complete` with nothing changed. The reader keeps them (`DiffFile.BlankAdded`,
+   removed runs with `BlankOnly`) and the mapping judges them as comment lines. No rule tells a string from code
+   here: the host has no parser, and a lexical one (counting `"""`, `@"`, backticks) would misread escapes,
+   interpolation holes, character and regular-expression literals and other languages' strings (Python's `'''`),
+   so the mapping is conservative: a blank line a member holds changes it, even when it is only spacing in a method
+   body (a formatting commit marks those members changed, which makes `affected` noisier, never wrong), and one
+   after a type's last member, above its closing line, is a line of the type. The cost, measured on jellyfin and
+   on a formatting-only diff, is in the log. A file's line 1 is read without a leading byte-order mark
    (U+FEFF), on either side of the diff and on disk, by one function every rule reads through
    (`SourceLines.FileLine`); on any other line U+FEFF is text. The rules are lexical and
    in one place (`SourceLines`): a comment line starts with `//`, `/*`, `*/` or a block comment's `* `, and where a
@@ -533,7 +544,11 @@ Decisions where the backlog was silent:
    close one, where the lines they replace did not (`blockCommentBoundary`), and `#if`, `#elif`, `#else`, `#endif`,
    `#define`, `#undef` (`conditionalDirective`, beside the container change). Known limits of reading lines without
    a parser: a `/*` or `*/` inside a line of code is not followed; a string whose last line starts with `//` or
-   `/*` directly above a declaration reads as that declaration's comment.
+   `/*`, or is blank, directly above a declaration reads as that declaration's comment (only where no member holds
+   the string: a C# field or property initializer and a TypeScript variable statement are members); a blank line
+   of a top-level multi-line string that no declaration holds is not seen, which the bundled workers never leave
+   (C# top-level statements are `<Main>`, a TypeScript module is its whole file) but a third-party worker that
+   emits no module node could.
 6. One walk: `GraphWalk.AffectedBy` over the union of changed node ids, the function `affected` uses, so propagation,
    dispatch, the static-call stop, the test-double stop, `testsHidden`, depth, cancellation and the test-file rule are
    the same; seeds are never listed (a changed declaration that uses another is a change, not a dependent). A
