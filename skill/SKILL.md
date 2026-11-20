@@ -66,8 +66,12 @@ Reading results:
 - `cache snapshot` (only with `--snapshot`; `--json`: `"cache":{"state":"snapshot",...}`)
   means no instance was running and the answer was read from the saved index after a
   check by file times of what it was made from (see [operations](references/operations.md));
-  no worker re-analysed anything. It can miss a change that check cannot see. Before
-  editing on it or concluding absence, confirm with `rg` or query without `--snapshot`.
+  no worker re-analysed anything. It can miss a change that check cannot see: on Windows,
+  a file replaced by a copy of the same size that keeps older times; on macOS, content
+  rewritten in place with its old modification time put back. A running instance does
+  not rely on these times: it follows source and project file edits as they happen.
+  Before editing on it or concluding absence, confirm with `rg` or query without
+  `--snapshot`.
 - `relationships not loaded` means nothing was fetched: the name was ambiguous
   (re-query with a target's identifier) or the depth was 0. It says nothing about
   whether the symbol has users.
