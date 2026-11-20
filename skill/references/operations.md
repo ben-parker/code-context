@@ -89,7 +89,11 @@ git diff $(git merge-base main HEAD) | jq -Rs '{diff: ., maxDepth: 5, limit: 20}
 
 `complete` is true only when every changed line mapped and every mapped file matched the
 working tree by blob id; `unmapped` (with `unmappedCount`, `unmappedReasons`), `changes`,
-`items` and `testFiles` each carry their own count and truncation. A diff that cannot be
+`items` and `testFiles` each carry their own count and truncation. A change's
+`usedByChanges` (at most five, with `usedByChangeCount`) names the other changes that use
+it, since a change is never among `items`. `setAsideFiles` (with `setAsideFileCount`)
+lists changed files that cannot change an indexed fact; they do not make the answer
+incomplete. A diff that cannot be
 read (truncated hunk, garbled line, the same file twice, over 16 MiB or 10,000 files) is a
 400 naming its line; a 503 `INDEX_NOT_READY` means no scan has finished yet.
 

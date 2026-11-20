@@ -121,32 +121,52 @@ git diff $(git merge-base main HEAD) | codecontext query impact   # what this br
   fall in (`member`, or `container` for a type's or module's own lines: its header, its
   closing line, between members; impact is then walked from the type alone), each with its
   lines and the dependents attributed to it; `affected` lists them as `affected` does, each
-  `from` the change that reached it first; `tests` lists the test files in reach. The
-  diff's new side must be the working tree: diff against a base (`git diff $(git
-  merge-base main HEAD)`), or from a base to `HEAD` with nothing uncommitted; `git diff
-  --cached` matches only files with no unstaged change, and untracked files appear only
-  after `git add -N`. A file is mapped only when its content
-  is the diff's new side (its blob id, so keep git's `index` lines) and the instance read
-  it after it last changed; `impact` waits for a finished scan. The first line says
-  `complete` or `incomplete`, and `incomplete` exits 2: every part that maps to nothing is
-  listed under `unmapped` with its reason, among them `outsideDeclarations` (imports,
-  usings, a namespace line; in an added file only a `global using`, an assembly attribute
-  or a statement, since its own usings bind only its declarations, all changed), `removedBetweenDeclarations` (removed or replaced lines outside
-  a member: a deleted, renamed or re-signed declaration exists only on the old side, so what
-  used it is not in the index; `rg` its old name), `deletedFile`, `renamed`, `binary`,
-  `notIndexed` (a file no worker parses: a project or config file can still matter),
-  `contentMismatch` (the working tree is not the diff's new side), `notYetIndexed` (retry),
-  `outsideRoot` and `invalidPath`. Blank lines and comment lines no member holds change
-  nothing (`ignored`), except a `/*` or `*/` that comments unchanged lines out or back in
-  (`blockCommentBoundary`). `--depth`, `--limit` (per list), `--tests` and `--relation` mean what
-  they mean for `affected`. The tool never runs git: you run it. In a repository you do not
-  trust, `git diff` itself runs what its `.git/config` names (an external diff, a textconv
-  or clean filter, an fsmonitor hook), and its config can reshape the output (colour,
-  prefixes, relative paths). There, commit or check out the new side with a clean work
-  tree and diff two commits: `git -c core.fsmonitor=false diff --no-ext-diff --no-textconv
-  --no-color --no-relative --src-prefix=a/ --dst-prefix=b/ --full-index <base> HEAD`. A diff
-  against the working tree (`git diff <base>`) runs the repository's clean filters whatever
-  the flags.
+  `from` the change that reached it first; `tests` lists the test files in reach. A changed
+  declaration is never listed as a dependent: `used by N other change(s)` on a change names
+  the other changes that use it directly, so `0 dependents` there does not mean unused.
+  The diff's new side must be the working tree. Uncommitted work: `git diff HEAD` (after
+  `git add -N` for new files). A branch with what is uncommitted on it: `git diff $(git
+  merge-base main HEAD)`. Commits only, nothing uncommitted: `git diff main...HEAD`. `git
+  diff --cached` matches only files with no unstaged change. A file is mapped only when
+  its content is the diff's new side (its blob id, so keep git's `index` lines; a CRLF
+  checkout matches) and the instance read it after it last changed; `impact` waits for a
+  finished scan. The first line says `complete` or `incomplete`, and `incomplete` exits 2:
+  every part that maps to nothing is listed under `unmapped` with its reason:
+  `outsideDeclarations` (imports, usings, a namespace line: they can rebind every symbol
+  of the file, so `query affected <file>`; in an added file only a `global using`, an
+  assembly attribute or a statement), `removedBetweenDeclarations` (removed or replaced
+  lines outside a member, a one-line member's replaced line included: a deleted, renamed
+  or re-signed declaration exists only on the old side, so what used it is not in the
+  index; `rg` its old name), `blockCommentBoundary` and `conditionalDirective` (a `/*`,
+  `*/`, `#if` or `#endif` outside a member that comments or compiles unchanged lines out
+  or in), `noChangedLines` (a file named with no hunk: a diff cut short, or made with
+  `-w`), `deletedFile`, `renamed`, `binary`, `contentMismatch` (the working tree is not
+  the diff's new side, or a filter such as LFS or `ident` rewrites the file on checkout),
+  `notYetIndexed` (retry; or the worker failed on the file, which the detail says),
+  `unreadable`, `outsideRoot`, `invalidPath`, `combinedDiff`, and `notIndexed`: a file
+  with no declaration that may still change what is indexed, with why (a project or
+  configuration file, a lock file, an ignore file, an excluded path, a file a worker
+  reported reading, or one added to or removed from a directory a worker lists). Changed
+  files that cannot change an indexed fact (a README, documentation, an image) are listed
+  under `setAside` and leave the answer `complete`; nothing is set aside while a worker
+  does not report what it reads. Blank lines, and comment lines just above a declaration
+  or at the head of a file, change nothing (`ignored`); a comment line elsewhere outside a
+  member changes the type or module holding it. `--depth`, `--limit` (per list), `--tests`
+  and `--relation` mean what they mean for `affected`. The tool never runs git: you run
+  it. That matters only where the repository's `.git` is not yours (received as a
+  directory or an archive rather than cloned): there git runs what `.git/config` names,
+  an external diff, a textconv, a clean or smudge filter, an fsmonitor hook, and `git
+  add`, `git commit`, `git stash` and `git checkout` run filters and hooks as well. One
+  form was checked (git 2.43) to run none of it, a diff between two commits: `git
+  -c core.fsmonitor=false diff --no-ext-diff --no-textconv --no-color --no-relative
+  --src-prefix=a/ --dst-prefix=b/ --full-index <base> HEAD`, which describes the working
+  tree only when `HEAD` is checked out with nothing uncommitted. Uncommitted work there
+  has no form that is safe by flags alone: any git command that reads the working tree
+  runs the clean filters the config names. Look first (`git config --local --includes
+  --get-regexp '^(filter|include|includeif)\.'` runs nothing); if it prints nothing, the
+  same flags without `HEAD` (`... --full-index <base>`) were checked to run nothing, and
+  `git -c core.fsmonitor=false add -N` likewise. If it names a filter, do not diff the
+  working tree with git: say so and leave the uncommitted part out.
 - **`hubs`** ranks symbols by distinct direct dependents, then by their files. A type's
   count is uses of the type itself, not of its members (`--type Method` ranks members).
   `--within DIR` (repository-relative), `--type`, `--limit`, `--relation` (kinds counted),

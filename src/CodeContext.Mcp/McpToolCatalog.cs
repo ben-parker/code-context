@@ -82,7 +82,7 @@ internal static class McpToolCatalog
             GetAffectedSchema),
         MakeTool(
             "get_impact",
-            "List what a diff could break: the declarations its changed lines fall in, everything that depends on them (as get_affected, in one walk, each dependent attributed to the change that reached it first), and the test files in reach. Parts of the diff that map to no declaration (imports, removed or renamed declarations, deleted, binary or unparsed files, a diff whose new side is not checked out) are listed in unmapped, and complete is then false. Static evidence, not runtime behavior.",
+            "List what a diff could break: the declarations its changed lines fall in, everything that depends on them (as get_affected, in one walk, each dependent attributed to the change that reached it first), and the test files in reach. A changed declaration is never listed as a dependent: usedByChanges names the other changes that use it. Parts of the diff that map to no declaration (imports, removed or renamed declarations, deleted, binary or unparsed files, a diff whose new side is not checked out) are listed in unmapped, and complete is then false; changed files that cannot change an indexed fact (a README, documentation: no worker parses, names or reported reading them) are listed in setAsideFiles and leave it true. Static evidence, not runtime behavior.",
             GetImpactSchema),
         MakeTool(
             "get_hubs",

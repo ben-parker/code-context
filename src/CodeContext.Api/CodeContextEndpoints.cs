@@ -237,11 +237,14 @@ public static class CodeContextEndpoints
         .WithDescription("Maps the changed lines of a unified diff (git diff output, whose new side must be the working tree) to " +
                         "the innermost declarations holding them, then lists what depends on those declarations as " +
                         "/api/graph/affected does, in one walk, each dependent attributed to the change that reached it first, " +
-                        "and the test files in reach. Every part of the diff that maps to no declaration (lines outside " +
+                        "and the test files in reach. A changed declaration is never listed as a dependent: 'usedByChanges' " +
+                        "names the other changes that use it. Every part of the diff that maps to no declaration (lines outside " +
                         "declarations, removed declarations, deleted, renamed, binary or unparsed files, files whose content " +
                         "is not the diff's new side or changed since the index read them) is listed in 'unmapped' with the " +
-                        "reason, and the answer is then not 'complete'. Nothing is run: the diff is data. 503 INDEX_NOT_READY " +
-                        "while no scan has finished.")
+                        "reason, and the answer is then not 'complete'. Changed files that cannot change an indexed fact (no " +
+                        "worker parses them, names them as a project file or reported reading them: a README, documentation) " +
+                        "are listed in 'setAsideFiles' and leave it complete. Nothing is run: the diff is data. 503 " +
+                        "INDEX_NOT_READY while no scan has finished.")
         .Accepts<GraphImpactRequest>("application/json")
         .Produces<GraphImpactResponse>(StatusCodes.Status200OK)
         .Produces(StatusCodes.Status400BadRequest)

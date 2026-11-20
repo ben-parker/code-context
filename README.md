@@ -143,8 +143,10 @@ new side is the working tree from stdin or `--diff FILE`, maps each changed line
 innermost declaration holding it, walks what depends on all of them at once, and lists the
 test files in reach. What maps to no declaration (imports, removed or renamed
 declarations, deleted, binary or unparsed files, a diff whose new side is not checked out)
-is listed with the reason, and the answer is then `incomplete` (exit code `2`). The tool
-never runs git; the diff is data.
+is listed with the reason, and the answer is then `incomplete` (exit code `2`). Changed
+files that cannot change an indexed fact (a README, documentation: no worker parses them,
+names them as a project file or reported reading them) are set aside and leave the answer
+complete. The tool never runs git; the diff is data.
 
 ## Instance lifecycle
 
