@@ -52,6 +52,16 @@ namespace CodeContext.Core.Tests.Services
         }
 
         [Fact]
+        public async Task GetStatusAsync_ListsTheGraphQueryEndpoints()
+        {
+            var status = await CreateService().GetStatusAsync();
+
+            Assert.Contains("/api/graph/path", status.Api.Endpoints);
+            Assert.Contains("/api/graph/affected", status.Api.Endpoints);
+            Assert.Contains("/api/graph/hubs", status.Api.Endpoints);
+        }
+
+        [Fact]
         public async Task GetStatusAsync_SerializesInformationalAndContractVersions()
         {
             var status = await CreateService().GetStatusAsync();

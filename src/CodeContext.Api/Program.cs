@@ -4,6 +4,7 @@ using System.CommandLine.Help;
 using System.CommandLine.Invocation;
 using CodeContext.Api;
 using CodeContext.Api.Commands;
+using CodeContext.Core.Services;
 
 namespace CodeContext.Api;
 
@@ -194,8 +195,18 @@ public class Program
                 "leaving nothing running; otherwise start one. CodeContext:QueryFromSnapshot=true " +
                 "(environment CodeContext__QueryFromSnapshot=true) makes this the default.",
         };
+        Option<string?> queryWithinOption = new("--within")
+        {
+            Description = "query hubs: only symbols under this repository-relative directory or file.",
+        };
+        Option<string?> queryTypeOption = new("--type")
+        {
+            Description = "query hubs: only symbols of this type (Class, Method, Interface, ...).",
+        };
         foreach (var option in new Option[]
                  {
+                     queryWithinOption,
+                     queryTypeOption,
                      queryPathOption,
                      queryDepthOption,
                      queryTestsOption,
@@ -226,24 +237,44 @@ public class Program
         queryCommand.Options.Add(queryExternalOption);
         queryCommand.Options.Add(queryStartOption);
         queryCommand.Options.Add(querySnapshotOption);
+        queryCommand.Options.Add(queryWithinOption);
+        queryCommand.Options.Add(queryTypeOption);
         queryCommand.Options.Add(queryHelpOption);
+
+        // The options given on the command line, not defaulted: a query refuses one it does not read.
+        IReadOnlyCollection<string> Given(ParseResult parseResult)
+            => new Option[] { queryDepthOption, queryExactOption, queryLimitOption, queryExternalOption, queryWithinOption, queryTypeOption }
+                .Where(option => parseResult.GetResult(option) is { Implicit: false })
+                .Select(option => option.Name)
+                .ToList();
+
+        QuerySettings Settings(ParseResult parseResult, IReadOnlyList<string> identifiers, bool multi, GraphQuerySettings? graph)
+            => new(
+                identifiers,
+                parseResult.GetValue(queryPathOption)!,
+                parseResult.GetValue(queryDepthOption),
+                parseResult.GetValue(queryTestsOption),
+                parseResult.GetValue(queryRelationOption),
+                parseResult.GetValue(queryExactOption),
+                parseResult.GetValue(queryJsonOption),
+                multi,
+                parseResult.GetValue(queryHumanOption),
+                parseResult.GetValue(queryLimitOption),
+                parseResult.GetValue(queryExternalOption),
+                parseResult.GetValue(queryStartOption),
+                parseResult.GetValue(querySnapshotOption),
+                graph,
+                Given(parseResult));
+
+        GraphQuerySettings Graph(ParseResult parseResult, string query)
+            => new(
+                query,
+                parseResult.GetResult(queryDepthOption) is { Implicit: false } ? parseResult.GetValue(queryDepthOption) : null,
+                parseResult.GetValue(queryWithinOption),
+                parseResult.GetValue(queryTypeOption));
         queryCommand.SetAction((ParseResult parseResult, CancellationToken ct) =>
             QueryCommandHandler.ExecuteAsync(
-                new QuerySettings(
-                    [parseResult.GetValue(queryIdentifierArgument)!],
-                    parseResult.GetValue(queryPathOption)!,
-                    parseResult.GetValue(queryDepthOption),
-                    parseResult.GetValue(queryTestsOption),
-                    parseResult.GetValue(queryRelationOption),
-                    parseResult.GetValue(queryExactOption),
-                    parseResult.GetValue(queryJsonOption),
-                    Multi: false,
-                    parseResult.GetValue(queryHumanOption),
-                    parseResult.GetValue(queryLimitOption),
-                    parseResult.GetValue(queryExternalOption),
-                    parseResult.GetValue(queryStartOption),
-                    parseResult.GetValue(querySnapshotOption)),
-                ct));
+                Settings(parseResult, [parseResult.GetValue(queryIdentifierArgument)!], multi: false, graph: null), ct));
 
         var multiQueryCommand = new Command(
             "multi",
@@ -259,22 +290,51 @@ public class Program
         multiQueryCommand.Options.Add(multiHelpOption);
         multiQueryCommand.SetAction((ParseResult parseResult, CancellationToken ct) =>
             QueryCommandHandler.ExecuteAsync(
-                new QuerySettings(
-                    parseResult.GetValue(queryIdentifiersArgument)!,
-                    parseResult.GetValue(queryPathOption)!,
-                    parseResult.GetValue(queryDepthOption),
-                    parseResult.GetValue(queryTestsOption),
-                    parseResult.GetValue(queryRelationOption),
-                    parseResult.GetValue(queryExactOption),
-                    parseResult.GetValue(queryJsonOption),
-                    Multi: true,
-                    parseResult.GetValue(queryHumanOption),
-                    parseResult.GetValue(queryLimitOption),
-                    parseResult.GetValue(queryExternalOption),
-                    parseResult.GetValue(queryStartOption),
-                    parseResult.GetValue(querySnapshotOption)),
-                ct));
+                Settings(parseResult, parseResult.GetValue(queryIdentifiersArgument)!, multi: true, graph: null), ct));
         queryCommand.Subcommands.Add(multiQueryCommand);
+
+        // Whole-graph queries. A symbol named like one of these subcommands is queried after `--`: `query -- path`.
+        var pathQueryCommand = new Command(
+            "path",
+            "Shortest chain of recorded relationships from one symbol to another, through dispatch to implementations. " +
+            $"--depth is the most hops searched (1-{GraphQueryLimits.MaxDepth}, default {GraphQueryLimits.DefaultPathDepth}); " +
+            "--tests lets the path pass through test files; --relation limits the kinds followed.");
+        Argument<string> pathFromArgument = new("from") { Description = "Where the path starts: identifier, exact or qualified name, or file path." };
+        Argument<string> pathToArgument = new("to") { Description = "Where the path ends." };
+        pathQueryCommand.Arguments.Add(pathFromArgument);
+        pathQueryCommand.Arguments.Add(pathToArgument);
+        pathQueryCommand.SetAction((ParseResult parseResult, CancellationToken ct) =>
+            QueryCommandHandler.ExecuteAsync(
+                Settings(parseResult, [parseResult.GetValue(pathFromArgument)!, parseResult.GetValue(pathToArgument)!],
+                    multi: false, Graph(parseResult, GraphQueryParameters.PathQuery)), ct));
+
+        var affectedQueryCommand = new Command(
+            "affected",
+            "What depends on a symbol or file, transitively, nearest first: what could break if it changes. " +
+            $"--depth is the most hops followed (1-{GraphQueryLimits.MaxDepth}, default {GraphQueryLimits.DefaultAffectedDepth}); " +
+            $"--limit the entries listed (default {GraphQueryLimits.DefaultLimit}); --tests lists test-file dependents.");
+        Argument<string> affectedIdentifierArgument = new("identifier") { Description = "The symbol or file that would change." };
+        affectedQueryCommand.Arguments.Add(affectedIdentifierArgument);
+        affectedQueryCommand.SetAction((ParseResult parseResult, CancellationToken ct) =>
+            QueryCommandHandler.ExecuteAsync(
+                Settings(parseResult, [parseResult.GetValue(affectedIdentifierArgument)!],
+                    multi: false, Graph(parseResult, GraphQueryParameters.AffectedQuery)), ct));
+
+        var hubsQueryCommand = new Command(
+            "hubs",
+            "The symbols with the most distinct direct dependents. --within DIR, --type TYPE, " +
+            $"--limit N (default {GraphQueryLimits.DefaultLimit}), --tests and --external widen or narrow what is ranked.");
+        hubsQueryCommand.SetAction((ParseResult parseResult, CancellationToken ct) =>
+            QueryCommandHandler.ExecuteAsync(
+                Settings(parseResult, [], multi: false, Graph(parseResult, GraphQueryParameters.HubsQuery)), ct));
+
+        foreach (var command in new[] { pathQueryCommand, affectedQueryCommand, hubsQueryCommand })
+        {
+            var help = new HelpOption();
+            help.Action = new QueryHelpAction(queryIdentifierArgument);
+            command.Options.Add(help);
+            queryCommand.Subcommands.Add(command);
+        }
 
         rootCommand.Subcommands.Add(startCommand);
         rootCommand.Subcommands.Add(initCommand);
@@ -302,7 +362,8 @@ public class Program
         };
         option.Validators.Add(result =>
         {
-            if (result.GetValueOrDefault<int>() < 0)
+            // A value that is not a number is the parser's error to report; reading it here would throw.
+            if (TokenInt(result) is < 0)
                 result.AddError("Depth must be non-negative.");
         });
         return option;
@@ -317,11 +378,16 @@ public class Program
         };
         option.Validators.Add(result =>
         {
-            if (result.GetValueOrDefault<int?>() is < 1 or > QueryCommandHandler.MaxRelationshipLimit)
+            if (TokenInt(result) is < 1 or > QueryCommandHandler.MaxRelationshipLimit)
                 result.AddError($"Limit must be between 1 and {QueryCommandHandler.MaxRelationshipLimit}.");
         });
         return option;
     }
+
+    /// <summary>The option's value as given, when it is an integer; null when absent or not a number.</summary>
+    private static int? TokenInt(System.CommandLine.Parsing.OptionResult result)
+        => result.Tokens.Count > 0 && int.TryParse(result.Tokens[^1].Value, System.Globalization.NumberStyles.AllowLeadingSign,
+            System.Globalization.CultureInfo.InvariantCulture, out var value) ? value : null;
 
     private static Option<bool> CreateTestsOption()
         => new("--tests")
@@ -368,7 +434,32 @@ internal sealed class QueryHelpAction(Argument<string> singleIdentifier) : Synch
     {
         var command = parseResult.CommandResult.Command;
         var previousHidden = singleIdentifier.Hidden;
-        singleIdentifier.Hidden = command.Name == "multi";
+        singleIdentifier.Hidden = command.Name != "query";
+        // List only the options this query reads, described as it reads them; the options are shared, so put them back.
+        var mode = command.Name is "query" or "multi" ? "context" : command.Name;
+        var queryCommand = command.Name == "query" ? command : command.Parents.OfType<Command>().First();
+        var restore = new List<Action>();
+        foreach (var option in queryCommand.Options)
+        {
+            if (!QueryCommandHandler.Reads(mode, option.Name))
+            {
+                var hidden = option.Hidden;
+                option.Hidden = true;
+                restore.Add(() => option.Hidden = hidden);
+            }
+            else if (QueryCommandHandler.GraphOptionDescription(mode, option.Name) is { } description)
+            {
+                var previous = option.Description;
+                option.Description = description;
+                restore.Add(() => option.Description = previous);
+                if (option is Option<int> { DefaultValueFactory: { } factory } withDefault)
+                {
+                    // The graph queries' defaults are their own, given in the description.
+                    withDefault.DefaultValueFactory = null;
+                    restore.Add(() => withDefault.DefaultValueFactory = factory);
+                }
+            }
+        }
         try
         {
             using var rendered = new StringWriter();
@@ -383,15 +474,21 @@ internal sealed class QueryHelpAction(Argument<string> singleIdentifier) : Synch
             {
                 invocation.Output = output;
             }
-            var usage = command.Name == "multi"
-                ? "codecontext query multi <identifier>... [options]"
-                : "codecontext query <identifier> [options]";
+            var usage = command.Name switch
+            {
+                "multi" => "codecontext query multi <identifier>... [options]",
+                "path" => "codecontext query path <from> <to> [options]",
+                "affected" => "codecontext query affected <identifier> [options]",
+                "hubs" => "codecontext query hubs [options]",
+                _ => "codecontext query <identifier> [options]   (a symbol named path, affected, hubs or multi: query -- <name>)",
+            };
             output.Write(ReplaceUsage(rendered.ToString(), usage));
             return 0;
         }
         finally
         {
             singleIdentifier.Hidden = previousHidden;
+            foreach (var undo in restore) undo();
         }
     }
 

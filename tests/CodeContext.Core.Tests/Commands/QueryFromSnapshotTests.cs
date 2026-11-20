@@ -52,6 +52,14 @@ public sealed class QueryFromSnapshotTests : IAsyncLifetime
         ["O'Brien+é&Class", "--json"],
         ["multi", "O'Brien+é&Method", "aClass", "--json"],
         ["O'Brien+é&Class", "--human"],
+        // Whole-graph queries, through the same service.
+        ["path", "aClass", "aMethod"],
+        ["path", "aClass", "bMethod", "--json"],
+        ["path", "aClass", "Missing", "--human"],
+        ["affected", "aMethod", "--json"],
+        ["affected", "fake:b.Class"],
+        ["hubs", "--human"],
+        ["hubs", "--json"],
     ];
 
     public async Task InitializeAsync()
@@ -501,11 +509,13 @@ public sealed class QueryFromSnapshotTests : IAsyncLifetime
         bool snapshotFlag = true, bool snapshotByDefault = false)
     {
         var multi = query[0] == "multi";
-        var identifiers = query.Skip(multi ? 1 : 0).TakeWhile(arg => !arg.StartsWith("--", StringComparison.Ordinal)).ToList();
+        var graph = query[0] is "path" or "affected" or "hubs" ? new GraphQuerySettings(query[0]) : null;
+        var identifiers = query.Skip(multi || graph is not null ? 1 : 0).TakeWhile(arg => !arg.StartsWith("--", StringComparison.Ordinal)).ToList();
         var depthIndex = Array.IndexOf(query, "--depth");
         var settings = new QuerySettings(
             identifiers, Root, depthIndex < 0 ? 1 : int.Parse(query[depthIndex + 1]), query.Contains("--tests"), null, false,
-            query.Contains("--json"), multi, query.Contains("--human"), Start: query.Contains("--start"), Snapshot: snapshotFlag);
+            query.Contains("--json"), multi, query.Contains("--human"), Start: query.Contains("--start"), Snapshot: snapshotFlag,
+            Graph: graph);
         var output = new StringWriter();
         var error = new StringWriter();
         var runtime = new QueryRuntime(
@@ -543,6 +553,7 @@ public sealed class QueryFromSnapshotTests : IAsyncLifetime
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
         builder.Services.AddSingleton<IContextService>(instance.Context);
+        builder.Services.AddSingleton<IGraphQueryService>(instance.Context);
         builder.Services.AddSingleton<IStatusService>(instance.Status);
         builder.Services.AddSingleton<IIndexCoordinator>(instance.Coordinator);
         builder.Services.AddSingleton<ILanguageWorkerService>(instance.Workers);

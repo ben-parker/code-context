@@ -74,3 +74,19 @@ curl -X POST "http://localhost:<port>/api/index/refresh"
 
 After a refresh, wait for ready status and an `operationId` at least as new as the
 refresh response before querying.
+
+The whole-graph queries are `GET` endpoints (MCP: `get_path`, `get_affected`, `get_hubs`,
+same parameter names; `/api/status` lists the endpoints under `api.endpoints`):
+
+```bash
+curl "http://localhost:<port>/api/graph/path?from=A&to=B&maxDepth=10&relation=CALLS&includeTests=false"
+curl "http://localhost:<port>/api/graph/affected?identifier=X&maxDepth=5&limit=20&relation=CALLS&includeTests=false"
+curl "http://localhost:<port>/api/graph/hubs?limit=20&within=src/Core&type=Class&relation=CALLS&includeTests=false&includeExternal=false"
+```
+
+A parameter an endpoint does not take, a value of the wrong kind or out of range is a
+400 whose `error.message` says which (MCP: an `isError` result). A 503 `GRAPH_CHANGING`
+means the index changed under every attempt to read one generation of it; retry once
+indexing settles. Counts follow the context responses: `totalCount`, `returnedCount`,
+`truncated` only when something was left out, and `depthLimited` only when something lies
+beyond `maxDepth`.

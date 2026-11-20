@@ -791,6 +791,12 @@ namespace CodeContext.Core.Repositories.InMemory
         }
 
         /// <summary>
+        /// Moves with every published change (a commit, a reconciliation, a prune, a legacy in-place write). A reader that
+        /// sees the same value before and after its reads read one generation.
+        /// </summary>
+        internal long MutationVersion => Interlocked.Read(ref _version);
+
+        /// <summary>
         /// Invalidates cached statistics/adjacency; called after every committed mutation. The composite adjacency is
         /// also dropped, not only made stale: it references every shard of the map it was built over, so a stale one
         /// would keep a replaced generation's shards alive until the next read (an idle host would hold two copies).
@@ -844,6 +850,7 @@ namespace CodeContext.Core.Repositories.InMemory
                     if (!ReferenceEquals(next, _shards))
                     {
                         _shards = next;
+                        AfterPublishForTests?.Invoke();
                         NotifyMutation();
                     }
                     Interlocked.Exchange(ref _lastCommittedGeneration, generation);
@@ -1159,6 +1166,21 @@ namespace CodeContext.Core.Repositories.InMemory
         /// <summary>Test seam: runs inside the commit lock of every generation commit, after its state is built.</summary>
         internal Action? InsideCommitLock { get; set; }
 
+        /// <summary>Test seam: runs when a generation commit has published its map and not yet bumped the version.</summary>
+        internal Action? AfterPublishForTests { get; set; }
+
+        /// <summary>Test seam: runs when a read finds no composite adjacency cached for the version, before it reads the map.</summary>
+        internal Action? AdjacencyMissForTests { get; set; }
+
+        /// <summary>Test seam: runs when a read that built a composite is about to cache it.</summary>
+        internal Action? BeforeAdjacencyStoreForTests { get; set; }
+
+        /// <summary>Test seam: runs on every read of the store that no pin answers.</summary>
+        internal Action? UnpinnedReadForTests { get; set; }
+
+        /// <summary>The composite adjacency cached now, if any. Tests only.</summary>
+        internal object? CachedAdjacencyForTests => _cachedAdjacency?.Value;
+
         /// <summary>
         /// Latches the published shard map, the shards' annotations and the generation they were committed
         /// at, from one hold of the commit lock: one consistent cut. Returns false, latching nothing usable,
@@ -1219,15 +1241,80 @@ namespace CodeContext.Core.Repositories.InMemory
         /// </summary>
         internal CompositeAdjacency GetAdjacency()
         {
+            if (_pinned.Value is { } pinned) return pinned;
+            UnpinnedReadForTests?.Invoke();
+            return Published();
+        }
+
+        /// <summary>The composite adjacency of the published map, cached per mutation version.</summary>
+        private CompositeAdjacency Published()
+        {
             var version = Interlocked.Read(ref _version);
             var cached = _cachedAdjacency;
             if (cached is { } c && c.Version == version) return c.Value;
+            AdjacencyMissForTests?.Invoke();
 
             var shards = _shards;
             var composite = CompositeAdjacency.Build(shards);
             // Not cached when a commit ran meanwhile: it would hold that commit's replaced shards.
-            if (Interlocked.Read(ref _version) == version) _cachedAdjacency = new CachedAdjacency(version, composite);
+            if (Interlocked.Read(ref _version) == version)
+            {
+                BeforeAdjacencyStoreForTests?.Invoke();
+                var entry = new CachedAdjacency(version, composite);
+                _cachedAdjacency = entry;
+                // A commit that cleared the cache between the check above and this store would leave the entry holding
+                // its replaced shards until the next read: an entry for a version already gone is taken back. A commit
+                // bumps the version before it clears, so one that lands after this re-read clears the entry itself.
+                if (Interlocked.Read(ref _version) != version) Interlocked.CompareExchange(ref _cachedAdjacency, null, entry);
+            }
             return composite;
+        }
+
+        // A composite this async flow reads instead of the published one (see PinPublished).
+        private readonly AsyncLocal<CompositeAdjacency?> _pinned = new();
+
+        /// <summary>The composite the current async flow is pinned to, or null.</summary>
+        internal CompositeAdjacency? Pinned => _pinned.Value;
+
+        /// <summary>
+        /// Makes every read of this store in the current async flow (the repositories included) answer from the
+        /// composite adjacency of the map published now, until the returned pin is disposed. A reader that makes
+        /// several reads (resolving names, then relationships, test evidence, a walk) then reads one generation
+        /// whatever commits land meanwhile: the composite holds that map's shards, and committed shards are never
+        /// changed in place (only the legacy in-place writes change a shard where it stands). Inside a pin this pins
+        /// nothing more: the outer reader's generation is kept, and disposing the inner pin leaves it in place.
+        /// Take it in an async method (or one that restores it before returning), so the flow it was taken in, and
+        /// work started from it, are all that see it.
+        /// </summary>
+        internal GenerationPin PinPublished()
+        {
+            if (_pinned.Value is { } outer) return new GenerationPin(null, outer);
+            var adjacency = Published();
+            _pinned.Value = adjacency;
+            return new GenerationPin(this, adjacency);
+        }
+
+        /// <summary>A pin taken by <see cref="PinPublished"/>; disposing the outermost one unpins the flow.</summary>
+        internal readonly struct GenerationPin : IDisposable
+        {
+            private readonly InMemoryDatabase? _owner;
+
+            internal GenerationPin(InMemoryDatabase? owner, CompositeAdjacency adjacency)
+            {
+                _owner = owner;
+                Adjacency = adjacency;
+            }
+
+            /// <summary>The composite every read under this pin answers from.</summary>
+            internal CompositeAdjacency Adjacency { get; }
+
+            /// <summary>Whether this pin is inside another one, whose generation it keeps.</summary>
+            internal bool Nested => _owner is null;
+
+            public void Dispose()
+            {
+                if (_owner is not null) _owner._pinned.Value = null;
+            }
         }
 
         // ---- Internal test accessors (shard-level identity assertions) ----

@@ -137,6 +137,59 @@ public sealed class CodeContextTools
         }
     }
 
+    /// <summary>A graph tool's checked arguments (see <c>McpToolCatalog.GraphArguments</c>), read with the tool's defaults.</summary>
+    public sealed class GraphArguments(IReadOnlyDictionary<string, JsonElement> values)
+    {
+        public string? Str(string key) => values.TryGetValue(key, out var value) ? value.GetString() : null;
+
+        public int Int(string key, int fallback) => values.TryGetValue(key, out var value) ? value.GetInt32() : fallback;
+
+        public bool Bool(string key) => values.TryGetValue(key, out var value) && value.GetBoolean();
+    }
+
+    [Description("Find how one symbol reaches another through recorded relationships and dispatch.")]
+    public static async Task<string> GetPath(IGraphQueryService graph, GraphArguments args, CancellationToken cancellationToken)
+    {
+        var response = await graph.FindPathAsync(new GraphPathRequest
+        {
+            From = args.Str("from")!,
+            To = args.Str("to")!,
+            MaxDepth = args.Int("maxDepth", GraphQueryLimits.DefaultPathDepth),
+            Relation = args.Str("relation"),
+            IncludeTests = args.Bool("includeTests"),
+        }, cancellationToken);
+        return JsonSerializer.Serialize(response, CodeContextJsonContext.Default.GraphPathResponse);
+    }
+
+    [Description("List what depends on a symbol or file, transitively.")]
+    public static async Task<string> GetAffected(IGraphQueryService graph, GraphArguments args, CancellationToken cancellationToken)
+    {
+        var response = await graph.GetAffectedAsync(new GraphAffectedRequest
+        {
+            Identifier = args.Str("identifier")!,
+            MaxDepth = args.Int("maxDepth", GraphQueryLimits.DefaultAffectedDepth),
+            Relation = args.Str("relation"),
+            IncludeTests = args.Bool("includeTests"),
+            Limit = args.Int("limit", GraphQueryLimits.DefaultLimit),
+        }, cancellationToken);
+        return JsonSerializer.Serialize(response, CodeContextJsonContext.Default.GraphAffectedResponse);
+    }
+
+    [Description("List the symbols with the most direct dependents.")]
+    public static async Task<string> GetHubs(IGraphQueryService graph, GraphArguments args, CancellationToken cancellationToken)
+    {
+        var response = await graph.GetHubsAsync(new GraphHubsRequest
+        {
+            Limit = args.Int("limit", GraphQueryLimits.DefaultLimit),
+            Relation = args.Str("relation"),
+            Type = args.Str("type"),
+            Within = args.Str("within"),
+            IncludeTests = args.Bool("includeTests"),
+            IncludeExternal = args.Bool("includeExternal"),
+        }, cancellationToken);
+        return JsonSerializer.Serialize(response, CodeContextJsonContext.Default.GraphHubsResponse);
+    }
+
     [Description("Get comprehensive system health and debugging information")]
     public static async Task<string> GetStatus(IStatusService statusService)
     {

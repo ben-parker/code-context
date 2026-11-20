@@ -15,6 +15,9 @@ namespace CodeContext.Core.Repositories.InMemory
             _database = database;
         }
 
+        /// <summary>The store this repository reads; the graph queries traverse its shards directly.</summary>
+        internal InMemoryDatabase Database => _database;
+
         // Reads resolve through the version-stamped adjacency index (O(degree)) instead of a full
         // O(E) scan of the edge table. GetAll returns the composite's cached, downcast-proof view
         // (zero copy); keyed lookups without a type filter wrap the shared backing array in a

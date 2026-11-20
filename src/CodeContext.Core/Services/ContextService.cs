@@ -1,4 +1,5 @@
 using CodeContext.Core.Repositories;
+using CodeContext.Core.Repositories.InMemory;
 using CodeContext.Core.Workers;
 using CodeContext.Parser.Protocol;
 using Microsoft.Extensions.Options;
@@ -24,6 +25,9 @@ namespace CodeContext.Core.Services
         private readonly IAnalysisCoverageRegistry? _coverage;
         private readonly ICacheStateProvider? _cacheState;
 
+        /// <summary>The store behind in-memory repositories, which the graph queries traverse directly; null for others.</summary>
+        private readonly InMemoryDatabase? _database;
+
         private const int MaxCoverageNames = 5;
 
         public ContextService(
@@ -42,6 +46,7 @@ namespace CodeContext.Core.Services
             _workerService = workerService;
             _coverage = coverage;
             _cacheState = cacheState;
+            _database = (edgeRepository as InMemoryEdgeRepository)?.Database;
         }
 
         /// <summary>The worst state among projects.</summary>
@@ -59,19 +64,7 @@ namespace CodeContext.Core.Services
             var nothingFound = response.TotalMatches == 0
                 || response.Matches.Exists(match => match.Relationships is { } relationships
                     && (relationships.UsedByCount ?? 0) == 0);
-            if (!nothingFound || _coverage is null) return null;
-
-            var projects = _coverage.GetProjects();
-            var incomplete = projects.Where(project => project.State != ProjectCoverageStates.Complete).ToList();
-            return incomplete.Count == 0
-                ? null
-                : new CoverageSummary
-                {
-                    State = OverallState(projects),
-                    IncompleteProjects = incomplete.Count,
-                    TotalProjects = projects.Count,
-                    Names = incomplete.Take(MaxCoverageNames).Select(project => project.Name).ToList(),
-                };
+            return nothingFound ? CoverageForEmptyAnswer() : null;
         }
 
         public async Task<CompleteContextResponse> GetCompleteContextAsync(
@@ -91,6 +84,7 @@ namespace CodeContext.Core.Services
             string? sourceFile = null,
             bool includeExternal = false)
         {
+            using var generation = OneGeneration();
             ValidateIdentifier(identifier);
             if (depth is < 0 or > 10)
             {
@@ -99,8 +93,8 @@ namespace CodeContext.Core.Services
             }
             ValidateTestBounds(maxTestFiles, maxTestMethods);
 
-            // Read before the store and again after it (CacheAfterReads): labelled if either says cached.
-            var response = new CompleteContextResponse { Cache = _cacheState?.GetNotice() };
+            // Read before the store (the pin) and again after it (CacheAfterReads): labelled if either says cached.
+            var response = new CompleteContextResponse { Cache = generation.CacheBefore };
             var (candidates, isFilePath) = await FindCandidatesAsync(
                 identifier, type, exact, containingType, @namespace, signature, sourceFile);
 
@@ -144,6 +138,43 @@ namespace CodeContext.Core.Services
         /// </summary>
         private CacheNotice? CacheAfterReads(CacheNotice? before) => before ?? _cacheState?.GetNotice();
 
+        /// <summary>
+        /// Pins the published map for the rest of the calling query (see <see cref="InMemoryDatabase.PinPublished"/>):
+        /// every store read it makes, through the repositories or a walk, answers from that one generation, whatever
+        /// commits land meanwhile. The first statement of every public query of this service, in an async method, so the
+        /// pin ends with it; a query called by another (the items of a multi query) keeps the caller's generation.
+        /// <c>ContextGenerationTests</c> checks every method of the query interfaces reads only through it.
+        /// Taking the pin is the store read that chooses the answer's facts, so the cache notice to label them is
+        /// read just before it (<see cref="QueryGeneration.CacheBefore"/>): read after, a scan that commits and is
+        /// reported in between would leave facts of the loaded snapshot unlabelled.
+        /// </summary>
+        private QueryGeneration OneGeneration()
+        {
+            var cacheBefore = _cacheState?.GetNotice();
+            return new QueryGeneration(_database?.PinPublished() ?? default, cacheBefore);
+        }
+
+        /// <summary>A query's pin and the cache notice read just before it was taken.</summary>
+        private readonly struct QueryGeneration : IDisposable
+        {
+            private readonly InMemoryDatabase.GenerationPin _pin;
+
+            internal QueryGeneration(InMemoryDatabase.GenerationPin pin, CacheNotice? cacheBefore)
+            {
+                _pin = pin;
+                CacheBefore = cacheBefore;
+            }
+
+            /// <summary>
+            /// The notice before the pin. Inside a caller's pin it is read after that pin, so a multi query labels
+            /// its answers with its own as well: its pin may hold the loaded snapshot's facts after the scan that
+            /// replaced them was reported.
+            /// </summary>
+            internal CacheNotice? CacheBefore { get; }
+
+            public void Dispose() => _pin.Dispose();
+        }
+
         public async Task<CompactContextResponse> GetCompactContextAsync(
             string identifier,
             string? type = null,
@@ -166,11 +197,12 @@ namespace CodeContext.Core.Services
             string? relation = null,
             bool includeExternal = false)
         {
+            using var generation = OneGeneration();
             ValidateIdentifier(identifier);
             ValidateQueryBounds(depth, maxMatches, maxRelationships, maxCallSites, maxTestFiles, maxTestMethods);
             var relationKinds = ParseRelationFilter(relation);
-            // Read before the store and again after it (CacheAfterReads): labelled if either says cached.
-            var cacheNotice = _cacheState?.GetNotice();
+            // Read before the store (the pin) and again after it (CacheAfterReads): labelled if either says cached.
+            var cacheNotice = generation.CacheBefore;
 
             List<CodeNode> candidates;
             bool isFilePath;
@@ -266,6 +298,7 @@ namespace CodeContext.Core.Services
 
         public async Task<List<CompleteContextResponse>> GetMultipleContextAsync(MultiContextRequest request)
         {
+            using var generation = OneGeneration();
             if (request.RelationshipTypes is { Count: > 0 })
             {
                 throw new ArgumentException(
@@ -296,11 +329,13 @@ namespace CodeContext.Core.Services
                 results.Add(context);
             }
 
+            foreach (var result in results) result.Cache ??= generation.CacheBefore;
             return results;
         }
 
         public async Task<List<CompactContextResponse>> GetMultipleCompactContextAsync(MultiContextRequest request)
         {
+            using var generation = OneGeneration();
             var results = new List<CompactContextResponse>();
             foreach (var identifier in request.Identifiers)
             {
@@ -329,6 +364,7 @@ namespace CodeContext.Core.Services
                     includeExternal: request.IncludeExternal));
             }
 
+            foreach (var result in results) result.Cache ??= generation.CacheBefore;
             return results;
         }
 
@@ -547,7 +583,7 @@ namespace CodeContext.Core.Services
             testing.TestFilesReturnedCount = testing.TestFiles.Count;
         }
 
-        private static IOrderedEnumerable<CodeNode> RankCandidates(
+        private IOrderedEnumerable<CodeNode> RankCandidates(
             IEnumerable<CodeNode> candidates,
             string identifier)
             => candidates
@@ -841,7 +877,10 @@ namespace CodeContext.Core.Services
             return compact;
         }
 
-        private CompactCodeNode ToCompactNode(CodeNode node)
+        private CompactCodeNode ToCompactNode(CodeNode node) => ToCompact<CompactCodeNode>(node);
+
+        /// <summary>A node's compact form, as <typeparamref name="T"/> (a compact node with fields of its own).</summary>
+        private T ToCompact<T>(CodeNode node) where T : CompactCodeNode, new()
             => new()
             {
                 Name = node.Name,
@@ -854,7 +893,7 @@ namespace CodeContext.Core.Services
             };
 
         /// <summary>A library symbol the code uses, known only through that use.</summary>
-        private static bool IsExternal(CodeNode node)
+        internal static bool IsExternal(CodeNode node)
             => node.Metadata?.GetValueOrDefault("external") == "true";
 
         private string ToDisplayPath(string path)
@@ -980,9 +1019,8 @@ namespace CodeContext.Core.Services
             return WhitespaceRegex().Replace(signature.Trim(), " ");
         }
 
-        private static bool IsTestPath(string? path)
-            => path?.Contains("test", StringComparison.OrdinalIgnoreCase) == true ||
-               path?.Contains("spec", StringComparison.OrdinalIgnoreCase) == true;
+        /// <summary>The one test-file rule, on the part of the path under the root (see <see cref="RepositoryPaths.IsTestFile"/>).</summary>
+        private bool IsTestPath(string? path) => RepositoryPaths.IsTestFile(path, _rootPath);
 
         // Case-insensitive rank tables: an OrdinalIgnoreCase lookup avoids the per-node/per-edge
         // ToLower/ToUpper string allocation the switch statements used to force.
@@ -1078,9 +1116,44 @@ namespace CodeContext.Core.Services
             "IMPLEMENTS_MEMBER", "OVERRIDES_MEMBER",
         };
 
-        private static bool IsUsageEdge(CodeEdge edge)
-            => edge.Type is null || (!ContainmentEdgeKinds.Contains(edge.Type)
-                && !MethodFamilyEdgeKinds.Contains(edge.Type));
+        /// <summary>What an edge is to a query: a use, containment, or a method-family link (implements or overrides a member).</summary>
+        internal enum EdgeRole : byte { Usage, Containment, Family }
+
+        /// <summary>
+        /// The role of an edge kind. Queries ask this of every edge they look at, so the kinds as the workers write
+        /// them are told apart by an ordinal switch; any other spelling goes to the case-insensitive sets above, which
+        /// this agrees with.
+        /// </summary>
+        internal static EdgeRole RoleOf(string? type)
+        {
+            switch (type)
+            {
+                case null:
+                case "CALLS":
+                case "REFERENCES":
+                case "MOCK_CALLS":
+                case "IMPLEMENTS":
+                case "INHERITS":
+                case "EXTENDS":
+                case "IMPORTS":
+                case "USES":
+                    return EdgeRole.Usage;
+                case "HAS_METHOD":
+                case "HAS_PROPERTY":
+                case "HAS_FIELD":
+                case "CONTAINS":
+                    return EdgeRole.Containment;
+                case "IMPLEMENTS_MEMBER":
+                case "OVERRIDES_MEMBER":
+                    return EdgeRole.Family;
+                default:
+                    return ContainmentEdgeKinds.Contains(type) ? EdgeRole.Containment
+                        : MethodFamilyEdgeKinds.Contains(type) ? EdgeRole.Family
+                        : EdgeRole.Usage;
+            }
+        }
+
+        private static bool IsUsageEdge(CodeEdge edge) => RoleOf(edge.Type) == EdgeRole.Usage;
 
         // Graph traversal uses first-parent-wins semantics: the first edge that reaches a
         // node fixes that node's recorded RelationPath (and, for family expansion, its
@@ -1227,8 +1300,12 @@ namespace CodeContext.Core.Services
         private static bool ReachesQueriedMethod(CodeEdge edge, string selfId)
             => edge.TargetId == selfId || !IsStaticallyBound(edge);
 
-        /// <summary>Whether the worker marked a usage as bound to its target alone, as <c>base.M()</c> and <c>super.m()</c> are.</summary>
-        private static bool IsStaticallyBound(CodeEdge edge)
+        /// <summary>
+        /// Whether the worker marked a usage as bound to its target alone, as <c>base.M()</c> and <c>super.m()</c> are.
+        /// Shared with the graph walks, so compact <c>bindings: static</c> and a walk that does not fan such a call out
+        /// to overrides agree on which edges these are.
+        /// </summary>
+        internal static bool IsStaticallyBound(CodeEdge edge)
             => edge.Metadata?.GetValueOrDefault(EdgeMetadataKeys.Dispatch) == EdgeDispatch.Static;
 
         /// <summary>
@@ -1639,16 +1716,14 @@ namespace CodeContext.Core.Services
 
         /// <summary>
         /// Files that may test <paramref name="targetNode"/> by name alone: the distinct node file
-        /// paths containing "Test" or "Spec", ordered OrdinalIgnoreCase then Ordinal, and of those
+        /// paths that are test files (<see cref="IsTestPath"/>), ordered OrdinalIgnoreCase then Ordinal, and of those
         /// the first ten for which <see cref="MightContainTestsForTargetAsync"/> holds.
         /// </summary>
         private async Task<List<string>> FindTestFilesAsync(CodeNode targetNode)
         {
             var testFiles = new List<string>();
             // The repository returns the paths distinct and already in this order.
-            var paths = ((await _nodeRepository.GetFilePathsAsync()) ?? [])
-                .Where(path => path.Contains("Test", StringComparison.OrdinalIgnoreCase)
-                    || path.Contains("Spec", StringComparison.OrdinalIgnoreCase));
+            var paths = ((await _nodeRepository.GetFilePathsAsync()) ?? []).Where(IsTestPath);
 
             foreach (var path in paths)
             {

@@ -33,15 +33,19 @@ namespace CodeContext.Core.Snapshots
     /// </summary>
     public sealed class OneShotSnapshot
     {
-        private OneShotSnapshot(IContextService context, DateTime capturedUtc, OneShotTimings timings)
+        private OneShotSnapshot(ContextService context, DateTime capturedUtc, OneShotTimings timings)
         {
             Context = context;
+            Graph = context;
             CapturedUtc = capturedUtc;
             Timings = timings;
         }
 
         /// <summary>Answers from the snapshot, labelled; the same service a host answers with.</summary>
         public IContextService Context { get; }
+
+        /// <summary>Whole-graph answers from the same snapshot and service, labelled the same way.</summary>
+        public IGraphQueryService Graph { get; }
 
         /// <summary>When the snapshot was captured.</summary>
         public DateTime CapturedUtc { get; }

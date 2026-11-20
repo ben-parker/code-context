@@ -1,6 +1,6 @@
 ---
 name: code-context
-description: Use for C#, TypeScript/JavaScript and Vue questions about how symbols relate - who calls, renders, implements, or depends on something, the impact of changing or deleting it, which tests cover it - or exact syntax structure. One query on a live index replaces many greps, so ask it BEFORE grep/Read when those relationships are unknown; skip it for an edit confined to a file you already know. Not for literal strings, comments, config values, filenames, docs, or non-indexed files (shell, SQL, Python, YAML/JSON, markdown, csproj) - use grep/rg for those.
+description: Use for C#, TypeScript/JavaScript and Vue questions about how symbols relate - who calls, renders, implements, or depends on something, how one symbol reaches another, the impact of changing or deleting it, which symbols the most code depends on, which tests cover it - or exact syntax structure. One query on a live index replaces many greps, so ask it BEFORE grep/Read when those relationships are unknown; skip it for an edit confined to a file you already know. Not for literal strings, comments, config values, filenames, docs, or non-indexed files (shell, SQL, Python, YAML/JSON, markdown, csproj) - use grep/rg for those.
 ---
 
 # CodeContext
@@ -22,6 +22,9 @@ and docs.
   to "put active items first in this handler".
 - **Use `rg`** for filenames, route strings, comments, config values and other literal
   text, and to cross-check an empty result before a decision rests on it.
+- **Use a whole-graph query** (below) when the question spans many hops: how A reaches B,
+  everything a change could break, the load-bearing symbols of an area. One call replaces
+  a chain of `query` calls stitched together by hand.
 - **Use the [native syntax tree](references/native-syntax.md)** when exact structure
   matters: overloads, modifiers, spans.
 
@@ -72,11 +75,77 @@ Reading results:
   not rely on these times: it follows source and project file edits as they happen.
   Before editing on it or concluding absence, confirm with `rg` or query without
   `--snapshot`.
+- An answer's facts are read from one state of the index, even while it is re-indexing:
+  never half of one commit and half of the next. The answers of one `query multi` share
+  it. Only its `coverage` line can describe a later state.
 - `relationships not loaded` means nothing was fetched: the name was ambiguous
   (re-query with a target's identifier) or the depth was 0. It says nothing about
   whether the symbol has users.
 - An unmatched identifier exits 2, labelled or not; empty or truncated results are
   otherwise successful.
+
+## Whole-graph queries
+
+```bash
+codecontext query path StartCommandHandler ContextService   # how does one reach the other
+codecontext query affected ContextService.FindPathAsync     # what could break if it changes
+codecontext query hubs --within src/CodeContext.Core        # the most depended-on symbols there
+```
+
+- Identifiers match **exactly**: a canonical identifier, an exact or qualified name
+  (`Type.Member`), or a file path; there is no substring fallback. An unknown name prints
+  `missing`, a name with several symbols `ambiguous` with their identifiers; both exit 2.
+  Pass a returned identifier back unchanged. A type stands for itself and its members, a
+  file for its symbols. One declaration indexed more than once (the same file, span, name,
+  type and signature under several identifiers, as a worker reports a file it sees through
+  several projects or workspaces) is not ambiguous: all its copies are searched together,
+  whichever identifier you pass, and a `sameDeclaration` line lists them.
+- **`path`** prints one shortest chain, a line per hop: `start`; the relationship and the
+  line it is recorded at (`CALLS line 42`); `dispatch IMPLEMENTS_MEMBER` or `OVERRIDES_MEMBER`
+  where a call through an interface or base member, or the starting member itself, reaches
+  an implementation (never after a statically bound `base.M()` or `super.m()` call);
+  `member` and `memberOf` at a type endpoint. A use of a type never leads into its members
+  mid-path. `--depth N` is the most
+  hops (1-20, default 10). Test files are not passed through without `--tests`. `path none`
+  comes with an `explanation`: `excludedBy relation` or `tests` means your own filter hid
+  a path that exists; a depth note means the search stopped at its limit with more to
+  explore (raise `--depth`); "swap from and to" means the path runs the other way.
+  Otherwise nothing recorded connects them, which proves nothing about runtime: `rg`.
+- **`affected`** lists what depends on the symbol or file, nearest first: the distance,
+  the relation, `via` the symbol it depends on, and `through` the interface or base member
+  a call names when it reaches the seed by dispatch. Impact moves along recorded uses; to
+  implementations and overrides of a changed declaration (not under `--relation`); and to
+  callers of a member the seed implements or overrides, unless statically bound. It never
+  moves to siblings, containers, or same-file or same-namespace symbols. `--depth N`
+  (1-20, default 5; `more beyond` says the limit cut it off), `--limit N` (1-100, default
+  20; `truncated` with the total), `--tests` lists the test-file dependents counted in
+  `testsHidden` and lets impact move on from them (without it, a test double never makes
+  its callers' callers affected).
+- **`hubs`** ranks symbols by distinct direct dependents, then by their files. A type's
+  count is uses of the type itself, not of its members (`--type Method` ranks members).
+  `--within DIR` (repository-relative), `--type`, `--limit`, `--relation` (kinds counted),
+  `--tests` (rank test files and count their uses), `--external` (rank library symbols).
+- `--relation` takes CALLS, MOCK_CALLS, REFERENCES, IMPLEMENTS, INHERITS, EXTENDS, IMPORTS,
+  USES; dispatch is followed whatever it says. An option a subcommand does not read
+  (`--exact`, `--within` on `path`, ...) is refused.
+- A test file, here and for `--tests` evidence, is one named as test runners expect, judged
+  on its path under the root: a directory or file-name part (between `.`, `-`, `_`) that
+  is `test`, `tests`, `spec` or `specs` (`tests/`, `__tests__/`, `Widget.Tests/`,
+  `widget.test.ts`, `widget.spec.ts`, `widget_test.go`, `test_widget.py`), or that ends in
+  `Test` or `Tests` (`WidgetTests.cs`, `Widget.UnitTests/`); a whole directory named
+  `testdata`, `unittests` or `__mocks__`; a Cypress `*.cy.*` file (`login.cy.ts`); or
+  `conftest.py`. A name that only contains the letters (`Latest.cs`, `WorkerLaunchSpec.cs`,
+  `inspector.ts`, `ab-testing/`, `testdatabase/`, `cy.ts`, `cy/`) is not one; test code named
+  otherwise (`testing/`, `fixtures/`, `TestHelpers.cs` outside a test directory) is not
+  recognized, so check with `rg` when the split matters.
+- To query a symbol named `path`, `affected`, `hubs` or `multi`, put it after `--`:
+  `codecontext query --depth 2 -- path`.
+- A graph query walks the graph on every call: milliseconds on a repository of 100,000
+  edges, seconds on one of millions. The CLI waits up to 60 seconds for one (5 for
+  `query`), then says it stopped and how to narrow the query; the instance stops the walk
+  when the caller goes away.
+- The answers are static evidence with the blind spots listed below; an empty `affected`
+  or `path none` is not proof of no dependency.
 
 ## Interpret relationships
 
