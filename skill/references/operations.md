@@ -19,8 +19,9 @@ from it (label `cache snapshot`; `--json` carries `cache.state` `"snapshot"`) on
 snapshot authenticates, was written by a verified instance, every worker reported what it
 read, and nothing of that changed since by file time: the files and folders a scan walks,
 every file a worker read outside them (project files, configs, restore data, referenced
-assemblies, declaration files, also above the root) still there and no newer, and every
-path a worker looked for and did not find still absent. On Linux the time is the status
+assemblies, declaration files, also above the root) still there and no newer than when the
+worker began reading it (not when the index was saved: nothing watches a file above the root),
+and every path a worker looked for and did not find still absent. On Linux the time is the status
 change time, which `tar -x`, `cp -p` or `touch -d` cannot set back. On Windows it is the
 file system's change time, which an edit moves but a copy carries over from its source, so
 a file replaced by a copy of the same size with older times is not seen. On macOS it is the

@@ -43,14 +43,17 @@ public sealed class CSharpWorkerInputsTests : IAsyncLifetime
     {
         await _pipeline.GraphUpdateService.PerformInitialScanAsync(Root, null, CancellationToken.None);
         var inputs = WorkerInputsAssert.Recorded(_pipeline.RepositoryFactory.Database, "csharp");
+        _read = WorkerInputsAssert.ReadAt(_pipeline.RepositoryFactory.Database, "csharp");
         Thread.Sleep(50);
         var captured = DateTime.UtcNow;
         Thread.Sleep(50);
         return (inputs, captured);
     }
 
+    private DateTime _read;
+
     private SnapshotFreshnessResult Check(WorkerInputs inputs, DateTime captured)
-        => WorkerInputsAssert.Check(Root, captured, inputs, ".cs");
+        => WorkerInputsAssert.Check(Root, captured, inputs, _read, ".cs");
 
     private void Gate()
     {
@@ -81,6 +84,47 @@ public sealed class CSharpWorkerInputsTests : IAsyncLifetime
         File.WriteAllText(props, "<Project><PropertyGroup><DefineConstants>$(DefineConstants);FEATURE_B</DefineConstants></PropertyGroup></Project>");
 
         Assert.Equal(props, Check(inputs, captured).FirstMoved);
+    }
+
+    /// <summary>
+    /// The review's sequence: the scan reads a props file above the root, the props file is edited (no watcher sees
+    /// it, being outside the root, and nothing makes the worker read it again), and the snapshot is captured later.
+    /// The facts are as old as the read, not as the capture, so the edit is a change.
+    /// </summary>
+    [Fact]
+    public async Task DirectoryBuildPropsAboveTheRoot_EditedAfterTheScanButBeforeTheCapture_IsSeen()
+    {
+        var props = Write(Path.Combine(_base, "Directory.Build.props"),
+            "<Project><PropertyGroup><DefineConstants>$(DefineConstants);FEATURE_A</DefineConstants></PropertyGroup></Project>");
+        Gate();
+        var (inputs, _) = await ScanAsync();
+        Thread.Sleep(50);
+        File.WriteAllText(props, "<Project><PropertyGroup><DefineConstants>$(DefineConstants);FEATURE_B</DefineConstants></PropertyGroup></Project>");
+        Thread.Sleep(50);
+        var capturedLater = DateTime.UtcNow;
+
+        Assert.Equal(props, Check(inputs, capturedLater).FirstMoved);
+    }
+
+    /// <summary>
+    /// The time recorded with the inputs moves only with an operation that reads them all: an index or a reread of the
+    /// projects, not a batch of source edits, which re-reads those files alone and re-reports the inputs as they were.
+    /// </summary>
+    [Fact]
+    public async Task TheInputsReadTime_MovesWithAProjectReread_NotWithASourceEdit()
+    {
+        Gate();
+        await ScanAsync();
+        var read = _read;
+        Thread.Sleep(50);
+
+        File.AppendAllText(Path.Combine(Root, "Gate.cs"), "\n// edit\n");
+        await _pipeline.GraphUpdateService.ProcessFileChangeAsync(Path.Combine(Root, "Gate.cs"), FileChangeType.Changed, CancellationToken.None);
+        Assert.Equal(read, WorkerInputsAssert.ReadAt(_pipeline.RepositoryFactory.Database, "csharp"));
+
+        File.AppendAllText(Path.Combine(Root, "Sub.csproj"), "\n");
+        await _pipeline.GraphUpdateService.ProcessFileChangeAsync(Path.Combine(Root, "Sub.csproj"), FileChangeType.Changed, CancellationToken.None);
+        Assert.True(WorkerInputsAssert.ReadAt(_pipeline.RepositoryFactory.Database, "csharp") > read);
     }
 
     [Fact]
@@ -120,7 +164,7 @@ public sealed class CSharpWorkerInputsTests : IAsyncLifetime
         // The folder the worker listed to find restore data says so first; the file would as well.
         Assert.StartsWith("artifacts/obj", Check(inputs, captured).FirstMoved);
         // The check names a path in the root with '/' between names, on every platform.
-        Assert.Equal(assets, WorkerInputsAssert.Check(Root, captured, inputs with { Files = [] }, ".cs").FirstMoved is { } moved
+        Assert.Equal(assets, WorkerInputsAssert.Check(Root, captured, inputs with { Files = [] }, _read, ".cs").FirstMoved is { } moved
             ? Path.GetFullPath(Path.Combine(Root, moved)) : null);
     }
 
@@ -243,18 +287,19 @@ public sealed class TypeScriptWorkerInputsTests : IAsyncLifetime
         await _pipeline.GraphUpdateService.PerformInitialScanAsync(_root, null, CancellationToken.None);
         Assert.Equal("web/lib/util.ts", await HelperTargetFileAsync());
         var inputs = WorkerInputsAssert.Recorded(_pipeline.RepositoryFactory.Database, "typescript");
+        var read = WorkerInputsAssert.ReadAt(_pipeline.RepositoryFactory.Database, "typescript");
         Assert.Contains(Config, inputs.Files);
         Thread.Sleep(50);
         var captured = DateTime.UtcNow;
         Thread.Sleep(50);
         var extensions = new[] { ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".vue" };
-        Assert.True(WorkerInputsAssert.Check(_root, captured, inputs, extensions).Unchanged,
-            WorkerInputsAssert.Check(_root, captured, inputs, extensions).FirstMoved);
+        Assert.True(WorkerInputsAssert.Check(_root, captured, inputs, read, extensions).Unchanged,
+            WorkerInputsAssert.Check(_root, captured, inputs, read, extensions).FirstMoved);
 
         // The review's edit: the mapping moved by an in-place write; no folder's time moves.
         File.WriteAllText(Config, Mapping("lib2/*"));
 
-        Assert.Equal("web/tsconfig.json", WorkerInputsAssert.Check(_root, captured, inputs, extensions).FirstMoved);
+        Assert.Equal("web/tsconfig.json", WorkerInputsAssert.Check(_root, captured, inputs, read, extensions).FirstMoved);
     }
 
     [Fact]
@@ -312,9 +357,18 @@ internal static class WorkerInputsAssert
         return Assert.IsType<WorkerInputs>(annotation.Inputs);
     }
 
-    public static SnapshotFreshnessResult Check(string root, DateTime captured, WorkerInputs inputs, params string[] extensions)
+    /// <summary>When the host recorded the parser's worker began the read of the inputs beside its shard.</summary>
+    public static DateTime ReadAt(CodeContext.Core.Repositories.InMemory.InMemoryDatabase database, string parserId)
+    {
+        Assert.True(database.TryLatchCommitted(out _, out var annotations, out _));
+        var annotation = Assert.Single(annotations, pair => pair.Key.ParserId == parserId).Value;
+        Assert.True(annotation.InputsReadUtcTicks > 0, "no read time recorded with the inputs");
+        return ReportedInputs.ReadTime(annotation.InputsReadUtcTicks);
+    }
+
+    public static SnapshotFreshnessResult Check(string root, DateTime captured, WorkerInputs inputs, DateTime read, params string[] extensions)
         => SnapshotFreshness.Check(
             new RepositoryFileSelector(Options.Create(new CodeContextOptions { RootPath = root })),
-            root, captured, extension => extensions.Contains(extension, StringComparer.OrdinalIgnoreCase), [inputs],
+            root, captured, extension => extensions.Contains(extension, StringComparer.OrdinalIgnoreCase), [new ReportedInputs(inputs, read)],
             tolerance: TimeSpan.Zero);
 }

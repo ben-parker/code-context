@@ -43,7 +43,9 @@ namespace CodeContext.Core.Snapshots
     /// were filtered as they arrive is covered by the same check here.</item>
     /// </list>
     /// An entry has changed when its time is after the capture time less <see cref="Tolerance"/> (file systems keeping
-    /// times to a second or two). The root is the exception for one time: the one its writer recorded once its cache
+    /// times to a second or two); a file a worker reported, when its time is after the start of the operation that read
+    /// it less the same, since nothing makes a worker read again what is outside the watched root, and a shard whose read
+    /// time is not recorded is not known. The root is the exception for one time: the one its writer recorded once its cache
     /// directory existed, since making <c>.codecontext/</c> moves the root's time just before the first capture.
     /// A time more than <see cref="Tolerance"/> ahead of now counts as changed, flagged <see cref="SnapshotFreshnessResult.InFuture"/>.
     /// A capture time that far ahead of now is never current: the clock was set back, and times say nothing.
@@ -67,7 +69,7 @@ namespace CodeContext.Core.Snapshots
             string rootPath,
             DateTime capturedUtc,
             Func<string, bool> claimsExtension,
-            IEnumerable<WorkerInputs> inputs,
+            IEnumerable<ReportedInputs> inputs,
             long rootTimeTicks = 0,
             DateTime? nowUtc = null,
             TimeSpan? tolerance = null,
@@ -144,10 +146,17 @@ namespace CodeContext.Core.Snapshots
 
             if (IgnoreFileChanged(root)) return Result();
             var changeTimes = FileChangeTime.ReadsChangeTime;
+            // The directories the walk dates, the root among them: a worker that listed one reports it too, and its time
+            // is the walk's to judge, by the capture, since the watcher sees what comes and goes there.
+            var walked = new HashSet<string>(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal)
+            {
+                Path.TrimEndingDirectorySeparator(root),
+            };
             selector.WalkIncluded(withTimes: !changeTimes, entry =>
             {
                 if (entry.IsDirectory)
                 {
+                    walked.Add(Path.TrimEndingDirectorySeparator(entry.Path));
                     if (IgnoreFileChanged(entry.Path)) return false;
                 }
                 else if (!claimsExtension(Path.GetExtension(entry.Path)))
@@ -167,18 +176,36 @@ namespace CodeContext.Core.Snapshots
             });
             if (moved is not null) return Result();
 
-            foreach (var reported in inputs)
+            foreach (var (reported, readUtc) in inputs)
             {
+                // The facts are as old as the read of these, not as the capture: a file outside the root is watched by
+                // nobody, and an edit there between the read and the capture would otherwise pass as older than both.
+                if (reported.Files.Count + reported.Absent.Count > 0 && readUtc == DateTime.MinValue)
+                {
+                    checkedCount++;
+                    (moved, why, notChecked) = (".", "is not checked: when a worker read what it reported is not recorded", true);
+                    return Result();
+                }
+                var readLimit = readUtc == DateTime.MinValue || readUtc >= capturedUtc ? limit
+                    : readUtc.Ticks <= slack.Ticks ? DateTime.MinValue : readUtc - slack;
                 foreach (var file in reported.Files)
                 {
                     if (Refused(file)) return Result();
+                    if (walked.Contains(Path.TrimEndingDirectorySeparator(file))) continue;
                     if (!FileChangeTime.TryRead(file, out var time))
                     {
                         checkedCount++;
                         (moved, why) = (Shown(file), "was read for the saved index and is gone");
                         return Result();
                     }
-                    if (Changed(file, time)) return Result();
+                    checkedCount++;
+                    if (time > readLimit)
+                    {
+                        moved = Shown(file);
+                        future = time > ahead;
+                        why = future ? "has a time in the future" : "changed after the saved index (after its worker read it)";
+                        return Result();
+                    }
                 }
                 foreach (var absent in reported.Absent)
                 {
@@ -198,11 +225,23 @@ namespace CodeContext.Core.Snapshots
         /// what the shards' workers reported, where the workers themselves are installed.
         /// </summary>
         internal static SnapshotFreshnessResult For(
-            CodeContextOptions options, LanguageWorkerService workers, DateTime capturedUtc, IEnumerable<WorkerInputs> inputs,
+            CodeContextOptions options, LanguageWorkerService workers, DateTime capturedUtc, IEnumerable<ReportedInputs> inputs,
             long rootTimeTicks, TimeSpan? tolerance = null)
             => Check(
                 new RepositoryFileSelector(Options.Create(options)), options.RootPath, capturedUtc,
                 extension => workers.TryGetParserForExtension(extension, out _),
-                inputs.Append(new WorkerInputs(workers.InstallationPaths(), [])), rootTimeTicks, tolerance: tolerance);
+                inputs.Append(new ReportedInputs(new WorkerInputs(workers.InstallationPaths(), []), capturedUtc)), rootTimeTicks, tolerance: tolerance);
+    }
+
+    /// <summary>
+    /// What one shard's worker reported reading, and when the worker began the operation that read it all
+    /// (<see cref="Repositories.ShardAnnotation.InputsReadUtcTicks"/>); <see cref="DateTime.MinValue"/> when that is not
+    /// recorded, which leaves the shard not known, never unchanged.
+    /// </summary>
+    internal readonly record struct ReportedInputs(WorkerInputs Inputs, DateTime ReadUtc)
+    {
+        /// <summary>The read time recorded beside a shard, in UTC ticks; 0 or a value that is no time reads as not recorded.</summary>
+        public static DateTime ReadTime(long utcTicks)
+            => utcTicks > 0 && utcTicks <= DateTime.MaxValue.Ticks ? new DateTime(utcTicks, DateTimeKind.Utc) : DateTime.MinValue;
     }
 }

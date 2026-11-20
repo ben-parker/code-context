@@ -640,9 +640,12 @@ public sealed class PersistentStateTests : IAsyncLifetime
             var metadata = new InMemoryFileMetadataRepository();
             var coverage = AnalysisCoverageRegistry.ForStore(Factory);
             var store = (IGenerationalGraphStore)Factory.CreateGraphRepository();
-            Sink = new RecordingSink(new AnalysisDeltaApplier(store, NullLogger<AnalysisDeltaApplier>.Instance, coverage));
+            var applier = new AnalysisDeltaApplier(store, NullLogger<AnalysisDeltaApplier>.Instance, coverage);
+            Sink = new RecordingSink(applier);
             Workers = new LanguageWorkerService(Catalog, Sink,
                 Sessions, options, new WorkerLogFactory(WorkerLog), TestWorkerOptions.Patient());
+            // Behind the recording decorator the worker service does not find the applier itself.
+            applier.InputsReadBoundary = Workers.InputsReadBoundary;
             var graphUpdate = new GraphUpdateService(Factory, options, NullLogger<GraphUpdateService>.Instance, metadata, Workers);
             GraphUpdate = graphUpdate;
 

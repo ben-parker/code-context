@@ -209,7 +209,7 @@ namespace CodeContext.Core.Snapshots
 
         // What a one-shot query checks before answering from a snapshot (SnapshotFreshness): capture time, the shards'
         // inputs, the root time the snapshot recorded. Null skips the check.
-        private readonly Func<DateTime, IEnumerable<WorkerInputs>, long, SnapshotFreshnessResult>? _filesSince;
+        private readonly Func<DateTime, IEnumerable<ReportedInputs>, long, SnapshotFreshnessResult>? _filesSince;
         // Guarded by _gate. The newest snapshot on disk cannot serve a one-shot query (loaded older than a file it
         // describes, or written unverified): once a scan has verified the store (ScanPhase.Ready), it counts as unwritten.
         // Never before: an unverified store must not get a newer capture time.
@@ -233,7 +233,7 @@ namespace CodeContext.Core.Snapshots
             CacheState? cacheState = null,
             IWorkerStateSaver? workers = null,
             QuietTimeTrim? memoryTrim = null,
-            Func<DateTime, IEnumerable<WorkerInputs>, long, SnapshotFreshnessResult>? filesSince = null)
+            Func<DateTime, IEnumerable<ReportedInputs>, long, SnapshotFreshnessResult>? filesSince = null)
         {
             _memoryTrim = memoryTrim;
             _filesSince = filesSince;
@@ -259,31 +259,44 @@ namespace CodeContext.Core.Snapshots
         private void CheckLoadedInBackground(DateTime capturedUtc, long rootTimeTicks, SnapshotView view)
         {
             if (_filesSince is not { } filesSince) return;
-            var inputs = view.Shards.Select(shard => shard.Annotation?.Inputs).ToList();
             // A shard without inputs is never answered without a worker: rewriting would not change that.
-            if (inputs.Contains(null)) return;
+            if (view.Shards.Any(shard => shard.Annotation?.Inputs is null)) return;
+            // One without the time they were read (written before it was recorded) is not known until written again.
+            if (view.Shards.Any(shard => shard.Annotation!.InputsReadUtcTicks <= 0))
+            {
+                RewriteLoaded(view, "the loaded snapshot records no time its inputs were read");
+                return;
+            }
+            var inputs = view.Shards
+                .Select(shard => new ReportedInputs(
+                    shard.Annotation!.Inputs!, ReportedInputs.ReadTime(shard.Annotation.InputsReadUtcTicks)))
+                .ToList();
             _loadedCheck = Task.Run(() =>
             {
                 try
                 {
-                    var result = filesSince(capturedUtc, inputs!, rootTimeTicks);
+                    var result = filesSince(capturedUtc, inputs, rootTimeTicks);
                     if (result.Unchanged || result.InFuture || result.NotChecked) return;
-                    _logger.LogInformation(
-                        "'{Path}' {Why}; the verified graph will be written again for one-shot queries.", result.FirstMoved, result.Why);
-                    lock (_gate)
-                    {
-                        // While stopping too: the stop waits for this answer and then writes what it marked.
-                        if (_status.Mode != SnapshotCacheMode.Writer || !_written.SameAs(view)) return;
-                        _written = SnapshotView.Empty;
-                        _lastChangeAt = _time.GetUtcNow();
-                    }
-                    OnMutationCommandCompleted();
+                    RewriteLoaded(view, $"'{result.FirstMoved}' {result.Why}");
                 }
                 catch (Exception exception)
                 {
                     _logger.LogDebug(exception, "The loaded snapshot could not be checked against the files.");
                 }
             });
+        }
+
+        private void RewriteLoaded(SnapshotView view, string why)
+        {
+            _logger.LogInformation("{Why}; the verified graph will be written again for one-shot queries.", why);
+            lock (_gate)
+            {
+                // While stopping too: the stop waits for the check and then writes what this marked.
+                if (_status.Mode != SnapshotCacheMode.Writer || !_written.SameAs(view)) return;
+                _written = SnapshotView.Empty;
+                _lastChangeAt = _time.GetUtcNow();
+            }
+            OnMutationCommandCompleted();
         }
 
         public SnapshotServiceStatus Status
@@ -886,7 +899,8 @@ namespace CodeContext.Core.Snapshots
                     StateSha256: state?.Sha256,
                     Coverage: coverage,
                     Fingerprints: fingerprints,
-                    Inputs: inputs);
+                    Inputs: inputs,
+                    InputsReadUtcTicks: inputs is null ? 0 : shard.Annotation!.InputsReadUtcTicks);
             }
             return new SnapshotWriteInput
             {

@@ -129,12 +129,20 @@ namespace CodeContext.Core.Snapshots
 
                 // What every shard read besides its files, as its worker reported it: without that report nothing says
                 // whether the shard is current, and only an instance (whose worker re-reads) may answer from it.
-                var inputs = new List<WorkerInputs>();
+                var inputs = new List<ReportedInputs>();
                 foreach (var shard in file.Shards.Where(shard => Accept(shard.Key)))
                 {
-                    if (!shard.ReadInfo().TryReadInputs(out var reported, out _) || reported is null)
+                    var info = shard.ReadInfo();
+                    if (!info.TryReadInputs(out var reported, out _) || reported is null)
                         return Unavailable($"{candidate.Name}: the worker of shard {shard.Key} reported no inputs for it");
-                    inputs.Add(reported);
+                    inputs.Add(new ReportedInputs(reported, ReportedInputs.ReadTime(info.InputsReadUtcTicks)));
+                }
+                // A test's later time stands for a later capture of the same state, so the reads move with it.
+                if (checkAgainst is { } later && later > capturedUtc)
+                {
+                    var shift = later - capturedUtc;
+                    inputs = inputs.Select(input => input.ReadUtc == DateTime.MinValue || input.ReadUtc > DateTime.MaxValue - shift
+                        ? input : input with { ReadUtc = input.ReadUtc + shift }).ToList();
                 }
                 var freshness = SnapshotFreshness.For(options, workers, checkAgainst ?? capturedUtc, inputs, file.Header.RootTimeTicks);
                 if (!freshness.Unchanged) return Unavailable(freshness.Describe(snapshotAt ?? "an unknown time"));
