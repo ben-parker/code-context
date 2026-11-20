@@ -217,7 +217,9 @@ public class ParserProcessSupervisorTests
                 releaseObserver.Wait(TimeSpan.FromSeconds(10));
             });
 
-        await observerEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        // The first progress comes after the worker process has started and initialized, which on a loaded runner
+        // (Windows CI, the suite in parallel) took longer than 5 s; the property under test is the 2 s answer below.
+        await observerEntered.Task.WaitAsync(WaitBudget);
         try
         {
             var opened = await supervisor.OpenWorkspaceAsync(
