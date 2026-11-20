@@ -286,6 +286,18 @@ public sealed class GraphImpactTests : IDisposable
     }
 
     [Fact]
+    public async Task ALineThatStartsWithACommentAndGoesOnWithCode_IsCode()
+    {
+        var service = Sample().Build();
+
+        // Line 14 lies between Run and Other: a declaration after a comment on its own line is the type's change.
+        var impact = await Impact(service, Diff("src/Foo.cs", Blob("src/Foo.cs"), "@@ -13,0 +14 @@\n+    /* cache */ int added;"));
+
+        Assert.Equal([(I("Foo"), "container", "14")], impact.Changes.Select(change => (change.Identifier, change.Level, change.ChangedLines)));
+        Assert.Equal(0, impact.IgnoredLines);
+    }
+
+    [Fact]
     public async Task ABlockCommentAroundUnchangedMembers_IsReported_NotIgnored()
     {
         var service = Sample().Build();

@@ -96,17 +96,31 @@ namespace CodeContext.Core.Diffs
         public const int MaxLine = 100_000_000;
 
         /// <summary>
-        /// Whether a line holds only a comment in the C-family syntax every bundled worker reads: it starts, after
+        /// Whether a line holds only comments in the C-family syntax every bundled worker reads: it starts, after
         /// whitespace, with <c>//</c>, <c>/*</c>, <c>*/</c> or a block comment's <c>*</c> (followed by a space or nothing),
-        /// or is a <c>#region</c>/<c>#endregion</c> line. Lexical only: a line inside a string, or <c>* b</c> continuing
-        /// an expression, reads as a comment too, so this is trusted only where no member holds the line.
+        /// and where a block comment ends on the line nothing but comments follows it (<c>/* note */ int x;</c> is code);
+        /// or it is a <c>#region</c>/<c>#endregion</c> line. Lexical only: a line inside a string, or <c>* b</c>
+        /// continuing an expression, reads as a comment too, so this is trusted only where no member holds the line.
         /// </summary>
         public static bool IsCommentLine(ReadOnlySpan<char> line)
         {
-            var text = line.TrimStart();
-            if (text.StartsWith("//") || text.StartsWith("/*") || text.StartsWith("*/")) return true;
-            if (text.Length > 0 && text[0] == '*' && (text.Length == 1 || text[1] == ' ' || text[1] == '\t')) return true;
-            return text.StartsWith("#region") || text.StartsWith("#endregion");
+            var text = line.Trim();
+            if (text.StartsWith("#region") || text.StartsWith("#endregion")) return true;
+            while (true)
+            {
+                if (text.StartsWith("//")) return true;
+                int from;
+                if (text.StartsWith("/*")) from = 2;
+                else if (text.StartsWith("*/")) from = 0;
+                else if (text.Length > 0 && text[0] == '*' && (text.Length == 1 || text[1] == ' ' || text[1] == '\t')) from = 1;
+                else return false;
+                var close = text[from..].IndexOf("*/");
+                if (close < 0) return true;
+                text = text[(from + close + 2)..].TrimStart();
+                if (text.IsEmpty) return true;
+                // What follows the end of a block comment must open another comment.
+                if (!text.StartsWith("//") && !text.StartsWith("/*")) return false;
+            }
         }
 
         /// <summary>

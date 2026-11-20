@@ -52,6 +52,16 @@ public class UnifiedDiffTests
     [InlineData("*pointer = 1;", false)]
     [InlineData("#if DEBUG", false)]
     [InlineData("[Obsolete]", false)]
+    // A comment that ends on the line is a comment line only when nothing but comments follows it.
+    [InlineData("/* api */ public sealed class User", false)]
+    [InlineData("    /* go */ helper();", false)]
+    [InlineData(" */ run();", false)]
+    [InlineData(" * last */ run();", false)]
+    [InlineData("/* one */ /* two */", true)]
+    [InlineData("/* one */ // two", true)]
+    [InlineData("/* one */   ", true)]
+    [InlineData(" * closes */", true)]
+    [InlineData("/*/", true)]
     public void ACommentLine_IsToldApartByItsStart(string line, bool comment)
         => Assert.Equal(comment, UnifiedDiff.IsCommentLine(line));
 
