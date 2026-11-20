@@ -1242,7 +1242,8 @@ namespace Mixed { public class Service { public string Run() => ""ok""; } }");
 
     /// <summary>
     /// In plain JavaScript a call on a value of no known type binds to nothing, so it is a possible caller of every
-    /// function of that name; a call the compiler bound to a library (<c>items.push</c>) is not, nor is a bound call.
+    /// function of that name; a call the compiler bound to a library (<c>list.push</c> on an array) is not sent, and a
+    /// bound call is a caller.
     /// </summary>
     [Fact]
     public async Task ACallThatBindsToNothing_IsAPossibleCaller_AndALibraryCallIsNot()
@@ -1259,10 +1260,10 @@ namespace Mixed { public class Service { public string Run() => ""ok""; } }");
         var guessed = Assert.Single(edges, edge => edge.SourceId!.EndsWith("#draw(widget)", StringComparison.Ordinal) && edge.Type == "CALLS");
         Assert.Equal("render", guessed.TargetId);
         Assert.Equal("true", guessed.Metadata![EdgeMetadataKeys.Unresolved]);
-        Assert.False(guessed.Metadata.ContainsKey(EdgeMetadataKeys.External));
-        var library = Assert.Single(edges, edge => edge.SourceId!.EndsWith("#collect(items)", StringComparison.Ordinal)
-            && edge.Type == "CALLS" && edge.Metadata?.GetValueOrDefault(EdgeMetadataKeys.External) == "true");
-        Assert.Equal("push", library.TargetId);
+        // The library's push is not sent at all: it names no project code.
+        Assert.Equal(["push"], edges
+            .Where(edge => edge.SourceId!.EndsWith("#collect(items)", StringComparison.Ordinal) && edge.Type == "CALLS")
+            .Select(edge => edge.TargetId));
 
         var context = new ContextService(_pipeline.RepositoryFactory.CreateNodeRepository(),
             _pipeline.RepositoryFactory.CreateEdgeRepository(), _pipeline.FileMetadataRepository);

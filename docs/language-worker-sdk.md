@@ -341,13 +341,13 @@ binding `static`. A worker that does not mark such calls is read as if every cal
 dispatches.
 
 A call that binds to nothing (a missing name, a `dynamic` or untyped receiver, a call
-no overload fits) can still be emitted: a `CALLS` edge whose `targetId` is the name the
-call invokes (`Missing` for `x.Missing()`), with edge metadata `"unresolved": "true"`
-and its `line` and `column`. The host lists its caller as a *possible* caller of every
-method or function of that name your worker emits in the workspace, in a list apart
-from the bound callers, and never walks it in path, affected, impact or hubs. Add
-`"external": "true"` when the call did bind, to a library declaration your worker
-emits no node for: it is then no possible caller of a workspace method of that name.
+none of your overloads fits) can still be emitted: a `CALLS` edge whose `targetId` is
+the name the call invokes (`Missing` for `x.Missing()`), with edge metadata
+`"unresolved": "true"` and its `line` and `column`. The host lists its caller as a
+*possible* caller of every method or function of that name your worker emits in the
+workspace, in a list apart from the bound callers, and never walks it in path,
+affected, impact or hubs. Do not mark a call that bound to a library declaration: it
+is no possible use of a workspace method that shares its name.
 
 Optionally advertise `nativeSyntaxTree` and implement `syntaxTree/get`. Return a
 parser-owned, versioned `format` plus a bounded JSON tree. Support `start`/`length`

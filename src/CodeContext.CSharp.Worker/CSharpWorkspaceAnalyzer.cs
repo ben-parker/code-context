@@ -1566,7 +1566,7 @@ public sealed class CSharpWorkspaceAnalyzer
 
     /// <summary>A call that bound to nothing: its own, at a place in the source, to the bare name it invokes.</summary>
     private bool IsUnresolvedCall(EdgeFact edge)
-        => edge is { Unresolved: true, Line: >= 0, Kind: "CALLS" or "MOCK_CALLS" }
+        => edge is { Unresolved: true, Line: >= 0, Kind: "CALLS" }
             && edge.SourceId.StartsWith(_workspaceIdPrefix, StringComparison.Ordinal)
             && !edge.TargetId.StartsWith(_workspaceIdPrefix, StringComparison.Ordinal);
 
@@ -2307,27 +2307,33 @@ public sealed class CSharpWorkspaceAnalyzer
 
         public override void VisitInvocationExpression(InvocationExpressionSyntax node)
         {
-            var calleeSymbol = ResolveMethodSymbol(node);
-            var unboundName = calleeSymbol is null ? UnboundInvokedName(node) : null;
-            if ((calleeSymbol is not null || unboundName is not null) && FindEnclosingNodeId(node) is { } callerId)
+            var info = _semanticModel.GetSymbolInfo(node);
+            if (ResolveMethodSymbol(info) is { } calleeSymbol)
             {
-                var enclosingMethod = node.Ancestors().OfType<MethodDeclarationSyntax>().FirstOrDefault();
-                var kind = enclosingMethod is not null && IsMockOrFluentTestInvocation(node, enclosingMethod)
-                    ? "MOCK_CALLS"
-                    : "CALLS";
-                if (calleeSymbol is not null) AddLocatedEdge(callerId, NodeId(calleeSymbol), kind, node, IsThroughBase(node.Expression));
-                else AddLocatedEdge(callerId, unboundName!, kind, node, unresolved: true);
+                if (FindEnclosingNodeId(node) is { } callerId)
+                {
+                    var enclosingMethod = node.Ancestors().OfType<MethodDeclarationSyntax>().FirstOrDefault();
+                    var kind = enclosingMethod is not null && IsMockOrFluentTestInvocation(node, enclosingMethod)
+                        ? "MOCK_CALLS"
+                        : "CALLS";
+                    AddLocatedEdge(callerId, NodeId(calleeSymbol), kind, node, IsThroughBase(node.Expression));
+                }
+            }
+            else if (UnboundInvokedName(node, info) is { } name && FindEnclosingNodeId(node) is { } callerId)
+            {
+                AddLocatedEdge(callerId, name, "CALLS", node, unresolved: true);
             }
             base.VisitInvocationExpression(node);
         }
 
         /// <summary>
         /// The method name a call that bound to nothing invokes: <c>Missing()</c>, <c>x.Missing()</c>, a call on a
-        /// <c>dynamic</c> receiver, a call no overload fits. The host shows it as a possible caller of every method of
-        /// that name, apart from the bound callers. Null when the call names no method: <c>nameof</c>, a call of
-        /// whatever an expression returns, or a name that bound to a field, local or property holding a delegate.
+        /// <c>dynamic</c> receiver, a call no overload of the project's own fits. The host shows it as a possible
+        /// caller of every method of that name, apart from the bound callers. Null when the call is a library's (every
+        /// overload it could mean is one), or names no method: <c>nameof</c>, a type, a call of whatever an expression
+        /// returns, or a name bound to a field, local or property holding a delegate.
         /// </summary>
-        private string? UnboundInvokedName(InvocationExpressionSyntax invocation)
+        private string? UnboundInvokedName(InvocationExpressionSyntax invocation, SymbolInfo info)
         {
             SimpleNameSyntax? name = invocation.Expression switch
             {
@@ -2336,12 +2342,17 @@ public sealed class CSharpWorkspaceAnalyzer
                 MemberBindingExpressionSyntax binding => binding.Name,
                 _ => null,
             };
-            if (name is null) return null;
-            var symbol = _semanticModel.GetSymbolInfo(name).Symbol;
-            if (symbol is not null and not IMethodSymbol) return null;
-            if (symbol is null && name.Identifier.ValueText == "nameof") return null;
-            return _semanticModel.GetConstantValue(invocation).HasValue ? null : name.Identifier.ValueText;
+            if (name is null || (info.CandidateSymbols.Length > 0 && !info.CandidateSymbols.Any(IsSourceMethod))) return null;
+            var named = _semanticModel.GetSymbolInfo(name);
+            var text = name.Identifier.ValueText;
+            if (named.Symbol is { } symbol) return IsSourceMethod(symbol) ? text : null;
+            if (named.CandidateSymbols.Length > 0) return named.CandidateSymbols.Any(IsSourceMethod) ? text : null;
+            return text == "nameof" ? null : text;
         }
+
+        private static bool IsSourceMethod(ISymbol symbol) => symbol is IMethodSymbol && IsInSource(symbol);
+
+        private static bool IsInSource(ISymbol symbol) => symbol.Locations.Any(location => location.IsInSource);
 
         public override void VisitObjectCreationExpression(ObjectCreationExpressionSyntax node)
         {
@@ -2407,9 +2418,8 @@ public sealed class CSharpWorkspaceAnalyzer
             return matching.Count == 1 ? matching[0] : null;
         }
 
-        private IMethodSymbol? ResolveMethodSymbol(InvocationExpressionSyntax invocation)
+        private static IMethodSymbol? ResolveMethodSymbol(SymbolInfo info)
         {
-            var info = _semanticModel.GetSymbolInfo(invocation);
             var method = info.Symbol as IMethodSymbol;
             if (method is null)
             {
@@ -2559,7 +2569,7 @@ public sealed class CSharpWorkspaceAnalyzer
         {
             if (info.CandidateReason != CandidateReason.Ambiguous) return null;
             var inSource = info.CandidateSymbols
-                .Where(candidate => candidate.Locations.Any(location => location.IsInSource))
+                .Where(IsInSource)
                 .DistinctBy(DisplayName, StringComparer.Ordinal)
                 .Take(2)
                 .ToList();

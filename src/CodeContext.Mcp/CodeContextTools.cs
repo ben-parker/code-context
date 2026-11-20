@@ -31,7 +31,7 @@ public sealed class CodeContextTools
         [Description("Filter by exact namespace or module")] string? @namespace = null,
         [Description("Filter by exact signature")] string? signature = null,
         [Description("Filter by repository-relative or absolute source file")] string? sourceFile = null,
-        [Description("Comma-separated relation kinds to filter uses/usedBy (CALLS, MOCK_CALLS, REFERENCES, IMPLEMENTS, INHERITS, EXTENDS, IMPORTS, USES); compact view only")] string? relation = null,
+        [Description("Comma-separated relation kinds to filter uses, usedBy and possibleCallers (CALLS, MOCK_CALLS, REFERENCES, IMPLEMENTS, INHERITS, EXTENDS, IMPORTS, USES); compact view only")] string? relation = null,
         [Description("Response shape; compact is the default")] ContextResponseView view = ContextResponseView.Compact,
         [Description("Whether to include library symbols, which name matches and uses otherwise leave out")] bool includeExternal = false)
     {
@@ -88,7 +88,7 @@ public sealed class CodeContextTools
         [Description("Exact namespace or module filter")] string? @namespace = null,
         [Description("Exact signature filter")] string? signature = null,
         [Description("Repository-relative or absolute source file filter")] string? sourceFile = null,
-        [Description("Comma-separated relation kinds to filter uses/usedBy (CALLS, MOCK_CALLS, REFERENCES, IMPLEMENTS, INHERITS, EXTENDS, IMPORTS, USES); compact view only")] string? relation = null,
+        [Description("Comma-separated relation kinds to filter uses, usedBy and possibleCallers (CALLS, MOCK_CALLS, REFERENCES, IMPLEMENTS, INHERITS, EXTENDS, IMPORTS, USES); compact view only")] string? relation = null,
         [Description("Response shape; compact is the default")] ContextResponseView view = ContextResponseView.Compact,
         [Description("Whether to include library symbols, which name matches and uses otherwise leave out")] bool includeExternal = false)
     {

@@ -230,12 +230,13 @@ git diff $(git merge-base main HEAD) | codecontext query impact   # what this br
   - `static`: the call is written `base.M()` (C#) or `super.m()` (TypeScript), or
     takes such a member as a value. It is bound to the method it names and cannot
     dispatch to an override, so it is listed only in that method's `usedBy`.
-- `possibleCallers` (only on a method or function, and only when there are some) lists
-  members with a call of the same name that bound to nothing: a missing or generated
-  member, a `dynamic` receiver or an untyped JavaScript value, a call no overload fits.
-  Such a call may reach this method or any other of the name, so it is a lead to read,
-  not a caller; it is never in `usedBy`, `affected`, `impact`, `path` or `hubs`. A call
-  bound to a library (`list.push`) is not listed.
+- `possibleCallers` (on a method or function with any; printed when its count is not
+  zero) lists members with a call of the same name that bound to nothing: a missing or
+  generated member, a `dynamic` receiver or an untyped JavaScript value, a call none of
+  the project's overloads fits. Such a call may reach this method or any other of the
+  name, so it is a lead to read, not a caller; it is never in `usedBy`, `affected`,
+  `impact`, `path` or `hubs`. A call bound to a library (`list.push` on an array) is not
+  listed, and `--relation` without `CALLS` leaves the list empty.
 - `fileDependencies` / `fileDependents` aggregate resolved semantic edges crossing
   the selected file, excluding unresolved, same-file, and proximity-only links.
   They describe the whole file named after `of`, not the queried member: a file

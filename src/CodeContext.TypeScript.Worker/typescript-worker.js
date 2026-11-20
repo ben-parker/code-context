@@ -1679,8 +1679,8 @@ function analyzeFile(workspace, workspaceId, program, checker, fileName, diagnos
 
     /**
      * True when a call no project declaration answers did bind, to a declaration outside the
-     * project (a library, a lib .d.ts): such a call is no possible use of a project function of
-     * that name. A call bound to nothing, on an untyped receiver for one, is.
+     * project's files (a library, a lib .d.ts). A call bound to nothing, on an untyped receiver
+     * for one, is not.
      */
     const boundOutsideProject = (expression, callLikeExpression) => {
         try {
@@ -2140,20 +2140,20 @@ function analyzeFile(workspace, workspaceId, program, checker, fileName, diagnos
                 if (expression) {
                     const nameNode = ts.isPropertyAccessExpression(expression) ? expression.name : expression;
                     const callTarget = nameNode.getText(sourceFile);
-                    if (callTarget) {
+                    const targetDecl = callTarget
+                        ? resolveToProjectDeclaration(nameNode, tsNode) ?? optionsMemberOf(expression)
+                        : null;
+                    // A call the compiler bound to a library names no project code, so nothing records it. One
+                    // bound to nothing (an untyped receiver) is sent by name, a possible call of that name.
+                    if (callTarget && (targetDecl || !boundOutsideProject(nameNode, tsNode))) {
                         const position = sourceFile.getLineAndCharacterOfPosition(tsNode.getStart(sourceFile));
-                        const targetDecl = resolveToProjectDeclaration(nameNode, tsNode)
-                            ?? optionsMemberOf(expression);
                         const targetId = targetDecl ? idOfDeclaration(targetDecl) : callTarget;
                         const metadata = {
                             callTarget,
                             line: String(position.line + 1),
                             column: String(position.character + 1),
                         };
-                        if (!targetDecl) {
-                            metadata.unresolved = 'true';
-                            if (boundOutsideProject(nameNode, tsNode)) metadata.external = 'true';
-                        }
+                        if (!targetDecl) metadata.unresolved = 'true';
                         if (isThroughSuper(expression)) metadata.dispatch = 'static';
                         addEdge(enclosingDeclarationId(tsNode), targetId, 'CALLS', metadata);
                     }

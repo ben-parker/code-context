@@ -324,6 +324,9 @@ namespace CodeContext.Core.Services
         /// </summary>
         public List<CodeNode> PossibleCallers { get; set; } = new();
 
+        /// <summary>The calls behind <see cref="PossibleCallers"/>, for the compact view's call sites. Not serialized.</summary>
+        internal IReadOnlyList<CodeEdge> PossibleCallEdges { get; set; } = [];
+
         /// <summary>Nodes beyond the direct Uses list, labeled with shortest path.</summary>
         public List<ContextTransitiveRelationship> TransitiveUses { get; set; } = new();
 
@@ -491,7 +494,7 @@ namespace CodeContext.Core.Services
         public string? SourceFile { get; set; }
 
         /// <summary>
-        /// Relation kinds to filter uses/usedBy by, applied to every identifier (compact view only).
+        /// Relation kinds to filter uses, usedBy and possibleCallers by, applied to every identifier (compact view only).
         /// Valid kinds: CALLS, MOCK_CALLS, REFERENCES, IMPLEMENTS, INHERITS, EXTENDS, IMPORTS, USES.
         /// Empty means no filter. Joined with ',' and passed as the <c>relation</c> filter to the
         /// per-identifier compact lookup; a non-empty value with the full view is rejected.

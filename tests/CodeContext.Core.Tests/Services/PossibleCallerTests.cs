@@ -15,11 +15,13 @@ public class PossibleCallerTests
 {
     private const string Root = "/repo";
 
-    private static CodeNode Node(string identifier, string name, string file, int line, string type = "Method", string workspace = "ws")
+    private static CodeNode Node(string identifier, string name, string file, int line, string type = "Method", string workspace = "ws",
+        string parser = "lang", bool external = false)
         => new()
         {
-            Id = $"lang:{workspace}:{identifier}",
-            Identifier = $"lang:{workspace}/{identifier}",
+            Id = $"{parser}:{workspace}:{identifier}",
+            Identifier = $"{parser}:{workspace}/{identifier}",
+            Metadata = external ? new Dictionary<string, string> { ["external"] = "true" } : null,
             Name = name,
             Type = type,
             FilePath = $"{Root}/{file}",
@@ -38,14 +40,13 @@ public class PossibleCallerTests
             Metadata = new Dictionary<string, string> { ["line"] = line.ToString(), ["column"] = "0" },
         };
 
-    private static CodeEdge Unbound(string source, string name, int line, string type = "CALLS", bool external = false, string workspace = "ws")
+    private static CodeEdge Unbound(string source, string name, int line, string type = "CALLS", string workspace = "ws", string parser = "lang")
     {
         var metadata = new Dictionary<string, string> { ["line"] = line.ToString(), ["column"] = "4", ["unresolved"] = "true" };
-        if (external) metadata["external"] = "true";
         return new()
         {
-            Id = $"lang:{workspace}:{source}=[{type}]=>{name}@{line}:4",
-            SourceId = $"lang:{workspace}:{source}",
+            Id = $"{parser}:{workspace}:{source}=[{type}]=>{name}@{line}:4",
+            SourceId = $"{parser}:{workspace}:{source}",
             TargetId = name,
             Type = type,
             Metadata = metadata,
@@ -59,9 +60,13 @@ public class PossibleCallerTests
         Node("Caller.Bound", "Bound", "Caller.cs", 1),
         Node("Caller.Guess", "Guess", "Caller.cs", 10),
         Node("Caller.Both", "Both", "Caller.cs", 20),
-        Node("Caller.Library", "Library", "Caller.cs", 30),
         Node("Caller.Heritage", "Heritage", "Caller.cs", 40, type: "Class"),
         Node("Other.Guess", "Guess", "Other.cs", 1, workspace: "ws2"),
+        Node("other.js#guess", "guess", "other.js", 1, parser: "js"),
+        Node("render.js#render", "render", "render.js", 1, type: "Function", parser: "js"),
+        Node("render.js#caller", "caller", "render.js", 5, type: "Function", parser: "js"),
+        Node("render.js#render2", "render", "render.js", 9, type: "Function", parser: "js"),
+        Node("Lib.Render", "Render", "Lib.cs", 0, external: true),
     ];
 
     private static List<CodeEdge> BoundEdges() =>
@@ -75,12 +80,14 @@ public class PossibleCallerTests
         Unbound("Caller.Guess", "Render", 11),
         Unbound("Caller.Guess", "Render", 14),
         Unbound("Caller.Both", "Render", 22),
-        // Bound, to a library declaration: no use of a workspace Render.
-        Unbound("Caller.Library", "Render", 31, external: true),
         // Not a call.
         Unbound("Caller.Heritage", "Render", 40, type: "EXTENDS"),
-        // Another workspace's call of the name.
+        // Another workspace's call of the name, and another worker's.
         Unbound("Other.Guess", "Render", 2, workspace: "ws2"),
+        Unbound("other.js#guess", "Render", 2, workspace: "ws", parser: "js"),
+        // A function's own call of its name, and another function's.
+        Unbound("render.js#render", "render", 3, parser: "js"),
+        Unbound("render.js#caller", "render", 6, parser: "js"),
     ];
 
     private static ContextService Service(bool withUnbound = true)
@@ -109,6 +116,9 @@ public class PossibleCallerTests
         Assert.Equal(2, relationships.PossibleCallersCount);
         Assert.Equal(2, relationships.PossibleCallersReturnedCount);
         Assert.False(relationships.PossibleCallersTruncated);
+
+        Assert.DoesNotContain("possibleCallEdges", JsonSerializer.Serialize(relationships, CodeContextJsonContext.Default.CompactRelationships),
+            StringComparison.OrdinalIgnoreCase);
 
         var guess = relationships.PossibleCallers!.Single(node => node.Identifier == "lang:ws/Caller.Guess");
         Assert.Equal(["CALLS"], guess.Relations);
@@ -162,12 +172,36 @@ public class PossibleCallerTests
         Assert.Null(relationships.PossibleCallers);
     }
 
+    /// <summary>A function is listed for each of its name's calls but its own, as usedBy leaves out the queried node.</summary>
+    [Fact]
+    public async Task AFunction_HasPossibleCallers_ButNotItself()
+    {
+        var service = Service();
+
+        var render = Assert.Single((await Compact(service, "js:ws/render.js#render")).Matches).Relationships!;
+        Assert.Equal(["js:ws/render.js#caller"], render.PossibleCallers!.Select(node => node.Identifier));
+        var other = Assert.Single((await Compact(service, "js:ws/render.js#render2")).Matches).Relationships!;
+        Assert.Equal(["js:ws/render.js#caller", "js:ws/render.js#render"],
+            other.PossibleCallers!.Select(node => node.Identifier).Order(StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public async Task ALibraryMethod_HasNoPossibleCallers()
+    {
+        var match = Assert.Single((await Service().GetCompleteContextAsync("lang:ws/Lib.Render", includeExternal: true)).Matches);
+
+        Assert.Empty(match.Relationships.PossibleCallers);
+    }
+
     [Fact]
     public async Task TheFullView_ListsThemApartToo()
     {
         var match = Assert.Single((await Service().GetCompleteContextAsync("lang:ws/Widget.Render")).Matches);
 
         Assert.Equal(["lang:ws:Caller.Both", "lang:ws:Caller.Guess"], match.Relationships.PossibleCallers.Select(node => node.Id));
+        var json = JsonSerializer.Serialize(match.Relationships, CodeContextJsonContext.Default.ContextRelationships);
+        Assert.Contains("\"possibleCallers\":[", json, StringComparison.Ordinal);
+        Assert.DoesNotContain("possibleCallEdges", json, StringComparison.OrdinalIgnoreCase);
         Assert.Equal(["lang:ws:Caller.Both", "lang:ws:Caller.Bound"], match.Relationships.UsedBy.Select(node => node.Id).Order(StringComparer.Ordinal));
     }
 

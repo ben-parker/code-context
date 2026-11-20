@@ -1616,9 +1616,8 @@ namespace CodeContext.Core.Repositories.InMemory
         internal static string? DeriveLegacyIdentifier(CodeNode node)
         {
             if (string.IsNullOrEmpty(node.Id)) return null;
-            var first = node.Id.IndexOf(':');
-            var second = first < 0 ? -1 : node.Id.IndexOf(':', first + 1);
-            return second >= 0 && second + 1 < node.Id.Length ? node.Id[(second + 1)..] : node.Id;
+            var owner = GraphIds.OwnerPrefixLength(node.Id);
+            return owner > 0 && owner < node.Id.Length ? node.Id[owner..] : node.Id;
         }
 
         /// <summary>

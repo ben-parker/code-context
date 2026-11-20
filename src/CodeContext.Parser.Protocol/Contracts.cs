@@ -243,7 +243,10 @@ public sealed record ProtocolEdge(
     [property: JsonPropertyName("kind")] string Kind,
     [property: JsonPropertyName("metadata")] IReadOnlyDictionary<string, string>? Metadata = null);
 
-/// <summary>A symbolic reference the worker could not resolve; input to later linker stages.</summary>
+/// <summary>
+/// A symbolic reference the worker could not resolve. Accepted and not read by the host: a call that bound to nothing is
+/// sent as a <c>CALLS</c> edge marked <see cref="EdgeMetadataKeys.Unresolved"/>.
+/// </summary>
 public sealed record UnresolvedReference(
     [property: JsonPropertyName("sourceNodeId")] string SourceNodeId,
     [property: JsonPropertyName("targetName")] string TargetName,
@@ -281,18 +284,12 @@ public static class EdgeMetadataKeys
     public const string Dispatch = "dispatch";
 
     /// <summary>
-    /// <c>"true"</c> when the worker bound the reference to no declaration of the workspace, so the edge's target is
-    /// the name the code writes rather than a node id. The host lists such a call (a <c>CALLS</c> or <c>MOCK_CALLS</c>
-    /// edge) as a possible caller of the same worker's same-named methods and functions, apart from the bound callers,
-    /// unless <see cref="External"/> is also set.
+    /// <c>"true"</c> on a <c>CALLS</c> edge whose call bound to nothing (a missing name, an untyped or dynamic receiver,
+    /// a call none of the workspace's overloads fits): its target is then the name the call invokes, not a node id. The
+    /// host lists it as a possible caller of the same worker's methods and functions of that name in the workspace,
+    /// apart from the bound callers. A call bound to a library declaration is not one.
     /// </summary>
     public const string Unresolved = "unresolved";
-
-    /// <summary>
-    /// <c>"true"</c> on an <see cref="Unresolved"/> edge whose reference did bind, to a declaration outside the
-    /// workspace (a library), so it is no possible use of a workspace symbol of that name.
-    /// </summary>
-    public const string External = "external";
 }
 
 /// <summary>Values of <see cref="EdgeMetadataKeys.Dispatch"/>.</summary>

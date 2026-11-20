@@ -19,6 +19,7 @@ public sealed class CSharpWorkerPossibleCallTests : IDisposable
     private const string Cases = """
         using System;
         using System.Collections.Generic;
+        using System.Linq;
 
         namespace Fixture
         {
@@ -35,6 +36,7 @@ public sealed class CSharpWorkerPossibleCallTests : IDisposable
                 public int MissingGeneric() => Missing<int>();
                 public dynamic Dynamic(dynamic d) => d.Anything();
                 public int NoOverloadFits() => Over(1, 2, 3);
+                public int DynamicArgument(dynamic d) => Over(d);
                 public int Twice() => Missing() + Missing();
 
                 public int Bound() => Inst();
@@ -44,6 +46,20 @@ public sealed class CSharpWorkerPossibleCallTests : IDisposable
                 public int Delegate() => _adder(1, 2);
                 public int Returned() => Make()();
                 public static Func<int> Make() => () => 1;
+
+                // Every overload the call could mean is a library's: the call is the library's, not a possible
+                // call of a project method that shares the name.
+                public void LibraryDynamicArgument(dynamic d) => Console.WriteLine(d);
+                public void LibraryNoOverloadFits() => Console.WriteLine(1, 2, 3, 4, 5, 6, 7);
+                public void LibraryUnboundArgument() => Console.WriteLine(Nowhere);
+                public string LibraryWrongArity() => string.Join();
+                public IEnumerable<int> LibraryUnboundMethodGroup(IEnumerable<int> xs) => xs.Select(Nowhere);
+                public object TypeInvoked() => Cases();
+                public int PropertyInvoked() => Count();
+                public int Count => 0;
+                public void WriteLine(string text) { }
+                public int Select() => 0;
+                public int Join() => 0;
             }
         }
         """;
@@ -86,12 +102,11 @@ public sealed class CSharpWorkerPossibleCallTests : IDisposable
         {
             Assert.Equal("CALLS", edge.Kind);
             Assert.True(edge.Metadata!.ContainsKey("line") && edge.Metadata.ContainsKey("column"));
-            Assert.False(edge.Metadata.ContainsKey(EdgeMetadataKeys.External));
             Assert.StartsWith("csharp:test:", edge.Id, StringComparison.Ordinal);
         });
         Assert.Equal(
             [
-                "Dynamic Anything", "Missing1 Missing", "MissingConditional Missing", "MissingGeneric Missing",
+                "Dynamic Anything", "DynamicArgument Over", "Missing1 Missing", "MissingConditional Missing", "MissingGeneric Missing",
                 "MissingMember Missing", "NoOverloadFits Over", "Twice Missing", "Twice Missing",
             ],
             unresolved.Select(edge => $"{Caller(edge)} {edge.TargetId}").Order(StringComparer.Ordinal));
@@ -114,6 +129,9 @@ public sealed class CSharpWorkerPossibleCallTests : IDisposable
         Assert.DoesNotContain("NameOfMissing", callers);
         Assert.DoesNotContain("Delegate", callers);
         Assert.DoesNotContain("Returned", callers);
+        Assert.DoesNotContain(callers, caller => caller.StartsWith("Library", StringComparison.Ordinal));
+        Assert.DoesNotContain("TypeInvoked", callers);
+        Assert.DoesNotContain("PropertyInvoked", callers);
         Assert.Contains(result.Edges, edge => edge.Kind == "CALLS" && edge.SourceId.EndsWith("Cases.Bound()", StringComparison.Ordinal)
             && edge.TargetId.EndsWith("Cases.Inst()", StringComparison.Ordinal));
     }
