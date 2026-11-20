@@ -1257,8 +1257,12 @@ namespace CodeContext.Core.Services
         private static bool ReachesQueriedMethod(CodeEdge edge, string selfId)
             => edge.TargetId == selfId || !IsStaticallyBound(edge);
 
-        /// <summary>Whether the worker marked a usage as bound to its target alone, as <c>base.M()</c> and <c>super.m()</c> are.</summary>
-        private static bool IsStaticallyBound(CodeEdge edge)
+        /// <summary>
+        /// Whether the worker marked a usage as bound to its target alone, as <c>base.M()</c> and <c>super.m()</c> are.
+        /// Shared with the graph walks, so compact <c>bindings: static</c> and a walk that does not fan such a call out
+        /// to overrides agree on which edges these are.
+        /// </summary>
+        internal static bool IsStaticallyBound(CodeEdge edge)
             => edge.Metadata?.GetValueOrDefault(EdgeMetadataKeys.Dispatch) == EdgeDispatch.Static;
 
         /// <summary>
