@@ -24,7 +24,8 @@ and docs.
   text, and to cross-check an empty result before a decision rests on it.
 - **Use a whole-graph query** (below) when the question spans many hops: how A reaches B,
   everything a change could break, the load-bearing symbols of an area. One call replaces
-  a chain of `query` calls stitched together by hand.
+  a chain of `query` calls stitched together by hand. To review or prepare a change, give
+  its diff to `query impact`.
 - **Use the [native syntax tree](references/native-syntax.md)** when exact structure
   matters: overloads, modifiers, spans.
 
@@ -90,6 +91,7 @@ Reading results:
 codecontext query path StartCommandHandler ContextService   # how does one reach the other
 codecontext query affected ContextService.FindPathAsync     # what could break if it changes
 codecontext query hubs --within src/CodeContext.Core        # the most depended-on symbols there
+git diff $(git merge-base main HEAD) | codecontext query impact   # what this branch could break
 ```
 
 - Identifiers match **exactly**: a canonical identifier, an exact or qualified name
@@ -121,6 +123,67 @@ codecontext query hubs --within src/CodeContext.Core        # the most depended-
   20; `truncated` with the total), `--tests` lists the test-file dependents counted in
   `testsHidden` and lets impact move on from them (without it, a test double never makes
   its callers' callers affected).
+- **`impact`** reads a unified diff from stdin or `--diff FILE` and answers `affected` for
+  everything it changes, in one walk: `changed` lists the declarations its changed lines
+  fall in (`member`, or `container` for a type's or module's own lines: its header, its
+  closing line, between members; impact is then walked from the type alone; a second part
+  of a `partial` type, or of merged TypeScript declarations, counts as the type's own and
+  is listed at that part's file), each with its lines and the dependents attributed to
+  it; `affected` lists them as `affected` does, each `from` the change that reached it
+  first; `tests` lists the test files in reach. A changed
+  declaration is never listed as a dependent: `used by N other change(s)` on a change names
+  the other changes that use it directly, so `0 dependents` there does not mean unused.
+  The diff's new side must be the working tree. Uncommitted work: `git diff HEAD` (after
+  `git add -N` for new files). A branch with what is uncommitted on it: `git diff $(git
+  merge-base main HEAD)`. Commits only, nothing uncommitted: `git diff main...HEAD`. `git
+  diff --cached` matches only files with no unstaged change. A file is mapped only when
+  its content is the diff's new side (its blob id, so keep git's `index` lines; a CRLF
+  checkout matches) and the instance read it after it last changed (on Windows a file
+  copied over another keeps the source's older times, so until the instance has re-read
+  it such a copy passes this check). `impact` refuses until a full scan has succeeded in
+  the instance; after a failed scan, or a change the instance failed to index, it says
+  what failed, and `POST /api/index/refresh` (or a restart) reads every file again. The
+  first line says `complete` or `incomplete`, and `incomplete` exits 2: every part that
+  maps to nothing is listed under `unmapped` with its reason:
+  `outsideDeclarations` (imports, usings, a namespace line: they can rebind every symbol
+  of the file, so `query affected <file>`; in an added file only a `global using`, an
+  assembly attribute or a statement), `removedBetweenDeclarations` (removed or replaced
+  lines outside a member, a one-line member's replaced line included: a deleted, renamed
+  or re-signed declaration exists only on the old side, so what used it is not in the
+  index; `rg` its old name), `blockCommentBoundary` and `conditionalDirective` (a `/*`,
+  `*/`, `#if` or `#endif` outside a member that comments or compiles unchanged lines out
+  or in), `noChangedLines` (a file named with no hunk: a diff cut short, or made with
+  `-w`), `deletedFile`, `renamed`, `binary`, `contentMismatch` (the working tree is not
+  the diff's new side, or a filter such as LFS or `ident` rewrites the file on checkout),
+  `notYetIndexed` (retry; or the worker failed on the file, which the detail says),
+  `unreadable`, `outsideRoot`, `invalidPath`, `combinedDiff`, and `notIndexed`: a file
+  with no declaration that may still change what is indexed, with why (a project or
+  configuration file, a lock file, an ignore file, an excluded path, a file a worker
+  reported reading, or one added to or removed from a directory a worker lists). Changed
+  files that cannot change an indexed fact (a README, documentation, an image) are listed
+  under `setAside` and leave the answer `complete`; nothing is set aside while a worker
+  does not report what it reads. Any changed line inside a member changes it, a blank or
+  comment line too (inside a multi-line string either is part of a value), so a
+  formatting change marks members changed. Outside members, blank and comment lines just
+  above a declaration or at the head of a file, blank lines no declaration holds, and a
+  byte-order mark added or removed alone change nothing (`ignored`); a blank or comment
+  line elsewhere changes the type or module holding it. Text shows the first 8 ranges of a long
+  line list and how many there are (`--json` keeps them all). `--depth`, `--limit` (per
+  list), `--tests` and `--relation` mean what they mean for `affected`. The tool never
+  runs git: you run it. That matters only where the repository's `.git` is not yours
+  (received as a directory or an archive rather than cloned): there git runs what
+  `.git/config` names, an external diff, a textconv, a clean or smudge filter, an
+  fsmonitor hook, and `git add`, `git commit`, `git stash` and `git checkout` run filters
+  and hooks as well. One form was checked (git 2.43) to run none of it, a diff between two
+  commits: `git -c core.fsmonitor=false diff --no-ext-diff --no-textconv --no-color
+  --no-relative --src-prefix=a/ --dst-prefix=b/ --full-index <base> HEAD`, which describes
+  the working tree only when `HEAD` is checked out with nothing uncommitted. Uncommitted
+  work there has no form that is safe by flags alone: any git command that reads the
+  working tree runs the clean filters the config names. Look first (`git config --local
+  --includes --get-regexp '^(filter|include|includeif)\.'` runs nothing); if it prints
+  nothing, the same flags without `HEAD` (`... --full-index <base>`) were checked to run
+  nothing, and `git -c core.fsmonitor=false add -N` likewise. If it names a filter, do not
+  diff the working tree with git: say so and leave the uncommitted part out.
 - **`hubs`** ranks symbols by distinct direct dependents, then by their files. A type's
   count is uses of the type itself, not of its members (`--type Method` ranks members).
   `--within DIR` (repository-relative), `--type`, `--limit`, `--relation` (kinds counted),
@@ -138,7 +201,7 @@ codecontext query hubs --within src/CodeContext.Core        # the most depended-
   `inspector.ts`, `ab-testing/`, `testdatabase/`, `cy.ts`, `cy/`) is not one; test code named
   otherwise (`testing/`, `fixtures/`, `TestHelpers.cs` outside a test directory) is not
   recognized, so check with `rg` when the split matters.
-- To query a symbol named `path`, `affected`, `hubs` or `multi`, put it after `--`:
+- To query a symbol named `path`, `affected`, `hubs`, `impact` or `multi`, put it after `--`:
   `codecontext query --depth 2 -- path`.
 - A graph query walks the graph on every call: milliseconds on a repository of 100,000
   edges, seconds on one of millions. The CLI waits up to 60 seconds for one (5 for

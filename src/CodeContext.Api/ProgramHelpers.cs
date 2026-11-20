@@ -127,6 +127,8 @@ public static class ProgramHelpers
         // watcher batches); register it before the watcher so its channel exists first.
         services.AddSingleton<IndexCoordinator>();
         services.AddSingleton<IIndexCoordinator>(sp => sp.GetRequiredService<IndexCoordinator>());
+        // Diff impact matches line numbers only against files the index has read since they last changed.
+        services.AddSingleton<IIndexFreshness>(sp => sp.GetRequiredService<IndexCoordinator>());
         services.AddHostedService(sp => sp.GetRequiredService<IndexCoordinator>());
         // Snapshots: after the coordinator, before the watcher. Hosted services stop in reverse
         // order, so the final capture runs while the coordinator loop and the workers are alive.

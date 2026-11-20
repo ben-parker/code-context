@@ -63,7 +63,7 @@ public class SnapshotPersistabilityTests
     public static TheoryData<string> StringFields => new(
         "node identifier", "node name", "node type", "node language", "node file path", "node namespace", "node visibility",
         "node signature", "node return type", "node parameters", "node modifiers", "node metrics", "node id",
-        "node metadata key", "node metadata value",
+        "node metadata key", "node metadata value", "node part path",
         "edge id", "edge source id", "edge target id", "edge type", "edge metadata key", "edge metadata value");
 
     /// <summary>
@@ -103,6 +103,7 @@ public class SnapshotPersistabilityTests
             case "node id": node.Id = "csharp:default:" + Lone; edge.SourceId = node.Id; edge.Id = node.Id + "=[CALLS]=>x"; break;
             case "node metadata key": node.Metadata = SnapshotTestSupport.Owned(Bad, (Lone, "v")); break;
             case "node metadata value": node.Metadata = SnapshotTestSupport.Owned(Bad, ("kind", Lone)); break;
+            case "node part path": node.Parts = [new CodeNodePart(Lone, 1, 2, 0, 1)]; break;
             case "edge id": edge.Id = "csharp:default:" + Lone; break;
             case "edge source id": edge.SourceId = "csharp:default:" + Lone; break;
             case "edge target id": edge.TargetId = Lone; break;

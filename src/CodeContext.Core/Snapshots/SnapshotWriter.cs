@@ -492,7 +492,8 @@ namespace CodeContext.Core.Snapshots
                 && SnapshotFormat.IsWellFormed(node.Visibility) && SnapshotFormat.IsWellFormed(node.Signature)
                 && SnapshotFormat.IsWellFormed(node.Language) && SnapshotFormat.IsWellFormed(node.ReturnType)
                 && SnapshotFormat.IsWellFormed(node.Parameters) && SnapshotFormat.IsWellFormed(node.Modifiers)
-                && SnapshotFormat.IsWellFormed(node.Metrics) && WellFormed(node.Metadata);
+                && SnapshotFormat.IsWellFormed(node.Metrics) && WellFormed(node.Metadata)
+                && (node.Parts is null || node.Parts.All(part => part?.FilePath is not null && SnapshotFormat.IsWellFormed(part.FilePath)));
 
         private static bool WellFormed(IReadOnlyDictionary<string, string>? metadata)
         {
@@ -710,6 +711,7 @@ namespace CodeContext.Core.Snapshots
                     Collect(node.Identifier); Collect(node.Name); Collect(node.Type); Collect(node.Language);
                     Collect(node.Namespace); Collect(node.Visibility); Collect(node.Signature); Collect(node.ReturnType);
                     Collect(node.Parameters); Collect(node.Modifiers); Collect(node.Metrics);
+                    foreach (var part in node.Parts ?? []) Collect(part.FilePath);
                     var set = MetadataPairs(node.Metadata, null);
                     foreach (var value in set) Collect(value);
                     nodeSets.Add(set);
@@ -833,6 +835,8 @@ namespace CodeContext.Core.Snapshots
                     return created;
                 }
 
+                // Parts lists, numbered in node record order.
+                var partLists = new List<IReadOnlyList<CodeNodePart>>();
                 var nodeRecords = new LittleEndianBuffer(nodes.Count * SnapshotFormat.NodeRecordSize);
                 for (var i = 0; i < nodes.Count; i++)
                 {
@@ -856,7 +860,12 @@ namespace CodeContext.Core.Snapshots
                     nodeRecords.WriteU32(Ref(node.Metrics));
                     nodeRecords.WriteU32(SetRef(nodeSets[i]));
                     nodeRecords.WriteU32(SnapshotFormat.IsExternal(node.Metadata) ? SnapshotFormat.NodeFlagExternal : 0);
-                    nodeRecords.WriteU32(0);
+                    if (node.Parts is { Count: > 0 } nodeParts)
+                    {
+                        partLists.Add(nodeParts);
+                        nodeRecords.WriteU32((uint)partLists.Count);
+                    }
+                    else nodeRecords.WriteU32(0);
                 }
                 sections[3] = nodeRecords.ToArray();
 
@@ -928,6 +937,34 @@ namespace CodeContext.Core.Snapshots
                 sections[8] = info.Coverage ?? Array.Empty<byte>();
                 sections[9] = info.Fingerprints ?? Array.Empty<byte>();
                 sections[10] = info.Inputs ?? Array.Empty<byte>();
+
+                var partsSection = new LittleEndianBuffer();
+                partsSection.WriteU32((uint)partLists.Count);
+                var listOffset = 4L + 4L * (partLists.Count + 1);
+                foreach (var list in partLists)
+                {
+                    partsSection.WriteU32((uint)listOffset);
+                    listOffset += 4 + (long)SnapshotFormat.PartSize * list.Count;
+                }
+                if (listOffset > uint.MaxValue)
+                {
+                    reason = "the shard's parts exceed 4 GiB";
+                    return null;
+                }
+                partsSection.WriteU32((uint)listOffset);
+                foreach (var list in partLists)
+                {
+                    partsSection.WriteU32((uint)list.Count);
+                    foreach (var part in list)
+                    {
+                        partsSection.WriteU32(Ref(part.FilePath));
+                        partsSection.WriteI32(part.StartLine);
+                        partsSection.WriteI32(part.EndLine);
+                        partsSection.WriteI32(part.StartCol);
+                        partsSection.WriteI32(part.EndCol);
+                    }
+                }
+                sections[11] = partsSection.ToArray();
 
                 // ---- Blob ----: the header and the section table, then the sections as they are; never one array.
                 var head = new LittleEndianBuffer(SnapshotFormat.ShardHeaderSize + SnapshotFormat.SectionCount * SnapshotFormat.SectionEntrySize);

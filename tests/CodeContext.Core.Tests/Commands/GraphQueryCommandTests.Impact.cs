@@ -1,0 +1,246 @@
+using System.Text.Json;
+using CodeContext.Api;
+using CodeContext.Api.Commands;
+using CodeContext.Core.Services;
+
+namespace CodeContext.Core.Tests.Commands;
+
+/// <summary><c>query impact</c>: where it reads the diff from, what it refuses before asking, what it sends and prints.</summary>
+public partial class GraphQueryCommandTests
+{
+    private const string ImpactDiff = "--- a/src/A.cs\n+++ b/src/A.cs\n@@ -1 +1 @@\n-a\n+b\n";
+
+    [Fact]
+    public void Impact_BindsItsDiffSourceAndOnlyTheOptionsGiven()
+    {
+        var impact = Parse("query", "impact", "--diff", "change.patch", "--depth", "3", "--limit", "7", "--tests");
+        Assert.Empty(impact.Identifiers);
+        Assert.Equal(new GraphQuerySettings(GraphQueryParameters.ImpactQuery, MaxDepth: 3, Diff: "change.patch"), impact.Graph);
+        Assert.Equal(["--depth", "--limit", "--diff"], impact.Given);
+        Assert.Null(Parse("query", "impact").Graph!.Diff);
+    }
+
+    [Fact]
+    public void ImpactHelp_ListsOnlyTheOptionsItReads_AndNoOtherHelpListsDiff()
+    {
+        var help = Help("query", "impact", "--help");
+        foreach (var option in new[] { "--diff", "--depth", "--limit", "--tests", "--relation", "git diff <base> | codecontext query impact" })
+            Assert.Contains(option, help);
+        foreach (var option in new[] { "--exact", "--external", "--within", "--type", "[default: 1]" }) Assert.DoesNotContain(option, help);
+
+        foreach (var command in new[] { "path", "affected", "hubs", "multi" }) Assert.DoesNotContain("--diff <diff>", Help("query", command, "--help"));
+        Assert.DoesNotContain("--diff <diff>", Help("query", "--help"));
+        Assert.Contains("--diff <diff>", help);
+    }
+
+    [Theory]
+    [InlineData(new[] { "query", "affected", "X", "--diff", "a.patch" }, "--diff does not apply to query affected: it applies only to query impact.")]
+    [InlineData(new[] { "query", "impact", "--within", "src" }, "--within does not apply to query impact: it applies only to query hubs.")]
+    [InlineData(new[] { "query", "impact", "--exact" }, "--exact does not apply to query impact: graph queries always match identifiers exactly (canonical identifier, exact or qualified name, or file path).")]
+    [InlineData(new[] { "query", "impact", "--depth", "0" }, "--depth must be between 1 and 20 for query impact (got 0).")]
+    public async Task Impact_InapplicableOptions_AreRefusedBeforeAnythingIsAsked(string[] args, string message)
+    {
+        var handler = new RecordingHandler(_ => throw new InvalidOperationException("nothing should be asked"));
+        var (runtime, output, error) = Runtime(handler, ImpactDiff);
+
+        var exit = await QueryCommandHandler.ExecuteAsync(Parse(args), runtime, CancellationToken.None);
+
+        Assert.Equal(1, exit);
+        Assert.Equal(message, error.ToString().Trim());
+        Assert.Empty(output.ToString());
+        Assert.Empty(handler.Requests);
+    }
+
+    [Theory]
+    [InlineData(null, false, "query impact reads a unified diff from standard input or --diff FILE, and none was given")]
+    [InlineData("", true, "The diff from standard input is refused: diff is empty")]
+    [InlineData("@@ -1 +1 @@\n-a\n+b\n", true, "The diff from standard input is refused: diff line 1: a hunk with no file header before it")]
+    [InlineData("--- a/x\n+++ b/x\n@@ -1,3 +1,3 @@\n x\n", true, "The diff from standard input is refused: diff line 3: the hunk ends early")]
+    public async Task Impact_ADiffThatCannotBeUsed_IsRefusedBeforeAnythingIsAskedOrStarted(string? input, bool redirected, string message)
+    {
+        var handler = new RecordingHandler(_ => throw new InvalidOperationException("nothing should be asked"));
+        var (runtime, output, error) = Runtime(handler, input, redirected);
+
+        var exit = await QueryCommandHandler.ExecuteAsync(Parse("query", "impact", "--path", Root), runtime, CancellationToken.None);
+
+        Assert.Equal(1, exit);
+        Assert.StartsWith(message, error.ToString().Trim());
+        Assert.Empty(output.ToString());
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
+    public async Task Impact_AMissingDiffFile_SaysWhichAndWhy()
+    {
+        var handler = new RecordingHandler(_ => throw new InvalidOperationException("nothing should be asked"));
+        var (runtime, _, error) = Runtime(handler);
+        var missing = Path.Combine(Path.GetTempPath(), "cc-no-such-" + Guid.NewGuid().ToString("N") + ".patch");
+
+        var exit = await QueryCommandHandler.ExecuteAsync(Parse("query", "impact", "--diff", missing, "--path", Root), runtime, CancellationToken.None);
+
+        Assert.Equal(1, exit);
+        Assert.StartsWith($"Could not read the diff from {missing}: ", error.ToString());
+        // The reason is one sentence: the exception's own full stop is not doubled.
+        Assert.DoesNotContain("..", error.ToString());
+    }
+
+    private const string ImpactAnswer = """
+        {"maxDepth":3,"complete":false,"diffFiles":2,"contentChecked":1,"changeCount":1,"changesReturned":1,
+         "changes":[{"level":"member","changedLines":"1","dependents":1,"testsHidden":2,"name":"Run","type":"Method","file":"src/A.cs","line":1,"identifier":"csharp:A.Run()"}],
+         "unmappedCount":1,"unmappedReturned":1,"unmappedLines":4,"unmappedReasons":{"notIndexed":1},
+         "unmapped":[{"file":"README.md","status":"modified","reason":"notIndexed","lineCount":4,"detail":"No declaration."}],
+         "ignoredLines":1,"totalCount":1,"returnedCount":1,"testsHidden":2,"fileCount":1,
+         "items":[{"seed":"csharp:A.Run()","relation":"CALLS","via":"csharp:A.Run()","distance":1,"name":"U","type":"Method","file":"src/U.cs","line":4,"identifier":"csharp:U()"}],
+         "testFileCount":1,"testFiles":["tests/ATests.cs"],"hint":"Look."}
+        """;
+
+    [Fact]
+    public async Task Impact_PostsTheDiffWithOnlyTheOptionsGiven_AndExitsTwoWhenIncomplete()
+    {
+        string? posted = null;
+        var handler = new RecordingHandler(request =>
+        {
+            if (request.RequestUri!.AbsolutePath == "/api/status") return Json(Status());
+            Assert.Equal(HttpMethod.Post, request.Method);
+            posted = request.Content!.ReadAsStringAsync().GetAwaiter().GetResult();
+            return Json(ImpactAnswer);
+        });
+        var (runtime, output, error) = Runtime(handler, ImpactDiff);
+
+        var exit = await QueryCommandHandler.ExecuteAsync(
+            Parse("query", "impact", "--depth", "3", "--relation", "CALLS", "--path", Root), runtime, CancellationToken.None);
+
+        Assert.Equal(2, exit);
+        Assert.Empty(error.ToString());
+        Assert.Equal("/api/graph/impact", handler.Requests.Last().AbsolutePath);
+        Assert.Equal($$"""{"diff":"{{ImpactDiff.Replace("\n", "\\n")}}","maxDepth":3,"relation":"CALLS"}""", posted);
+        Assert.Equal(
+            "impact\tincomplete\t1 changed\t1 affected in 1 file(s)\tdepth 3\t2 file(s) in the diff\n"
+            + "content\t1 file(s) match the working tree\n"
+            + "changed\t1/1\n"
+            + "\tmember\tlines 1\t1 dependents +2 in tests\tcsharp:A.Run()\tMethod\tsrc/A.cs:1\n"
+            + "unmapped\t1/1\t4 line(s)\tnotIndexed=1\n"
+            + "\tnotIndexed\tREADME.md\t-\tNo declaration.\n"
+            + "ignored\t1 line(s) that change no declaration\t0 mode-only file(s)\n"
+            + "affected\t1/1\tdepth 3\t1 file(s)\n"
+            + "testsHidden\t2\t--tests lists them\n"
+            + "\t1\tCALLS\tcsharp:U()\tMethod\tsrc/U.cs:4\tvia csharp:A.Run()\tfrom csharp:A.Run()\n"
+            + "tests\t1/1\n"
+            + "\ttests/ATests.cs\n"
+            + "hint\tLook.\n",
+            output.ToString().Replace("\r\n", "\n"));
+    }
+
+    [Fact]
+    public async Task Impact_PostsTheDiffUnescaped_SoThatADiffAtItsLimitFitsTheBody()
+    {
+        // JSON's default escaping writes '+', '<', '&' and every non-ASCII character as six bytes: a diff of such lines
+        // well under the character limit would pass the 64 MiB body limit.
+        const string diff = "--- a/src/A.cs\n+++ b/src/A.cs\n@@ -1 +1 @@\n-a < b && c\n+\u00e9t\u00e9 \u4e2d\u6587\n";
+        string? posted = null;
+        var handler = new RecordingHandler(request =>
+        {
+            if (request.RequestUri!.AbsolutePath == "/api/status") return Json(Status());
+            posted = request.Content!.ReadAsStringAsync().GetAwaiter().GetResult();
+            return Json(ImpactAnswer);
+        });
+        var (runtime, _, _) = Runtime(handler, diff);
+
+        await QueryCommandHandler.ExecuteAsync(Parse("query", "impact", "--path", Root), runtime, CancellationToken.None);
+
+        Assert.Equal($$"""{"diff":"{{diff.Replace("\n", "\\n")}}"}""", posted);
+        Assert.Equal(diff, JsonDocument.Parse(posted!).RootElement.GetProperty("diff").GetString());
+    }
+
+    [Fact]
+    public async Task Impact_ACompleteAnswerExitsZero_AndTheHumanFormSaysItIsComplete()
+    {
+        var complete = ImpactAnswer.Replace("\"complete\":false", "\"complete\":true");
+        var handler = new RecordingHandler(request => request.RequestUri!.AbsolutePath == "/api/status" ? Json(Status()) : Json(complete));
+        var (runtime, output, _) = Runtime(handler, ImpactDiff);
+
+        Assert.Equal(0, await QueryCommandHandler.ExecuteAsync(Parse("query", "impact", "--human", "--path", Root), runtime, CancellationToken.None));
+        Assert.StartsWith("Every changed line of the 2 file(s) in the diff maps to a declaration.", output.ToString());
+    }
+
+    [Fact]
+    public async Task Impact_ShowsTheFilesSetAside_AndTheChangesThatUseAChange_InBothForms()
+    {
+        const string answer = """
+            {"maxDepth":5,"complete":true,"diffFiles":4,"contentChecked":2,"changeCount":2,"changesReturned":2,
+             "changes":[
+              {"level":"member","changedLines":"3","dependents":0,"usedByChangeCount":7,"usedByChanges":["csharp:B.Use()","csharp:C.Use()"],"name":"Run","type":"Method","file":"src/A.cs","line":1,"identifier":"csharp:A.Run()"},
+              {"level":"member","changedLines":"9","dependents":0,"name":"Use","type":"Method","file":"src/B.cs","line":8,"identifier":"csharp:B.Use()"}],
+             "unmappedCount":0,"unmappedReturned":0,"unmappedLines":0,"unmapped":[],
+             "setAsideFileCount":3,"setAsideFilesTruncated":true,"setAsideFiles":["docs/guide.md","README.md"],
+             "totalCount":0,"returnedCount":0,"fileCount":0,"items":[],"testFileCount":0,"testFiles":[]}
+            """;
+        var handler = new RecordingHandler(request => request.RequestUri!.AbsolutePath == "/api/status" ? Json(Status()) : Json(answer));
+
+        var (runtime, output, _) = Runtime(handler, ImpactDiff);
+        Assert.Equal(0, await QueryCommandHandler.ExecuteAsync(Parse("query", "impact", "--path", Root), runtime, CancellationToken.None));
+        Assert.Equal(
+            "impact\tcomplete\t2 changed\t0 affected in 0 file(s)\tdepth 5\t4 file(s) in the diff\n"
+            + "content\t2 file(s) match the working tree\n"
+            + "changed\t2/2\n"
+            + "\tmember\tlines 3\t0 dependents\tcsharp:A.Run()\tMethod\tsrc/A.cs:1\tused by 7 other change(s): csharp:B.Use(), csharp:C.Use(), ...\n"
+            + "\tmember\tlines 9\t0 dependents\tcsharp:B.Use()\tMethod\tsrc/B.cs:8\n"
+            + "setAside\t2/3\ttruncated\tfile(s) no worker reads: they change nothing indexed\n"
+            + "\tdocs/guide.md\n"
+            + "\tREADME.md\n"
+            + "affected\t0/0\tdepth 5\t0 file(s)\n",
+            output.ToString().Replace("\r\n", "\n"));
+
+        (runtime, output, _) = Runtime(handler, ImpactDiff);
+        Assert.Equal(0, await QueryCommandHandler.ExecuteAsync(Parse("query", "impact", "--human", "--path", Root), runtime, CancellationToken.None));
+        var human = output.ToString().Replace("\r\n", "\n");
+        Assert.StartsWith("Every changed line of the 4 file(s) in the diff maps to a declaration, or lies in one of 3 file(s) no worker reads.\n", human);
+        Assert.Contains("     used by 7 other change(s) of this diff: csharp:B.Use(), csharp:C.Use(), ...\n", human);
+        Assert.Contains("Set aside (no worker reads them, so they change nothing indexed): 2/3, truncated\n  - docs/guide.md\n  - README.md\n", human);
+    }
+
+    [Fact]
+    public async Task Impact_ALongLineList_IsCutToItsFirstRangesAndACount_InText_AndKeptWholeInJson()
+    {
+        // A large added member interrupted by blank and comment lines: its changed lines are many short ranges.
+        var many = string.Join(",", Enumerable.Range(0, 400).Select(index => $"{3 * index + 1}-{3 * index + 2}"));
+        var answer = """
+            {"maxDepth":5,"complete":false,"diffFiles":1,"contentChecked":1,"changeCount":1,"changesReturned":1,
+             "changes":[{"level":"member","changedLines":"MANY","dependents":0,"name":"Run","type":"Method","file":"src/A.cs","line":1,"identifier":"csharp:A.Run()"}],
+             "unmappedCount":1,"unmappedReturned":1,"unmappedLines":800,"unmappedReasons":{"removedBetweenDeclarations":1},
+             "unmapped":[{"file":"src/A.cs","status":"modified","reason":"removedBetweenDeclarations","lines":"MANY","oldLines":"MANY","lineCount":800,"detail":"Gone."}],
+             "totalCount":0,"returnedCount":0,"fileCount":0,"items":[],"testFileCount":0,"testFiles":[]}
+            """.Replace("MANY", many);
+        var handler = new RecordingHandler(request => request.RequestUri!.AbsolutePath == "/api/status" ? Json(Status()) : Json(answer));
+        const string cut = "1-2,4-5,7-8,10-11,13-14,16-17,19-20,22-23,... (400 ranges)";
+
+        var (runtime, output, _) = Runtime(handler, ImpactDiff);
+        Assert.Equal(2, await QueryCommandHandler.ExecuteAsync(Parse("query", "impact", "--path", Root), runtime, CancellationToken.None));
+        var text = output.ToString().Replace("\r\n", "\n");
+        Assert.Contains($"\tmember\tlines {cut}\t0 dependents\tcsharp:A.Run()", text);
+        Assert.Contains($"\tremovedBetweenDeclarations\tsrc/A.cs\tlines {cut} old {cut}\tGone.\n", text);
+        Assert.DoesNotContain(many, text);
+
+        (runtime, output, _) = Runtime(handler, ImpactDiff);
+        await QueryCommandHandler.ExecuteAsync(Parse("query", "impact", "--human", "--path", Root), runtime, CancellationToken.None);
+        var human = output.ToString().Replace("\r\n", "\n");
+        Assert.Contains($"member: lines {cut};", human);
+        Assert.Contains($"  - src/A.cs lines {cut} old lines {cut} [removedBetweenDeclarations]", human);
+        Assert.DoesNotContain(many, human);
+
+        // The exact answer is one option away.
+        (runtime, output, _) = Runtime(handler, ImpactDiff);
+        await QueryCommandHandler.ExecuteAsync(Parse("query", "impact", "--json", "--path", Root), runtime, CancellationToken.None);
+        var json = JsonDocument.Parse(output.ToString()).RootElement;
+        Assert.Equal(many, json.GetProperty("changes")[0].GetProperty("changedLines").GetString());
+        Assert.Equal(many, json.GetProperty("unmapped")[0].GetProperty("oldLines").GetString());
+    }
+
+    [Fact]
+    public void Impact_TakesNoIdentifier()
+        => Assert.NotEmpty(Program.CreateRootCommand().Parse(["query", "impact", "X"]).Errors);
+
+    [Fact]
+    public void Impact_WaitsAsLongAsAGraphQuery()
+        => Assert.Equal(TimeSpan.FromSeconds(60), QueryCommandHandler.RequestTimeout(Parse("query", "impact")));
+}

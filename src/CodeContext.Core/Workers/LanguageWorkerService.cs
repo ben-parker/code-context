@@ -29,6 +29,13 @@ public interface ILanguageWorkerService
     bool TryGetParserForProjectInput(string path, bool isIncluded, out string parserId);
 
     /// <summary>
+    /// The parser id of a worker whose manifest names this file: by an extension it claims, or as a project marker or
+    /// a project input (an exact file name, or an ending that starts with a dot), wherever the file lies and whether
+    /// or not it is selected. Null when no manifest names it: no worker is routed the file or told when it changes.
+    /// </summary>
+    string? ParserNaming(string path);
+
+    /// <summary>
     /// Tells a worker its project inputs changed, with no source file changing. It rereads
     /// its projects and publishes whatever now binds differently.
     /// </summary>
@@ -320,6 +327,28 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
         }
         parserId = string.Empty;
         return false;
+    }
+
+    public string? ParserNaming(string path)
+    {
+        if (_extensionToParser.TryGetValue(Path.GetExtension(path), out var claiming)) return claiming;
+        var name = Path.GetFileName(path);
+        foreach (var state in _workers.Values)
+        {
+            var manifest = state.Registration.Manifest;
+            if (Names(manifest.ProjectInputs) || Names(manifest.ProjectMarkers)) return manifest.ParserId;
+        }
+        return null;
+
+        bool Names(IReadOnlyList<string>? entries)
+        {
+            foreach (var entry in entries ?? [])
+            {
+                if (entry.StartsWith('.') ? name.EndsWith(entry, StringComparison.OrdinalIgnoreCase) : name.Equals(entry, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+            return false;
+        }
     }
 
     public async Task RefreshProjectsAsync(string parserId, CancellationToken ct = default)

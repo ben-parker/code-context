@@ -1294,6 +1294,23 @@ namespace CodeContext.Core.Repositories.InMemory
             return new GenerationPin(this, adjacency);
         }
 
+        /// <summary>
+        /// The shard map and annotations of the generation the current flow is pinned to, latched together under the
+        /// commit lock as <see cref="LatchPublished"/> latches them; null when nothing is pinned, or when the published
+        /// map no longer holds the pinned shards (a commit has replaced them, and the annotations that described them
+        /// went with it). A reader that needs the annotations of the facts it reads takes them here, never from the
+        /// published map, so they are of its generation or none.
+        /// </summary>
+        internal (ImmutableSortedDictionary<ShardKey, IGraphShard> Shards, ImmutableSortedDictionary<ShardKey, ShardAnnotation> Annotations)? LatchPinned()
+        {
+            if (_pinned.Value is not { } pinned) return null;
+            lock (_commitLock)
+            {
+                var shards = _shards;
+                return pinned.Holds(shards) ? (shards, _annotations) : null;
+            }
+        }
+
         /// <summary>A pin taken by <see cref="PinPublished"/>; disposing the outermost one unpins the flow.</summary>
         internal readonly struct GenerationPin : IDisposable
         {
@@ -1632,6 +1649,18 @@ namespace CodeContext.Core.Repositories.InMemory
 
             internal static CompositeAdjacency Build(ImmutableSortedDictionary<ShardKey, IGraphShard> shards)
                 => new(shards.Values.ToArray());
+
+            /// <summary>Whether <paramref name="shards"/> holds exactly this composite's shards, the same instances in the same order.</summary>
+            internal bool Holds(ImmutableSortedDictionary<ShardKey, IGraphShard> shards)
+            {
+                if (shards.Count != _shards.Length) return false;
+                var index = 0;
+                foreach (var shard in shards.Values)
+                {
+                    if (!ReferenceEquals(shard, _shards[index++])) return false;
+                }
+                return true;
+            }
 
             public IReadOnlyList<CodeNode> Nodes
             {

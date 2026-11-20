@@ -451,6 +451,7 @@ internal sealed class ReferenceGraphModel
         Namespace = node.Namespace, Visibility = node.Visibility, Signature = node.Signature, Language = node.Language,
         ReturnType = node.ReturnType, Parameters = node.Parameters, Modifiers = node.Modifiers, Metrics = node.Metrics,
         Metadata = node.Metadata is null ? null : new Dictionary<string, string>(node.Metadata),
+        Parts = node.Parts?.ToList(),
     };
 
     internal static CodeEdge Clone(CodeEdge edge) => new()

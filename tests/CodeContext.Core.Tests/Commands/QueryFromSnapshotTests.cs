@@ -60,7 +60,14 @@ public sealed class QueryFromSnapshotTests : IAsyncLifetime
         ["affected", "fake:b.Class"],
         ["hubs", "--human"],
         ["hubs", "--json"],
+        // Diff impact, read from a file outside the tree.
+        ["impact", "--diff", DiffPlaceholder],
+        ["impact", "--diff", DiffPlaceholder, "--json"],
     ];
+
+    private const string DiffPlaceholder = "<diff>";
+
+    private string DiffPath => Path.Combine(_base, "change.patch");
 
     public async Task InitializeAsync()
     {
@@ -69,6 +76,9 @@ public sealed class QueryFromSnapshotTests : IAsyncLifetime
         File.WriteAllText(Path.Combine(Root, "b.fake"), "b");
         File.WriteAllText(Path.Combine(Root, "O'Brien+é&.fake"), "o");
         File.WriteAllText(Path.Combine(Root, "notes.txt"), "not indexed");
+        // Line 4 is inside aMethod whichever base the fake worker's lines have.
+        var blob = CodeContext.Core.Diffs.DiffWorkingTree.BlobId("a"u8.ToArray(), sha256: false)[..7];
+        File.WriteAllText(DiffPath, $"diff --git a/a.fake b/a.fake\nindex 1111111..{blob} 100644\n--- a/a.fake\n+++ b/a.fake\n@@ -4 +4 @@\n-x\n+y\n");
 
         // A first start scans and writes a snapshot; a second, cached start verifies it and serves.
         await using (var first = new CachedInstance(Root, KeyPath, "normal"))
@@ -509,7 +519,9 @@ public sealed class QueryFromSnapshotTests : IAsyncLifetime
         bool snapshotFlag = true, bool snapshotByDefault = false)
     {
         var multi = query[0] == "multi";
-        var graph = query[0] is "path" or "affected" or "hubs" ? new GraphQuerySettings(query[0]) : null;
+        var graph = query[0] is "path" or "affected" or "hubs" ? new GraphQuerySettings(query[0])
+            : query[0] == "impact" ? new GraphQuerySettings(query[0], Diff: DiffPath)
+            : null;
         var identifiers = query.Skip(multi || graph is not null ? 1 : 0).TakeWhile(arg => !arg.StartsWith("--", StringComparison.Ordinal)).ToList();
         var depthIndex = Array.IndexOf(query, "--depth");
         var settings = new QuerySettings(

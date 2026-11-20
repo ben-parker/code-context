@@ -102,6 +102,7 @@ codecontext query multi ContextService StartCommandHandler
 codecontext query path StartCommandHandler ContextService   # how one reaches the other
 codecontext query affected ContextService.FindPathAsync     # what depends on it, transitively
 codecontext query hubs --within src/CodeContext.Core        # the most depended-on symbols
+git diff $(git merge-base main HEAD) | codecontext query impact   # what a branch could break
 ```
 
 `query` finds the closest instance watching the requested path and queries its compact
@@ -137,6 +138,16 @@ that depends on a symbol or file transitively, and the symbols with the most dis
 direct dependents. They match identifiers exactly (canonical identifier, exact or
 qualified name, or file path) and are described in [the skill](skill/SKILL.md). A symbol
 named like a subcommand is queried after a separator: `codecontext query -- path`.
+
+`query impact` is `affected` for everything a diff changes: it reads a unified diff whose
+new side is the working tree from stdin or `--diff FILE`, maps each changed line to the
+innermost declaration holding it, walks what depends on all of them at once, and lists the
+test files in reach. What maps to no declaration (imports, removed or renamed
+declarations, deleted, binary or unparsed files, a diff whose new side is not checked out)
+is listed with the reason, and the answer is then `incomplete` (exit code `2`). Changed
+files that cannot change an indexed fact (a README, documentation: no worker parses them,
+names them as a project file or reported reading them) are set aside and leave the answer
+complete. The tool never runs git; the diff is data.
 
 ## Instance lifecycle
 
@@ -187,6 +198,7 @@ The main endpoints are:
 - `POST /api/context/multi` for several context queries in one round trip.
 - `GET /api/graph/path`, `GET /api/graph/affected` and `GET /api/graph/hubs` for
   whole-graph queries; a parameter one of them does not take is a 400 that says so.
+- `POST /api/graph/impact` for what a diff could break (the diff in a JSON body).
 - `POST /api/syntax-tree` for an optional parser-native syntax tree.
 - `POST /api/index/refresh` for a full or single-file refresh.
 - `GET /healthz` for process liveness.
@@ -224,7 +236,7 @@ A typical MCP client configuration is:
 ```
 
 The MCP tools are `get_context`, `get_multi_context`, `get_status`, and the graph queries
-`get_path`, `get_affected`, and `get_hubs`. MCP mode is owned
+`get_path`, `get_affected`, `get_impact`, and `get_hubs`. MCP mode is owned
 by the client process and does not register a REST instance.
 
 ## Architecture

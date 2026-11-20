@@ -203,10 +203,15 @@ public class Program
         {
             Description = "query hubs: only symbols of this type (Class, Method, Interface, ...).",
         };
+        Option<string?> queryDiffOption = new("--diff")
+        {
+            Description = "query impact: read the unified diff from this file ('-' for standard input, which is read when this is left out).",
+        };
         foreach (var option in new Option[]
                  {
                      queryWithinOption,
                      queryTypeOption,
+                     queryDiffOption,
                      queryPathOption,
                      queryDepthOption,
                      queryTestsOption,
@@ -239,11 +244,12 @@ public class Program
         queryCommand.Options.Add(querySnapshotOption);
         queryCommand.Options.Add(queryWithinOption);
         queryCommand.Options.Add(queryTypeOption);
+        queryCommand.Options.Add(queryDiffOption);
         queryCommand.Options.Add(queryHelpOption);
 
         // The options given on the command line, not defaulted: a query refuses one it does not read.
         IReadOnlyCollection<string> Given(ParseResult parseResult)
-            => new Option[] { queryDepthOption, queryExactOption, queryLimitOption, queryExternalOption, queryWithinOption, queryTypeOption }
+            => new Option[] { queryDepthOption, queryExactOption, queryLimitOption, queryExternalOption, queryWithinOption, queryTypeOption, queryDiffOption }
                 .Where(option => parseResult.GetResult(option) is { Implicit: false })
                 .Select(option => option.Name)
                 .ToList();
@@ -271,7 +277,8 @@ public class Program
                 query,
                 parseResult.GetResult(queryDepthOption) is { Implicit: false } ? parseResult.GetValue(queryDepthOption) : null,
                 parseResult.GetValue(queryWithinOption),
-                parseResult.GetValue(queryTypeOption));
+                parseResult.GetValue(queryTypeOption),
+                parseResult.GetValue(queryDiffOption));
         queryCommand.SetAction((ParseResult parseResult, CancellationToken ct) =>
             QueryCommandHandler.ExecuteAsync(
                 Settings(parseResult, [parseResult.GetValue(queryIdentifierArgument)!], multi: false, graph: null), ct));
@@ -328,7 +335,19 @@ public class Program
             QueryCommandHandler.ExecuteAsync(
                 Settings(parseResult, [], multi: false, Graph(parseResult, GraphQueryParameters.HubsQuery)), ct));
 
-        foreach (var command in new[] { pathQueryCommand, affectedQueryCommand, hubsQueryCommand })
+        var impactQueryCommand = new Command(
+            "impact",
+            "What a diff could break: the declarations its changed lines fall in, what depends on them (as affected walks them, " +
+            "in one walk), and the test files in reach. Reads a unified diff whose new side is the working tree from standard " +
+            "input (git diff $(git merge-base main HEAD) | codecontext query impact) or --diff FILE; it runs nothing itself. " +
+            $"--depth (1-{GraphQueryLimits.MaxDepth}, default {GraphQueryLimits.DefaultAffectedDepth}), --limit per list " +
+            $"(default {GraphQueryLimits.DefaultLimit}), --tests, --relation. Exits 2 when part of the diff could not be mapped; " +
+            "changed files no worker reads (a README) are set aside and do not count.");
+        impactQueryCommand.SetAction((ParseResult parseResult, CancellationToken ct) =>
+            QueryCommandHandler.ExecuteAsync(
+                Settings(parseResult, [], multi: false, Graph(parseResult, GraphQueryParameters.ImpactQuery)), ct));
+
+        foreach (var command in new[] { pathQueryCommand, affectedQueryCommand, hubsQueryCommand, impactQueryCommand })
         {
             var help = new HelpOption();
             help.Action = new QueryHelpAction(queryIdentifierArgument);
@@ -480,7 +499,8 @@ internal sealed class QueryHelpAction(Argument<string> singleIdentifier) : Synch
                 "path" => "codecontext query path <from> <to> [options]",
                 "affected" => "codecontext query affected <identifier> [options]",
                 "hubs" => "codecontext query hubs [options]",
-                _ => "codecontext query <identifier> [options]   (a symbol named path, affected, hubs or multi: query -- <name>)",
+                "impact" => "git diff <base> | codecontext query impact [options]   or   codecontext query impact --diff <file> [options]",
+                _ => "codecontext query <identifier> [options]   (a symbol named path, affected, hubs, impact or multi: query -- <name>)",
             };
             output.Write(ReplaceUsage(rendered.ToString(), usage));
             return 0;

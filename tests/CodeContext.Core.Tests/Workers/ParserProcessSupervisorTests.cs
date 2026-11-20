@@ -217,7 +217,9 @@ public class ParserProcessSupervisorTests
                 releaseObserver.Wait(TimeSpan.FromSeconds(10));
             });
 
-        await observerEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        // The first progress comes after the worker process has started and initialized, which on a loaded runner
+        // (Windows CI, the suite in parallel) took longer than 5 s; the property under test is the 2 s answer below.
+        await observerEntered.Task.WaitAsync(WaitBudget);
         try
         {
             var opened = await supervisor.OpenWorkspaceAsync(
@@ -888,5 +890,35 @@ public class ParserProcessSupervisorTests
         // The worker sent them; nothing will ever hand them back to a worker without the capability, so none is kept.
         Assert.All(deltas, delta => Assert.Null(delta.Fingerprints));
         Assert.False(supervisor.DeclaresPersistentState);
+    }
+
+    /// <summary>
+    /// Parts name files and spans a repository made its worker say: only parts in files the host supplied to the
+    /// workspace, well ordered, apart from the node's own span and from each other, and at most
+    /// <see cref="ParserProcessSupervisor.MaxPartsPerNode"/> of them are kept; a node with any other is kept without
+    /// its parts, mapped as a worker that sends none is.
+    /// </summary>
+    [Fact]
+    public async Task Parts_OutsideTheSuppliedFiles_IllFormed_OrTooMany_AreDropped()
+    {
+        await using var supervisor = CreateSupervisor(FakeWorkerSpec("--behavior", "parts"));
+        var deltas = Recording(supervisor);
+        string[] files = ["good.fake", "outside.fake", "inverted.fake", "overlap.fake", "twice.fake", "many.fake"];
+        await supervisor.OpenWorkspaceAsync(new OpenWorkspaceParams("ws-1", Path.GetTempPath(), [], files));
+        await supervisor.IndexWorkspaceAsync(new IndexWorkspaceParams("ws-1", 1, files));
+
+        var parts = Assert.Single(deltas).Nodes.Where(node => node.Kind == "class")
+            .ToDictionary(node => node.Name, node => node.Parts);
+        Assert.Equal([new ProtocolNodePart("outside.fake", 19, 24, 0, 1)], parts["goodClass"]);
+        Assert.Null(parts["outsideClass"]);
+        Assert.Null(parts["invertedClass"]);
+        Assert.Null(parts["overlapClass"]);
+        Assert.Null(parts["twiceClass"]);
+        Assert.Null(parts["manyClass"]);
+
+        // An apply is held to the files of the open that preceded it: outside.fake is no longer one of them.
+        await supervisor.OpenWorkspaceAsync(new OpenWorkspaceParams("ws-1", Path.GetTempPath(), [], ["good.fake"]));
+        await supervisor.ApplyChangesAsync(new ApplyChangesParams("ws-1", 2, [new FileChangeDto("good.fake", FileChangeKinds.Changed)]));
+        Assert.Null(deltas[^1].Nodes.Single(node => node.Kind == "class").Parts);
     }
 }

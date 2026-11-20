@@ -913,7 +913,7 @@ public sealed class CSharpWorkspaceAnalyzer
         for (var index = 0; index < walked.Nodes.Count; index++)
         {
             var node = walked.Nodes[index];
-            if (last[node.Id] == index && owners[node.Id] == path) nodes.Add(node);
+            if (last[node.Id] == index && owners[node.Id] == path) nodes.Add(WithParts(node, path, walked, last.Count < walked.Nodes.Count, shared));
         }
 
         var edges = new HashSet<EdgeFact>();
@@ -942,6 +942,52 @@ public sealed class CSharpWorkspaceAnalyzer
         // holding a second copy of every edge for as long as the file is unchanged.
         var bucketEdges = allOwn && !fromOthers && edges.Count == walked.Edges.Count ? walked.Edges : edges.ToList();
         return new FileFacts(path, Qualify(nodes, contested), bucketEdges);
+    }
+
+    /// <summary>
+    /// The node a bucket emits, with the other declarations of its symbol as parts: the earlier declarations of the
+    /// same id in this file (<paramref name="hasDuplicates"/>), and those in the other files that emit the id (a
+    /// partial type or member). Each part is a walked declaration's own span; the node's own is not repeated, nor
+    /// is a span twice. The walks are stored before settlement, so parts are rebuilt from them, never saved.
+    /// </summary>
+    private ProtocolNode WithParts(
+        ProtocolNode node, string path, WalkedFile walked, bool hasDuplicates, Dictionary<string, List<string>> shared)
+    {
+        List<ProtocolNodePart>? parts = null;
+        void Add(ProtocolNode other)
+        {
+            if (ReferenceEquals(other, node)) return;
+            var part = new ProtocolNodePart(other.FilePath!, other.StartLine, other.EndLine, other.StartColumn, other.EndColumn);
+            if (part == new ProtocolNodePart(node.FilePath!, node.StartLine, node.EndLine, node.StartColumn, node.EndColumn)) return;
+            if ((parts ??= []).Contains(part)) return;
+            parts.Add(part);
+        }
+        if (hasDuplicates)
+        {
+            foreach (var other in walked.Nodes)
+            {
+                if (other.Id == node.Id) Add(other);
+            }
+        }
+        if (shared.TryGetValue(node.Id, out var files))
+        {
+            foreach (var file in files.Order(StringComparer.Ordinal))
+            {
+                if (file == path || !_walked.TryGetValue(file, out var elsewhere)) continue;
+                foreach (var other in elsewhere.Nodes)
+                {
+                    if (other.Id == node.Id) Add(other);
+                }
+            }
+        }
+        if (parts is null) return node;
+        parts.Sort(static (left, right) =>
+        {
+            var order = string.CompareOrdinal(left.FilePath, right.FilePath);
+            if (order == 0) order = left.StartLine.CompareTo(right.StartLine);
+            return order != 0 ? order : left.StartColumn.CompareTo(right.StartColumn);
+        });
+        return node with { Parts = parts };
     }
 
     private List<ProjectCoverage> BuildCoverage()
@@ -1536,6 +1582,26 @@ public sealed class CSharpWorkspaceAnalyzer
             // when base.M() becomes this.M() in a method that does not override M. It shares this field with the
             // target's presence so that a bucket with no such call hashes as it always did.
             hasher.Int((analysis.Holds(edge.TargetId) ? 1 : 0) | (edge.StaticallyBound ? 2 : 0));
+        }
+        // The nodes' other declarations, after everything else and only when there are any, so that a bucket whose
+        // nodes carry none hashes as it did before parts were emitted. The stream before them is self-delimiting.
+        var withParts = bucket.Nodes.Where(node => node.Parts is { Count: > 0 }).OrderBy(n => n.Id, StringComparer.Ordinal).ToList();
+        if (withParts.Count > 0)
+        {
+            hasher.Int(withParts.Count);
+            foreach (var node in withParts)
+            {
+                hasher.Str(node.Id);
+                hasher.Int(node.Parts!.Count);
+                foreach (var part in node.Parts)
+                {
+                    hasher.Str(part.FilePath);
+                    hasher.Int(part.StartLine);
+                    hasher.Int(part.EndLine);
+                    hasher.Int(part.StartColumn);
+                    hasher.Int(part.EndColumn);
+                }
+            }
         }
         return bucket.Hash = hasher.GetHashAndReset();
     }

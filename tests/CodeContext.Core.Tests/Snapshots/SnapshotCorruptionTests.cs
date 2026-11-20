@@ -99,6 +99,7 @@ public class SnapshotCorruptionTests
         // host rebuilds.
         AssertRefused(Patch32(SmallFile(), SnapshotFormat.HeaderFormatVersion, 1), SnapshotRejection.FormatVersion);
         AssertRefused(Patch32(SmallFile(), SnapshotFormat.HeaderFormatVersion, 2), SnapshotRejection.FormatVersion);
+        AssertRefused(Patch32(SmallFile(), SnapshotFormat.HeaderFormatVersion, 3), SnapshotRejection.FormatVersion);
         AssertRefused(Patch32(SmallFile(), SnapshotFormat.HeaderFormatVersion, SnapshotFormat.FormatVersion + 1), SnapshotRejection.FormatVersion);
     }
 

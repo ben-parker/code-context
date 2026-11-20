@@ -212,6 +212,25 @@ files' facts. The contract:
   mid-stream the host commits nothing; keeping the previous baseline means the next
   batch re-emits the same difference and converges.
 
+## Report a symbol declared in several places (optional)
+
+A node has one location, but some symbols are declared in more than one place: a C#
+`partial` type or member split over files, TypeScript declarations merged in one file
+(two `interface Shared` blocks, a class and a namespace of one name). The node then
+stands at one of them (the owner above), and the other declarations' header, braces and
+base list belong to no declaration of the index. Send them as the node's `parts`: one
+`{ "filePath", "startLine", "endLine", "startColumn", "endColumn" }` per other
+declaration, in the span semantics you declared, never repeating the node's own location.
+The host maps a changed line of a part to the node (`query impact`), as it maps a line of
+the node's own span; without `parts` such a line maps to nothing (or to whatever encloses
+it) and the answer is incomplete. `parts` belongs to the node's emission: hash it with the
+node, and emit the node's file again whenever a file holding a part is walked again or
+removed, as you do for an id emitted by several files. Older hosts ignore the field. The
+host keeps a node's parts only when every one is in a file it supplied to the workspace
+(`approvedFiles` of the last `workspace/open`), ends no earlier than it starts, and overlaps
+neither the node's own span nor another part, and when there are at most 1024; otherwise it
+keeps the node without them and logs a warning.
+
 ## Report what the facts were read from (optional)
 
 Send `inputs` on the first `analysis/delta` chunk of every request: `{ "files": [...],

@@ -208,6 +208,48 @@ public static class CodeContextEndpoints
         .Produces(StatusCodes.Status400BadRequest)
         .Produces(StatusCodes.Status503ServiceUnavailable);
 
+        // Diff impact takes its diff in a JSON body: a diff is too large, and too varied in its bytes, for a query string.
+        app.MapPost(GraphRoutes.Impact, async (HttpContext http, IGraphQueryService graph, CancellationToken ct) =>
+        {
+            if (http.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpMaxRequestBodySizeFeature>() is { IsReadOnly: false } limit)
+                limit.MaxRequestBodySize = MaxImpactBodyBytes;
+            GraphImpactRequest request;
+            try
+            {
+                using var body = await JsonDocument.ParseAsync(http.Request.Body, cancellationToken: ct);
+                if (GraphQueryParameters.CheckJson(GraphQueryParameters.ImpactQuery, body.RootElement) is { } problem)
+                    return InvalidGraphQuery(problem);
+                request = ImpactRequest(body.RootElement);
+            }
+            catch (JsonException ex)
+            {
+                return InvalidGraphQuery($"The body is not a JSON object of impact arguments: {ex.Message}");
+            }
+            catch (BadHttpRequestException ex)
+            {
+                return InvalidGraphQuery($"The body could not be read: {ex.Message}");
+            }
+            return await GraphResultAsync(() => graph.GetImpactAsync(request, ct));
+        })
+        .WithMetadata(new GraphQueryEndpoint(GraphQueryParameters.ImpactQuery))
+        .WithName("GetImpact")
+        .WithSummary("List what a diff could break")
+        .WithDescription("Maps the changed lines of a unified diff (git diff output, whose new side must be the working tree) to " +
+                        "the innermost declarations holding them, then lists what depends on those declarations as " +
+                        "/api/graph/affected does, in one walk, each dependent attributed to the change that reached it first, " +
+                        "and the test files in reach. A changed declaration is never listed as a dependent: 'usedByChanges' " +
+                        "names the other changes that use it. Every part of the diff that maps to no declaration (lines outside " +
+                        "declarations, removed declarations, deleted, renamed, binary or unparsed files, files whose content " +
+                        "is not the diff's new side or changed since the index read them) is listed in 'unmapped' with the " +
+                        "reason, and the answer is then not 'complete'. Changed files that cannot change an indexed fact (no " +
+                        "worker parses them, names them as a project file or reported reading them: a README, documentation) " +
+                        "are listed in 'setAsideFiles' and leave it complete. Nothing is run: the diff is data. 503 " +
+                        "INDEX_NOT_READY while no scan has finished.")
+        .Accepts<GraphImpactRequest>("application/json")
+        .Produces<GraphImpactResponse>(StatusCodes.Status200OK)
+        .Produces(StatusCodes.Status400BadRequest)
+        .Produces(StatusCodes.Status503ServiceUnavailable);
+
         // Index refresh endpoint. All work is queued on the index coordinator — the
         // endpoint owns no background tasks and mutations stay ordered.
         app.MapPost("/api/index/refresh", async (
@@ -393,7 +435,28 @@ public static class CodeContextEndpoints
         public const string Path = "/api/graph/path";
         public const string Affected = "/api/graph/affected";
         public const string Hubs = "/api/graph/hubs";
+        public const string Impact = "/api/graph/impact";
     }
+
+    /// <summary>The largest impact body read: a diff at its limit, JSON-escaped.</summary>
+    private const long MaxImpactBodyBytes = 4L * CodeContext.Core.Diffs.UnifiedDiff.MaxLength;
+
+    private static GraphImpactRequest ImpactRequest(JsonElement body)
+    {
+        var request = new GraphImpactRequest();
+        if (body.TryGetProperty("diff", out var diff) && diff.ValueKind == JsonValueKind.String) request.Diff = diff.GetString()!;
+        if (body.TryGetProperty("maxDepth", out var maxDepth) && maxDepth.ValueKind == JsonValueKind.Number) request.MaxDepth = maxDepth.GetInt32();
+        if (body.TryGetProperty("relation", out var relation) && relation.ValueKind == JsonValueKind.String) request.Relation = relation.GetString();
+        if (body.TryGetProperty("includeTests", out var tests) && tests.ValueKind is JsonValueKind.True or JsonValueKind.False) request.IncludeTests = tests.GetBoolean();
+        if (body.TryGetProperty("limit", out var limit) && limit.ValueKind == JsonValueKind.Number) request.Limit = limit.GetInt32();
+        return request;
+    }
+
+    private static IResult InvalidGraphQuery(string message)
+        => Results.Json(
+            new ApiErrorResponse(new ApiError("INVALID_GRAPH_QUERY", message)),
+            CodeContextJsonContext.Default.ApiErrorResponse,
+            statusCode: StatusCodes.Status400BadRequest);
 
     /// <summary>Marks a graph query endpoint with the query it answers, for <see cref="UseGraphQueryValidation"/>.</summary>
     internal sealed record GraphQueryEndpoint(string Query);
@@ -409,8 +472,12 @@ public static class CodeContextEndpoints
         => app.Use(async (context, next) =>
         {
             if (context.GetEndpoint()?.Metadata.GetMetadata<GraphQueryEndpoint>() is { Query: var query }
-                && GraphQueryParameters.Check(query, context.Request.Query.Select(pair =>
-                    new KeyValuePair<string, IReadOnlyList<string?>>(pair.Key, pair.Value.ToArray()))) is { } problem)
+                && (query == GraphQueryParameters.ImpactQuery
+                    ? context.Request.Query.Count > 0
+                        ? $"impact takes its arguments in a JSON body ({string.Join(", ", GraphQueryParameters.Impact.Select(parameter => parameter.Name))}), not in the query string."
+                        : null
+                    : GraphQueryParameters.Check(query, context.Request.Query.Select(pair =>
+                        new KeyValuePair<string, IReadOnlyList<string?>>(pair.Key, pair.Value.ToArray())))) is { } problem)
             {
                 context.Response.StatusCode = StatusCodes.Status400BadRequest;
                 await context.Response.WriteAsJsonAsync(
@@ -438,6 +505,13 @@ public static class CodeContextEndpoints
         {
             return Results.Json(
                 new ApiErrorResponse(new ApiError("GRAPH_CHANGING", ex.Message)),
+                CodeContextJsonContext.Default.ApiErrorResponse,
+                statusCode: StatusCodes.Status503ServiceUnavailable);
+        }
+        catch (IndexNotReadyException ex)
+        {
+            return Results.Json(
+                new ApiErrorResponse(new ApiError("INDEX_NOT_READY", ex.Message)),
                 CodeContextJsonContext.Default.ApiErrorResponse,
                 statusCode: StatusCodes.Status503ServiceUnavailable);
         }

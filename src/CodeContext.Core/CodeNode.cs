@@ -22,5 +22,17 @@ namespace CodeContext.Core
         public string? Modifiers { get; set; }
         public string? Metrics { get; set; }
         public IReadOnlyDictionary<string, string>? Metadata { get; set; }
+
+        /// <summary>
+        /// The other declarations of this node's symbol, when the worker reports it declared in more than one place (a
+        /// partial type or member in several files, merged declarations in one file): each part's file and span, in
+        /// the stored span form. The node's own location is not repeated. Null for the usual single declaration. Kept
+        /// out of the REST and MCP answers; diff impact maps a changed line of a part to this node.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonIgnore]
+        public IReadOnlyList<CodeNodePart>? Parts { get; set; }
     }
+
+    /// <summary>One other declaration of a node's symbol (see <see cref="CodeNode.Parts"/>): its file and span, zero-based, end-exclusive.</summary>
+    public sealed record CodeNodePart(string FilePath, int StartLine, int EndLine, int StartCol, int EndCol);
 }

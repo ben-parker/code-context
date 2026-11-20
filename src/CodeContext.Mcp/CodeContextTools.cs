@@ -175,6 +175,20 @@ public sealed class CodeContextTools
         return JsonSerializer.Serialize(response, CodeContextJsonContext.Default.GraphAffectedResponse);
     }
 
+    [Description("List what a diff could break.")]
+    public static async Task<string> GetImpact(IGraphQueryService graph, GraphArguments args, CancellationToken cancellationToken)
+    {
+        var response = await graph.GetImpactAsync(new GraphImpactRequest
+        {
+            Diff = args.Str("diff")!,
+            MaxDepth = args.Int("maxDepth", GraphQueryLimits.DefaultAffectedDepth),
+            Relation = args.Str("relation"),
+            IncludeTests = args.Bool("includeTests"),
+            Limit = args.Int("limit", GraphQueryLimits.DefaultLimit),
+        }, cancellationToken);
+        return JsonSerializer.Serialize(response, CodeContextJsonContext.Default.GraphImpactResponse);
+    }
+
     [Description("List the symbols with the most direct dependents.")]
     public static async Task<string> GetHubs(IGraphQueryService graph, GraphArguments args, CancellationToken cancellationToken)
     {

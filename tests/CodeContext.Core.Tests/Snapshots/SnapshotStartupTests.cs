@@ -188,8 +188,11 @@ public class SnapshotStartupTests
         }
     }
 
-    [Fact]
-    public async Task SnapshotOfFormatVersion2_IsRefusedBeforeItIsRead_Deleted_AndTheStartScansAfresh()
+    /// <summary>Version 3 is the format before node parts: such a snapshot describes less than a scan, and is not read.</summary>
+    [Theory]
+    [InlineData(2u)]
+    [InlineData(3u)]
+    public async Task SnapshotOfAnEarlierFormatVersion_IsRefusedBeforeItIsRead_Deleted_AndTheStartScansAfresh(uint version)
     {
         var basePath = NewBase();
         try
@@ -197,9 +200,9 @@ public class SnapshotStartupTests
             var name = await WriteFirstRunAsync(basePath);
             await using var second = new SnapshotServiceHarness(basePath);
             var path = Path.Combine(second.WorkspacePath, name);
-            // What an earlier build left: the same header with version 2. Nothing after the header is looked at.
+            // What an earlier build left: the same header with an earlier version. Nothing after the header is looked at.
             var bytes = File.ReadAllBytes(path);
-            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(SnapshotFormat.HeaderFormatVersion), 2);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(SnapshotFormat.HeaderFormatVersion), version);
             File.WriteAllBytes(path, bytes);
 
             await second.Coordinator.StartAsync(CancellationToken.None);

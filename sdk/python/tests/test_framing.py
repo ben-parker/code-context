@@ -8,6 +8,7 @@ from codecontext_worker_sdk import (
     CAPABILITIES,
     METHODS,
     MessageDecoder,
+    NodePart,
     WorkerInputs,
     encode_message,
 )
@@ -28,6 +29,11 @@ class FramingTests(unittest.TestCase):
         schema = json.loads(SCHEMA.read_text(encoding="utf-8"))["$defs"]
         self.assertEqual(set(schema["workerInputs"]["properties"]), set(WorkerInputs.__annotations__))
         self.assertEqual("#/$defs/workerInputs", schema["analysisDelta"]["properties"]["inputs"]["$ref"])
+
+    def test_node_parts_name_the_schema_fields(self) -> None:
+        schema = json.loads(SCHEMA.read_text(encoding="utf-8"))["$defs"]
+        self.assertEqual(set(schema["nodePart"]["properties"]), set(NodePart.__annotations__))
+        self.assertEqual("#/$defs/nodePart", schema["node"]["properties"]["parts"]["items"]["$ref"])
 
     def test_fragmented_and_adjacent_frames(self) -> None:
         first = encode_message({"jsonrpc": "2.0", "id": 1, "result": "héllo"})

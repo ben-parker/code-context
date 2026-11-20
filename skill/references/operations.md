@@ -84,6 +84,24 @@ curl "http://localhost:<port>/api/graph/affected?identifier=X&maxDepth=5&limit=2
 curl "http://localhost:<port>/api/graph/hubs?limit=20&within=src/Core&type=Class&relation=CALLS&includeTests=false&includeExternal=false"
 ```
 
+Diff impact is a `POST` with a JSON body sent as `application/json` (otherwise a bare 415;
+MCP: `get_impact`, the same names); a query string is refused:
+
+```bash
+git diff $(git merge-base main HEAD) | jq -Rs '{diff: ., maxDepth: 5, limit: 20}' \
+  | curl -X POST -H 'Content-Type: application/json' --data-binary @- "http://localhost:<port>/api/graph/impact"
+```
+
+`complete` is true only when every changed line mapped and every mapped file matched the
+working tree by blob id; `unmapped` (with `unmappedCount`, `unmappedReasons`), `changes`,
+`items` and `testFiles` each carry their own count and truncation. A change's
+`usedByChanges` (at most five, with `usedByChangeCount`) names the other changes that use
+it, since a change is never among `items`. `setAsideFiles` (with `setAsideFileCount`)
+lists changed files that cannot change an indexed fact; they do not make the answer
+incomplete. A diff that cannot be
+read (truncated hunk, garbled line, the same file twice, over 16 MiB or 10,000 files) is a
+400 naming its line; a 503 `INDEX_NOT_READY` means no scan has finished yet.
+
 A parameter an endpoint does not take, a value of the wrong kind or out of range is a
 400 whose `error.message` says which (MCP: an `isError` result). A 503 `GRAPH_CHANGING`
 means the index changed under every attempt to read one generation of it; retry once

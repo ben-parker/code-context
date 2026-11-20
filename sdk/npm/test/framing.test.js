@@ -38,3 +38,13 @@ test('declares the inputs of a delta with the schema\'s fields', () => {
     assert.deepEqual(fields, Object.keys(schema.workerInputs.properties).sort());
     assert.equal(schema.analysisDelta.properties.inputs.$ref, '#/$defs/workerInputs');
 });
+
+test('declares the parts of a node with the schema\'s fields', () => {
+    const schema = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', '..', 'src', 'CodeContext.Parser.Protocol',
+        'protocol', 'parser-protocol.schema.json'), 'utf8')).$defs;
+    const declared = /export interface NodePart \{([^}]*)\}/.exec(fs.readFileSync(path.join(__dirname, '..', 'index.d.ts'), 'utf8'));
+    assert.ok(declared, 'index.d.ts declares NodePart');
+    const fields = [...declared[1].matchAll(/^\s*(\w+)\??:/gm)].map(match => match[1]).sort();
+    assert.deepEqual(fields, Object.keys(schema.nodePart.properties).sort());
+    assert.equal(schema.node.properties.parts.items.$ref, '#/$defs/nodePart');
+});

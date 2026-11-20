@@ -32,12 +32,14 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
             DeltaOrigin origin,
             HashSet<string>? expectedFiles = null,
             Action<AnalysisProgress>? progressHandler = null,
-            Action<Exception>? progressErrorHandler = null)
+            Action<Exception>? progressErrorHandler = null,
+            IReadOnlyList<string>? supplied = null)
         {
             WorkspaceId = workspaceId;
             Generation = generation;
             Origin = origin;
             ExpectedFiles = expectedFiles;
+            _supplied = supplied;
             _progressUpdates = progressHandler is null
                 ? null
                 : Channel.CreateBounded<AnalysisProgress>(new BoundedChannelOptions(16)
@@ -56,6 +58,17 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
         public long Generation { get; }
         public DeltaOrigin Origin { get; }
         public HashSet<string>? ExpectedFiles { get; }
+
+        private readonly IReadOnlyList<string>? _supplied;
+        private HashSet<string>? _suppliedSet;
+
+        /// <summary>
+        /// The files the host supplied for this request's workspace (its index's files, or else those of the open that
+        /// preceded it), as a set built the first time a delta of the request carries parts; null when none is known.
+        /// </summary>
+        public HashSet<string>? SuppliedFiles
+            => ExpectedFiles ?? (_supplied is null ? null : _suppliedSet ??= new HashSet<string>(_supplied, PathComparer));
+
         public int LastFilesProcessed { get; set; } = -1;
         public bool SawTerminalProgress { get; set; }
         public int DeltasReceived { get; set; }
@@ -118,6 +131,8 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
     private readonly SemaphoreSlim _lifecycleLock = new(1, 1);
     private readonly CancellationTokenSource _shutdown = new();
     private readonly ConcurrentDictionary<long, ActiveMutation> _activeMutations = new();
+    // The files of each workspace's last workspace/open: the files a part may name (KeepWellFormedParts).
+    private readonly ConcurrentDictionary<string, IReadOnlyList<string>> _openedFiles = new(StringComparer.Ordinal);
     // Which reported input paths the host may not look at, by spelling; null where none is refused (off Windows).
     private readonly Func<string, bool>? _refusedInput;
 
@@ -534,7 +549,14 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
                 $"Worker facts must be owned by prefix '{ownershipPrefix}' (node ids, edge ids, and edge sources).");
         }
 
-        var normalizedDelta = NormalizeSpans(delta, initialized.SpanSemantics);
+        var normalizedDelta = KeepWellFormedParts(NormalizeSpans(delta, initialized.SpanSemantics), active.SuppliedFiles, out var withoutParts);
+        if (withoutParts > 0)
+        {
+            _logger.LogWarning(
+                "[{ParserId}] kept {Count} node(s) of request {RequestId} without their parts: a part named a file not supplied to the workspace, "
+                + "ended before it started, overlapped the node or another part, or the node had more than {Max}.",
+                _spec.ParserId, withoutParts, delta.RequestId, MaxPartsPerNode);
+        }
         var accepted = OriginDeltaHandler is { } withOrigin
             ? await withOrigin(normalizedDelta, initialized.Capabilities.PersistentState ? active.Origin : null, _shutdown.Token).ConfigureAwait(false)
             : await DeltaHandler!(normalizedDelta, _shutdown.Token).ConfigureAwait(false);
@@ -611,7 +633,67 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
         return Task.CompletedTask;
     }
 
-    private static AnalysisDelta NormalizeSpans(AnalysisDelta delta, SpanSemantics semantics)
+    /// <summary>The most parts (protocol <c>node.parts</c>) a node may carry; a node with more is kept without them.</summary>
+    internal const int MaxPartsPerNode = 1024;
+
+    /// <summary>
+    /// The delta with each node's parts kept only when they are well formed, in the stored span form: every part in a
+    /// file the host supplied to the workspace (<paramref name="supplied"/>; none is known when null), its end not
+    /// before its start, none overlapping the node's own span or another part, and at most <see cref="MaxPartsPerNode"/>.
+    /// Parts are what a repository made its worker say, and diff impact maps a changed line of one to the node: a node
+    /// with any other part is kept without its parts, as a worker that sends none is mapped (such a line then belongs
+    /// to no declaration of the node, which never makes an answer complete). <paramref name="dropped"/> counts them.
+    /// </summary>
+    internal static AnalysisDelta KeepWellFormedParts(AnalysisDelta delta, IReadOnlySet<string>? supplied, out int dropped)
+    {
+        dropped = 0;
+        List<ProtocolNode>? nodes = null;
+        for (var index = 0; index < delta.Nodes.Count; index++)
+        {
+            var node = delta.Nodes[index];
+            if (node.Parts is null || (node.Parts.Count > 0 && supplied is not null && PartsAreWellFormed(node, supplied))) continue;
+            if (node.Parts.Count > 0) dropped++;
+            nodes ??= [.. delta.Nodes];
+            nodes[index] = node with { Parts = null };
+        }
+        return nodes is null ? delta : delta with { Nodes = nodes };
+    }
+
+    private static bool PartsAreWellFormed(ProtocolNode node, IReadOnlySet<string> supplied)
+    {
+        var parts = node.Parts!;
+        if (parts.Count > MaxPartsPerNode) return false;
+        var spans = new List<(string File, int StartLine, int StartColumn, int EndLine, int EndColumn)>(parts.Count + 1);
+        if (!string.IsNullOrEmpty(node.FilePath)) spans.Add((node.FilePath, node.StartLine, node.StartColumn, node.EndLine, node.EndColumn));
+        foreach (var part in parts)
+        {
+            if (part?.FilePath is not { Length: > 0 } path || !supplied.Contains(path)
+                || part.StartLine < 0 || part.StartColumn < 0
+                || part.EndLine < part.StartLine || (part.EndLine == part.StartLine && part.EndColumn < part.StartColumn))
+                return false;
+            spans.Add((path, part.StartLine, part.StartColumn, part.EndLine, part.EndColumn));
+        }
+        // In file and start order, a span overlaps another when it starts before the previous one of its file ends; a
+        // span equal to another (an empty one included) repeats it.
+        spans.Sort(static (left, right) =>
+        {
+            var order = PathComparer.Compare(left.File, right.File);
+            return order != 0
+                ? order
+                : (left.StartLine, left.StartColumn, left.EndLine, left.EndColumn).CompareTo((right.StartLine, right.StartColumn, right.EndLine, right.EndColumn));
+        });
+        for (var index = 1; index < spans.Count; index++)
+        {
+            var (previous, current) = (spans[index - 1], spans[index]);
+            if (!PathComparer.Equals(previous.File, current.File)) continue;
+            if ((previous.StartLine, previous.StartColumn, previous.EndLine, previous.EndColumn) == (current.StartLine, current.StartColumn, current.EndLine, current.EndColumn)
+                || (current.StartLine, current.StartColumn).CompareTo((previous.EndLine, previous.EndColumn)) < 0)
+                return false;
+        }
+        return true;
+    }
+
+    internal static AnalysisDelta NormalizeSpans(AnalysisDelta delta, SpanSemantics semantics)
     {
         if (semantics.LineBase == 0 && semantics.ColumnBase == 0 && !semantics.EndIsInclusive)
         {
@@ -625,6 +707,14 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
             StartColumn = Math.Max(0, node.StartColumn - semantics.ColumnBase),
             EndColumn = Math.Max(0, node.EndColumn - semantics.ColumnBase)
                 + (semantics.EndIsInclusive ? 1 : 0),
+            Parts = node.Parts?.Select(part => part with
+            {
+                StartLine = Math.Max(0, part.StartLine - semantics.LineBase),
+                EndLine = Math.Max(0, part.EndLine - semantics.LineBase),
+                StartColumn = Math.Max(0, part.StartColumn - semantics.ColumnBase),
+                EndColumn = Math.Max(0, part.EndColumn - semantics.ColumnBase)
+                    + (semantics.EndIsInclusive ? 1 : 0),
+            }).ToList(),
         }).ToList();
         var edges = delta.Edges.Select(edge => edge with
         {
@@ -731,6 +821,7 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
     public async Task<OpenWorkspaceResult> OpenWorkspaceAsync(OpenWorkspaceParams parameters, CancellationToken ct = default)
     {
         var client = await GetReadyClientAsync(ct).ConfigureAwait(false);
+        _openedFiles[parameters.WorkspaceId] = parameters.ApprovedFiles;
         return await RunRequestAsync(() => client.OpenWorkspaceAsync(parameters, ct)).ConfigureAwait(false);
     }
 
@@ -867,7 +958,8 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
             var result = await RunRequestAsync(() => client.ApplyChangesAsync(parameters, ct, id =>
             {
                 requestId = id;
-                active = new ActiveMutation(parameters.WorkspaceId, parameters.Generation, origin);
+                active = new ActiveMutation(parameters.WorkspaceId, parameters.Generation, origin,
+                    supplied: _openedFiles.GetValueOrDefault(parameters.WorkspaceId));
                 if (!_activeMutations.TryAdd(id, active))
                 {
                     throw new InvalidOperationException($"Request id {id} is already active.");

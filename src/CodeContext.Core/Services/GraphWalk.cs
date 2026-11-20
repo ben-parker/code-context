@@ -91,6 +91,20 @@ namespace CodeContext.Core.Services
         /// <summary>Whether the relation filter, if any, lets a hop follow this usage edge.</summary>
         public bool Admits(CodeEdge edge) => _relations is null || _relations.Contains(Kind(edge));
 
+        /// <summary>Whether a containment edge leaves the node: it holds members.</summary>
+        public bool HoldsMembers(string id)
+        {
+            foreach (var shard in _shards)
+            {
+                var edges = shard.GetEdgesBySource(id);
+                for (var i = 0; i < edges.Count; i++)
+                {
+                    if (IsContainment(edges[i])) return true;
+                }
+            }
+            return false;
+        }
+
         // ---- Seeds ----
 
         /// <summary>
@@ -277,10 +291,16 @@ namespace CodeContext.Core.Services
         /// unless that call is statically bound. Siblings that implement the same declaration are not affected, and
         /// nothing moves along containment or proximity. Unless tests are included, impact reaches a symbol in a test
         /// file but moves no further from it.
+        ///
+        /// A seed that uses another seed is not a dependent (seeds are excluded); <paramref name="seedUsesSeed"/>, when
+        /// given, is told of each such use, the using seed first, by the rules that carry impact one hop. It may be
+        /// told of one pair more than once.
         /// </summary>
-        public List<Affected> AffectedBy(IReadOnlyList<string> seeds, int maxDepth, out bool depthLimited)
+        public List<Affected> AffectedBy(
+            IReadOnlyList<string> seeds, int maxDepth, out bool depthLimited, Action<string, string>? seedUsesSeed = null)
         {
             var visited = new HashSet<string>(seeds, StringComparer.Ordinal);
+            var seedSet = seedUsesSeed is null ? null : new HashSet<string>(seeds, StringComparer.Ordinal);
             var declarationsSeen = new HashSet<string>(StringComparer.Ordinal);
             var results = new List<Affected>();
             var level = seeds.ToList();
@@ -321,8 +341,9 @@ namespace CodeContext.Core.Services
                 while (pending is not null && pending.TryPop(out var declaration))
                 {
                     if (!(climbed ??= new HashSet<string>(StringComparer.Ordinal)).Add(declaration)) continue;
-                    // Once its callers are in, a declaration adds nothing more (in a probe, they are visited already).
-                    if (!probe && !declarationsSeen.Add(declaration)) continue;
+                    // Once its callers are in, a declaration adds nothing more (in a probe, they are visited already),
+                    // except to say which seeds call a seed through it.
+                    if (!probe && !declarationsSeen.Add(declaration) && (seedSet is null || distance > 1)) continue;
                     if (Node(declaration) is not { } declared || ContextService.IsExternal(declared)) continue;
                     foreach (var shard in _shards)
                     {
@@ -341,6 +362,7 @@ namespace CodeContext.Core.Services
                 {
                     if (edge.SourceId is not { Length: > 0 } source) return false;
                     if (probe) return !visited.Contains(source) && Node(source) is not null;
+                    if (distance == 1 && seedSet is not null && source != via && seedSet.Contains(source)) seedUsesSeed!(source, via);
                     // A source with no node is remembered too: it is refused once, not at every edge from it.
                     if (!visited.Add(source) || Node(source) is not { } user) return false;
                     // Unless tests are included, a test-file symbol is affected but carries impact no further, as a path

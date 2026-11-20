@@ -86,6 +86,14 @@ namespace CodeContext.Core.Snapshots
                 || U32(SnapshotSectionKind.Metadata, 1 + MetadataSetCount) != metadataLength)
                 throw new SnapshotCorruptException("The metadata set offsets do not span the section.");
 
+            var partsLength = Length(SnapshotSectionKind.Parts);
+            if (partsLength < 8) throw new SnapshotCorruptException("The parts section is too short.");
+            PartListCount = U32(SnapshotSectionKind.Parts, 0);
+            if (PartListCount > (partsLength - 8) / 4
+                || U32(SnapshotSectionKind.Parts, 1) != 4 + 4L * (PartListCount + 1)
+                || U32(SnapshotSectionKind.Parts, 1 + PartListCount) != partsLength)
+                throw new SnapshotCorruptException("The parts list offsets do not span the section.");
+
             if (!SnapshotFile.TryParseKeyValues(_region.Slice(Offset(SnapshotSectionKind.ShardMeta), Length(SnapshotSectionKind.ShardMeta)), out var meta)
                 || !meta.TryGetValue(SnapshotFormat.ParserIdKey, out var parserId) || string.IsNullOrEmpty(parserId)
                 || !meta.TryGetValue(SnapshotFormat.WorkspaceIdKey, out var workspaceId) || string.IsNullOrEmpty(workspaceId))
@@ -153,6 +161,8 @@ namespace CodeContext.Core.Snapshots
 
         public long MetadataSetCount { get; }
 
+        public long PartListCount { get; }
+
         /// <summary>The section's absolute offset and length, for tests that damage a section on purpose.</summary>
         internal (long Offset, long Length) SectionRange(SnapshotSectionKind kind) => (Offset(kind), Length(kind));
 
@@ -207,7 +217,31 @@ namespace CodeContext.Core.Snapshots
                 Modifiers = GetString(_region.ReadU32(record + 60)),
                 Metrics = GetString(_region.ReadU32(record + 64)),
                 Metadata = metadata,
+                Parts = Parts(_region.ReadU32(record + SnapshotFormat.NodePartsOffset)),
             };
+        }
+
+        /// <summary>Parts list <paramref name="listRef"/> (1-based; 0 is none), each part's path a string of the shard.</summary>
+        private List<CodeNodePart>? Parts(uint listRef)
+        {
+            if (listRef == 0) return null;
+            if (listRef > PartListCount) throw new SnapshotCorruptException($"Parts list {listRef} is beyond {PartListCount} lists.");
+            long start = U32(SnapshotSectionKind.Parts, listRef);
+            long end = U32(SnapshotSectionKind.Parts, listRef + 1L);
+            if (start < 4 + 4 * (PartListCount + 1) || start > end || end > Length(SnapshotSectionKind.Parts) || start % 4 != 0)
+                throw new SnapshotCorruptException($"Parts list {listRef} lies outside the section.");
+            var at = Offset(SnapshotSectionKind.Parts) + start;
+            long count = _region.ReadU32(at);
+            if (count == 0 || end - start != 4 + (long)SnapshotFormat.PartSize * count)
+                throw new SnapshotCorruptException($"Parts list {listRef} has the wrong length.");
+            var parts = new List<CodeNodePart>((int)count);
+            for (long p = 0; p < count; p++)
+            {
+                var part = at + 4 + SnapshotFormat.PartSize * p;
+                var path = GetString(_region.ReadU32(part)) ?? throw new SnapshotCorruptException($"A part of list {listRef} has no path.");
+                parts.Add(new CodeNodePart(path, _region.ReadI32(part + 4), _region.ReadI32(part + 8), _region.ReadI32(part + 12), _region.ReadI32(part + 16)));
+            }
+            return parts;
         }
 
         /// <summary>The edge in record slot <paramref name="index"/>, materialized.</summary>

@@ -45,6 +45,19 @@ class WorkerInputs(TypedDict):
     absent: list[str]
 
 
+class NodePart(TypedDict):
+    """One entry of a node's optional parts: another declaration of the node's symbol, for a symbol declared in
+    more than one place (a partial type or member in several files, declarations merged in one file). Its file, as
+    the host supplied it, and its span, in the worker's declared span semantics like the node's. The node's own
+    location is not repeated. The host maps a changed line of a part to the node."""
+
+    filePath: str
+    startLine: int
+    endLine: int
+    startColumn: int
+    endColumn: int
+
+
 class IndexBaseline(TypedDict):
     """workspace/index params' optional baseline, sent only to a worker that declared persistentState."""
 

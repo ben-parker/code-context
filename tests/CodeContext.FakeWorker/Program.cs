@@ -22,6 +22,10 @@ using CodeContext.Parser.Protocol;
 //   invalid-progress-request reports progress for an unknown request id
 //   native-advertised-missing advertises native trees but omits the handler
 //   ignore-shutdown   never answers shutdown, and stays up for 60 s after stdin EOF
+//   parts             normal, but each class node carries protocol `parts`, chosen by its file's name: good.fake a
+//                     part in the request's other file; outside.fake one in a file the host never supplied;
+//                     inverted.fake one that ends before it starts; overlap.fake one inside the node's own span;
+//                     twice.fake two that overlap each other; many.fake 2000 parts
 //
 // Persistent state (plan phase 5). Every behaviour that does not declare persistentState fails a request
 // that carries a baseline, and workspace/saveState, with InvalidRequest: the host must never send them.
@@ -433,7 +437,8 @@ internal sealed class WorkerState(
                 StartLine: 1, EndLine: 10, StartColumn: 1, EndColumn: 1,
                 // The persistent family's facts do not depend on the generation, so facts restored from a baseline
                 // equal those of a fresh scan.
-                Metadata: Persistent ? null : new Dictionary<string, string> { ["gen"] = generation.ToString() }));
+                Metadata: Persistent ? null : new Dictionary<string, string> { ["gen"] = generation.ToString() },
+                Parts: behavior == "parts" ? PartsOf(stem, file, files.FirstOrDefault(other => other != file) ?? "outside.fake") : null));
             nodes.Add(new ProtocolNode(methodId, $"fake:{stem}.Class.Method", $"{stem}Method", "method", "fake", file,
                 StartLine: 2, EndLine: 5, StartColumn: 1, EndColumn: 1));
             edges.Add(new ProtocolEdge($"{classId}->contains->{methodId}", classId, methodId, "contains"));
@@ -454,6 +459,18 @@ internal sealed class WorkerState(
                 ? null
                 : new WorkerInputs(inputPaths.Where(File.Exists).ToList(), inputPaths.Where(path => !File.Exists(path)).ToList()));
     }
+
+    // Behaviour parts: the class node's parts, in this worker's span semantics (1-based, inclusive ends).
+    private static List<ProtocolNodePart>? PartsOf(string stem, string file, string other) => stem switch
+    {
+        "good" => [new(other, 20, 25, 1, 1)],
+        "outside" => [new(Path.Combine(Path.GetTempPath(), "never-supplied", "x.fake"), 20, 25, 1, 1)],
+        "inverted" => [new(other, 9, 3, 1, 1)],
+        "overlap" => [new(file, 3, 4, 1, 1)],
+        "twice" => [new(other, 20, 25, 1, 1), new(other, 24, 30, 1, 1)],
+        "many" => Enumerable.Range(0, 2000).Select(i => new ProtocolNodePart(other, 100 + 2 * i, 100 + 2 * i, 1, 1)).ToList(),
+        _ => null,
+    };
 
     private static T Deserialize<T>(JsonElement? paramsElement, System.Text.Json.Serialization.Metadata.JsonTypeInfo<T> typeInfo)
     {

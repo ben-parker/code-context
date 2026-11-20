@@ -47,6 +47,11 @@ internal static class McpToolCatalog
         {"type":"object","properties":{"limit":{"description":"Most entries returned (1-100)","type":"integer","default":20},"relation":{"description":"Comma-separated relation kinds counted (CALLS, MOCK_CALLS, REFERENCES, IMPLEMENTS, INHERITS, EXTENDS, IMPORTS, USES)","type":["string","null"],"default":null},"type":{"description":"Only symbols of this type (Class, Method, Interface, ...)","type":["string","null"],"default":null},"within":{"description":"Only symbols under this repository-relative directory or file","type":["string","null"],"default":null},"includeTests":{"description":"Whether symbols in test files are ranked and their uses counted","type":"boolean","default":false},"includeExternal":{"description":"Whether library symbols are ranked","type":"boolean","default":false}}}
         """;
 
+    private const string GetImpactSchema =
+        """
+        {"type":"object","properties":{"diff":{"description":"A unified diff whose new side is the working tree (git diff <base> output, with its index lines). The diff is data: nothing is run.","type":"string"},"maxDepth":{"description":"Most dependency hops followed (1-20)","type":"integer","default":5},"relation":{"description":"Comma-separated relation kinds that carry impact (CALLS, MOCK_CALLS, REFERENCES, IMPLEMENTS, INHERITS, EXTENDS, IMPORTS, USES); without it implementations of a changed declaration are affected too","type":["string","null"],"default":null},"includeTests":{"description":"Whether dependents in test files are listed and impact moves on from them (without it they are counted, and their files listed in testFiles)","type":"boolean","default":false},"limit":{"description":"Most entries in each list: changes, unmapped, dependents, test files (1-100)","type":"integer","default":20}},"required":["diff"]}
+        """;
+
     private const string GetStatusSchema =
         """
         {"type":"object","properties":{}}
@@ -75,6 +80,10 @@ internal static class McpToolCatalog
             "get_affected",
             "List what could break if a symbol or file changes: everything that uses it, transitively, nearest first, including callers through the interface or base member it implements. Nothing is added for merely sitting nearby. Test-file dependents are counted and listed with includeTests. Static evidence, not runtime behavior.",
             GetAffectedSchema),
+        MakeTool(
+            "get_impact",
+            "List what a diff could break: the declarations its changed lines fall in, everything that depends on them (as get_affected, in one walk, each dependent attributed to the change that reached it first), and the test files in reach. A changed declaration is never listed as a dependent: usedByChanges names the other changes that use it. Parts of the diff that map to no declaration (imports, removed or renamed declarations, deleted, binary or unparsed files, a diff whose new side is not checked out) are listed in unmapped, and complete is then false; changed files that cannot change an indexed fact (a README, documentation: no worker parses, names or reported reading them) are listed in setAsideFiles and leave it true. Static evidence, not runtime behavior.",
+            GetImpactSchema),
         MakeTool(
             "get_hubs",
             "List the load-bearing symbols: those with the most distinct direct dependents, optionally within a directory or of one type. Tests and library symbols are left out unless asked for.",
@@ -113,7 +122,7 @@ internal static class McpToolCatalog
         // stdio: `no_such_tool` returned {"error":{"code":-32602,...}}). It must be THROWN so the
         // request pipeline emits a JsonRpcError, not folded into the in-band isError path below.
         // McpProtocolException is the McpException subtype that carries the wire error code.
-        if (name is not ("get_context" or "get_multi_context" or "get_status" or "get_path" or "get_affected" or "get_hubs"))
+        if (name is not ("get_context" or "get_multi_context" or "get_status" or "get_path" or "get_affected" or "get_hubs" or "get_impact"))
             throw new McpProtocolException($"Unknown tool: '{name}'", McpErrorCode.InvalidParams);
 
         try
@@ -126,6 +135,7 @@ internal static class McpToolCatalog
                 "get_path" => await CodeContextTools.GetPath(Graph(context), GraphArguments(GraphQueryParameters.PathQuery, args), cancellationToken),
                 "get_affected" => await CodeContextTools.GetAffected(Graph(context), GraphArguments(GraphQueryParameters.AffectedQuery, args), cancellationToken),
                 "get_hubs" => await CodeContextTools.GetHubs(Graph(context), GraphArguments(GraphQueryParameters.HubsQuery, args), cancellationToken),
+                "get_impact" => await CodeContextTools.GetImpact(Graph(context), GraphArguments(GraphQueryParameters.ImpactQuery, args), cancellationToken),
                 _ => throw new InvalidOperationException("Unreachable: tool name validated above."),
             };
             return Success(text);

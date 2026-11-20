@@ -1819,6 +1819,9 @@ namespace Mixed { public class Service { public string Run() => ""ok""; } }");
         // worker emits it 1-based on source line 2; the host normalizes lineBase:1 to
         // 0-based, so the committed StartLine is 1 (the first declaration would be 0).
         Assert.Equal(1, shared[0].StartLine);
+        // The first declaration is the node's part, normalized as the node is: its header belongs to Shared.
+        Assert.Equal([new CodeNodePart(merge, 0, 0, 0, 38)], shared[0].Parts);
+        Assert.Null(nodes.Single(n => n.Id == "typescript:default:merge.ts#Shared.a()").Parts);
         // Both merged members survive under their own distinct ids.
         Assert.Contains(nodes, n => n.Id == "typescript:default:merge.ts#Shared.a()");
         Assert.Contains(nodes, n => n.Id == "typescript:default:merge.ts#Shared.b()");
@@ -1831,6 +1834,17 @@ namespace Mixed { public class Service { public string Run() => ""ok""; } }");
             merge, FileChangeType.Changed, CancellationToken.None);
         nodes = await nodeRepo.GetAllAsync();
         Assert.Single(nodes, n => n.Id == sharedId);
+
+        // One declaration left: no part.
+        await File.WriteAllTextAsync(merge, "export interface Shared { a(): void; }\n\nexport const x = 1;\n");
+        await _pipeline.GraphUpdateService.ProcessFileChangeAsync(merge, FileChangeType.Changed, CancellationToken.None);
+        Assert.Null((await nodeRepo.GetAllAsync()).Single(n => n.Id == sharedId).Parts);
+        // Two again, as the first edit had them, to compare with a fresh scan below.
+        await File.WriteAllTextAsync(merge,
+            "export interface Shared { a(): void; }\n" +
+            "export interface Shared { c(): void; }\n");
+        await _pipeline.GraphUpdateService.ProcessFileChangeAsync(merge, FileChangeType.Changed, CancellationToken.None);
+        Assert.Single((await nodeRepo.GetAllAsync()).Single(n => n.Id == sharedId).Parts!);
 
         // The incremental end state equals a fresh scan of the same tree (full records).
         var incrementalNodes = await nodeRepo.GetAllAsync();

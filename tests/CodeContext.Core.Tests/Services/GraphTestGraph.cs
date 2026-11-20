@@ -15,9 +15,38 @@ internal sealed class GraphTestGraph
 
     private readonly List<CodeNode> _nodes = new();
     private readonly List<CodeEdge> _edges = new();
-    private long _generation;
+    private readonly string _root;
+
+    /// <param name="root">The root files live under; <see cref="Root"/> unless a test needs real files.</param>
+    public GraphTestGraph(string? root = null) => _root = root ?? Root;
+
+    /// <summary>The index's freshness given to the service (diff impact); null leaves the time check out.</summary>
+    public IIndexFreshness? Freshness { get; set; }
+
+    /// <summary>The file table given to the service; a new, empty one when null.</summary>
+    public CodeContext.Core.Repositories.IFileMetadataRepository? Files { get; set; }
+
+    /// <summary>The workers and the selection policy given to the service (diff impact asks them which files feed the index).</summary>
+    public CodeContext.Core.Workers.ILanguageWorkerService? Workers { get; set; }
+    public IRepositoryFileSelector? Selector { get; set; }
 
     public InMemoryDatabase Database { get; } = new();
+
+    /// <summary>
+    /// Records, for each of the two shards, what its worker reported reading besides its files (null: it reported
+    /// nothing), as a commit that carries the report and changes no fact.
+    /// </summary>
+    public void ReportInputs(WorkerInputs? a, WorkerInputs? b)
+    {
+        foreach (var (workspace, inputs) in new[] { ("a", a), ("b", b) })
+        {
+            Assert.True(Database.TryCommitGeneration(Database.LastCommittedGeneration + 1, [], [],
+                new CodeContext.Core.Repositories.CommitScope("csharp", workspace, [])
+                {
+                    Annotation = new CodeContext.Core.Repositories.ShardAnnotation(null, null) { Inputs = inputs },
+                }));
+        }
+    }
 
     public static string Id(string name) => $"csharp:{Workspace(name)}:{name}";
 
@@ -29,7 +58,14 @@ internal sealed class GraphTestGraph
     private static Dictionary<string, string> Owner(string name)
         => new() { ["parserId"] = "csharp", ["workspaceId"] = Workspace(name) };
 
-    public GraphTestGraph Node(string name, string type = "Method", string? file = null, int line = 0, bool external = false)
+    /// <param name="line">The 0-based start line; <paramref name="endLine"/> the 0-based end line (the start line when null).</param>
+    /// <param name="parts">
+    /// Other declarations of the node (a partial type's other parts): each part's file and 0-based lines, from column 0
+    /// to column 200 of its last line.
+    /// </param>
+    /// <param name="col">The 0-based start column; <paramref name="endCol"/> the end column (one past the start when null).</param>
+    public GraphTestGraph Node(string name, string type = "Method", string? file = null, int line = 0, bool external = false,
+        int? endLine = null, string? id = null, (string File, int Line, int EndLine)[]? parts = null, int col = 0, int? endCol = null)
     {
         var metadata = Owner(name);
         if (external)
@@ -39,27 +75,34 @@ internal sealed class GraphTestGraph
         }
         _nodes.Add(new CodeNode
         {
-            Id = Id(name),
+            Id = id ?? Id(name),
             Identifier = Identifier(name),
             Name = name.Contains('.') ? name[(name.LastIndexOf('.') + 1)..] : name,
             Type = type,
-            FilePath = external ? null : $"{Root}/{file ?? "src/" + name.Split('.')[0] + ".cs"}",
+            FilePath = external ? null : Path.Combine(_root, (file ?? "src/" + name.Split('.')[0] + ".cs").Replace('/', Path.DirectorySeparatorChar)),
             StartLine = line,
+            EndLine = endLine ?? line,
+            StartCol = col,
+            EndCol = endCol ?? col + 1,
             Metadata = metadata,
+            Parts = parts?.Select(part => new CodeNodePart(
+                Path.Combine(_root, part.File.Replace('/', Path.DirectorySeparatorChar)), part.Line, part.EndLine, 0, 200)).ToList(),
         });
         return this;
     }
 
-    public GraphTestGraph Edge(string source, string target, string type = "CALLS", int? line = null, bool staticCall = false)
+    /// <param name="targetId">The target's node id when it was added with its own <c>id</c>.</param>
+    public GraphTestGraph Edge(string source, string target, string type = "CALLS", int? line = null, bool staticCall = false,
+        string? targetId = null)
     {
         var metadata = Owner(source);
         if (line is not null) metadata["line"] = line.Value.ToString();
         if (staticCall) metadata[EdgeMetadataKeys.Dispatch] = EdgeDispatch.Static;
         _edges.Add(new CodeEdge
         {
-            Id = $"{Id(source)}|{type}|{Id(target)}|{line}|{_edges.Count}",
+            Id = $"{Id(source)}|{type}|{targetId ?? Id(target)}|{line}|{_edges.Count}",
             SourceId = Id(source),
-            TargetId = Id(target),
+            TargetId = targetId ?? Id(target),
             Type = type,
             Metadata = metadata,
         });
@@ -74,17 +117,25 @@ internal sealed class GraphTestGraph
 
     public ContextService Build()
     {
-        Assert.True(Database.TryCommitGeneration(++_generation, _nodes, _edges, scope: null));
-        return Service(Database);
+        Assert.True(Database.TryCommitGeneration(Database.LastCommittedGeneration + 1, _nodes, _edges, scope: null));
+        return Service(Database, _root, Freshness, Files, Workers, Selector);
     }
 
-    /// <summary>Commits the graph as it is now as a new generation.</summary>
-    public void Commit() => Assert.True(Database.TryCommitGeneration(++_generation, _nodes.ToList(), _edges.ToList(), scope: null));
+    /// <summary>The nodes and edges added so far, to commit elsewhere.</summary>
+    public (List<CodeNode> Nodes, List<CodeEdge> Edges) Facts => (_nodes.ToList(), _edges.ToList());
 
-    public static ContextService Service(InMemoryDatabase database)
+    /// <summary>Commits the graph as it is now as a new generation.</summary>
+    public void Commit() => Assert.True(Database.TryCommitGeneration(Database.LastCommittedGeneration + 1, _nodes.ToList(), _edges.ToList(), scope: null));
+
+    public static ContextService Service(InMemoryDatabase database, string root = Root, IIndexFreshness? freshness = null,
+        CodeContext.Core.Repositories.IFileMetadataRepository? files = null,
+        CodeContext.Core.Workers.ILanguageWorkerService? workers = null, IRepositoryFileSelector? selector = null)
         => new(
             new InMemoryNodeRepository(database),
             new InMemoryEdgeRepository(database),
-            new CodeContext.Core.Repositories.InMemoryFileMetadataRepository(),
-            Options.Create(new CodeContextOptions { RootPath = Root }));
+            files ?? new CodeContext.Core.Repositories.InMemoryFileMetadataRepository(),
+            Options.Create(new CodeContextOptions { RootPath = root }),
+            workerService: workers,
+            freshness: freshness,
+            fileSelector: selector);
 }

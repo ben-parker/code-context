@@ -283,19 +283,7 @@ namespace CodeContext.Core.Services
 
             response.TotalCount = listed.Count;
             response.FileCount = files.Count;
-            foreach (var item in Leading(listed, request.Limit, static (left, right) =>
-            {
-                var order = left.Distance.CompareTo(right.Distance);
-                return order != 0 ? order : CompareByPlace(left.Node, right.Node);
-            }))
-            {
-                var compact = ToCompact<GraphAffectedNode>(item.Node);
-                compact.Distance = item.Distance;
-                compact.Relation = item.Relation;
-                compact.Via = PublicIdentifier(walk.Node(item.Via)!);
-                compact.Through = item.Through is null ? null : PublicIdentifier(walk.Node(item.Through)!);
-                response.Items.Add(compact);
-            }
+            foreach (var item in Leading(listed, request.Limit, NearestFirst)) response.Items.Add(ToDependent<GraphAffectedNode>(item, walk));
             response.ReturnedCount = response.Items.Count;
             response.Truncated = response.TotalCount > response.ReturnedCount;
             if (response.TotalCount == 0)
@@ -308,6 +296,24 @@ namespace CodeContext.Core.Services
             }
             response.Cache = CacheAfterReads(response.Cache);
             return response;
+        }
+
+        /// <summary>The order dependents are listed in, by affected and by diff impact: nearest first, then by file and line.</summary>
+        private static int NearestFirst(GraphWalk.Affected left, GraphWalk.Affected right)
+        {
+            var order = left.Distance.CompareTo(right.Distance);
+            return order != 0 ? order : CompareByPlace(left.Node, right.Node);
+        }
+
+        /// <summary>A dependent as it is listed: how far it is, the relation that carries the impact, what it uses and through which declaration.</summary>
+        private T ToDependent<T>(GraphWalk.Affected item, GraphWalk walk) where T : GraphAffectedNode, new()
+        {
+            var compact = ToCompact<T>(item.Node);
+            compact.Distance = item.Distance;
+            compact.Relation = item.Relation;
+            compact.Via = PublicIdentifier(walk.Node(item.Via)!);
+            compact.Through = item.Through is null ? null : PublicIdentifier(walk.Node(item.Through)!);
+            return compact;
         }
 
         // ---- Hubs ----
