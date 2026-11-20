@@ -193,12 +193,19 @@ namespace CodeContext.Core.Services
                     changes.Add(entry);
                     foreach (var node in ordered) changeOf[node.Id!] = entry;
                 }
-                if (mapping.Outside.Count > 0)
+                // An added file's own using and namespace lines bind only its declarations, every one of them a change here.
+                var outside = mapping.Outside;
+                if (file.Status == DiffFileStatus.Added && file.FileScopedDirectives.Count > 0 && mapping.Touched.Count > 0)
+                {
+                    outside = Subtract(mapping.Outside, file.FileScopedDirectives);
+                    response.IgnoredLines += mapping.Outside.Sum(range => range.Count) - outside.Sum(range => range.Count);
+                }
+                if (outside.Count > 0)
                 {
                     Unmapped("outsideDeclarations",
                         "Changed lines that no declaration holds (imports or usings, a namespace line, a file header): a change here "
                         + $"can alter how every symbol of the file binds; query affected {relative} walks them all.",
-                        lines: FormatRanges(mapping.Outside), count: mapping.Outside.Sum(range => range.Count));
+                        lines: FormatRanges(outside), count: outside.Sum(range => range.Count));
                 }
                 if (mapping.CommentBoundaries.Count > 0)
                 {
@@ -377,6 +384,24 @@ namespace CodeContext.Core.Services
 
         /// <summary>Whether a container holds statements beside its declarations, so that a line in it may lie in a string.</summary>
         private static bool HoldsStatements(CodeNode node) => string.Equals(node.Type, "Module", StringComparison.OrdinalIgnoreCase);
+
+        /// <summary>The lines of ordered, disjoint <paramref name="ranges"/> that none of <paramref name="removed"/> holds.</summary>
+        private static List<DiffLineRange> Subtract(List<DiffLineRange> ranges, List<DiffLineRange> removed)
+        {
+            var left = new List<DiffLineRange>();
+            foreach (var range in ranges)
+            {
+                var next = range.Start;
+                foreach (var cut in removed)
+                {
+                    if (cut.End < next || cut.Start > range.End) continue;
+                    if (cut.Start > next) left.Add(new DiffLineRange(next, cut.Start - 1));
+                    next = cut.End + 1;
+                }
+                if (next <= range.End) left.Add(new DiffLineRange(next, range.End));
+            }
+            return left;
+        }
 
         /// <summary>Ranges as <c>12-14,20</c>.</summary>
         internal static string FormatRanges(IEnumerable<DiffLineRange> ranges)

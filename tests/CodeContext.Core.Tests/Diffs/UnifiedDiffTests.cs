@@ -55,6 +55,23 @@ public class UnifiedDiffTests
     public void ACommentLine_IsToldApartByItsStart(string line, bool comment)
         => Assert.Equal(comment, UnifiedDiff.IsCommentLine(line));
 
+    [Theory]
+    [InlineData("using System;", true)]
+    [InlineData("  using static System.Math; // why", true)]
+    [InlineData("using Map = System.Collections.Generic.Dictionary<string, int>;", true)]
+    [InlineData("namespace Demo.Core;", true)]
+    [InlineData("namespace Demo {", true)]
+    [InlineData("}", true)]
+    [InlineData("#nullable enable", true)]
+    [InlineData("#pragma warning disable CS1591", true)]
+    [InlineData("global using System.IO;", false)]
+    [InlineData("using (var stream = Open())", false)]
+    [InlineData("using var stream = Open();", false)]
+    [InlineData("[assembly: InternalsVisibleTo(\"Tests\")]", false)]
+    [InlineData("#define TRACE", false)]
+    public void AFileScopedDirective_IsToldApartFromWhatBindsBeyondTheFile(string line, bool scoped)
+        => Assert.Equal(scoped, UnifiedDiff.IsFileScopedDirective(line));
+
     [Fact]
     public void AddedCommentLines_AreKeptApart_AndARemovedRunOfCommentsIsMarked()
     {

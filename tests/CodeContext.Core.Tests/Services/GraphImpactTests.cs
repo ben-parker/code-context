@@ -338,6 +338,38 @@ public sealed class GraphImpactTests : IDisposable
     }
 
     [Fact]
+    public async Task AnAddedFilesUsingsAndNamespace_BindOnlyItsOwnDeclarations_AndAreNotReported()
+    {
+        const string content = "using System;\nusing static System.Math;\nusing Alias = System.Text;\nglobal using System.IO;\n#nullable enable\n\n"
+            + "namespace Demo;\n\npublic class New\n{\n    public int Make() => 1;\n}\n";
+        var path = Path.Combine(_root, "src", "New.cs");
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(path, content);
+        var blob = DiffWorkingTree.BlobId(Encoding.UTF8.GetBytes(content), sha256: false)[..7];
+        var service = new GraphTestGraph(_root) { Freshness = new Fresh(DateTime.UtcNow.AddHours(1)) }
+            .Node("New", "Class", file: "src/New.cs", line: 8, endLine: 11).Node("New.Make", file: "src/New.cs", line: 10, endLine: 10)
+            .Edge("New", "New.Make", "HAS_METHOD")
+            .Build();
+        var lines = content.TrimEnd('\n').Split('\n');
+        string Added(string text) => $"diff --git a/src/New.cs b/src/New.cs\nnew file mode 100644\nindex 0000000..{blob}\n--- /dev/null\n+++ b/src/New.cs\n"
+            + $"@@ -0,0 +1,{lines.Length} @@\n" + string.Concat(text.TrimEnd('\n').Split('\n').Select(line => $"+{line}\n"));
+
+        var impact = await Impact(service, Added(content));
+
+        Assert.Equal([I("New"), I("New.Make")], impact.Changes.Select(change => change.Identifier));
+        // A global using binds every file of the project: it is still reported.
+        var entry = Assert.Single(impact.Unmapped);
+        Assert.Equal(("outsideDeclarations", "4"), (entry.Reason, entry.Lines));
+        // using, using static, an alias, #nullable and the namespace line; two blank lines.
+        Assert.Equal(7, impact.IgnoredLines);
+
+        // The same lines in a file that existed before can change how its unchanged declarations bind.
+        var modified = await Impact(service, Diff("src/New.cs", blob, "@@ -1 +1 @@\n-using Other;\n+using System;"));
+        Assert.Contains("outsideDeclarations", modified.Unmapped.Select(unmapped => unmapped.Reason));
+        Assert.False(modified.Complete);
+    }
+
+    [Fact]
     public async Task AnAddedOrCopiedFile_ChangesEveryDeclarationInIt()
     {
         var blob = WriteFile("src/New.cs", 6);

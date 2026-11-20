@@ -142,7 +142,8 @@ namespace CodeContext.Core.Services
 
         /// <summary>
         /// Changed lines that change no declaration: holding only whitespace, or only a comment where no member holds
-        /// them (a doc comment above a member, a file header).
+        /// them (a doc comment above a member, a file header); and in an added file its own using and namespace lines,
+        /// which bind only its declarations, all of them changes.
         /// </summary>
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
         public int IgnoredLines { get; set; }

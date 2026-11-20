@@ -56,6 +56,13 @@ namespace CodeContext.Core.Diffs
         /// them: the unchanged lines next to them were commented out or back in (see <see cref="UnifiedDiff.IsCommentLine"/>).
         /// </summary>
         public List<DiffLineRange> CommentBoundaries { get; } = new();
+
+        /// <summary>
+        /// In an added file, the added lines among <see cref="Added"/> whose effect stays in the file: a <c>using</c>
+        /// directive that is not <c>global</c>, a namespace line, a lone brace, <c>#nullable</c> or <c>#pragma warning</c>
+        /// (see <see cref="UnifiedDiff.IsFileScopedDirective"/>).
+        /// </summary>
+        public List<DiffLineRange> FileScopedDirectives { get; } = new();
         public List<DiffRemoval> Removals { get; } = new();
         public int IgnoredLines { get; internal set; }
 
@@ -79,7 +86,7 @@ namespace CodeContext.Core.Diffs
     /// garbled diff is refused rather than read as a smaller change. Text outside file headers and hunks (a commit
     /// message, a mail signature) is skipped. Nothing here touches the disk or runs anything.
     /// </summary>
-    public static class UnifiedDiff
+    public static partial class UnifiedDiff
     {
         public const int MaxLength = 16 * 1024 * 1024;
         public const int MaxFiles = 10_000;
@@ -101,6 +108,18 @@ namespace CodeContext.Core.Diffs
             if (text.Length > 0 && text[0] == '*' && (text.Length == 1 || text[1] == ' ' || text[1] == '\t')) return true;
             return text.StartsWith("#region") || text.StartsWith("#endregion");
         }
+
+        /// <summary>
+        /// Whether a C# line only directs how its own file binds: <c>using N;</c>, <c>using static N;</c> or
+        /// <c>using A = N;</c> (not <c>global using</c>, which binds the whole project), <c>namespace N</c> (with <c>;</c>
+        /// or <c>{</c>), a lone <c>{</c> or <c>}</c>, <c>#nullable</c> or <c>#pragma warning</c>. Lexical.
+        /// </summary>
+        public static bool IsFileScopedDirective(ReadOnlySpan<char> line) => FileScopedDirective().IsMatch(line);
+
+        [System.Text.RegularExpressions.GeneratedRegex(
+            @"^\s*(using\s+(static\s+)?[A-Za-z_@][\w.@]*(\s*=\s*[\w.@<>,\s]+)?\s*;|namespace\s+[A-Za-z_@][\w.@]*\s*[;{]?|[{}]|#nullable\b.*|#pragma\s+warning\b.*)\s*(//.*)?$",
+            System.Text.RegularExpressions.RegexOptions.CultureInvariant)]
+        private static partial System.Text.RegularExpressions.Regex FileScopedDirective();
 
         /// <summary>Parses <paramref name="text"/>; throws <see cref="ArgumentException"/> saying where and why it is refused.</summary>
         public static List<DiffFile> Parse(string? text)
@@ -432,6 +451,8 @@ namespace CodeContext.Core.Diffs
                             {
                                 CloseComments();
                                 if (addStart == 0) addStart = nextNew;
+                                if (file.Status == DiffFileStatus.Added && IsFileScopedDirective(line.AsSpan(1)))
+                                    DiffMapper.Merge(file.FileScopedDirectives, new DiffLineRange(nextNew, nextNew));
                             }
                             newLeft--;
                             nextNew++;

@@ -423,7 +423,10 @@ Decisions where the backlog was silent:
    every member (`affected <type>` seeds its members too: the two differ there on purpose). A copied file changes
    every declaration in it; an added file changes what its hunks add, which is all of it.
 4. Never silently dropped: lines no declaration holds (`outsideDeclarations`: usings, a namespace line, a file
-   header; also in an added file, conservatively, since a `global using` there binds other files); removed lines
+   header). In an added file whose declarations the diff changes, a `using` that is not `global`, a namespace line, a
+   lone brace, `#nullable` and `#pragma warning` bind only that file's declarations, every one of them a change, so
+   they are counted with `ignoredLines` instead (`UnifiedDiff.IsFileScopedDirective`); a `global using`, an
+   `[assembly:]` attribute or a statement there is still reported; removed lines
    between or at the edge of declarations, including a replaced signature line (`removedBetweenDeclarations`: what
    they held exists only on the old side); `deletedFile` (or `notYetIndexed` while still indexed, `contentMismatch`
    while still on disk); `renamed` (the new path is mapped by its hunks; what named the old path is not in the

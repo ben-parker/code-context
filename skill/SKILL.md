@@ -130,7 +130,8 @@ git diff $(git merge-base main HEAD) | codecontext query impact   # what this br
   it after it last changed; `impact` waits for a finished scan. The first line says
   `complete` or `incomplete`, and `incomplete` exits 2: every part that maps to nothing is
   listed under `unmapped` with its reason, among them `outsideDeclarations` (imports,
-  usings, a namespace line), `removedBetweenDeclarations` (removed or replaced lines outside
+  usings, a namespace line; in an added file only a `global using`, an assembly attribute
+  or a statement, since its own usings bind only its declarations, all changed), `removedBetweenDeclarations` (removed or replaced lines outside
   a member: a deleted, renamed or re-signed declaration exists only on the old side, so what
   used it is not in the index; `rg` its old name), `deletedFile`, `renamed`, `binary`,
   `notIndexed` (a file no worker parses: a project or config file can still matter),
