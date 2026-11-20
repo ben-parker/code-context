@@ -175,33 +175,38 @@ namespace CodeContext.Core.Services
             if (filters.Count > 0)
             {
                 // The search with every filter dropped reaches the most: when it finds nothing, no filter hid a path,
-                // and no other search is made. When it finds one, each filter is dropped on its own to name the one
-                // (or the two) to blame.
+                // and no other search is made. The path it finds says which filter stood in its way; only when both
+                // did is each dropped on its own, to learn whether one alone would have been enough.
                 var both = walk.FiltersRelations && !walk.IncludesTests;
                 var widest = both ? walk.WithoutRelationFilter().WithTests() : walk.FiltersRelations ? walk.WithoutRelationFilter() : walk.WithTests();
                 if (widest.ShortestPath(from.Seeds!, goals, request.MaxDepth, out unfilteredLimited) is { } unfiltered)
                 {
-                    int? relationHops = !walk.FiltersRelations ? null
-                        : !both ? UsesHops(unfiltered)
-                        : walk.WithoutRelationFilter().ShortestPath(from.Seeds!, goals, request.MaxDepth, out _) is { } relationPath ? UsesHops(relationPath) : null;
-                    int? testsHops = walk.IncludesTests ? null
-                        : !both ? UsesHops(unfiltered)
-                        : walk.WithTests().ShortestPath(from.Seeds!, goals, request.MaxDepth, out _) is { } testsPath ? UsesHops(testsPath) : null;
-                    if (relationHops is not null && testsHops is not null)
+                    var byRelation = walk.FiltersRelations && unfiltered.Exists(step => step.Hop == "uses" && !walk.Admits(step.Edge!));
+                    var byTests = !walk.IncludesTests && unfiltered.Skip(1).Any(step => !goals.Contains(step.NodeId) && walk.IsTestNode(walk.Node(step.NodeId)!));
+                    int? relationHops = byRelation ? UsesHops(unfiltered) : null;
+                    int? testsHops = byTests ? UsesHops(unfiltered) : null;
+                    if (byRelation && byTests)
                     {
-                        return (["relation", "tests"],
-                            $"No path {names}{filtered}, but one of {relationHops} hop(s) exists {withoutRelation}, and one of {testsHops} "
-                            + $"hop(s) {withTests}: either change finds a path; your own filters excluded them, not the graph.");
+                        relationHops = walk.WithoutRelationFilter().ShortestPath(from.Seeds!, goals, request.MaxDepth, out _) is { } relationPath
+                            ? UsesHops(relationPath) : null;
+                        testsHops = walk.WithTests().ShortestPath(from.Seeds!, goals, request.MaxDepth, out _) is { } testsPath
+                            ? UsesHops(testsPath) : null;
+                        if (relationHops is null && testsHops is null)
+                        {
+                            return (["relation", "tests"],
+                                $"No path {names}{filtered}, but one of {UsesHops(unfiltered)} hop(s) exists {withoutRelation} and {withTests}: "
+                                + "your own filters excluded it, not the graph.");
+                        }
+                        if (relationHops is not null && testsHops is not null)
+                        {
+                            return (["relation", "tests"],
+                                $"No path {names}{filtered}, but one of {relationHops} hop(s) exists {withoutRelation}, and one of {testsHops} "
+                                + $"hop(s) {withTests}: either change finds a path; your own filters excluded them, not the graph.");
+                        }
                     }
-                    if ((relationHops ?? testsHops) is { } hops)
-                    {
-                        return ([relationHops is not null ? "relation" : "tests"],
-                            $"No path {names}{filtered}, but one of {hops} hop(s) exists {(relationHops is not null ? withoutRelation : withTests)}: "
-                            + "your own filter excluded it, not the graph.");
-                    }
-                    return (["relation", "tests"],
-                        $"No path {names}{filtered}, but one of {UsesHops(unfiltered)} hop(s) exists {withoutRelation} and {withTests}: "
-                        + "your own filters excluded it, not the graph.");
+                    return ([relationHops is not null ? "relation" : "tests"],
+                        $"No path {names}{filtered}, but one of {relationHops ?? testsHops} hop(s) exists "
+                        + $"{(relationHops is not null ? withoutRelation : withTests)}: your own filter excluded it, not the graph.");
                 }
             }
 

@@ -182,7 +182,29 @@ public class GraphPathTests
     [Fact]
     public async Task EitherFilter_HidingAPathOfItsOwn_IsNotSaidToNeedTheOther()
     {
-        // Two chains: one has a REFERENCES hop, the other passes through a test file. Dropping either filter finds one.
+        // The shortest chain needs both filters gone (a REFERENCES hop into a test helper), but each filter alone
+        // hides a longer chain of its own: one with a REFERENCES hop, one through test files.
+        var service = new GraphTestGraph()
+            .Node("A").Node("Helper", file: "tests/Helpers.cs").Node("C")
+            .Edge("A", "Helper", "REFERENCES").Edge("Helper", "C")
+            .Node("B").Node("B2").Edge("A", "B", "REFERENCES").Edge("B", "B2").Edge("B2", "C")
+            .Node("T1", file: "tests/T.cs").Node("T2", file: "tests/T.cs").Node("T3", file: "tests/T.cs")
+            .Edge("A", "T1").Edge("T1", "T2").Edge("T2", "T3").Edge("T3", "C")
+            .Build();
+
+        var response = await Path(service, I("A"), I("C"), relation: "CALLS");
+
+        Assert.False(response.Found);
+        Assert.Equal(["relation", "tests"], response.ExcludedBy);
+        Assert.Contains("one of 3 hop(s) exists without the relation filter, and one of 4 hop(s) with test files included", response.Explanation);
+        Assert.Contains("either change finds a path", response.Explanation);
+    }
+
+    [Fact]
+    public async Task WithBothFiltersGiven_TheOneTheNearestPathNeedsDropped_IsNamedAlone()
+    {
+        // Two chains: the shorter passes through a test file, the longer has a REFERENCES hop. The nearest path is
+        // hidden by the test filter alone, and that is what the explanation names.
         var service = new GraphTestGraph()
             .Node("A").Node("B").Node("B2").Node("Helper", file: "tests/Helpers.cs").Node("C")
             .Edge("A", "B", "REFERENCES").Edge("B", "B2").Edge("B2", "C")
@@ -192,9 +214,13 @@ public class GraphPathTests
         var response = await Path(service, I("A"), I("C"), relation: "CALLS");
 
         Assert.False(response.Found);
-        Assert.Equal(["relation", "tests"], response.ExcludedBy);
-        Assert.Contains("one of 3 hop(s) exists without the relation filter, and one of 2 hop(s) with test files included", response.Explanation);
-        Assert.Contains("either change finds a path", response.Explanation);
+        Assert.Equal(["tests"], response.ExcludedBy);
+        Assert.Contains("one of 2 hop(s) exists with test files included", response.Explanation);
+
+        // And the answer is true: that change alone finds the path.
+        var withTests = await Path(service, I("A"), I("C"), relation: "CALLS", includeTests: true);
+        Assert.True(withTests.Found);
+        Assert.Equal(2, withTests.Length);
     }
 
     [Fact]

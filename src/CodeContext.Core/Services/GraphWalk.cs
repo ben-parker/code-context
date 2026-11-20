@@ -90,7 +90,8 @@ namespace CodeContext.Core.Services
 
         internal static string Kind(CodeEdge edge) => edge.Type ?? "USES";
 
-        private bool Admits(CodeEdge edge) => _relations is null || _relations.Contains(Kind(edge));
+        /// <summary>Whether the relation filter, if any, lets a hop follow this usage edge.</summary>
+        public bool Admits(CodeEdge edge) => _relations is null || _relations.Contains(Kind(edge));
 
         // ---- Seeds ----
 
