@@ -1173,14 +1173,16 @@ namespace CodeContext.Core.Snapshots
                 await requested.WaitAsync(stop).ConfigureAwait(false);
                 await inFlight.WaitAsync(stop).ConfigureAwait(false);
                 // A verifying scan that ended just before the stop may not have reached the observer yet, and the check
-                // of the loaded snapshot may still be running: both decide whether the store is written below.
+                // of the loaded snapshot may still be running: both decide whether the store is written below. The check
+                // is waited for only when nothing else would write the store, so a slow one never spends the budget of
+                // a write that is due anyway.
                 Task loadedCheck;
                 lock (_gate)
                 {
                     OnVerifiedLocked(_time.GetUtcNow());
                     loadedCheck = _loadedCheck;
                 }
-                await loadedCheck.WaitAsync(stop).ConfigureAwait(false);
+                if (!loadedCheck.IsCompleted && Observe().SameAs(Written())) await loadedCheck.WaitAsync(stop).ConfigureAwait(false);
                 if (_scanState.Phase == ScanPhase.Scanning)
                 {
                     _logger.LogInformation("Shutting down during a scan: no final snapshot.");
