@@ -53,6 +53,13 @@ public sealed class AnalysisDeltaApplier : IAnalysisDeltaSink
         }
     }
 
+    /// <summary>
+    /// For a parser, when its worker last began an operation that read all its inputs (UTC ticks, 0 when not known):
+    /// recorded with the inputs a commit carries (<see cref="ShardAnnotation.InputsReadUtcTicks"/>). Set by the worker
+    /// service that owns the workers.
+    /// </summary>
+    internal Func<string, long>? InputsReadBoundary { get; set; }
+
     private readonly IGenerationalGraphStore _store;
     private readonly IStoredNodeIds? _storedNodeIds;
     private readonly ILogger<AnalysisDeltaApplier> _logger;
@@ -164,6 +171,7 @@ public sealed class AnalysisDeltaApplier : IAnalysisDeltaSink
                 {
                     Fingerprints = pending.Fingerprints,
                     Inputs = pending.Inputs,
+                    InputsReadUtcTicks = pending.Inputs is null ? 0 : InputsReadBoundary?.Invoke(pending.ParserId) ?? 0,
                     Lineage = origin is null
                         ? null
                         : new ShardLineage(origin.Incarnation, origin.Request,

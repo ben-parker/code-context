@@ -140,6 +140,12 @@ namespace CodeContext.Core.Snapshots
         public const string StateIdKey = "stateId";
         public const string StateSha256Key = "stateSha256";
 
+        /// <summary>
+        /// Optional: when the shard's worker began the operation that read its inputs, UTC ticks in decimal. Absent (a
+        /// file written before it was recorded) leaves the shard's inputs not known to the one-shot check.
+        /// </summary>
+        public const string InputsReadKey = "inputsReadUtcTicks";
+
         // Edge metadata keys held in the record when canonical.
         public const string LineKey = "line";
         public const string ColumnKey = "column";

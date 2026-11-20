@@ -50,6 +50,16 @@ namespace CodeContext.Core.Repositories
         /// </summary>
         public CodeContext.Parser.Protocol.WorkerInputs? Inputs { get; init; }
 
+        /// <summary>
+        /// When the worker last began an operation that read every one of <see cref="Inputs"/> (an index, or a reread of
+        /// its projects), UTC ticks; 0 when not known. The facts are as old as that read, whatever later commits
+        /// re-reported, so the one-shot check compares the inputs' times with it, not with the capture. Persisted, but
+        /// not compared by <see cref="SamePersisted"/>: every start reads again, and a snapshot with an older time is
+        /// only more cautious (the host rewrites one that time makes stale, see the snapshot service's check of a loaded
+        /// snapshot).
+        /// </summary>
+        public long InputsReadUtcTicks { get; init; }
+
         /// <summary>The worker state file paired with the shard at <see cref="Anchor"/>, or null.</summary>
         public WorkerStateBinding? State { get; init; }
 

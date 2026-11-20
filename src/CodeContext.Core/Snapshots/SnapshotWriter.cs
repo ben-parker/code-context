@@ -29,7 +29,8 @@ namespace CodeContext.Core.Snapshots
         string? StateSha256 = null,
         byte[]? Coverage = null,
         byte[]? Fingerprints = null,
-        byte[]? Inputs = null)
+        byte[]? Inputs = null,
+        long InputsReadUtcTicks = 0)
     {
         public static readonly SnapshotShardInfo Empty = new();
 
@@ -796,6 +797,8 @@ namespace CodeContext.Core.Snapshots
                 if (info.StateFileName is not null) meta.Add((SnapshotFormat.StateFileKey, info.StateFileName));
                 if (info.StateId is not null) meta.Add((SnapshotFormat.StateIdKey, info.StateId));
                 if (info.StateSha256 is not null) meta.Add((SnapshotFormat.StateSha256Key, info.StateSha256));
+                if (info.InputsReadUtcTicks > 0)
+                    meta.Add((SnapshotFormat.InputsReadKey, info.InputsReadUtcTicks.ToString(System.Globalization.CultureInfo.InvariantCulture)));
                 sections[0] = EncodeKeyValues(meta);
 
                 var stringOffsets = new LittleEndianBuffer((_strings.Count + 1) * 4);
