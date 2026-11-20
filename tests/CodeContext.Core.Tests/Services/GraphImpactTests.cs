@@ -654,6 +654,29 @@ public sealed class GraphImpactTests : IDisposable
     }
 
     [Fact]
+    public void AFileRewrittenBetweenTheTimeCheckAndTheHash_IsNotTakenForTheOneTheIndexRead()
+    {
+        // The index read the old content; the diff's new side is written while the file is being checked.
+        WriteText("src/Raced.cs", "old\n");
+        var path = Path.Combine(_root, "src", "Raced.cs");
+        var newBlob = DiffWorkingTree.BlobId(Encoding.UTF8.GetBytes("new\n"), sha256: false);
+        var tree = new DiffWorkingTree(_root, indexedAsOf: DateTime.UtcNow.AddSeconds(1))
+        {
+            BeforeHashForTests = written =>
+            {
+                // Later than any time a file system could have given the first write, coarse clocks included.
+                Thread.Sleep(50);
+                File.WriteAllText(written, "new\n");
+            },
+        };
+
+        Assert.Equal(DiffWorkingTree.Verdict.ChangedSinceIndexed, tree.Inspect(path, newBlob).Verdict);
+
+        // Left alone, the same file with the same times is the diff's new side.
+        Assert.Equal(DiffWorkingTree.Verdict.Match, new DiffWorkingTree(_root, DateTime.UtcNow.AddSeconds(1)).Inspect(path, newBlob).Verdict);
+    }
+
+    [Fact]
     public async Task BeforeAnyScanHasFinished_TheDiffIsRefused()
     {
         var graph = Sample();

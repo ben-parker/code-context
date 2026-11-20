@@ -109,20 +109,33 @@ namespace CodeContext.Core.Diffs
             {
                 return (Verdict.Refused, exception.Message);
             }
-            if (_indexedAsOf is { } asOf && FileChangeTime.TryRead(fullPath, out var changed) && changed > asOf)
-                return (Verdict.ChangedSinceIndexed, null);
+            DateTime changed = default;
+            if (_indexedAsOf is { } asOf)
+            {
+                if (!FileChangeTime.TryRead(fullPath, out changed)) return (Verdict.Refused, "the time it last changed cannot be read");
+                if (changed > asOf) return (Verdict.ChangedSinceIndexed, null);
+            }
             if (blob is null) return (Verdict.Unchecked, null);
             if (info.Length > MaxHashedBytes) return (Verdict.Refused, $"it is larger than {MaxHashedBytes / (1024 * 1024)} MB, so its content was not compared");
             try
             {
-                using var stream = Open(fullPath);
-                return (Matches(stream, blob) ? Verdict.Match : Verdict.Mismatch, null);
+                BeforeHashForTests?.Invoke(fullPath);
+                bool matches;
+                using (var stream = Open(fullPath)) matches = Matches(stream, blob);
+                // The content hashed is the content the index read only if nothing changed the file since its time was
+                // looked at: one rewritten in between is the diff's new side now and was not when it was indexed.
+                if (_indexedAsOf is not null && (!FileChangeTime.TryRead(fullPath, out var after) || after != changed))
+                    return (Verdict.ChangedSinceIndexed, null);
+                return (matches ? Verdict.Match : Verdict.Mismatch, null);
             }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
             {
                 return (Verdict.Refused, exception.Message);
             }
         }
+
+        /// <summary>Called with the path between the look at a file's time and the read of its content.</summary>
+        internal Action<string>? BeforeHashForTests { get; init; }
 
         private const int HashBufferBytes = 64 * 1024;
 
