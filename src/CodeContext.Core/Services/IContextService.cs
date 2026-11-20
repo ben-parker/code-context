@@ -184,6 +184,16 @@ namespace CodeContext.Core.Services
         public int? UsedByReturnedCount { get; set; }
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
         public bool UsedByTruncated { get; set; }
+
+        /// <summary>
+        /// Members whose call names this method or function but bound to nothing (a missing name, an untyped or
+        /// <c>dynamic</c> receiver), so may reach it or another of that name. Never mixed into <see cref="UsedBy"/>.
+        /// </summary>
+        public List<CompactCodeNode>? PossibleCallers { get; set; }
+        public int? PossibleCallersCount { get; set; }
+        public int? PossibleCallersReturnedCount { get; set; }
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+        public bool PossibleCallersTruncated { get; set; }
         public List<CompactCodeNode>? TransitiveUses { get; set; }
         public int? TransitiveUsesCount { get; set; }
         public int? TransitiveUsesReturnedCount { get; set; }
@@ -307,6 +317,15 @@ namespace CodeContext.Core.Services
         /// What uses this construct
         /// </summary>
         public List<CodeNode> UsedBy { get; set; } = new();
+
+        /// <summary>
+        /// Members with a call that names this method or function but bound to nothing, so it may reach this one or
+        /// another of the name: static evidence of a possible use, never mixed into <see cref="UsedBy"/>.
+        /// </summary>
+        public List<CodeNode> PossibleCallers { get; set; } = new();
+
+        /// <summary>The calls behind <see cref="PossibleCallers"/>, for the compact view's call sites. Not serialized.</summary>
+        internal IReadOnlyList<CodeEdge> PossibleCallEdges { get; set; } = [];
 
         /// <summary>Nodes beyond the direct Uses list, labeled with shortest path.</summary>
         public List<ContextTransitiveRelationship> TransitiveUses { get; set; } = new();
@@ -475,7 +494,7 @@ namespace CodeContext.Core.Services
         public string? SourceFile { get; set; }
 
         /// <summary>
-        /// Relation kinds to filter uses/usedBy by, applied to every identifier (compact view only).
+        /// Relation kinds to filter uses, usedBy and possibleCallers by, applied to every identifier (compact view only).
         /// Valid kinds: CALLS, MOCK_CALLS, REFERENCES, IMPLEMENTS, INHERITS, EXTENDS, IMPORTS, USES.
         /// Empty means no filter. Joined with ',' and passed as the <c>relation</c> filter to the
         /// per-identifier compact lookup; a non-empty value with the full view is rejected.

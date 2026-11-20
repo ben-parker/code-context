@@ -93,6 +93,7 @@ public sealed class CSharpWorkerStateFileTests : IDisposable
                     [
                         new EdgeFact("csharp:default:u:A", "t", "CALLS"), new EdgeFact("csharp:default:u:A", "t", "CALLS", 5, 6),
                         new EdgeFact("csharp:default:u:A", "t", "CALLS", 7, 8, StaticallyBound: true),
+                        new EdgeFact("csharp:default:u:A", "Missing", "CALLS", 9, 1, Unresolved: true),
                     ],
                     StubNodes = [], StubEdges = [], UnresolvedNames = [],
                 },
@@ -113,7 +114,8 @@ public sealed class CSharpWorkerStateFileTests : IDisposable
         Assert.Empty(read.Files[0].Nodes[1].Metadata!);
         Assert.Equal(state.Files[0].Nodes[1] with { Metadata = null }, read.Files[0].Nodes[1] with { Metadata = null });
         Assert.Equal(state.Files[0].Edges, read.Files[0].Edges);
-        Assert.Equal([false, false, true], read.Files[0].Edges.Select(edge => edge.StaticallyBound));
+        Assert.Equal([false, false, true, false], read.Files[0].Edges.Select(edge => edge.StaticallyBound));
+        Assert.Equal([false, false, false, true], read.Files[0].Edges.Select(edge => edge.Unresolved));
         Assert.Equal(new FileStamp(10, 20, true, hash).Size, read.Files[0].Stamp.Size);
         Assert.True(read.Files[0].Stamp.Racy && read.Files[0].ContainsDirectives);
         Assert.NotNull(read.Files[0].UnresolvedNames);
@@ -262,15 +264,18 @@ public sealed class CSharpWorkerStateFileTests : IDisposable
     }
 
     /// <summary>
-    /// A version 2 file, whose fact hashes did not cover a node's parts, is refused rather than compared: the worker walks
-    /// afresh. A walk never carries parts (settlement adds them), so one that does is not written.
+    /// A version 2 file, whose fact hashes did not cover a node's parts, and a version 3 file, which holds no call that
+    /// bound to nothing, are refused rather than compared: the worker walks afresh. A walk never carries parts
+    /// (settlement adds them), so one that does is not written.
     /// </summary>
-    [Fact]
-    public void AVersion2File_IsRefused_AndAWalkWithPartsIsNotWritten()
+    [Theory]
+    [InlineData(2u)]
+    [InlineData(3u)]
+    public void AnOlderFile_IsRefused_AndAWalkWithPartsIsNotWritten(uint version)
     {
         var bytes = StateOf(Walk(nodes: [GoodNode]));
-        Assert.Equal(3u, System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(8)));
-        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(8), 2);
+        Assert.Equal(4u, System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(8)));
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(8), version);
         Assert.Equal("unknown state format version", Assert.Throws<WorkerStateFormatException>(() => WorkerStateFile.Read(bytes)).Message);
 
         Assert.Throws<InvalidOperationException>(() => StateOf(Walk(nodes: [GoodNode with { Parts = [new ProtocolNodePart("b.cs", 0, 1, 0, 1)] }])));

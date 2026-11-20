@@ -271,7 +271,7 @@
         "metadata": {
           "type": "object",
           "additionalProperties": { "type": "string" },
-          "description": "The host reads 'line' and 'column', where the edge occurs in the declared bases, and 'dispatch': 'static' on a call bound to its target that reaches no override of it, as base.M() and super.m() are. Without it a call may reach any override or implementation of its target."
+          "description": "The host reads 'line' and 'column', where the edge occurs in the declared bases, and 'dispatch': 'static' on a call bound to its target that reaches no override of it, as base.M() and super.m() are. Without it a call may reach any override or implementation of its target. On a CALLS edge, 'unresolved': 'true' says the call bound to nothing (not even to a library), so targetId is the name it invokes, not a node id; the host lists it as a possible caller of the worker's methods and functions of that name in the workspace, apart from bound callers."
         }
       }
     },
@@ -307,6 +307,7 @@
         "edges": { "type": "array", "items": { "$ref": "#/$defs/edge" } },
         "unresolvedReferences": {
           "type": "array",
+          "description": "Accepted and not read by the host. Send a call that bound to nothing as a CALLS edge marked 'unresolved' (see edge metadata).",
           "items": {
             "type": "object",
             "required": ["sourceNodeId", "targetName", "kind"],

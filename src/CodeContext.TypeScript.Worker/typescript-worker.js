@@ -1677,6 +1677,22 @@ function analyzeFile(workspace, workspaceId, program, checker, fileName, diagnos
         }
     };
 
+    /**
+     * True when a call no project declaration answers did bind, to a declaration outside the
+     * project's files (a library, a lib .d.ts). A call bound to nothing, on an untyped receiver
+     * for one, is not.
+     */
+    const boundOutsideProject = (expression, callLikeExpression) => {
+        try {
+            if (checker.getResolvedSignature(callLikeExpression)?.declaration) return true;
+            let symbol = checker.getSymbolAtLocation(expression);
+            if (symbol && symbol.flags & ts.SymbolFlags.Alias) symbol = checker.getAliasedSymbol(symbol);
+            return (symbol?.declarations?.length ?? 0) > 0;
+        } catch {
+            return false;
+        }
+    };
+
     const moduleIdOf = file => `${graphPrefix}${relPath(root, file)}`;
 
     /** The declaration `addNode` emits a node for when `decl` declares a function,
@@ -2124,10 +2140,13 @@ function analyzeFile(workspace, workspaceId, program, checker, fileName, diagnos
                 if (expression) {
                     const nameNode = ts.isPropertyAccessExpression(expression) ? expression.name : expression;
                     const callTarget = nameNode.getText(sourceFile);
-                    if (callTarget) {
+                    const targetDecl = callTarget
+                        ? resolveToProjectDeclaration(nameNode, tsNode) ?? optionsMemberOf(expression)
+                        : null;
+                    // A call the compiler bound to a library names no project code, so nothing records it. One
+                    // bound to nothing (an untyped receiver) is sent by name, a possible call of that name.
+                    if (callTarget && (targetDecl || !boundOutsideProject(nameNode, tsNode))) {
                         const position = sourceFile.getLineAndCharacterOfPosition(tsNode.getStart(sourceFile));
-                        const targetDecl = resolveToProjectDeclaration(nameNode, tsNode)
-                            ?? optionsMemberOf(expression);
                         const targetId = targetDecl ? idOfDeclaration(targetDecl) : callTarget;
                         const metadata = {
                             callTarget,

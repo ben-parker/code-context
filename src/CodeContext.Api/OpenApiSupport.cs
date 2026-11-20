@@ -157,6 +157,7 @@ internal sealed class CodeNodeArraySchemaTransformer : IOpenApiSchemaTransformer
             context.JsonPropertyInfo?.Name == "relatedItems" ||
             context.JsonPropertyInfo?.Name == "uses" ||
             context.JsonPropertyInfo?.Name == "methodFamilyMembers" ||
+            context.JsonPropertyInfo?.Name == "possibleCallers" ||
             context.JsonPropertyInfo?.Name == "staticallyBoundTargets")
         {
             // Flags test: nullable list properties carry JsonSchemaType.Null | Array in Microsoft.OpenApi 2.x

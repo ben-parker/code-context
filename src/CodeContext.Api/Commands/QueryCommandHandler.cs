@@ -547,6 +547,9 @@ public static partial class QueryCommandHandler
             output.WriteLine($"usesExternal\t{relationships.UsesExternalHidden}\t--external lists them");
         WriteAgentNodeCategory("usedBy", relationships.UsedBy, relationships.UsedByReturnedCount,
             relationships.UsedByCount, relationships.UsedByTruncated, output, showEmpty: true);
+        // Calls of this name that bound to nothing: kept apart from usedBy, which holds only bound callers.
+        WriteAgentNodeCategory("possibleCallers", relationships.PossibleCallers, relationships.PossibleCallersReturnedCount,
+            relationships.PossibleCallersCount, relationships.PossibleCallersTruncated, output);
         WriteAgentNodeCategory("transitiveUses", relationships.TransitiveUses,
             relationships.TransitiveUsesReturnedCount, relationships.TransitiveUsesCount,
             relationships.TransitiveUsesTruncated, output);
@@ -769,6 +772,9 @@ public static partial class QueryCommandHandler
             output.WriteLine($"  Library symbols used: {relationships.UsesExternalHidden} (--external lists them)");
         WriteNodeCategory("Used by", relationships.UsedBy, relationships.UsedByReturnedCount,
             relationships.UsedByCount ?? 0, relationships.UsedByTruncated, output);
+        WriteNodeCategory("Possible callers, unbound calls of this name", relationships.PossibleCallers,
+            relationships.PossibleCallersReturnedCount, relationships.PossibleCallersCount,
+            relationships.PossibleCallersTruncated, output);
         WriteNodeCategory("Transitive uses", relationships.TransitiveUses,
             relationships.TransitiveUsesReturnedCount, relationships.TransitiveUsesCount,
             relationships.TransitiveUsesTruncated, output);

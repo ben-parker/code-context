@@ -97,7 +97,7 @@
             "default": null
           },
           "relation": {
-            "description": "Comma-separated relation kinds to filter uses/usedBy (CALLS, MOCK_CALLS, REFERENCES, IMPLEMENTS, INHERITS, EXTENDS, IMPORTS, USES); compact view only",
+            "description": "Comma-separated relation kinds to filter uses, usedBy and possibleCallers (CALLS, MOCK_CALLS, REFERENCES, IMPLEMENTS, INHERITS, EXTENDS, IMPORTS, USES); compact view only",
             "type": [
               "string",
               "null"
@@ -241,7 +241,7 @@
             "default": null
           },
           "relation": {
-            "description": "Comma-separated relation kinds to filter uses/usedBy (CALLS, MOCK_CALLS, REFERENCES, IMPLEMENTS, INHERITS, EXTENDS, IMPORTS, USES); compact view only",
+            "description": "Comma-separated relation kinds to filter uses, usedBy and possibleCallers (CALLS, MOCK_CALLS, REFERENCES, IMPLEMENTS, INHERITS, EXTENDS, IMPORTS, USES); compact view only",
             "type": [
               "string",
               "null"

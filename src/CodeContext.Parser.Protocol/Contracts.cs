@@ -243,7 +243,10 @@ public sealed record ProtocolEdge(
     [property: JsonPropertyName("kind")] string Kind,
     [property: JsonPropertyName("metadata")] IReadOnlyDictionary<string, string>? Metadata = null);
 
-/// <summary>A symbolic reference the worker could not resolve; input to later linker stages.</summary>
+/// <summary>
+/// A symbolic reference the worker could not resolve. Accepted and not read by the host: a call that bound to nothing is
+/// sent as a <c>CALLS</c> edge marked <see cref="EdgeMetadataKeys.Unresolved"/>.
+/// </summary>
 public sealed record UnresolvedReference(
     [property: JsonPropertyName("sourceNodeId")] string SourceNodeId,
     [property: JsonPropertyName("targetName")] string TargetName,
@@ -279,6 +282,14 @@ public static class EdgeMetadataKeys
     /// implementation of it; <see cref="EdgeDispatch.Static"/> means it reaches the target alone.
     /// </summary>
     public const string Dispatch = "dispatch";
+
+    /// <summary>
+    /// <c>"true"</c> on a <c>CALLS</c> edge whose call bound to nothing (a missing name, an untyped or dynamic receiver,
+    /// a call none of the workspace's overloads fits): its target is then the name the call invokes, not a node id. The
+    /// host lists it as a possible caller of the same worker's methods and functions of that name in the workspace,
+    /// apart from the bound callers. A call bound to a library declaration is not one.
+    /// </summary>
+    public const string Unresolved = "unresolved";
 }
 
 /// <summary>Values of <see cref="EdgeMetadataKeys.Dispatch"/>.</summary>

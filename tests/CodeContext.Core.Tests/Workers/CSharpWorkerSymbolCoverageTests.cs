@@ -634,7 +634,10 @@ public class CSharpWorkerSymbolCoverageTests : IDisposable
             }
             """));
 
-        Assert.DoesNotContain(result.Edges, edge => edge.SourceId == Id("App.User.Wire()"));
+        // Connect binds to nothing, so it is sent as a call of that name; neither Handler is guessed.
+        var wire = Assert.Single(result.Edges, edge => edge.SourceId == Id("App.User.Wire()"));
+        Assert.Equal("Connect", wire.TargetId);
+        Assert.Equal("true", wire.Metadata![EdgeMetadataKeys.Unresolved]);
     }
 
     [Fact]
