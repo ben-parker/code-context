@@ -1,4 +1,5 @@
 using CodeContext.Core.Models;
+using CodeContext.Core.Paths;
 using CodeContext.Core.Repositories;
 using CodeContext.Core.Workers;
 using Microsoft.Extensions.Logging;
@@ -69,10 +70,14 @@ public class GraphUpdateService : IGraphUpdateService
         var workerBatches = new Dictionary<string, List<FileChange>>(StringComparer.Ordinal);
         var projectChanges = new HashSet<string>(_projectsOfRemovedDirectories, StringComparer.Ordinal);
         _projectsOfRemovedDirectories.Clear();
+        var throughALink = ReportedPaths.RefusedOnDisk(_options.RootPath);
 
         foreach (var change in changes)
         {
-            if (_workerService?.TryGetParserForProjectInput(change.Path, _fileSelector.IsIncluded(change.Path), out var inputOwner) == true)
+            // A link the repository holds, or a path beneath one, is never selected, as a scan follows none; it is
+            // recognised before anything looks at the path, the selector's ignore rules included.
+            var included = !throughALink(change.Path) && _fileSelector.IsIncluded(change.Path);
+            if (_workerService?.TryGetParserForProjectInput(change.Path, included, out var inputOwner) == true)
             {
                 projectChanges.Add(inputOwner);
                 continue;
@@ -81,7 +86,7 @@ public class GraphUpdateService : IGraphUpdateService
             // The same selector governs explicit refresh and watcher paths. An
             // excluded file is forwarded as a deletion so stale facts cannot remain
             // after a rule change or a direct refresh of an ignored path.
-            var effectiveChange = !_fileSelector.IsIncluded(change.Path)
+            var effectiveChange = !included
                 ? new FileChange(change.Path, FileChangeType.Deleted)
                 : change;
             if (TryGetWorkerForPath(change.Path, out var parserId))
@@ -165,11 +170,15 @@ public class GraphUpdateService : IGraphUpdateService
             }
         }
 
-        // What is there now, by the scan's own selection; a root inside another is walked with it.
+        // What is there now, by the scan's own selection; a root inside another is walked with it. A root that is a
+        // link the repository holds, or lies beneath one, holds nothing a scan would index: it is recognised from the
+        // listing of the plain directory above it before anything probes or enumerates it, which would follow it.
         var present = new HashSet<string>(comparer);
+        var throughALink = ReportedPaths.RefusedOnDisk(_options.RootPath);
         foreach (var root in roots)
         {
             ct.ThrowIfCancellationRequested();
+            if (throughALink(root)) continue;
             var nested = false;
             for (var parent = Path.GetDirectoryName(root); !nested && !string.IsNullOrEmpty(parent); parent = Path.GetDirectoryName(parent))
                 nested = roots.Contains(parent) && Directory.Exists(parent);
@@ -195,7 +204,8 @@ public class GraphUpdateService : IGraphUpdateService
     /// <summary>
     /// The files under <paramref name="root"/> a scan would index, into <paramref name="present"/>; ignore files and
     /// project inputs, which are read and not indexed, into <paramref name="changes"/> (an ignore file there makes
-    /// the batch a reconciliation, as its own event would). Links are not followed, as in a scan.
+    /// the batch a reconciliation, as its own event would). Links are not followed, as in a scan: the caller has
+    /// refused a root that is one, and an entry that is one is skipped from its listing.
     /// </summary>
     private void WalkSubtree(string root, HashSet<string> present, List<FileChange> changes)
     {
