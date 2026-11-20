@@ -379,8 +379,9 @@ Decisions where the backlog was silent:
 Surface. `POST /api/graph/impact` with a JSON body `{diff, maxDepth=5, relation, includeTests=false, limit=20}`
 (`diff` required; `maxDepth` 1-20, `limit` 1-100 and applied to each list); MCP `get_impact` with the same names;
 `codecontext query impact [--diff FILE|-]` reading standard input when `--diff` is left out or `-`, with `--depth`,
-`--limit`, `--tests`, `--relation`, `--json`/`--human`, `--snapshot`/`--start`, `--path`. Exit 0 when `complete`, 2
-when not, 1 when refused. `status` lists the route. One service, `ContextService.GetImpactAsync` (partial
+`--limit`, `--tests`, `--relation`, `--json`/`--human`, `--snapshot`/`--start`, `--path`; in text a line list of more
+than 8 ranges shows its first 8 and their number (`--json` is exact). Exit 0 when `complete`, 2 when not, 1 when
+refused. `status` lists the route. One service, `ContextService.GetImpactAsync` (partial
 `ContextService.Impact.cs`), behind REST, MCP, the CLI and `query --snapshot` (`OneShotSnapshot`). Parsing in
 `Diffs/UnifiedDiff.cs`, the lexical line rules in `Diffs/SourceLines.cs`, line mapping in `Diffs/DiffMapper.cs`,
 working-tree checks in `Diffs/DiffWorkingTree.cs`, the files set aside in `Services/ChangedFilesNoWorkerReads.cs`.

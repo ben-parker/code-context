@@ -152,8 +152,9 @@ git diff $(git merge-base main HEAD) | codecontext query impact   # what this br
   does not report what it reads. Blank lines, a byte-order mark added or removed alone,
   and comment lines just above a declaration or at the head of a file, change nothing
   (`ignored`); a comment line elsewhere outside a
-  member changes the type or module holding it. `--depth`, `--limit` (per list), `--tests`
-  and `--relation` mean what they mean for `affected`. The tool never runs git: you run
+  member changes the type or module holding it. Text shows the first 8 ranges of a long
+  line list and how many there are (`--json` keeps them all). `--depth`, `--limit` (per
+  list), `--tests` and `--relation` mean what they mean for `affected`. The tool never runs git: you run
   it. That matters only where the repository's `.git` is not yours (received as a
   directory or an archive rather than cloned): there git runs what `.git/config` names,
   an external diff, a textconv, a clean or smudge filter, an fsmonitor hook, and `git

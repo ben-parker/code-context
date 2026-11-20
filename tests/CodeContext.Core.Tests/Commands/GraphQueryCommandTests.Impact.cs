@@ -200,6 +200,43 @@ public partial class GraphQueryCommandTests
     }
 
     [Fact]
+    public async Task Impact_ALongLineList_IsCutToItsFirstRangesAndACount_InText_AndKeptWholeInJson()
+    {
+        // A large added member interrupted by blank and comment lines: its changed lines are many short ranges.
+        var many = string.Join(",", Enumerable.Range(0, 400).Select(index => $"{3 * index + 1}-{3 * index + 2}"));
+        var answer = """
+            {"maxDepth":5,"complete":false,"diffFiles":1,"contentChecked":1,"changeCount":1,"changesReturned":1,
+             "changes":[{"level":"member","changedLines":"MANY","dependents":0,"name":"Run","type":"Method","file":"src/A.cs","line":1,"identifier":"csharp:A.Run()"}],
+             "unmappedCount":1,"unmappedReturned":1,"unmappedLines":800,"unmappedReasons":{"removedBetweenDeclarations":1},
+             "unmapped":[{"file":"src/A.cs","status":"modified","reason":"removedBetweenDeclarations","lines":"MANY","oldLines":"MANY","lineCount":800,"detail":"Gone."}],
+             "totalCount":0,"returnedCount":0,"fileCount":0,"items":[],"testFileCount":0,"testFiles":[]}
+            """.Replace("MANY", many);
+        var handler = new RecordingHandler(request => request.RequestUri!.AbsolutePath == "/api/status" ? Json(Status()) : Json(answer));
+        const string cut = "1-2,4-5,7-8,10-11,13-14,16-17,19-20,22-23,... (400 ranges)";
+
+        var (runtime, output, _) = Runtime(handler, ImpactDiff);
+        Assert.Equal(2, await QueryCommandHandler.ExecuteAsync(Parse("query", "impact", "--path", Root), runtime, CancellationToken.None));
+        var text = output.ToString().Replace("\r\n", "\n");
+        Assert.Contains($"\tmember\tlines {cut}\t0 dependents\tcsharp:A.Run()", text);
+        Assert.Contains($"\tremovedBetweenDeclarations\tsrc/A.cs\tlines {cut} old {cut}\tGone.\n", text);
+        Assert.DoesNotContain(many, text);
+
+        (runtime, output, _) = Runtime(handler, ImpactDiff);
+        await QueryCommandHandler.ExecuteAsync(Parse("query", "impact", "--human", "--path", Root), runtime, CancellationToken.None);
+        var human = output.ToString().Replace("\r\n", "\n");
+        Assert.Contains($"member: lines {cut};", human);
+        Assert.Contains($"  - src/A.cs lines {cut} old lines {cut} [removedBetweenDeclarations]", human);
+        Assert.DoesNotContain(many, human);
+
+        // The exact answer is one option away.
+        (runtime, output, _) = Runtime(handler, ImpactDiff);
+        await QueryCommandHandler.ExecuteAsync(Parse("query", "impact", "--json", "--path", Root), runtime, CancellationToken.None);
+        var json = JsonDocument.Parse(output.ToString()).RootElement;
+        Assert.Equal(many, json.GetProperty("changes")[0].GetProperty("changedLines").GetString());
+        Assert.Equal(many, json.GetProperty("unmapped")[0].GetProperty("oldLines").GetString());
+    }
+
+    [Fact]
     public void Impact_TakesNoIdentifier()
         => Assert.NotEmpty(Program.CreateRootCommand().Parse(["query", "impact", "X"]).Errors);
 

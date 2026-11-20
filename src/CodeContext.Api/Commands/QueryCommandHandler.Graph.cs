@@ -470,7 +470,7 @@ public static partial class QueryCommandHandler
         output.WriteLine($"changed\t{response.ChangesReturned}/{response.ChangeCount}" + (response.ChangesTruncated ? "\ttruncated" : string.Empty));
         foreach (var change in response.Changes)
         {
-            var lines = change.ChangedLines is { } changed ? $"lines {changed}" : "lines -";
+            var lines = change.ChangedLines is { } changed ? $"lines {Ranges(changed)}" : "lines -";
             var removed = change.RemovedLines > 0 ? $", {change.RemovedLines} removed" : string.Empty;
             var tests = change.TestsHidden > 0 ? $" +{change.TestsHidden} in tests" : string.Empty;
             WriteAgentNode($"\t{change.Level}\t{lines}{removed}\t{change.Dependents} dependents{tests}\t", change, output,
@@ -490,8 +490,8 @@ public static partial class QueryCommandHandler
                 var where = entry.OldFile is { } old ? $"{entry.File} (from {old})" : entry.File;
                 var lines = string.Join(' ', new[]
                 {
-                    entry.Lines is { } newLines ? $"lines {newLines}" : null,
-                    entry.OldLines is { } oldLines ? $"old {oldLines}" : null,
+                    entry.Lines is { } newLines ? $"lines {Ranges(newLines)}" : null,
+                    entry.OldLines is { } oldLines ? $"old {Ranges(oldLines)}" : null,
                 }.Where(part => part is not null));
                 output.WriteLine($"\t{Clean(entry.Reason)}\t{Clean(where)}\t{(lines.Length > 0 ? lines : "-")}\t{Clean(entry.Detail)}");
             }
@@ -594,6 +594,23 @@ public static partial class QueryCommandHandler
         WriteCoverage(response.Coverage, "Coverage ({0}): ", response.Cache, output);
     }
 
+    /// <summary>Line ranges shown in text: at most this many, then a count of all (<c>--json</c> keeps the whole list).</summary>
+    internal const int ShownRanges = 8;
+
+    /// <summary>A list of line ranges (<c>3-5,9</c>) as text shows it: the first <see cref="ShownRanges"/>, then how many there are.</summary>
+    internal static string Ranges(string ranges)
+    {
+        var cut = -1;
+        var count = 1;
+        for (var index = 0; index < ranges.Length; index++)
+        {
+            if (ranges[index] != ',') continue;
+            if (count == ShownRanges) cut = index;
+            count++;
+        }
+        return cut < 0 ? ranges : $"{ranges[..cut]},... ({count} ranges)";
+    }
+
     private static void WriteHumanImpact(GraphImpactResponse response, TextWriter output)
     {
         WriteHumanCache(response.Cache, output);
@@ -607,7 +624,7 @@ public static partial class QueryCommandHandler
         foreach (var change in response.Changes)
         {
             output.WriteLine($"  {change.Identifier} [{change.Type ?? "Unknown"}]{HumanLocation(change)}");
-            var lines = change.ChangedLines is { } changed ? $"lines {changed}" : "removed lines only";
+            var lines = change.ChangedLines is { } changed ? $"lines {Ranges(changed)}" : "removed lines only";
             output.WriteLine($"     {(change.Level == "container" ? "its own lines (not its members)" : "member")}: {lines}"
                 + (change.RemovedLines > 0 ? $", {change.RemovedLines} removed" : string.Empty)
                 + $"; {change.Dependents} dependent(s){(change.TestsHidden > 0 ? $" and {change.TestsHidden} in test files" : string.Empty)}");
@@ -624,8 +641,8 @@ public static partial class QueryCommandHandler
             foreach (var entry in response.Unmapped)
             {
                 var where = entry.OldFile is { } old ? $"{entry.File} (from {old})" : entry.File;
-                var lines = entry.Lines is { } newLines ? $" lines {newLines}" : string.Empty;
-                var oldLines = entry.OldLines is { } removed ? $" old lines {removed}" : string.Empty;
+                var lines = entry.Lines is { } newLines ? $" lines {Ranges(newLines)}" : string.Empty;
+                var oldLines = entry.OldLines is { } removed ? $" old lines {Ranges(removed)}" : string.Empty;
                 output.WriteLine($"  - {where}{lines}{oldLines} [{entry.Reason}]: {entry.Detail}");
             }
         }
