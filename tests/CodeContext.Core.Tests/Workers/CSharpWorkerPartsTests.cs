@@ -1,4 +1,5 @@
 using CodeContext.CSharp.Worker;
+using CodeContext.Core.Services;
 using CodeContext.Parser.Protocol;
 
 namespace CodeContext.Core.Tests.Workers;
@@ -59,5 +60,60 @@ public sealed class CSharpWorkerPartsTests : IDisposable
         emission = analyzer.BuildIncrementalEmission(analyzer.Analyze(CancellationToken.None));
         Assert.Contains(p1, emission.ReplacesFiles);
         Assert.Null(emission.Nodes.Single(node => node.Identifier == "csharp:Demo.P").Parts);
+    }
+
+    /// <summary>
+    /// The worker's state saved and a new worker restored from it, after edits that move only a part of a partial
+    /// type (no member, no located edge moves with it), made while the worker ran or while it was down: the facts
+    /// the host holds must be a fresh scan's, parts included, as a hibernated worker woken from its state must.
+    /// </summary>
+    [Fact]
+    public async Task APartMovedAlone_ConvergesToAFreshScan_LiveAndAcrossARestore()
+    {
+        var root = Path.Combine(_tempDir, "repo");
+        var states = Path.Combine(root, ".codecontext", "cache", "default");
+        Directory.CreateDirectory(states);
+        string Put(string name, string content)
+        {
+            var path = Path.Combine(root, name);
+            File.WriteAllText(path, content);
+            return path;
+        }
+        Put("A.cs", "namespace Demo;\npublic partial class P { public void X() { } }\n");
+        var b = Put("B.cs", "namespace Demo;\npublic partial class P\n{\n    public void Y() { }\n}\n");
+        var c = Put("C.cs", "namespace Demo;\npublic partial class P { }\n");
+        var host = new InProcessCSharpHost(root);
+        await host.IndexAsync();
+
+        async Task AssertFresh(string step)
+        {
+            var fresh = new InProcessCSharpHost(root);
+            await fresh.IndexAsync();
+            Assert.True(fresh.Facts().SequenceEqual(host.Facts()),
+                $"After '{step}': stale {string.Join("; ", host.Facts().Except(fresh.Facts()))}");
+        }
+
+        // Live: the part's closing line moves down, below its only member.
+        Put("B.cs", "namespace Demo;\npublic partial class P\n{\n    public void Y() { }\n\n\n}\n");
+        await host.ApplyAsync([new FileChange(b, FileChangeType.Changed)]);
+        await AssertFresh("a part's end moved while the worker ran");
+
+        // Down: the part with no member moves, and another one appears, while no worker runs.
+        foreach (var (step, edit) in new (string, Action)[]
+        {
+            ("a part with no member moved", () => Put("C.cs", "\n\n\nnamespace Demo;\npublic partial class P { }\n")),
+            ("a part appeared", () => Put("D.cs", "namespace Demo;\npublic partial class P\n{\n}\n")),
+            ("a part's end moved", () => Put("D.cs", "namespace Demo;\npublic partial class P\n{\n\n}\n")),
+            ("a part disappeared", () => File.Delete(c)),
+        })
+        {
+            foreach (var file in Directory.GetFiles(states)) File.Delete(file);
+            var baseline = await host.SaveAsync(states);
+            edit();
+            host.Restart();
+            var result = await host.IndexAsync(baseline);
+            Assert.Equal(BaselineOutcomes.Accepted, result.Baseline);
+            await AssertFresh(step + " while the worker was down");
+        }
     }
 }

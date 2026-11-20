@@ -206,6 +206,13 @@ public sealed class CSharpWorkerPartialTypeConvergenceTests : IAsyncLifetime
             ("drop the base list", () => EditAsync("B.cs", BareDeclaration(keyword).Replace(" : IThing", string.Empty))),
             ("restore the other file", () => EditAsync("B.cs", ContributingDeclaration(keyword))),
             ("shift the other file's lines", () => EditAsync("B.cs", "\n\n" + ContributingDeclaration(keyword))),
+            // Only the other part's end moves: no member and no located edge of that file moves with it, so only
+            // the type's parts say that the canonical file's facts changed.
+            ("grow the other part below its members", () => EditAsync("B.cs",
+                "\n\n" + ContributingDeclaration(keyword).Replace("    }\n}", "\n\n    }\n}"))),
+            ("add a part with no member", () => EditAsync("Z.cs", $"namespace Fx {{ public partial {keyword} C {{ }} }}")),
+            ("move the part with no member", () => EditAsync("Z.cs", $"\n\nnamespace Fx\n{{\n    public partial {keyword} C\n    {{\n    }}\n}}")),
+            ("drop the part with no member", () => DeleteAsync("Z.cs")),
             ("move the attribute between files", async () =>
             {
                 await EditAsync("B.cs", moved);
