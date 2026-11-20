@@ -105,8 +105,8 @@ jobs:
       - name: Install TypeScript worker dependencies
         run: npm ci --prefix src/CodeContext.TypeScript.Worker
       # Tests that depend on external tooling such as Node.js
-      # carry the explicit ExternalTooling trait; see DEVELOPMENT.md for the quarantine
-      # list and how to run them locally.
+      # carry the explicit ExternalTooling trait; see DEVELOPMENT.md for how to run
+      # them locally.
       - name: Run tests
         run: >
           dotnet test tests/CodeContext.Core.Tests/CodeContext.Core.Tests.csproj

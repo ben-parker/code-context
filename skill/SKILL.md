@@ -270,9 +270,9 @@ index saw a call of the name it could not bind.
 - **Same-named symbols in two projects** are separate, and their identifiers name the
   project, as in `csharp:ToolA#Program.Main()`. A bare identifier then returns all of them
   as ambiguous.
-- **A `coverage` line** on any answer, found or not, means a project of that language was
-  not fully analyzed, so `usedBy`, `affected`, `impact` and `hubs` counts may be
-  short there. Usually it was never restored (missing references), or much of its code
+- **A `coverage` line** on any answer (on `path` only when it finds none) means a project
+  of that language was not fully analyzed, so `usedBy`, `affected`, `impact` and `hubs`
+  counts may be short there. Usually it was never restored (missing references), or much of its code
   fails to bind although nothing declared is missing, as code a source generator writes
   does. `codecontext status --path .` lists each project's state, its missing references,
   how many names failed to bind and which. Run `dotnet restore`, then

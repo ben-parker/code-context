@@ -1,8 +1,10 @@
 # Persistent fact cache and worker hibernation: design and phase plan
 
 Status: phases 0 to 6 and 11 shipped in 0.11 (merge `d42ec29`); phase 0A was dropped and
-built as a 0.10.x patch. Phases 7 to 10 and 12, including worker hibernation (phase 9), are
-not started. Each phase's own `Status:` line has the details.
+built as a 0.10.x patch. Worker hibernation (phase 9) shipped in 0.12 as M3 of
+[MEMORY_FOOTPRINT_PLAN.md](MEMORY_FOOTPRINT_PLAN.md) (#8). Phase 8 (mapped shard) was decided
+against at that plan's M4 gate. Phases 7, 10 and 12 are not scheduled. Leftovers from section
+9 are in #39. Each phase's own `Status:` line has the details.
 
 Brief: [proposals/persistent-fact-cache.md](proposals/persistent-fact-cache.md), direction and
 eight decisions agreed 2026-11-04. Builds on
@@ -2280,7 +2282,9 @@ Gates: standard.
 
 ### Phase 9: worker hibernation
 
-Status: not started
+Status: shipped in 0.12 as M3 of [MEMORY_FOOTPRINT_PLAN.md](MEMORY_FOOTPRINT_PLAN.md) (#8),
+extended to workers without `persistentState`; see M3 "As built" there for where it differs
+from this design (no crash restart from saved state, #37)
 
 Goal: an idle worker exits; the next activity wakes it through verification.
 
@@ -2593,7 +2597,7 @@ into the release.
   re-walk. Such a worker sends `fingerprints` on the first delta chunk of every request;
   the host stores them and hands them back unread. The protocol version stays 1, and a
   worker that does not declare the capability sees no change on the wire. See
-  `docs/language-worker-sdk.md`, "persisting state across restarts". (Phase 5)
+  `docs/language-worker-sdk.md`, "Persist state across restarts (optional)". (Phase 5)
 - `indexing.cache.verification` can read `baseline`, and `workerStateBytes` reports the
   size of the saved worker state. State files live in `.codecontext/cache/` beside the
   snapshot that names them and are deleted with it. (Phase 5)
@@ -2609,28 +2613,28 @@ into the release.
   1.14 s, d2-roguelike 3.50 s to 0.62 s, code-context 4.86 s to 0.65 s; to `ready`: 17.7 s to
   5.04 s, 3.33 s to 2.20 s, 4.77 s to 2.50 s. Warm edits are unchanged. (Phase 11)
 - The first edit after a cached start costs +0.33 to +0.50 s against v0.10.7. (Phase 11)
-- Not run: Linux and macOS, a cold OS file cache, and hibernation, which moved to 0.12.
-  (Phases 6 and 11)
+- Not run: Linux and macOS, a cold OS file cache, and hibernation, which moved to 0.12
+  (shipped in #8). (Phases 6 and 11)
 
 ## 9. Known items
 
 | Item | Placement |
 |---|---|
 | CS8604 at `CSharpWorkspaceAnalyzer.cs:337` | Fixed in phase 6 |
-| Redundant second build between open and index | Being removed on `main` by the 0.10.x patch (D25). Phase 7 makes `workspace/open` declarative on top of whatever `main` holds when it starts; it must not reintroduce the second build |
+| Redundant second build between open and index | Being removed on `main` by the 0.10.x patch (D25). Phase 7 (not scheduled) would make `workspace/open` declarative; if it is revived, it must not reintroduce the second build |
 | MimeTypes source-only package gap | Out of scope |
 | `JsonRpcConnectionTests.Notification_DispatchesToHandler` 30 s wait | Left as is; the cause of slow tests under suite load is unknown and out of scope. Phase 5 must not shorten it. |
 | Test worker starts needing `TestWorkerOptions.Patient()` | Rule for all phases; new real-worker tests use it |
-| `ParserProcessSupervisorTests` `CrashingRepeatedly...` and `MalformedOutput...` failed in 1 of 8 full-suite runs on `main` ("The pipe is being closed", state `Failed` where `Unavailable` is expected) | Predates this work: a race in how the supervisor classifies a dying worker. Phase 9 changes that code. If the hibernation work explains it, fix it with a test; if not, record what was seen. The assertion is not loosened. A failure of these two tests in a gate run before phase 9 is re-run once and recorded, not treated as a regression of the phase |
+| `ParserProcessSupervisorTests` `CrashingRepeatedly...` and `MalformedOutput...` failed in 1 of 8 full-suite runs on `main` ("The pipe is being closed", state `Failed` where `Unavailable` is expected) | Predates this work: a race in how the supervisor classifies a dying worker. The hibernation work (#8, M3) did not reproduce it; tracked in #39. The assertion is not loosened. A failure of these two tests in a gate run before phase 9 is re-run once and recorded, not treated as a regression of the phase |
 | Dedicated skill pass | Done, closing step 2 |
-| First edit after a cached start, +0.33 to +0.50 s | Accepted for 0.11; tracing it moves to 0.12 with phase 10 |
-| `codecontext stop` kills the process tree after 5 s, while the final capture may take 10 s | Closing audit nit 1, by reading only. Crash-safe: the older pair stays valid. Open for 0.12 |
-| A write that outlives a timed-out stop runs `TryRetireOlderThan` without the lock and could delete a newer instance's state file | Closing audit nit 2, by reading only. The result is a full walk. Open for 0.12 |
-| The supervisor does not check that a `workspace/index` without a baseline replaces the workspace | Closing audit nit 3, by reading only. A breach by a third-party worker, not by a bundled one. Open for 0.12 |
-| A watcher batch dequeued before a refresh-started full scan can replace a loaded shard and use up the baseline | Closing audit nit 4, by reading only. It stays labelled `verifying` and the scan repairs it. Open for 0.12 |
-| No directory fsync after a rename | Closing audit nit 5, not run. A power loss on Unix gives an older pair or no baseline. Open for 0.12 |
+| First edit after a cached start, +0.33 to +0.50 s | Accepted for 0.11; phase 10 is not scheduled, so tracing it is in #39 |
+| `codecontext stop` kills the process tree after 5 s, while the final capture may take 10 s | Closing audit nit 1, by reading only. Crash-safe: the older pair stays valid. Open, #39 |
+| A write that outlives a timed-out stop runs `TryRetireOlderThan` without the lock and could delete a newer instance's state file | Closing audit nit 2, by reading only. The result is a full walk. Open, #39 |
+| The supervisor does not check that a `workspace/index` without a baseline replaces the workspace | Closing audit nit 3, by reading only. A breach by a third-party worker, not by a bundled one. Open, #39 |
+| A watcher batch dequeued before a refresh-started full scan can replace a loaded shard and use up the baseline | Closing audit nit 4, by reading only. It stays labelled `verifying` and the scan repairs it. Open, #39 |
+| No directory fsync after a rename | Closing audit nit 5, not run. A power loss on Unix gives an older pair or no baseline. Open, #39 |
 | `dotnet test` leaves two empty random-named directories in `%TEMP%` per invocation | The tool's, not a test's; `dotnet vstest` leaves none. Left alone |
-| Legacy in-place store writes (`UpsertNode`, `RemoveNode`, `UpsertEdge`, `RemoveEdgesTouchingNode`) during a staged reconciliation reach the live map at once and survive the reconciliation's commit only where the staged map still shares the shard object; a write to a shard the reconciliation already rebuilt, or to a new shard key, is dropped by that commit | Predates this work and is kept; pinned by `LegacyUpsertIntoANewShard_DuringAReconciliation_IsLiveUntilItsCommit` and the phase 1 legacy-mutation tests. No production path writes this way during a reconciliation. Phase 8 must keep a mapped shard behaving as a heap shard here, which those tests check |
+| Legacy in-place store writes (`UpsertNode`, `RemoveNode`, `UpsertEdge`, `RemoveEdgesTouchingNode`) during a staged reconciliation reach the live map at once and survive the reconciliation's commit only where the staged map still shares the shard object; a write to a shard the reconciliation already rebuilt, or to a new shard key, is dropped by that commit | Predates this work and is kept; pinned by `LegacyUpsertIntoANewShard_DuringAReconciliation_IsLiveUntilItsCommit` and the phase 1 legacy-mutation tests. No production path writes this way during a reconciliation. Phase 8 (mapped shard) was not built (M4 gate of the memory plan); #22 proposes removing these legacy mutators |
 | A shard key whose facts were all removed stays in the shard map; `RemoveNode(null)` throws when any shard exists and returns false on an empty store | Found in phase 1; not changed. Phase 2's writer must skip a shard with no facts; phase 3's capture must not treat an empty key as a change |
 | Status `languageBreakdown` order follows scan history (file-metadata repository) | Out of scope unless a later phase needs byte-identical status |
-| `ParserProcessSupervisorTests.SlowProgressObserver_DoesNotBlockProtocolResponses` failed once in a full-suite run during the phase 1 fix and passed alone and on the re-run | Timing-based, unrelated to the store. Same rule as the two supervisor tests above: re-run once and record. Seen again in the coordinator's phase 4 gate run (2026-11-06, 1 of 1,519 failed; the re-run passed 1,519 of 1,519 and the class alone 27 of 27). Two occurrences in about 20 full-suite runs of this work; phase 9 looks at the supervisor's timing |
+| `ParserProcessSupervisorTests.SlowProgressObserver_DoesNotBlockProtocolResponses` failed once in a full-suite run during the phase 1 fix and passed alone and on the re-run | Timing-based, unrelated to the store. Same rule as the two supervisor tests above: re-run once and record. Seen again in the coordinator's phase 4 gate run (2026-11-06, 1 of 1,519 failed; the re-run passed 1,519 of 1,519 and the class alone 27 of 27). Two occurrences in about 20 full-suite runs of this work. The test now gets the file's start-up budget (`4dda2b0`; the 2 s bound it tests is unchanged); tracked in #39 |

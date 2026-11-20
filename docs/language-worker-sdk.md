@@ -231,6 +231,22 @@ host keeps a node's parts only when every one is in a file it supplied to the wo
 neither the node's own span nor another part, and when there are at most 1024; otherwise it
 keeps the node without them and logs a warning.
 
+## Report project coverage (optional)
+
+A worker with a notion of a project can say how much of each one it saw, in the delta's
+`coverage` array (one `projectCoverage` per project, on the first chunk; it replaces the
+worker's previous report when the request commits). `state` is `complete` when everything
+the project declares was found and its code binds, `partial` when it was analyzed as its
+own project with something missing (a reference not found, or much of its code failing
+to bind although nothing declared is missing), and `fallback` when it was analyzed
+without knowing its project. `missingReferences`, `unresolvedNames`,
+`commonUnresolvedNames` and `notes` say why; `codecontext status` prints them. While any
+project of a worker is not `complete`, every answer about that worker's symbols carries a
+`coverage` line (`path` only when it finds none), so report `partial` only when counts
+may really be short. The delta's `unresolvedReferences` is accepted and not read: send a
+call that bound to nothing as an `unresolved` `CALLS` edge (see "Normalized graph and
+native trees").
+
 ## Report what the facts were read from (optional)
 
 Send `inputs` on the first `analysis/delta` chunk of every request: `{ "files": [...],

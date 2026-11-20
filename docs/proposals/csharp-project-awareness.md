@@ -1,6 +1,6 @@
 # C# worker project awareness
 
-Status: all decisions agreed on 2026-11-04 and delivered on this branch. Results are below.
+Status: all decisions agreed on 2026-11-04 and delivered in 0.10.0 (`15bfde8`). Results are below.
 
 ## Problem
 

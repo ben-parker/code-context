@@ -131,6 +131,12 @@ Returned targets include canonical identifiers that can be passed back as
 `identifier` without modification. Name searches use exact-first matching with a
 substring fallback.
 
+A method's answer can also list `possibleCallers`: calls of the same name that bound to
+nothing, for example through an untyped receiver. They are leads to check with `rg`, kept
+apart from `usedBy` and never walked by `path`, `affected`, `impact` or `hubs`. A
+`coverage` line means a project of that language was not fully analyzed (usually it was
+never restored), so counts may be short there; `codecontext status --path .` names it.
+
 `query path`, `query affected` and `query hubs` answer questions about the whole graph in
 one call: the shortest chain of recorded relationships from one symbol to another
 (following dispatch from an interface or base member to its implementations), everything
