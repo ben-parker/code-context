@@ -291,7 +291,7 @@ start. Not built: a stale answer with a count (option b).
 | Id | Item | Notes |
 |---|---|---|
 | F1 | Whole-graph queries: shortest path, transitive `affected`, hubs | Over existing adjacency; REST, MCP and CLI together; contract and skill updates. Done (`40b854a`..`F1 final review` in the log; see "F1 as built") |
-| F2 | Diff and PR impact | `affected` seeded from a git diff's changed symbols |
+| F2 | Diff and PR impact | `affected` seeded from a git diff's changed symbols. Implemented, pending review (`df2fe51`..`F2` in the log; see "F2 as built") |
 | F3 | Loud incompleteness | `query` says when a project is unrestored or has many unresolved names; `complete` with hundreds of unresolved names is not `complete` (jellyfin lost 29% of edges before `dotnet restore`; diablo2-draft ModBuilder reported `complete` with 292 unresolved names) |
 | F4 | Labelled possible callers | Unresolved same-name calls shown as `possible`, never mixed with bound edges |
 | F5 | Generic tree-sitter worker | Out of process, through the worker protocol, edges labelled inferred; breadth for languages with no semantic worker |
@@ -374,6 +374,78 @@ Decisions where the backlog was silent:
    symbol by file, so it is exercised on hand-built graphs only; it is there for a worker or workspace layout that
    reports a file once per project.
 
+### F2 as built
+
+Surface. `POST /api/graph/impact` with a JSON body `{diff, maxDepth=5, relation, includeTests=false, limit=20}`
+(`diff` required; `maxDepth` 1-20, `limit` 1-100 and applied to each list); MCP `get_impact` with the same names;
+`codecontext query impact [--diff FILE|-]` reading standard input when `--diff` is left out or `-`, with `--depth`,
+`--limit`, `--tests`, `--relation`, `--json`/`--human`, `--snapshot`/`--start`, `--path`. Exit 0 when `complete`, 2
+when not, 1 when refused. `status` lists the route. One service, `ContextService.GetImpactAsync` (partial
+`ContextService.Impact.cs`), behind REST, MCP, the CLI and `query --snapshot` (`OneShotSnapshot`). Parsing in
+`Diffs/UnifiedDiff.cs`, line mapping in `Diffs/DiffMapper.cs`, working-tree checks in `Diffs/DiffWorkingTree.cs`.
+The response lists `changes` (each `member` or `container`, its changed lines, removed lines, dependents and hidden
+test dependents attributed to it, `sameDeclaration`), `unmapped` (one entry per file and reason, with lines, old
+lines, a line count and what to do; `unmappedReasons` counts all), `items` (the dependents as `affected` lists them,
+each with the `seed` change that reached it first) and `testFiles`; each list has its own count, returned count and
+`truncated`. `complete` is true only when nothing is unmapped and every mapped file was checked by blob id.
+
+Decisions where the backlog was silent:
+
+1. Nothing runs git, the CLI included. The service, REST and MCP take the diff as data; the CLI reads a diff the
+   caller made (`git diff $(git merge-base main HEAD) | codecontext query impact`). Reason: `git diff` in a
+   repository executes what that repository's configuration names (`core.fsmonitor`, `diff.external`, a `textconv`
+   driver, `core.pager` on a terminal), so a tool that runs it in a repository it was pointed at would run that
+   repository's code; the rest of the host and both workers never run anything a repository names, and this keeps
+   it so. Who runs git, and with which safeguards for an untrusted repository (`--no-ext-diff --no-textconv
+   -c core.fsmonitor=false`), stays the caller's decision. Blob ids are computed in the host (SHA-1 and SHA-256, as git
+   computes them), never asked of git. The CLI reads and checks the diff before an instance is asked or started.
+2. The diff must describe the index's own file contents, and where that cannot be shown nothing is mapped:
+   - Until a read of every file has finished in this instance (first scan running, `cache verifying`, or a failed
+     verification) the request is refused: REST 503 `INDEX_NOT_READY`, MCP `isError`; the CLI waits for a finished
+     scan instead of accepting a cached answer. `IndexCoordinator.FilesReadAsOfUtc` is when the last such read began:
+     a scan's commit, or a watcher batch that took every change notified before it; a single-file refresh does not
+     move it. `query --snapshot` uses the capture time, after its freshness check.
+   - A file whose change time is later than that is `notYetIndexed` (mid-reindex, edited since): retry.
+   - A file whose content is not the diff's new-side blob id is `contentMismatch` (a diff between commits not
+     checked out, or edited since the diff was made); a CRLF checkout is compared without its carriage returns. A
+     diff with no `index` line (`diff -u`) is mapped but counted `contentUnchecked`, and the answer is not complete.
+   - Uncommitted changes: `git diff <base>` compares with the working tree and is checked as above; `git diff
+     --cached` matches only where the working tree equals the index; untracked files appear only after `git add
+     -N`. The skill says so.
+   - Blind spot: a change made before the last batch began that the watcher had not delivered yet.
+3. Lines map to the innermost declarations holding them (no nested declaration on that line); a declaration's first
+   and last lines are its own; nodes with one span are one change (`sameDeclaration`). Added lines of a type's own
+   (header, closing line, between members) change the type as a `container`, walked from the type alone, not from
+   every member (`affected <type>` seeds its members too: the two differ there on purpose). A copied file changes
+   every declaration in it; an added file changes what its hunks add, which is all of it.
+4. Never silently dropped: lines no declaration holds (`outsideDeclarations`: usings, a namespace line, a file
+   header; also in an added file, conservatively, since a `global using` there binds other files); removed lines
+   between or at the edge of declarations, including a replaced signature line (`removedBetweenDeclarations`: what
+   they held exists only on the old side); `deletedFile` (or `notYetIndexed` while still indexed, `contentMismatch`
+   while still on disk); `renamed` (the new path is mapped by its hunks; what named the old path is not in the
+   index); `binary`; `notIndexed` (no declaration in the file: unparsed, excluded, or a project or config file);
+   `unreadable`; `outsideRoot`; `invalidPath`; `combinedDiff`. Removed lines inside a member change that member.
+5. Changed lines that change nothing are counted, not mapped: whitespace-only lines and comment lines no member holds
+   (read lexically: `//`, `/*`, `*`, `*/`, `#region`; a doc comment lies outside the span a worker gives its member,
+   and treating it as the type's change listed every user of the type). A removed run of comments only is no removed
+   declaration. Inside a member any line, a comment too, changes it. Mode-only files are counted.
+6. One walk: `GraphWalk.AffectedBy` over the union of changed node ids, the function `affected` uses, so propagation,
+   dispatch, the static-call stop, the test-double stop, `testsHidden`, depth, cancellation and the test-file rule are
+   the same; seeds are never listed (a changed declaration that uses another is a change, not a dependent). A
+   one-member diff gives the `affected` answer for that member under every filter (tested). Each dependent is
+   attributed to the change that reached it first (results are nearest first). One generation as in F1 item 6.
+7. The diff is hostile data: at most 16,777,216 characters, 10,000 files, paths of 4,096 characters and line numbers
+   of 100,000,000; every hunk is checked against its header's counts and a truncated, garbled or repeated-file diff
+   (`git log -p`) is refused with its line and reason, never read in part. Paths are unquoted (C escapes, UTF-8),
+   stripped of git's one-letter prefix (mnemonic prefixes too), and refused when absolute, with `..`, `.` or empty
+   segments, a control character or invalid UTF-8; such a path is never looked at. Paths are relative to the git work
+   tree holding the root (the nearest ancestor with `.git`, found by looking, not by asking git). Only line numbers
+   are kept. The working tree is read only through `ReportedPaths.RefusedOnDisk` (no link the repository holds, no
+   share but the root's), regular files only, at most 64 MB hashed.
+8. REST takes a JSON body, not a query string (a diff is too large and too varied for one), up to 64 MiB, checked as
+   strictly as the graph tools' MCP arguments (unknown or miscased names, wrong kinds, missing or blank `diff`);
+   a query string is refused.
+
 ## Log
 
 | Date | Item | Result |
@@ -404,3 +476,4 @@ Decisions where the backlog was silent:
 | 2026-11-19 | Final pass: bundled workers (merge `5505abd`) | Both workers keep guard-refused paths out of inputs. C# `Inputs()` no longer loads runtime references (one-project repository: worker 77-78 to 20 MB). TypeScript inputs de-duplicated and collapsed (delta 2.97 to 1.09 MB on a 132-package project). M2d: references held as metadata only (jellyfin anonymous 417 to 368 MB, facts identical). Discovery stops one directory below `obj`, so edit, build, `query --snapshot` answers from the snapshot. Buffered fact hasher (jellyfin body edit emission 42-48 to 19-20 ms). Bound state released after 60 s quiet (jellyfin after first scan: RSS 487 to 378 MB, heap 302 to 201 MB; no cost seen on the next edit). Left: incremental `SettleOwnership` (about 45 ms per edit on jellyfin), inputs sent only when changed, guard cost of `Inputs()` on Windows unmeasured; nothing run on Windows |
 | 2026-11-19 | F1 | Whole-graph queries (path, affected, hubs) over REST, MCP, the CLI and `query --snapshot`, through `ContextService`; see "F1 as built". Tests: hand-built graphs per query, a slow reference compared on 12 generated two-shard graphs per query (it found a real bug in the first path search: a free dispatch hop could not improve a state already queued one hop deeper), concurrent commits (no answer mixes generations; the test fails without the generation check), allocation (multi-shard lookups allocate nothing; hubs over 80,000 edges allocates 74 KB). Memory, `measure-memory.sh --queries`, this repository, Release JIT, baseline `a62fcbc` against F1, two runs each, RSS MB: idle host 128.5/128.5 vs 128.5/129.2, idle total 497.9/497.2 vs 497.5/498.2; after the 60-query mix host 171.6/169.6 vs 170.1/170.4. Graph queries on this repository (Release, median of 5): hubs 33-42 ms (9 ms under a `within` and `type`), affected 3-21 ms (21 ms for `CodeNode` at depth 20 with tests), path 6 ms (`McpToolCatalog.CallAsync` to `InMemoryDatabase.GetAdjacency`; the two other path queries named an ambiguous `Program.Main` and searched nothing, 2 ms); host RSS 127.6 MB before a 45-query graph mix, 142.3 MB 25 s after (garbage, as for context queries). Changed beside F1: the test-file rule is root-relative for `--tests` too; the shared `--depth`/`--limit` validators no longer crash on a non-number. Not run: Windows, AOT publish, jellyfin |
 | 2026-11-20 | F1 final review | Decisions applied: test files by naming convention (item 8; here only `WorkerLaunchSpec.cs` changes side; the rule costs 27 ns a call against 84-94 ns for the substring rule), copies of one declaration searched together (item 9; not producible with the bundled workers, hand-built graphs only), cancellation inside the walks. Defects fixed: an MCP argument in the wrong letter case was said to belong to another query; "without the relation filter and with test files included" was also said when either alone was enough; the CLI's 5 s request timeout cut off graph queries on large graphs (now 60 s, with a message). Synthetic two-shard graph, 150,000 symbols and 500,000 edges, Release JIT, best of 7, before to after: runs vary by about 15% here: hubs 728-842 to 581-854 ms, 4.0 MB (ordering all 117,972 hubs was about 140 ms of it; now the leading 20 are selected); affected with 95,160 dependents 448-477 to 267-359 ms and 17.3 to 15.7 MB, 144,106 dependents at depth 20 899-957 to 608-861 ms and 25.3 to 23.1 MB (nodes carried instead of looked up again, no full sort); a path search that finds nothing 592-642 to 550-596 ms and 32.8 to 20.2 MB (one state table instead of two); edge kinds by ordinal switch, 82 to 5 ms per 500,000 edges, shared with context queries. Per edge the walks cost about 1.3-1.7 us, mostly the string-keyed node lookup (0.7-0.9 us cold); nothing short of integer-indexed adjacency changes that. 600,000 symbols and 2,000,000 edges: hubs 2.7-3.3 s, affected at depth 20 3.1 s and 88-90 MB, a path that does not exist 3.8-6.4 s and 109-195 MB (was 6.3 s and 219 MB with both filters). AOT host with both real workers (`dotnet publish -r linux-x64 --self-contained`, no trim or AOT warning): the three queries answered over REST, CLI, MCP stdio and `--snapshot` (one-shot hubs 0.32 s); a stale snapshot (one file touched) and an absent one each said why and started an instance. C# and TypeScript in one instance (two projects sharing a file, two tsconfigs sharing a module): one node per shared declaration, dependents of both projects listed. Cross-checked with `rg`: `IScanProgressReporter` affected in 6 files, `IGraphShard` used in 8, both exact. Gates: 2342 passed, the 6 known failures, 38 skipped; ExternalTooling 74 and 2 skipped; both SDK suites; idle RSS host 128.8/128.8/129.4 MB, total 500.4/501.2 MB (one run 539 with the TypeScript worker at 253, the outlier M0 records). Not run: Windows, macOS, a real repository above 300,000 edges, a client disconnect against a live instance (the walks' cancellation is tested directly). Known limits of the test-file rule: `testing/`, `testdata/`, `unittests/`, `__mocks__/`, `*.cy.ts` and a camel-case `Test` prefix (`TestHelpers.cs` outside a test directory) are not recognized |
+| 2026-11-20 | F2 | Diff impact (`query impact`, `POST /api/graph/impact`, MCP `get_impact`, `query --snapshot`) through `ContextService`; see "F2 as built". Tests: hand-written diffs against real files and hand-built graphs (mapping, every unmapped reason, blob and time checks, links, a root below the repository top, caps, one generation, cancellation), a one-member diff equal to `affected` on that member under dispatch, static calls, a test double, relation filters, `includeTests` and depth; the parser against malformed, truncated, oversized, binary, combined, CRLF, quoted and non-ASCII input; REST, MCP and CLI refusals. On this repository (Debug instance, 104k edges), checked by reading each diff and with `rg`: `git diff 8adfec7^ 8adfec7` maps 17 declarations in 8 files, all matching the working tree, 39 comment or blank lines ignored, one replaced record-struct line reported `removedBetweenDeclarations`, 19 dependents and 82 hidden in tests, exit 2; `git diff 7933384^ 7933384` maps the one file unchanged since and reports the two changed since as `contentMismatch`; an uncommitted edit is `notYetIndexed` at once and mapped (`complete`) after the re-index; the whole branch diff (259 KB, 36 files) answers in 0.3 s through the CLI; REST and MCP stdio refused while the start-up scan ran (`INDEX_NOT_READY`) and answered after; `--snapshot` gave the instance's answer in 0.8 s; the served OpenAPI document equals the checked-in one but for version and server URL. Synthetic 50,000 symbols and 288,000 edges, a 600-file diff of 1,800 hunks (Release, median of 5, two runs): parse 6.6-6.7 ms, whole call 243-245 ms, 24.4 MB allocated, 10 KB retained. Idle RSS, `measure-memory.sh`, Release JIT, two runs: host 129.8/129.9 MB, total 500.4/502.2 MB (F1: 128.8, 500.4-501.2). Gates: 2456 passed, the 6 known failures, 38 skipped (2342 before F2); ExternalTooling 74 and 2 skipped; both SDK suites. Not run: Windows, macOS, AOT publish, a repository other than this one |
