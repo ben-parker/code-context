@@ -30,8 +30,13 @@ public sealed record QuerySettings(
 /// <summary>
 /// A whole-graph query (<c>query path</c>, <c>query affected</c>, <c>query hubs</c>): which one, and the options only graph
 /// queries read. <see cref="MaxDepth"/> is <c>--depth</c> when given, else the query's own default applies.
+/// <see cref="Diff"/> is <c>--diff</c> for <c>query impact</c>: a file, or <c>-</c> or null for standard input.
 /// </summary>
-public sealed record GraphQuerySettings(string Query, int? MaxDepth = null, string? Within = null, string? Type = null);
+public sealed record GraphQuerySettings(string Query, int? MaxDepth = null, string? Within = null, string? Type = null, string? Diff = null)
+{
+    /// <summary>For <c>query impact</c>: the diff as read from <see cref="Diff"/> or standard input, before anything is asked.</summary>
+    public string? DiffText { get; init; }
+}
 
 internal sealed record QueryRuntime(
     IInstanceRegistry Registry,
@@ -44,7 +49,9 @@ internal sealed record QueryRuntime(
     TimeSpan ReadinessTimeout,
     Func<string, bool>? DirectoryExists = null,
     Func<string, OneShotSnapshotOpen>? OpenSnapshot = null,
-    bool SnapshotByDefault = false);
+    bool SnapshotByDefault = false,
+    TextReader? Input = null,
+    bool InputRedirected = true);
 
 public static partial class QueryCommandHandler
 {
@@ -86,7 +93,9 @@ public static partial class QueryCommandHandler
             Task.Delay,
             TimeSpan.FromSeconds(30),
             OpenSnapshot: root => OneShotSnapshot.TryOpen(root, configuration),
-            SnapshotByDefault: SnapshotByDefault(configuration));
+            SnapshotByDefault: SnapshotByDefault(configuration),
+            Input: Console.In,
+            InputRedirected: Console.IsInputRedirected);
 
         return await ExecuteAsync(settings, runtime, ct);
     }
@@ -132,6 +141,12 @@ public static partial class QueryCommandHandler
             {
                 runtime.Error.WriteLine(problem);
                 return 1;
+            }
+            if (graph.Query == GraphQueryParameters.ImpactQuery)
+            {
+                // Read and checked here, so a diff that cannot be read starts nothing and asks nothing.
+                if (ReadDiff(graph, runtime) is not { } diff) return 1;
+                settings = settings with { Graph = graph with { DiffText = diff } };
             }
         }
         else if (settings.Identifiers.Count == 0 || settings.Identifiers.Any(string.IsNullOrWhiteSpace))
@@ -262,7 +277,8 @@ public static partial class QueryCommandHandler
                 runtime.DelayAsync,
                 runtime.ReadinessTimeout,
                 ct,
-                acceptCached: true);
+                // Changed lines are matched only against files a finished scan read: impact waits for one.
+                acceptCached: settings.Graph?.Query != GraphQueryParameters.ImpactQuery);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {

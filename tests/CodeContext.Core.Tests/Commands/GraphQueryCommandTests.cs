@@ -13,7 +13,7 @@ namespace CodeContext.Core.Tests.Commands;
 /// <c>query path</c>, <c>query affected</c> and <c>query hubs</c>: how the command line binds, what it refuses before
 /// asking anything, the request it sends, and how it renders the answer.
 /// </summary>
-public class GraphQueryCommandTests
+public partial class GraphQueryCommandTests
 {
     private static readonly string Root = OperatingSystem.IsWindows() ? "C:\\repo" : "/repo";
 
@@ -119,8 +119,8 @@ public class GraphQueryCommandTests
 
     [Theory]
     [InlineData(new[] { "query", "path", "A", "B", "--exact" }, "--exact does not apply to query path: graph queries always match identifiers exactly (canonical identifier, exact or qualified name, or file path).")]
-    [InlineData(new[] { "query", "path", "A", "B", "--limit", "3" }, "--limit does not apply to query path: it applies only to query, query affected, query hubs.")]
-    [InlineData(new[] { "query", "hubs", "--depth", "3" }, "--depth does not apply to query hubs: it applies only to query, query path, query affected.")]
+    [InlineData(new[] { "query", "path", "A", "B", "--limit", "3" }, "--limit does not apply to query path: it applies only to query, query affected, query hubs, query impact.")]
+    [InlineData(new[] { "query", "hubs", "--depth", "3" }, "--depth does not apply to query hubs: it applies only to query, query path, query affected, query impact.")]
     [InlineData(new[] { "query", "affected", "X", "--external" }, "--external does not apply to query affected: it applies only to query, query hubs.")]
     [InlineData(new[] { "query", "affected", "X", "--within", "src" }, "--within does not apply to query affected: it applies only to query hubs.")]
     [InlineData(new[] { "query", "X", "--type", "Class" }, "--type does not apply to query: it applies only to query hubs.")]
@@ -317,7 +317,8 @@ public class GraphQueryCommandTests
         return (exit, output.ToString());
     }
 
-    private static (QueryRuntime Runtime, StringWriter Output, StringWriter Error) Runtime(RecordingHandler handler)
+    private static (QueryRuntime Runtime, StringWriter Output, StringWriter Error) Runtime(
+        RecordingHandler handler, string? input = null, bool redirected = true)
     {
         var output = new StringWriter();
         var error = new StringWriter();
@@ -326,7 +327,8 @@ public class GraphQueryCommandTests
             new Registry(instance),
             new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(2) },
             (_, _) => Task.FromResult(DetachedStartResult.Failed("unexpected start")),
-            output, error, TimeProvider.System, (_, _) => Task.CompletedTask, TimeSpan.FromSeconds(30), _ => true);
+            output, error, TimeProvider.System, (_, _) => Task.CompletedTask, TimeSpan.FromSeconds(30), _ => true,
+            Input: input is null ? null : new StringReader(input), InputRedirected: redirected);
         return (runtime, output, error);
     }
 

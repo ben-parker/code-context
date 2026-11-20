@@ -8,18 +8,22 @@ using CodeContext.Core.Snapshots;
 
 namespace CodeContext.Api.Commands;
 
-/// <summary><c>query path</c>, <c>query affected</c> and <c>query hubs</c>: the graph endpoints, rendered like <c>query</c>.</summary>
+/// <summary>
+/// <c>query path</c>, <c>query affected</c>, <c>query hubs</c> and <c>query impact</c>: the graph endpoints, rendered like
+/// <c>query</c>.
+/// </summary>
 public static partial class QueryCommandHandler
 {
     /// <summary>Which query modes read each option; any other is refused rather than ignored.</summary>
     private static readonly (string Option, string[] Modes)[] OptionModes =
     [
-        ("--depth", ["context", GraphQueryParameters.PathQuery, GraphQueryParameters.AffectedQuery]),
+        ("--depth", ["context", GraphQueryParameters.PathQuery, GraphQueryParameters.AffectedQuery, GraphQueryParameters.ImpactQuery]),
         ("--exact", ["context"]),
-        ("--limit", ["context", GraphQueryParameters.AffectedQuery, GraphQueryParameters.HubsQuery]),
+        ("--limit", ["context", GraphQueryParameters.AffectedQuery, GraphQueryParameters.HubsQuery, GraphQueryParameters.ImpactQuery]),
         ("--external", ["context", GraphQueryParameters.HubsQuery]),
         ("--within", [GraphQueryParameters.HubsQuery]),
         ("--type", [GraphQueryParameters.HubsQuery]),
+        ("--diff", [GraphQueryParameters.ImpactQuery]),
     ];
 
     /// <summary>Whether <paramref name="mode"/> (<c>context</c> or a graph query) reads <paramref name="option"/>.</summary>
@@ -33,11 +37,17 @@ public static partial class QueryCommandHandler
             $"Most relationship hops searched (1-{GraphQueryLimits.MaxDepth}, default {GraphQueryLimits.DefaultPathDepth}).",
         (GraphQueryParameters.AffectedQuery, "--depth") =>
             $"Most dependency hops followed (1-{GraphQueryLimits.MaxDepth}, default {GraphQueryLimits.DefaultAffectedDepth}).",
+        (GraphQueryParameters.ImpactQuery, "--depth") =>
+            $"Most dependency hops followed from the changes (1-{GraphQueryLimits.MaxDepth}, default {GraphQueryLimits.DefaultAffectedDepth}).",
         (GraphQueryParameters.AffectedQuery or GraphQueryParameters.HubsQuery, "--limit") =>
             $"Most entries listed (1-{GraphQueryLimits.MaxLimit}, default {GraphQueryLimits.DefaultLimit}).",
+        (GraphQueryParameters.ImpactQuery, "--limit") =>
+            $"Most entries in each list: changes, unmapped, dependents, test files (1-{GraphQueryLimits.MaxLimit}, default {GraphQueryLimits.DefaultLimit}).",
+        (GraphQueryParameters.ImpactQuery, "--tests") =>
+            "List dependents in test files and follow impact on from them (otherwise counted, and their files listed).",
         (GraphQueryParameters.PathQuery or GraphQueryParameters.AffectedQuery or GraphQueryParameters.HubsQuery, "--tests") =>
             "Include symbols in test files (left out by default).",
-        (GraphQueryParameters.PathQuery or GraphQueryParameters.AffectedQuery or GraphQueryParameters.HubsQuery, "--relation") =>
+        (GraphQueryParameters.PathQuery or GraphQueryParameters.AffectedQuery or GraphQueryParameters.HubsQuery or GraphQueryParameters.ImpactQuery, "--relation") =>
             "Comma-separated relationship kinds followed or counted.",
         (GraphQueryParameters.HubsQuery, "--external") => "Rank library symbols too.",
         _ => null,
@@ -68,12 +78,15 @@ public static partial class QueryCommandHandler
             GraphQueryParameters.AffectedQuery => 1,
             _ => 0,
         };
+        if (graph.Query == GraphQueryParameters.ImpactQuery && settings.Identifiers.Count > 0)
+            return "query impact takes no identifier: it reads a unified diff from standard input or --diff FILE.";
         if (settings.Identifiers.Count != expected || settings.Identifiers.Any(string.IsNullOrWhiteSpace))
         {
             return graph.Query switch
             {
                 GraphQueryParameters.PathQuery => "query path needs two non-empty identifiers: <from> <to>.",
                 GraphQueryParameters.AffectedQuery => "query affected needs one non-empty identifier.",
+                GraphQueryParameters.ImpactQuery => "query impact takes no identifier.",
                 _ => "query hubs takes no identifier.",
             };
         }
@@ -113,13 +126,97 @@ public static partial class QueryCommandHandler
         return query.ToString();
     }
 
+    /// <summary>
+    /// The diff of <c>query impact</c>, from <c>--diff FILE</c> or standard input, read up to the API's limit and checked
+    /// as the instance would check it; null, with the reason written, when it cannot be used. Nothing is run to make it.
+    /// </summary>
+    private static string? ReadDiff(GraphQuerySettings graph, QueryRuntime runtime)
+    {
+        string text;
+        var source = graph.Diff is null or "-" ? "standard input" : graph.Diff;
+        try
+        {
+            if (graph.Diff is null or "-")
+            {
+                if (!runtime.InputRedirected || runtime.Input is null)
+                {
+                    runtime.Error.WriteLine("query impact reads a unified diff from standard input or --diff FILE, and none was given: "
+                        + "git diff $(git merge-base main HEAD) | codecontext query impact");
+                    return null;
+                }
+                text = ReadBounded(runtime.Input);
+            }
+            else
+            {
+                if (new FileInfo(graph.Diff) is { Exists: true, Length: var length } && length > 4L * UnifiedDiffLimit)
+                    throw new InvalidDataException($"it is {length:N0} bytes");
+                using var reader = new StreamReader(graph.Diff, System.Text.Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+                text = ReadBounded(reader);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException or InvalidDataException)
+        {
+            runtime.Error.WriteLine($"Could not read the diff from {source}: {ex.Message}.");
+            return null;
+        }
+        try
+        {
+            CodeContext.Core.Diffs.UnifiedDiff.Parse(text);
+        }
+        catch (ArgumentException ex)
+        {
+            runtime.Error.WriteLine($"The diff from {source} is refused: {ex.Message}");
+            return null;
+        }
+        return text;
+    }
+
+    private const int UnifiedDiffLimit = CodeContext.Core.Diffs.UnifiedDiff.MaxLength;
+
+    /// <summary>All of <paramref name="reader"/>, refusing more than the API reads.</summary>
+    private static string ReadBounded(TextReader reader)
+    {
+        var text = new StringBuilder();
+        var buffer = new char[64 * 1024];
+        int read;
+        while ((read = reader.Read(buffer, 0, buffer.Length)) > 0)
+        {
+            text.Append(buffer, 0, read);
+            if (text.Length > UnifiedDiffLimit)
+                throw new InvalidDataException($"it is longer than the {UnifiedDiffLimit:N0} characters read; split it by path (git diff <base> -- <dir>)");
+        }
+        return text.ToString();
+    }
+
+    /// <summary>The JSON body of an impact request: the diff and only the options given, so the defaults are the API's.</summary>
+    private static string ImpactBody(QuerySettings settings, GraphQuerySettings graph)
+    {
+        using var buffer = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(buffer))
+        {
+            writer.WriteStartObject();
+            writer.WriteString("diff", graph.DiffText);
+            if (graph.MaxDepth is { } depth) writer.WriteNumber("maxDepth", depth);
+            if (!string.IsNullOrWhiteSpace(settings.Relation)) writer.WriteString("relation", settings.Relation);
+            if (settings.IncludeTests) writer.WriteBoolean("includeTests", true);
+            if (settings.Limit is { } limit) writer.WriteNumber("limit", limit);
+            writer.WriteEndObject();
+        }
+        return Encoding.UTF8.GetString(buffer.ToArray());
+    }
+
     private static async Task<int> ExecuteGraphAsync(
         QuerySettings settings, InstanceRecord instance, QueryRuntime runtime, CancellationToken ct)
     {
         var graph = settings.Graph!;
-        using var request = new HttpRequestMessage(
-            HttpMethod.Get,
-            $"http://localhost:{instance.Port}/api/graph/{graph.Query}?{GraphQueryString(settings, graph)}");
+        using var request = graph.Query == GraphQueryParameters.ImpactQuery
+            ? new HttpRequestMessage(HttpMethod.Post, $"http://localhost:{instance.Port}/api/graph/impact")
+            {
+                Content = new StringContent(ImpactBody(settings, graph), Encoding.UTF8, "application/json"),
+            }
+            : new HttpRequestMessage(
+                HttpMethod.Get,
+                $"http://localhost:{instance.Port}/api/graph/{graph.Query}?{GraphQueryString(settings, graph)}");
         HttpResponseMessage response;
         try
         {
@@ -130,7 +227,9 @@ public static partial class QueryCommandHandler
             // The client's own timeout; the instance stops the walk when the request goes away.
             runtime.Error.WriteLine(
                 $"{ModeName(graph.Query)} did not answer within {runtime.Http.Timeout.TotalSeconds:0} seconds and was stopped. "
-                + "On a very large graph narrow it: --within DIR or --type for hubs, a smaller --depth for path and affected.");
+                + (graph.Query == GraphQueryParameters.ImpactQuery
+                    ? "On a very large graph narrow it: a smaller --depth, or a diff of fewer paths (git diff <base> -- <dir>)."
+                    : "On a very large graph narrow it: --within DIR or --type for hubs, a smaller --depth for path and affected."));
             return 1;
         }
         using var answered = response;
@@ -181,6 +280,13 @@ public static partial class QueryCommandHandler
                     Relation = relation, IncludeTests = settings.IncludeTests, Limit = settings.Limit ?? GraphQueryLimits.DefaultLimit,
                 }, ct),
                 options.GetTypeInfo(typeof(GraphAffectedResponse))),
+            GraphQueryParameters.ImpactQuery => JsonSerializer.Serialize(
+                await snapshot.Graph.GetImpactAsync(new GraphImpactRequest
+                {
+                    Diff = graph.DiffText!, MaxDepth = graph.MaxDepth ?? GraphQueryLimits.DefaultAffectedDepth,
+                    Relation = relation, IncludeTests = settings.IncludeTests, Limit = settings.Limit ?? GraphQueryLimits.DefaultLimit,
+                }, ct),
+                options.GetTypeInfo(typeof(GraphImpactResponse))),
             _ => JsonSerializer.Serialize(
                 await snapshot.Graph.GetHubsAsync(new GraphHubsRequest
                 {
@@ -214,6 +320,16 @@ public static partial class QueryCommandHandler
                 else if (settings.Human) WriteHumanAffected(response, output);
                 else WriteAgentAffected(response, output);
                 return Resolved(response.Seed) ? 0 : 2;
+            }
+            case GraphQueryParameters.ImpactQuery:
+            {
+                var response = JsonSerializer.Deserialize(body, CodeContextJsonContext.Default.GraphImpactResponse);
+                if (response is null) return EmptyResponse(runtime);
+                if (settings.Json) output.Write(body);
+                else if (settings.Human) WriteHumanImpact(response, output);
+                else WriteAgentImpact(response, output);
+                // Part of the diff is not covered: say so to a script too.
+                return response.Complete ? 0 : 2;
             }
             default:
             {
@@ -263,7 +379,7 @@ public static partial class QueryCommandHandler
         return false;
     }
 
-    private static void WriteAgentNode(string prefix, CompactCodeNode node, TextWriter output, string? suffix = null)
+    private static void WriteAgentNode(string prefix, CompactCodeNode node, TextWriter output, string? suffix = null, string? more = null)
     {
         output.Write(prefix);
         output.Write(Clean(node.Identifier));
@@ -271,6 +387,7 @@ public static partial class QueryCommandHandler
         output.Write(Clean(node.Type ?? "Unknown"));
         WriteOptionalField(output, Location(node));
         WriteOptionalField(output, suffix);
+        WriteOptionalField(output, more);
         output.WriteLine();
     }
 
@@ -337,6 +454,61 @@ public static partial class QueryCommandHandler
         foreach (var hub in response.Items)
             WriteAgentNode($"\t{hub.Dependents} dependents\t{hub.DependentFiles} files\t", hub, output);
         if (!string.IsNullOrWhiteSpace(response.Hint)) output.WriteLine($"hint\t{Clean(response.Hint)}");
+    }
+
+    private static void WriteAgentImpact(GraphImpactResponse response, TextWriter output)
+    {
+        WriteAgentCache(response.Cache, output);
+        output.WriteLine($"impact\t{(response.Complete ? "complete" : "incomplete")}\t{response.ChangeCount} changed\t"
+            + $"{response.TotalCount} affected in {response.FileCount} file(s)\tdepth {response.MaxDepth}"
+            + (response.DepthLimited ? ", more beyond" : string.Empty) + $"\t{response.DiffFiles} file(s) in the diff");
+        output.WriteLine($"content\t{response.ContentChecked} file(s) match the working tree"
+            + (response.ContentUnchecked > 0 ? $"\t{response.ContentUnchecked} unchecked (the diff gives no blob id)" : string.Empty));
+
+        output.WriteLine($"changed\t{response.ChangesReturned}/{response.ChangeCount}" + (response.ChangesTruncated ? "\ttruncated" : string.Empty));
+        foreach (var change in response.Changes)
+        {
+            var lines = change.ChangedLines is { } changed ? $"lines {changed}" : "lines -";
+            var removed = change.RemovedLines > 0 ? $", {change.RemovedLines} removed" : string.Empty;
+            var tests = change.TestsHidden > 0 ? $" +{change.TestsHidden} in tests" : string.Empty;
+            WriteAgentNode($"\t{change.Level}\t{lines}{removed}\t{change.Dependents} dependents{tests}\t", change, output,
+                change.SameDeclaration is { Count: > 0 } copies ? $"same declaration as {string.Join(", ", copies)}" : null);
+        }
+
+        if (response.UnmappedCount > 0)
+        {
+            output.WriteLine($"unmapped\t{response.UnmappedReturned}/{response.UnmappedCount}" + (response.UnmappedTruncated ? "\ttruncated" : string.Empty)
+                + $"\t{response.UnmappedLines} line(s)"
+                + (response.UnmappedReasons is { Count: > 0 } reasons ? $"\t{string.Join(',', reasons.Select(pair => $"{pair.Key}={pair.Value}"))}" : string.Empty));
+            foreach (var entry in response.Unmapped)
+            {
+                var where = entry.OldFile is { } old ? $"{entry.File} (from {old})" : entry.File;
+                var lines = string.Join(' ', new[]
+                {
+                    entry.Lines is { } newLines ? $"lines {newLines}" : null,
+                    entry.OldLines is { } oldLines ? $"old {oldLines}" : null,
+                }.Where(part => part is not null));
+                output.WriteLine($"\t{Clean(entry.Reason)}\t{Clean(where)}\t{(lines.Length > 0 ? lines : "-")}\t{Clean(entry.Detail)}");
+            }
+        }
+        if (response.IgnoredLines > 0 || response.ModeOnlyFiles > 0)
+            output.WriteLine($"ignored\t{response.IgnoredLines} whitespace-only line(s)\t{response.ModeOnlyFiles} mode-only file(s)");
+
+        output.WriteLine($"affected\t{response.ReturnedCount}/{response.TotalCount}" + (response.Truncated ? "\ttruncated" : string.Empty)
+            + $"\tdepth {response.MaxDepth}" + (response.DepthLimited ? ", more beyond" : string.Empty) + $"\t{response.FileCount} file(s)");
+        if (response.TestsHidden > 0) output.WriteLine($"testsHidden\t{response.TestsHidden}\t--tests lists them");
+        foreach (var item in response.Items)
+        {
+            var how = item.Through is { } through ? $"{item.Relation} through {through}" : item.Relation;
+            WriteAgentNode($"\t{item.Distance}\t{Clean(how)}\t", item, output, $"via {item.Via}", $"from {item.Seed}");
+        }
+        if (response.TestFileCount > 0)
+        {
+            output.WriteLine($"tests\t{response.TestFiles.Count}/{response.TestFileCount}" + (response.TestFilesTruncated ? "\ttruncated" : string.Empty));
+            foreach (var file in response.TestFiles) output.WriteLine($"\t{Clean(file)}");
+        }
+        if (!string.IsNullOrWhiteSpace(response.Hint)) output.WriteLine($"hint\t{Clean(response.Hint)}");
+        WriteCoverage(response.Coverage, "coverage\t{0}\t", response.Cache, output);
     }
 
     // ---- Human text ----
@@ -406,6 +578,55 @@ public static partial class QueryCommandHandler
             var through = item.Through is { } declaration ? $" through {declaration}" : string.Empty;
             output.WriteLine($"  {item.Distance}. {item.Identifier} [{item.Type ?? "Unknown"}]{HumanLocation(item)}");
             output.WriteLine($"     {item.Relation}{through} {item.Via}");
+        }
+        if (!string.IsNullOrWhiteSpace(response.Hint)) output.WriteLine(response.Hint);
+        WriteCoverage(response.Coverage, "Coverage ({0}): ", response.Cache, output);
+    }
+
+    private static void WriteHumanImpact(GraphImpactResponse response, TextWriter output)
+    {
+        WriteHumanCache(response.Cache, output);
+        output.WriteLine(response.Complete
+            ? $"Every changed line of the {response.DiffFiles} file(s) in the diff maps to a declaration."
+            : $"Incomplete: part of the {response.DiffFiles} file(s) in the diff maps to no declaration; see Not mapped.");
+        output.WriteLine($"Files matching the working tree: {response.ContentChecked}"
+            + (response.ContentUnchecked > 0 ? $"; mapped unchecked (no blob id in the diff): {response.ContentUnchecked}" : string.Empty));
+        output.WriteLine($"Changed declarations: {response.ChangesReturned}/{response.ChangeCount}{(response.ChangesTruncated ? ", truncated" : string.Empty)}");
+        foreach (var change in response.Changes)
+        {
+            output.WriteLine($"  {change.Identifier} [{change.Type ?? "Unknown"}]{HumanLocation(change)}");
+            var lines = change.ChangedLines is { } changed ? $"lines {changed}" : "removed lines only";
+            output.WriteLine($"     {(change.Level == "container" ? "its own lines (not its members)" : "member")}: {lines}"
+                + (change.RemovedLines > 0 ? $", {change.RemovedLines} removed" : string.Empty)
+                + $"; {change.Dependents} dependent(s){(change.TestsHidden > 0 ? $" and {change.TestsHidden} in test files" : string.Empty)}");
+        }
+        if (response.UnmappedCount > 0)
+        {
+            output.WriteLine($"Not mapped: {response.UnmappedReturned}/{response.UnmappedCount}{(response.UnmappedTruncated ? ", truncated" : string.Empty)}, "
+                + $"{response.UnmappedLines} line(s)");
+            foreach (var entry in response.Unmapped)
+            {
+                var where = entry.OldFile is { } old ? $"{entry.File} (from {old})" : entry.File;
+                var lines = entry.Lines is { } newLines ? $" lines {newLines}" : string.Empty;
+                var oldLines = entry.OldLines is { } removed ? $" old lines {removed}" : string.Empty;
+                output.WriteLine($"  - {where}{lines}{oldLines} [{entry.Reason}]: {entry.Detail}");
+            }
+        }
+        if (response.IgnoredLines > 0 || response.ModeOnlyFiles > 0)
+            output.WriteLine($"Ignored: {response.IgnoredLines} whitespace-only line(s), {response.ModeOnlyFiles} mode-only file(s)");
+        output.WriteLine($"Affected: {response.ReturnedCount}/{response.TotalCount}{(response.Truncated ? ", truncated" : string.Empty)}, "
+            + $"within {response.MaxDepth} hop(s){(response.DepthLimited ? " (more beyond)" : string.Empty)}, in {response.FileCount} file(s)");
+        if (response.TestsHidden > 0) output.WriteLine($"Test-file symbols affected: {response.TestsHidden} (--tests lists them)");
+        foreach (var item in response.Items)
+        {
+            var through = item.Through is { } declaration ? $" through {declaration}" : string.Empty;
+            output.WriteLine($"  {item.Distance}. {item.Identifier} [{item.Type ?? "Unknown"}]{HumanLocation(item)}");
+            output.WriteLine($"     {item.Relation}{through} {item.Via}, from the change to {item.Seed}");
+        }
+        if (response.TestFileCount > 0)
+        {
+            output.WriteLine($"Test files in reach: {response.TestFiles.Count}/{response.TestFileCount}{(response.TestFilesTruncated ? ", truncated" : string.Empty)}");
+            foreach (var file in response.TestFiles) output.WriteLine($"  - {file}");
         }
         if (!string.IsNullOrWhiteSpace(response.Hint)) output.WriteLine(response.Hint);
         WriteCoverage(response.Coverage, "Coverage ({0}): ", response.Cache, output);
