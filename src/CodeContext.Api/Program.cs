@@ -341,7 +341,8 @@ public class Program
             "in one walk), and the test files in reach. Reads a unified diff whose new side is the working tree from standard " +
             "input (git diff $(git merge-base main HEAD) | codecontext query impact) or --diff FILE; it runs nothing itself. " +
             $"--depth (1-{GraphQueryLimits.MaxDepth}, default {GraphQueryLimits.DefaultAffectedDepth}), --limit per list " +
-            $"(default {GraphQueryLimits.DefaultLimit}), --tests, --relation. Exits 2 when part of the diff could not be mapped.");
+            $"(default {GraphQueryLimits.DefaultLimit}), --tests, --relation. Exits 2 when part of the diff could not be mapped; " +
+            "changed files no worker reads (a README) are set aside and do not count.");
         impactQueryCommand.SetAction((ParseResult parseResult, CancellationToken ct) =>
             QueryCommandHandler.ExecuteAsync(
                 Settings(parseResult, [], multi: false, Graph(parseResult, GraphQueryParameters.ImpactQuery)), ct));
