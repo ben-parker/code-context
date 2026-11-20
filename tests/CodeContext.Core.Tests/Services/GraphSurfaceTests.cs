@@ -93,7 +93,7 @@ public class GraphSurfaceTests
 
     [Theory]
     [InlineData("/api/graph/path?from=A&to=B&within=src", "'within' does not apply to path queries (it is an option of hubs queries); path accepts from, to, maxDepth, relation, includeTests.")]
-    [InlineData("/api/graph/hubs?maxDepth=2", "'maxDepth' does not apply to hubs queries (it is an option of path queries and affected queries); hubs accepts limit, relation, type, within, includeTests, includeExternal.")]
+    [InlineData("/api/graph/hubs?maxDepth=2", "'maxDepth' does not apply to hubs queries (it is an option of path queries, affected queries and impact queries); hubs accepts limit, relation, type, within, includeTests, includeExternal.")]
     [InlineData("/api/graph/affected?identifier=A&depth=2", "'depth' does not apply to affected queries; affected accepts identifier, maxDepth, relation, includeTests, limit.")]
     [InlineData("/api/graph/affected?identifier=A&maxDepth=abc", "maxDepth must be an integer (got 'abc').")]
     [InlineData("/api/graph/hubs?includeTests=yes", "includeTests must be true or false (got 'yes').")]
@@ -170,7 +170,7 @@ public class GraphSurfaceTests
 
     [Theory]
     [InlineData("get_path", """{"from":"A","to":"B","within":"src"}""", "'within' does not apply to path queries (it is an option of hubs queries); path accepts from, to, maxDepth, relation, includeTests.")]
-    [InlineData("get_hubs", """{"includeExternal":true,"maxDepth":3}""", "'maxDepth' does not apply to hubs queries (it is an option of path queries and affected queries); hubs accepts limit, relation, type, within, includeTests, includeExternal.")]
+    [InlineData("get_hubs", """{"includeExternal":true,"maxDepth":3}""", "'maxDepth' does not apply to hubs queries (it is an option of path queries, affected queries and impact queries); hubs accepts limit, relation, type, within, includeTests, includeExternal.")]
     [InlineData("get_affected", """{"identifier":"A","maxDepth":"3"}""", "maxDepth must be an integer.")]
     [InlineData("get_affected", """{"identifier":"A","limit":1.5}""", "limit must be an integer.")]
     [InlineData("get_hubs", """{"includeTests":"true"}""", "includeTests must be true or false.")]

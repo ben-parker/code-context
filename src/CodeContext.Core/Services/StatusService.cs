@@ -335,6 +335,7 @@ public class StatusService : IStatusService
             "/api/graph/path",
             "/api/graph/affected",
             "/api/graph/hubs",
+            "/api/graph/impact",
             "/api/syntax-tree",
             "/api/index/refresh",
             "/api/schema",

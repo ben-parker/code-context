@@ -367,6 +367,48 @@
       }
     },
     {
+      "name": "get_impact",
+      "description": "List what a diff could break: the declarations its changed lines fall in, everything that depends on them (as get_affected, in one walk, each dependent attributed to the change that reached it first), and the test files in reach. Parts of the diff that map to no declaration (imports, removed or renamed declarations, deleted, binary or unparsed files, a diff whose new side is not checked out) are listed in unmapped, and complete is then false. Static evidence, not runtime behavior.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "diff": {
+            "description": "A unified diff whose new side is the working tree (git diff <base> output, with its index lines). The diff is data: nothing is run.",
+            "type": "string"
+          },
+          "maxDepth": {
+            "description": "Most dependency hops followed (1-20)",
+            "type": "integer",
+            "default": 5
+          },
+          "relation": {
+            "description": "Comma-separated relation kinds that carry impact (CALLS, MOCK_CALLS, REFERENCES, IMPLEMENTS, INHERITS, EXTENDS, IMPORTS, USES); without it implementations of a changed declaration are affected too",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "includeTests": {
+            "description": "Whether dependents in test files are listed and impact moves on from them (without it they are counted, and their files listed in testFiles)",
+            "type": "boolean",
+            "default": false
+          },
+          "limit": {
+            "description": "Most entries in each list: changes, unmapped, dependents, test files (1-100)",
+            "type": "integer",
+            "default": 20
+          }
+        },
+        "required": [
+          "diff"
+        ]
+      },
+      "execution": {
+        "taskSupport": "optional"
+      }
+    },
+    {
       "name": "get_hubs",
       "description": "List the load-bearing symbols: those with the most distinct direct dependents, optionally within a directory or of one type. Tests and library symbols are left out unless asked for.",
       "inputSchema": {
