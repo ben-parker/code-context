@@ -407,17 +407,9 @@ namespace CodeContext.Core.Services
             }
             response.TotalCount = listed.Count;
             response.FileCount = dependentFiles.Count;
-            foreach (var (item, change) in Leading(listed, request.Limit, static (left, right) =>
+            foreach (var (item, change) in Leading(listed, request.Limit, static (left, right) => NearestFirst(left.Item, right.Item)))
             {
-                var order = left.Item.Distance.CompareTo(right.Item.Distance);
-                return order != 0 ? order : CompareByPlace(left.Item.Node, right.Item.Node);
-            }))
-            {
-                var compact = ToCompact<GraphImpactNode>(item.Node);
-                compact.Distance = item.Distance;
-                compact.Relation = item.Relation;
-                compact.Via = PublicIdentifier(walk.Node(item.Via)!);
-                compact.Through = item.Through is null ? null : PublicIdentifier(walk.Node(item.Through)!);
+                var compact = ToDependent<GraphImpactNode>(item, walk);
                 compact.Seed = PublicIdentifier(change.Node);
                 response.Items.Add(compact);
             }
