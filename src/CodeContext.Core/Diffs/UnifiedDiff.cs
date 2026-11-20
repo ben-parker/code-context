@@ -74,6 +74,9 @@ namespace CodeContext.Core.Diffs
         public List<DiffLineRange> ConditionalDirectives { get; } = new();
         public List<DiffRemoval> Removals { get; } = new();
 
+        /// <summary>Where the last hunk read ended on each side: the next may not start before.</summary>
+        internal int OldEnd { get; set; }
+        internal int NewEnd { get; set; }
         public int IgnoredLines { get; internal set; }
 
         /// <summary>Lines the hunks add and remove, blank ones included.</summary>
@@ -388,6 +391,9 @@ namespace CodeContext.Core.Diffs
                 var nextNew = newCount == 0 ? newStart + 1 : newStart;
                 int oldLeft = oldCount, newLeft = newCount;
                 var hunkLine = _lineNumber;
+                // One diff between two states names each line once, in order: anything else is not read as a smaller or other change.
+                if (nextOld < file.OldEnd || nextNew < file.NewEnd)
+                    throw Malformed($"a hunk that starts before the hunk above it ends ('{Shorten(header.ToString())}')");
 
                 // The change block being read: removed lines (old side), and whether any is not blank.
                 var blockNewBefore = -1;
@@ -472,6 +478,8 @@ namespace CodeContext.Core.Diffs
                     }
                 }
                 CloseBlock();
+                file.OldEnd = nextOld;
+                file.NewEnd = nextNew;
                 // A marker may follow the last line.
                 while (_position < text.Length && text[_position] == '\\') NextSpan(out _);
 

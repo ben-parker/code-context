@@ -84,6 +84,21 @@ public class UnifiedDiffTests
     public void AConditionalDirective_IsToldApartByItsName(string line, bool conditional)
         => Assert.Equal(conditional, SourceLines.IsConditionalDirective(line));
 
+    [Fact]
+    public void AHunkThatGoesBackOverLinesAnEarlierOneCovered_IsRefused()
+    {
+        var header = "diff --git a/a.cs b/a.cs\n--- a/a.cs\n+++ b/a.cs\n";
+        // In order, and touching: read.
+        Assert.Single(UnifiedDiff.Parse(header + "@@ -5 +5 @@\n-a\n+b\n@@ -6,0 +7 @@\n+c\n@@ -7 +8 @@\n-d\n+e\n"));
+
+        var backwards = Assert.Throws<ArgumentException>(() => UnifiedDiff.Parse(header + "@@ -5 +5 @@\n-a\n+b\n@@ -2 +2 @@\n-c\n+d\n"));
+        Assert.Contains("diff line 7", backwards.Message);
+        Assert.Contains("before the hunk above it ends", backwards.Message);
+        // The same line twice is two changes of one state, not one diff.
+        Assert.Throws<ArgumentException>(() => UnifiedDiff.Parse(header + "@@ -5 +5 @@\n-a\n+b\n@@ -5 +5 @@\n-a\n+b\n"));
+        Assert.Throws<ArgumentException>(() => UnifiedDiff.Parse(header + "@@ -5,0 +6,2 @@\n+a\n+b\n@@ -6 +7 @@\n-c\n+d\n"));
+    }
+
     [Theory]
     [InlineData("using System;", true)]
     [InlineData("  using static System.Math; // why", true)]
