@@ -39,6 +39,42 @@ public class UnifiedDiffTests
         Assert.Equal((3, 2), (file.AddedLineCount, file.RemovedLineCount));
     }
 
+    [Theory]
+    [InlineData("// a comment", true)]
+    [InlineData("    /// <summary>Doc.</summary>", true)]
+    [InlineData("/* block", true)]
+    [InlineData(" * inside a block", true)]
+    [InlineData(" *", true)]
+    [InlineData(" */", true)]
+    [InlineData("#region Helpers", true)]
+    [InlineData("    #endregion", true)]
+    [InlineData("var x = 1; // trailing", false)]
+    [InlineData("*pointer = 1;", false)]
+    [InlineData("#if DEBUG", false)]
+    [InlineData("[Obsolete]", false)]
+    public void ACommentLine_IsToldApartByItsStart(string line, bool comment)
+        => Assert.Equal(comment, UnifiedDiff.IsCommentLine(line));
+
+    [Fact]
+    public void AddedCommentLines_AreKeptApart_AndARemovedRunOfCommentsIsMarked()
+    {
+        var file = Assert.Single(UnifiedDiff.Parse(Lines(
+            "--- a/a.cs",
+            "+++ b/a.cs",
+            "@@ -1,5 +1,4 @@",
+            "-/// old",
+            "+/// new",
+            "+int X;",
+            " a",
+            "-int Y;",
+            "-// why",
+            " b")));
+
+        Assert.Equal([new DiffLineRange(1, 1)], file.CommentAdded);
+        Assert.Equal([new DiffLineRange(2, 2)], file.Added);
+        Assert.Equal([true, false], file.Removals.Select(removal => removal.CommentsOnly));
+    }
+
     [Fact]
     public void ZeroContextHunks_PlaceAPureRemovalBetweenTheNewLinesAroundIt()
     {

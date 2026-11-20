@@ -140,7 +140,10 @@ namespace CodeContext.Core.Services
         public Dictionary<string, int>? UnmappedReasons { get; set; }
         public List<GraphUnmappedChange> Unmapped { get; set; } = new();
 
-        /// <summary>Changed lines holding only whitespace, which change no declaration on their own.</summary>
+        /// <summary>
+        /// Changed lines that change no declaration: holding only whitespace, or only a comment where no member holds
+        /// them (a doc comment above a member, a file header).
+        /// </summary>
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
         public int IgnoredLines { get; set; }
 

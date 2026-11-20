@@ -196,6 +196,30 @@ public sealed class GraphImpactTests : IDisposable
     }
 
     [Fact]
+    public async Task CommentLines_ChangeTheMemberHoldingThem_AndNothingWhereNoMemberDoes()
+    {
+        var service = Sample().Build();
+
+        // A doc comment above Other (lines 13-15 lie between Run and Other) and a file header: nothing changes.
+        var above = await Impact(service, Diff("src/Foo.cs", Blob("src/Foo.cs"),
+            "@@ -1 +1 @@\n-// old header\n+// new header",
+            "@@ -14,2 +14,2 @@\n-    /// <summary>Old.</summary>\n-    /// </remarks>\n+    /// <summary>New.</summary>\n+    /* and */"));
+        Assert.Empty(above.Changes);
+        Assert.Empty(above.Unmapped);
+        Assert.Equal(6, above.IgnoredLines);
+        Assert.True(above.Complete);
+
+        // The same comment inside Run is Run's.
+        var inside = await Impact(service, Diff("src/Foo.cs", Blob("src/Foo.cs"), "@@ -8 +8 @@\n-        // old\n+        * new"));
+        Assert.Equal([(I("Foo.Run"), "8")], inside.Changes.Select(change => (change.Identifier, change.ChangedLines)));
+
+        // A code line replaced by a comment between members may have held a declaration.
+        var replaced = await Impact(service, Diff("src/Foo.cs", Blob("src/Foo.cs"), "@@ -14 +14 @@\n-    int Removed;\n+    // gone"));
+        Assert.Empty(replaced.Changes);
+        Assert.Equal("removedBetweenDeclarations", Assert.Single(replaced.Unmapped).Reason);
+    }
+
+    [Fact]
     public async Task AnAddedOrCopiedFile_ChangesEveryDeclarationInIt()
     {
         var blob = WriteFile("src/New.cs", 6);

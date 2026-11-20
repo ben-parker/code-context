@@ -176,7 +176,8 @@ namespace CodeContext.Core.Services
                 IReadOnlyList<DiffLineRange> added = file.Status == DiffFileStatus.Copied
                     ? [new DiffLineRange(1, Math.Max(1, nodes.Max(node => Math.Max(node.EndLine, node.StartLine)) + 1))]
                     : file.Added;
-                var mapping = DiffMapper.Map(nodes, node => IsContainer(node, walk), added, file.Removals);
+                var mapping = DiffMapper.Map(nodes, node => IsContainer(node, walk), added, file.Removals, file.CommentAdded);
+                response.IgnoredLines += mapping.IgnoredComments;
 
                 foreach (var touch in mapping.Touched)
                 {

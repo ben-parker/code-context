@@ -119,7 +119,7 @@ public partial class GraphQueryCommandTests
             + "\tmember\tlines 1\t1 dependents +2 in tests\tcsharp:A.Run()\tMethod\tsrc/A.cs:1\n"
             + "unmapped\t1/1\t4 line(s)\tnotIndexed=1\n"
             + "\tnotIndexed\tREADME.md\t-\tNo declaration.\n"
-            + "ignored\t1 whitespace-only line(s)\t0 mode-only file(s)\n"
+            + "ignored\t1 blank or comment-only line(s)\t0 mode-only file(s)\n"
             + "affected\t1/1\tdepth 3\t1 file(s)\n"
             + "testsHidden\t2\t--tests lists them\n"
             + "\t1\tCALLS\tcsharp:U()\tMethod\tsrc/U.cs:4\tvia csharp:A.Run()\tfrom csharp:A.Run()\n"

@@ -11,6 +11,10 @@ namespace CodeContext.Core.Diffs
     /// a type, a module or no declaration at all, the removed lines may have held a declaration of their own (a
     /// deletion, a rename, a changed signature), which exists only on the old side: that is reported, never mapped.
     /// Lines no declaration holds at all (imports, a namespace line, a file header) are reported too.
+    ///
+    /// Comment lines (<see cref="UnifiedDiff.IsCommentLine"/>) change a member that holds them, as any line does; where
+    /// no member holds them (a doc comment above a member, which a declaration's span leaves out, or a file header) they
+    /// change nothing and are only counted, and a removed run of comments only is no removed declaration.
     /// </summary>
     public static class DiffMapper
     {
@@ -34,6 +38,9 @@ namespace CodeContext.Core.Diffs
             public List<Touch> Touched { get; } = new();
             public List<DiffLineRange> Outside { get; } = new();
             public List<RemovedBetween> RemovedBetween { get; } = new();
+
+            /// <summary>Comment lines no member holds, added or removed: counted, not mapped.</summary>
+            public int IgnoredComments { get; set; }
         }
 
         private sealed class Group
@@ -50,10 +57,10 @@ namespace CodeContext.Core.Diffs
 
         /// <param name="nodes">Every node of the index in the file.</param>
         /// <param name="isContainer">Whether a node holds declarations (a type, a module): a removal between its members is not mapped.</param>
-        /// <param name="added">Changed new-side lines; <paramref name="removals"/> the removed runs.</param>
+        /// <param name="added">Changed new-side lines; <paramref name="comments"/> changed comment lines; <paramref name="removals"/> the removed runs.</param>
         public static Result Map(
             IReadOnlyList<CodeNode> nodes, Func<CodeNode, bool> isContainer,
-            IReadOnlyList<DiffLineRange> added, IReadOnlyList<DiffRemoval> removals)
+            IReadOnlyList<DiffLineRange> added, IReadOnlyList<DiffRemoval> removals, IReadOnlyList<DiffLineRange>? comments = null)
         {
             var result = new Result();
             var groups = Groups(nodes);
@@ -74,6 +81,23 @@ namespace CodeContext.Core.Diffs
                 foreach (var outside in Uncovered(roots, range.Start, range.End)) Merge(result.Outside, outside);
             }
 
+            // A comment line is a member's when a member is innermost there; otherwise it changes nothing.
+            foreach (var range in comments ?? [])
+            {
+                for (var line = range.Start; line <= range.End; line++)
+                {
+                    var member = false;
+                    foreach (var group in groups)
+                    {
+                        if (line < group.Start || line > group.End || group.Nodes.Exists(node => isContainer(node))) continue;
+                        if (Owned(group, line, line).Count == 0) continue;
+                        Merge(TouchOf(group, result).Lines, new DiffLineRange(line, line));
+                        member = true;
+                    }
+                    if (!member) result.IgnoredComments++;
+                }
+            }
+
             foreach (var removal in removals)
             {
                 // The innermost declaration holding the new lines on both sides of the block.
@@ -92,6 +116,11 @@ namespace CodeContext.Core.Diffs
                 if (around is not null && !around.Nodes.Exists(node => isContainer(node)))
                 {
                     TouchOf(around, result).RemovedLines += removal.Old.Count;
+                    continue;
+                }
+                if (removal.CommentsOnly)
+                {
+                    result.IgnoredComments += removal.Old.Count;
                     continue;
                 }
                 result.RemovedBetween.Add(new RemovedBetween(removal.Old, around?.Nodes));
