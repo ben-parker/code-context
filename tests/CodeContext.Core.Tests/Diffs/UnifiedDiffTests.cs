@@ -63,7 +63,7 @@ public class UnifiedDiffTests
     [InlineData(" * closes */", true)]
     [InlineData("/*/", true)]
     public void ACommentLine_IsToldApartByItsStart(string line, bool comment)
-        => Assert.Equal(comment, UnifiedDiff.IsCommentLine(line));
+        => Assert.Equal(comment, SourceLines.IsCommentLine(line));
 
     [Theory]
     [InlineData("using System;", true)]
@@ -80,7 +80,7 @@ public class UnifiedDiffTests
     [InlineData("[assembly: InternalsVisibleTo(\"Tests\")]", false)]
     [InlineData("#define TRACE", false)]
     public void AFileScopedDirective_IsToldApartFromWhatBindsBeyondTheFile(string line, bool scoped)
-        => Assert.Equal(scoped, UnifiedDiff.IsFileScopedDirective(line));
+        => Assert.Equal(scoped, SourceLines.IsFileScopedDirective(line));
 
     [Fact]
     public void AddedCommentLines_AreKeptApart_AndARemovedRunOfCommentsIsMarked()

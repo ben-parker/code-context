@@ -15,7 +15,7 @@ namespace CodeContext.Core.Diffs
     /// Removed lines that are not all blank: <see cref="Old"/> on the old side, and the new-side lines around the change
     /// block they belong to: <see cref="NewBefore"/> is the last new-side line before it (0 at the top of the file) and
     /// <see cref="NewAfter"/> the first after it, past any lines the block adds. <see cref="CommentsOnly"/> when every
-    /// removed line that is not blank is a comment line (see <see cref="UnifiedDiff.IsCommentLine"/>).
+    /// removed line that is not blank is a comment line (see <see cref="SourceLines.IsCommentLine"/>).
     /// </summary>
     public readonly record struct DiffRemoval(DiffLineRange Old, int NewBefore, int NewAfter, bool CommentsOnly = false);
 
@@ -53,14 +53,14 @@ namespace CodeContext.Core.Diffs
 
         /// <summary>
         /// Added comment lines that open or close a block comment whose other end is not among the lines changed with
-        /// them: the unchanged lines next to them were commented out or back in (see <see cref="UnifiedDiff.IsCommentLine"/>).
+        /// them: the unchanged lines next to them were commented out or back in (see <see cref="SourceLines.IsCommentLine"/>).
         /// </summary>
         public List<DiffLineRange> CommentBoundaries { get; } = new();
 
         /// <summary>
         /// In an added file, the added lines among <see cref="Added"/> whose effect stays in the file: a <c>using</c>
         /// directive that is not <c>global</c>, a namespace line, a lone brace, <c>#nullable</c> or <c>#pragma warning</c>
-        /// (see <see cref="UnifiedDiff.IsFileScopedDirective"/>).
+        /// (see <see cref="SourceLines.IsFileScopedDirective"/>).
         /// </summary>
         public List<DiffLineRange> FileScopedDirectives { get; } = new();
         public List<DiffRemoval> Removals { get; } = new();
@@ -86,7 +86,7 @@ namespace CodeContext.Core.Diffs
     /// garbled diff is refused rather than read as a smaller change. Text outside file headers and hunks (a commit
     /// message, a mail signature) is skipped. Nothing here touches the disk or runs anything.
     /// </summary>
-    public static partial class UnifiedDiff
+    public static class UnifiedDiff
     {
         public const int MaxLength = 16 * 1024 * 1024;
         public const int MaxFiles = 10_000;
@@ -94,46 +94,6 @@ namespace CodeContext.Core.Diffs
 
         /// <summary>The largest line number a hunk may name.</summary>
         public const int MaxLine = 100_000_000;
-
-        /// <summary>
-        /// Whether a line holds only comments in the C-family syntax every bundled worker reads: it starts, after
-        /// whitespace, with <c>//</c>, <c>/*</c>, <c>*/</c> or a block comment's <c>*</c> (followed by a space or nothing),
-        /// and where a block comment ends on the line nothing but comments follows it (<c>/* note */ int x;</c> is code);
-        /// or it is a <c>#region</c>/<c>#endregion</c> line. Lexical only: a line inside a string, or <c>* b</c>
-        /// continuing an expression, reads as a comment too, so this is trusted only where no member holds the line.
-        /// </summary>
-        public static bool IsCommentLine(ReadOnlySpan<char> line)
-        {
-            var text = line.Trim();
-            if (text.StartsWith("#region") || text.StartsWith("#endregion")) return true;
-            while (true)
-            {
-                if (text.StartsWith("//")) return true;
-                int from;
-                if (text.StartsWith("/*")) from = 2;
-                else if (text.StartsWith("*/")) from = 0;
-                else if (text.Length > 0 && text[0] == '*' && (text.Length == 1 || text[1] == ' ' || text[1] == '\t')) from = 1;
-                else return false;
-                var close = text[from..].IndexOf("*/");
-                if (close < 0) return true;
-                text = text[(from + close + 2)..].TrimStart();
-                if (text.IsEmpty) return true;
-                // What follows the end of a block comment must open another comment.
-                if (!text.StartsWith("//") && !text.StartsWith("/*")) return false;
-            }
-        }
-
-        /// <summary>
-        /// Whether a C# line only directs how its own file binds: <c>using N;</c>, <c>using static N;</c> or
-        /// <c>using A = N;</c> (not <c>global using</c>, which binds the whole project), <c>namespace N</c> (with <c>;</c>
-        /// or <c>{</c>), a lone <c>{</c> or <c>}</c>, <c>#nullable</c> or <c>#pragma warning</c>. Lexical.
-        /// </summary>
-        public static bool IsFileScopedDirective(ReadOnlySpan<char> line) => FileScopedDirective().IsMatch(line);
-
-        [System.Text.RegularExpressions.GeneratedRegex(
-            @"^\s*(using\s+(static\s+)?[A-Za-z_@][\w.@]*(\s*=\s*[\w.@<>,\s]+)?\s*;|namespace\s+[A-Za-z_@][\w.@]*\s*[;{]?|[{}]|#nullable\b.*|#pragma\s+warning\b.*)\s*(//.*)?$",
-            System.Text.RegularExpressions.RegexOptions.CultureInvariant)]
-        private static partial System.Text.RegularExpressions.Regex FileScopedDirective();
 
         /// <summary>Parses <paramref name="text"/>; throws <see cref="ArgumentException"/> saying where and why it is refused.</summary>
         public static List<DiffFile> Parse(string? text)
@@ -436,7 +396,7 @@ namespace CodeContext.Core.Diffs
                             if (removedStart == 0) removedStart = nextOld;
                             removedEnd = nextOld;
                             if (IsBlank(line)) removedBlank++;
-                            else if (IsCommentLine(line.AsSpan(1)))
+                            else if (SourceLines.IsCommentLine(line.AsSpan(1)))
                             {
                                 removedComment = true;
                                 removedMarks.Follow(line.AsSpan(1));
@@ -455,7 +415,7 @@ namespace CodeContext.Core.Diffs
                                 file.IgnoredLines++;
                                 CloseAdded();
                             }
-                            else if (IsCommentLine(line.AsSpan(1)))
+                            else if (SourceLines.IsCommentLine(line.AsSpan(1)))
                             {
                                 CloseCode();
                                 if (commentStart == 0) commentStart = nextNew;
@@ -465,7 +425,7 @@ namespace CodeContext.Core.Diffs
                             {
                                 CloseComments();
                                 if (addStart == 0) addStart = nextNew;
-                                if (file.Status == DiffFileStatus.Added && IsFileScopedDirective(line.AsSpan(1)))
+                                if (file.Status == DiffFileStatus.Added && SourceLines.IsFileScopedDirective(line.AsSpan(1)))
                                     DiffMapper.Merge(file.FileScopedDirectives, new DiffLineRange(nextNew, nextNew));
                             }
                             newLeft--;
@@ -532,35 +492,6 @@ namespace CodeContext.Core.Diffs
                     blockNewBefore = -1;
                     removedStart = removedEnd = removedBlank = 0;
                     removedCode = removedComment = false;
-                }
-            }
-
-            /// <summary>
-            /// Where a run of comment lines leaves a block comment, read from outside one: whether one is open at its end,
-            /// and how many <c>*/</c> it holds that close a comment it did not open. Lexical, as <see cref="IsCommentLine"/>.
-            /// </summary>
-            private record struct CommentMarks(bool Open, int StrayCloses)
-            {
-                /// <summary>Reads one comment line; true when it holds a block-comment marker.</summary>
-                public bool Follow(ReadOnlySpan<char> text)
-                {
-                    var marked = false;
-                    for (var i = 0; i + 1 < text.Length; i++)
-                    {
-                        var pair = (text[i], text[i + 1]);
-                        if (Open)
-                        {
-                            if (pair is not ('*', '/')) continue;
-                            Open = false;
-                        }
-                        else if (pair is ('/', '/')) break;
-                        else if (pair is ('/', '*')) Open = true;
-                        else if (pair is ('*', '/')) StrayCloses++;
-                        else continue;
-                        marked = true;
-                        i++;
-                    }
-                    return marked;
                 }
             }
 

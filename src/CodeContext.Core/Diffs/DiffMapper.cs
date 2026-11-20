@@ -12,7 +12,7 @@ namespace CodeContext.Core.Diffs
     /// deletion, a rename, a changed signature), which exists only on the old side: that is reported, never mapped.
     /// Lines no declaration holds at all (imports, a namespace line, a file header) are reported too.
     ///
-    /// Comment lines (<see cref="UnifiedDiff.IsCommentLine"/>) change a member that holds them, as any line does; where
+    /// Comment lines (<see cref="SourceLines.IsCommentLine"/>) change a member that holds them, as any line does; where
     /// no member holds them (a doc comment above a member, which a declaration's span leaves out, or a file header) they
     /// change nothing and are only counted, and a removed run of comments only is no removed declaration. A comment line
     /// that opens or closes a block comment around unchanged lines (<see cref="DiffFile.CommentBoundaries"/>) is the
@@ -240,7 +240,7 @@ namespace CodeContext.Core.Diffs
                 var quiet = new bool[count + 2];
                 for (var i = 1; i <= count; i++)
                 {
-                    _comment[i] = UnifiedDiff.IsCommentLine(lines[i - 1]);
+                    _comment[i] = SourceLines.IsCommentLine(lines[i - 1]);
                     quiet[i] = _comment[i] || string.IsNullOrWhiteSpace(lines[i - 1]);
                 }
                 for (var i = 1; i <= count; i++) _runStart[i] = quiet[i] ? (quiet[i - 1] ? _runStart[i - 1] : i) : i + 1;
