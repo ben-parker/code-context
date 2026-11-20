@@ -151,6 +151,26 @@ public class DiffMapperTests
             Assert.Equal(expected.Keys, actual.Keys);
             foreach (var (id, lines) in expected) Assert.Equal(lines.Order(), actual[id]);
             Assert.Equal(outside, result.Outside.SelectMany(range => Enumerable.Range(range.Start, range.Count)));
+
+            // The same lines as comment lines, some marked as block-comment boundaries, over a file of random comment,
+            // blank and code lines (or none to read): each lands in exactly one place.
+            string[] kinds = ["// c", "", "code();", "/* open", " * inside", " */", "#region r"];
+            var file = random.Next(5) == 0 ? null : CommentRuns.Of(Enumerable.Range(0, 130).Select(_ => kinds[random.Next(kinds.Length)]).ToList());
+            var boundaries = added.Where(_ => random.Next(4) == 0).Select(range => new DiffLineRange(range.Start, range.Start)).ToList();
+            var asComments = DiffMapper.Map(nodes, Container, [], [], added, boundaries, readComments: () => file);
+
+            var total = added.Sum(range => range.Count);
+            var placed = asComments.Touched.SelectMany(touch => touch.Lines).Concat(asComments.Outside).Concat(asComments.CommentBoundaries)
+                .SelectMany(range => Enumerable.Range(range.Start, range.Count)).ToList();
+            var mapped = asComments.Touched.SelectMany(touch => touch.Lines).Concat(asComments.Outside)
+                .SelectMany(range => Enumerable.Range(range.Start, range.Count)).ToHashSet();
+            var reported = asComments.CommentBoundaries.SelectMany(range => Enumerable.Range(range.Start, range.Count)).ToHashSet();
+            Assert.Empty(mapped.Intersect(reported));
+            Assert.Equal(total, mapped.Count + reported.Count + asComments.IgnoredComments);
+            // A member's own line is the member's whatever the file shows, and without the file nothing is ignored.
+            Assert.All(placed, line => Assert.InRange(line, 1, 130));
+            if (file is null) Assert.Equal(0, asComments.IgnoredComments);
+            Assert.All(reported, line => Assert.Contains(new DiffLineRange(line, line), boundaries));
         }
     }
 }
