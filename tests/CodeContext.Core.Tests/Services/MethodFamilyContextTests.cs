@@ -124,7 +124,7 @@ public class MethodFamilyContextTests
             "csharp:Example.Base.Save()", depth: 1, maxRelationships: 10)).Matches).Relationships!;
         var caller = Assert.Single(relationships.UsedBy!);
         Assert.Equal("csharp:Example.Derived.Save()", caller.Identifier);
-        Assert.Equal(["base"], caller.Bindings);
+        Assert.Equal(["overridden"], caller.Bindings);
     }
 
     [Fact]
@@ -158,6 +158,10 @@ public class MethodFamilyContextTests
             "csharp:Example.Folder.Validate()", depth: 1, maxRelationships: 10)).Matches).Relationships!;
         Assert.Equal(["csharp:Example.AggregateFolder.Validate()", "csharp:Example.Refresh()"],
             named.UsedBy!.Select(node => node.Identifier).Order());
+        // Bindings name the role of the method the call names, not how the call binds: the call that
+        // dispatches and the base call both name an overridden method. Only where each is listed differs.
+        Assert.All(named.UsedBy!, node => Assert.Equal(["overridden"], node.Bindings));
+        Assert.Equal(["overridden"], Assert.Single(sibling.UsedBy!).Bindings);
     }
 
     [Fact]

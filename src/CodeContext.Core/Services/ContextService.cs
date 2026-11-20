@@ -736,14 +736,16 @@ namespace CodeContext.Core.Services
                     var familyEdges = (await _edgeRepository.GetBySourceIdAsync(familyId))
                         .Concat(await _edgeRepository.GetByTargetIdAsync(familyId))
                         .Where(edge => edge.Type is not null && MethodFamilyEdgeKinds.Contains(edge.Type));
+                    // The role of the member a call names, not how the call binds: a base.M() or super.m() call
+                    // names an overridden member too, and differs only in being listed for that member alone.
                     var label = "exact";
                     foreach (var edge in familyEdges)
                     {
                         if (edge.Type == "IMPLEMENTS_MEMBER")
                             label = edge.TargetId == familyId ? "interface" : "implementation";
                         else if (edge.Type == "OVERRIDES_MEMBER")
-                            label = edge.TargetId == familyId ? "base" : "implementation";
-                        if (label is "interface" or "base") break;
+                            label = edge.TargetId == familyId ? "overridden" : "implementation";
+                        if (label is "interface" or "overridden") break;
                     }
                     bindingByTarget[familyId] = label;
                 }

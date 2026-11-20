@@ -79,8 +79,22 @@ Reading results:
 - `uses` is the selected symbol's own outgoing behavior; sibling implementations do
   not lend it theirs.
 - Method `usedBy` unifies statically known interface, implementation, and override
-  callers; `bindings` identifies the called family role. This is potential
+  callers: a call counts for every member it may dispatch to. This is potential
   dispatch, not runtime certainty.
+- `bindings` (in `--json` only; the text output omits it) gives, per caller, the role
+  of the family member its call sites name. It says what the call names, never how the
+  call binds or where it lands at run time:
+  - `interface`: an interface member; the call may land on any implementation.
+  - `overridden`: a method that other methods override. An ordinary call to it may
+    dispatch to any override; it does not mean a `base.`/`super.` call.
+  - `implementation`: a member that implements or overrides another and is not itself
+    overridden.
+  - `exact`: a method with no implementation or override relation.
+- A call written `base.M()` (C#) or `super.m()` (TypeScript) is bound to the method it
+  names, so it is listed only in that method's `usedBy`, never in an override's. No
+  field marks it: where the named method is overridden it carries `overridden` like
+  any other call to it. To tell the two apart, read the call site (`lines` in
+  `--json`).
 - `fileDependencies` / `fileDependents` aggregate resolved semantic edges crossing
   the selected file, excluding unresolved, same-file, and proximity-only links.
   They describe the whole file named after `of`, not the queried member: a file
