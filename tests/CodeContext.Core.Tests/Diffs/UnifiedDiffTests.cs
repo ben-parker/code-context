@@ -382,6 +382,8 @@ public class UnifiedDiffTests
     [InlineData("a header that does not close", "--- a/a.cs\n+++ b/a.cs\n@@ -1 +1\n-a\n+b\n", "does not close")]
     [InlineData("a header with letters", "--- a/a.cs\n+++ b/a.cs\n@@ -x,1 +1 @@\n-a\n+b\n", "is not '@@")]
     [InlineData("a header past the largest line", "--- a/a.cs\n+++ b/a.cs\n@@ -1 +2147483647,2 @@\n-a\n+b\n", "is not '@@")]
+    [InlineData("an old side starting at line 0 with lines", "--- a/a.cs\n+++ b/a.cs\n@@ -0,1 +1,0 @@\n-a\n", "is not '@@")]
+    [InlineData("a new side starting at line 0 with lines", "--- a/a.cs\n+++ b/a.cs\n@@ -1,0 +0 @@\n+a\n", "is not '@@")]
     [InlineData("more added lines than counted", "--- a/a.cs\n+++ b/a.cs\n@@ -1,1 +1,1 @@\n+a\n+b\n", "beyond the hunk's new count")]
     [InlineData("an unclosed quoted path", "--- \"a/a.cs\n+++ b/a.cs\n@@ -1 +1 @@\n-a\n+b\n", "no closing quote")]
     [InlineData("a blob id that is not hexadecimal", "diff --git a/a.cs b/a.cs\nindex xyz1234..2222222\n--- a/a.cs\n+++ b/a.cs\n@@ -1 +1 @@\n-a\n+b\n", "not hexadecimal")]

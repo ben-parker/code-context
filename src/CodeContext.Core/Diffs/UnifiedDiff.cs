@@ -545,7 +545,8 @@ namespace CodeContext.Core.Diffs
                 var startText = comma < 0 ? value : value[..comma];
                 if (!int.TryParse(startText, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out start)) return false;
                 if (comma >= 0 && !int.TryParse(value[(comma + 1)..], System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out count)) return false;
-                return start <= MaxLine && count <= MaxLine && (long)start + count <= MaxLine;
+                // Line 0 is only where a side with no lines starts (a new or deleted file); lines there do not exist.
+                return start <= MaxLine && count <= MaxLine && (long)start + count <= MaxLine && (start > 0 || count == 0);
             }
 
             /// <summary>
