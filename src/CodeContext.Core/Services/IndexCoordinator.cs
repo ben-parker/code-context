@@ -151,17 +151,24 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator, IIn
     }
 
     /// <summary>
-    /// When the last read of every file that finished began: a scan, or a batch that took every change notified
-    /// before it began. A file whose last change is later may be held as it was. A refresh of one file, or a batch
-    /// with notifications still queued behind it, does not move it. A change the watcher has not yet delivered is not
+    /// When the last read of every file that finished began (less <see cref="FileTimeCoarseness"/>): a scan, or a
+    /// batch that took every change notified before it began. A file whose last change is later may be held as it was.
+    /// A refresh of one file, a batch with notifications still queued behind it, and a batch that failed or could not
+    /// list a changed directory do not move it. A change the watcher has not yet delivered is not
     /// seen (the window is the watcher's own latency).
     /// </summary>
     public DateTime? FilesReadAsOfUtc
         => Volatile.Read(ref _filesReadAsOfTicks) is var ticks and > 0 ? new DateTime(ticks, DateTimeKind.Utc) : null;
 
+    /// <summary>
+    /// How far behind this process's clock a file system may stamp a change: it reads a clock that moves once a timer
+    /// tick (up to 10 ms on Linux), so a file changed just after a read began can carry a time just before it.
+    /// </summary>
+    internal static readonly TimeSpan FileTimeCoarseness = TimeSpan.FromMilliseconds(20);
+
     private void FilesReadAsOf(DateTime startedUtc)
     {
-        var ticks = startedUtc.Ticks;
+        var ticks = (startedUtc - FileTimeCoarseness).Ticks;
         long current;
         do
         {
@@ -556,6 +563,7 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator, IIn
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to reconcile {Count} changed directories.", subtrees.Count);
+                tookEveryChange = false;
             }
         }
 

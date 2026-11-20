@@ -127,6 +127,84 @@ namespace CodeContext.Core.Tests.Services
         }
 
         [Fact]
+        public async Task FilesReadAsOf_DoesNotMoveWithABatchThatLeftChangesQueuedBehindIt()
+        {
+            var afterStartup = _coordinator.FilesReadAsOfUtc;
+            var blocker = Path.Combine(_tempDir, "Blocker.cs");
+            var first = Path.Combine(_tempDir, "First.cs");
+            var refreshed = Path.Combine(_tempDir, "Refreshed.cs");
+            var behind = Path.Combine(_tempDir, "Behind.cs");
+            var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            DateTime? afterFirstBatch = null;
+            _graphUpdateService
+                .ProcessFileChangesAsync(Arg.Any<IReadOnlyList<FileChange>>(), Arg.Any<CancellationToken>())
+                .Returns(async callInfo =>
+                {
+                    var batch = callInfo.ArgAt<IReadOnlyList<FileChange>>(0);
+                    _batches.Enqueue(batch);
+                    if (batch.Any(change => change.Path == blocker)) await gate.Task;
+                    // The refresh runs after the batch that held First and before the one that holds Behind.
+                    if (batch.Any(change => change.Path == refreshed)) afterFirstBatch = _coordinator.FilesReadAsOfUtc ?? DateTime.MinValue;
+                });
+
+            // While the loop is held, a change, a refresh (which ends the batch the change is in) and a change behind it.
+            var holding = _coordinator.RefreshFileAsync(blocker);
+            await WaitForAsync(() => AllProcessedChanges().Any(c => c.Path == blocker), "the loop to be held");
+            await _coordinator.NotifyFileChangedAsync(first, FileChangeType.Changed);
+            var refresh = _coordinator.RefreshFileAsync(refreshed);
+            await _coordinator.NotifyFileChangedAsync(behind, FileChangeType.Changed);
+            gate.SetResult();
+            await holding;
+            await refresh;
+
+            // The batch that held First did not take Behind: the files are not all read as of its start.
+            Assert.Contains(_batches, batch => batch.Count == 1 && batch[0].Path == first);
+            Assert.Equal(afterStartup, afterFirstBatch);
+            await WaitForAsync(() => AllProcessedChanges().Any(c => c.Path == behind), "the change behind to be processed");
+            await WaitForAsync(() => _coordinator.FilesReadAsOfUtc > afterStartup, "the batch that took every change to move the time");
+        }
+
+        [Fact]
+        public async Task FilesReadAsOf_DoesNotMoveWithABatchWhoseChangedDirectoriesCouldNotBeRead()
+        {
+            var afterStartup = _coordinator.FilesReadAsOfUtc;
+            _graphUpdateService.ExpandSubtreesAsync(Arg.Any<IReadOnlyCollection<string>>(), Arg.Any<CancellationToken>())
+                .ThrowsAsync(new IOException("the directory cannot be listed"));
+            var path = Path.Combine(_tempDir, "Changed.cs");
+
+            await _coordinator.NotifySubtreeChangedAsync(Path.Combine(_tempDir, "moved"));
+            await _coordinator.NotifyFileChangedAsync(path, FileChangeType.Changed);
+            await WaitForAsync(() => AllProcessedChanges().Any(c => c.Path == path), "the change to be processed");
+            await WaitForAsync(() => !_coordinator.IsBusy, "the batch to end");
+
+            Assert.Equal(afterStartup, _coordinator.FilesReadAsOfUtc);
+        }
+
+        [Fact]
+        public async Task FilesReadAsOf_IsEarlierThanTheReadBeganByTheCoarsenessOfFileTimes()
+        {
+            // A file system stamps a change with a clock that may run a tick behind the one read here: a file changed
+            // just after a batch began must not carry a time before it.
+            var path = Path.Combine(_tempDir, "Changed.cs");
+            DateTime? processingBegan = null;
+            _graphUpdateService
+                .ProcessFileChangesAsync(Arg.Any<IReadOnlyList<FileChange>>(), Arg.Any<CancellationToken>())
+                .Returns(callInfo =>
+                {
+                    processingBegan = DateTime.UtcNow;
+                    _batches.Enqueue(callInfo.ArgAt<IReadOnlyList<FileChange>>(0));
+                    return Task.CompletedTask;
+                });
+            var afterStartup = _coordinator.FilesReadAsOfUtc;
+
+            await _coordinator.NotifyFileChangedAsync(path, FileChangeType.Changed);
+            await WaitForAsync(() => _coordinator.FilesReadAsOfUtc > afterStartup, "the batch to move the time");
+
+            Assert.True(_coordinator.FilesReadAsOfUtc <= processingBegan - IndexCoordinator.FileTimeCoarseness,
+                $"{_coordinator.FilesReadAsOfUtc:O} is not {IndexCoordinator.FileTimeCoarseness.TotalMilliseconds} ms before {processingBegan:O}");
+        }
+
+        [Fact]
         public async Task FilesReadAsOf_StaysUnsetWhileNoScanHasSucceeded()
         {
             var failing = Substitute.For<IGraphUpdateService>();
