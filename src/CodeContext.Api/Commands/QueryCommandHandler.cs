@@ -637,14 +637,14 @@ public static partial class QueryCommandHandler
         }
     }
 
-    /// <summary>Why an empty answer may not mean nothing is there.</summary>
+    /// <summary>Why an answer, empty or not, may be short: a project of its worker was not fully seen.</summary>
     private static void WriteCoverage(CoverageSummary? coverage, string prefix, CacheNotice? cache, TextWriter output)
     {
         if (coverage is null) return;
         var more = coverage.IncompleteProjects - coverage.Names.Count;
         var names = string.Join(", ", coverage.Names.Select(Clean)) + (more > 0 ? $" and {more} more" : string.Empty);
         output.WriteLine(string.Format(CultureInfo.InvariantCulture, prefix, coverage.State)
-            + $"{coverage.IncompleteProjects} of {coverage.TotalProjects} projects analyzed without all they declare: {names}. "
+            + $"{coverage.IncompleteProjects} of {coverage.TotalProjects} projects not fully analyzed: {names}. "
             + "This answer may be incomplete; codecontext status has details."
             + (cache is null ? string.Empty : " Coverage is from the saved index."));
     }

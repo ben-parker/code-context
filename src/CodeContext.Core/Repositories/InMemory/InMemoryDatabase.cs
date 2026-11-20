@@ -1140,7 +1140,8 @@ namespace CodeContext.Core.Repositories.InMemory
         /// readers see were built from. A staged reconciliation's coverage is not here until it commits, and
         /// is gone with it when it rolls back.
         /// </summary>
-        internal IReadOnlyList<CodeContext.Parser.Protocol.ProjectCoverage> PublishedCoverage()
+        /// <summary>The coverage published with the shards, by parser id, in shard order (parser, then workspace).</summary>
+        internal ILookup<string, CodeContext.Parser.Protocol.ProjectCoverage> PublishedCoverage()
         {
             // One volatile read of the published annotations, no lock: a commit's build can take a while, and the
             // reference it publishes at its end is either the one read here or the next.
@@ -1148,18 +1149,15 @@ namespace CodeContext.Core.Repositories.InMemory
             var cached = _cachedCoverage;
             if (cached is not null && ReferenceEquals(cached.Annotations, annotations)) return cached.Projects;
             var projects = annotations
-                .OrderBy(annotation => annotation.Key.ParserId, StringComparer.Ordinal)
-                .ThenBy(annotation => annotation.Key.WorkspaceId, StringComparer.Ordinal)
-                .SelectMany(annotation => annotation.Value.Coverage ?? [])
-                .ToList()
-                .AsReadOnly();
+                .SelectMany(annotation => (annotation.Value.Coverage ?? []).Select(project => (annotation.Key.ParserId, project)))
+                .ToLookup(entry => entry.ParserId, entry => entry.project, StringComparer.Ordinal);
             _cachedCoverage = new CachedCoverage(annotations, projects);
             return projects;
         }
 
         private sealed record CachedCoverage(
             ImmutableSortedDictionary<ShardKey, ShardAnnotation> Annotations,
-            IReadOnlyList<CodeContext.Parser.Protocol.ProjectCoverage> Projects);
+            ILookup<string, CodeContext.Parser.Protocol.ProjectCoverage> Projects);
 
         private volatile CachedCoverage? _cachedCoverage;
 

@@ -107,7 +107,7 @@ namespace CodeContext.Core.Services
             {
                 response.DepthLimited = depthLimited;
                 (response.ExcludedBy, response.Explanation) = ExplainNoPath(request, walk, from, to, depthLimited);
-                response.Coverage = CoverageForEmptyAnswer();
+                response.Coverage = CoverageOf(from.Seeds.Concat(to.Seeds));
             }
             response.Cache = CacheAfterReads(response.Cache);
             return response;
@@ -292,8 +292,8 @@ namespace CodeContext.Core.Services
                     ? $"Only symbols in test files depend on it ({response.TestsHidden}); includeTests (--tests) lists them."
                     : $"Nothing recorded depends on it{(walk.FiltersRelations ? $" through relation={request.Relation!.Trim()}" : string.Empty)}. "
                         + "Relationships are static evidence: cross-check with rg before concluding it is unused.";
-                response.Coverage = CoverageForEmptyAnswer();
             }
+            response.Coverage = CoverageOf(seed.Seeds);
             response.Cache = CacheAfterReads(response.Cache);
             return response;
         }
@@ -337,6 +337,7 @@ namespace CodeContext.Core.Services
                 return true;
             });
             response.TotalCount = hubs.Count;
+            var listed = new List<string>();
             foreach (var hub in Leading(hubs, request.Limit, static (left, right) =>
             {
                 var order = right.Dependents.CompareTo(left.Dependents);
@@ -344,6 +345,7 @@ namespace CodeContext.Core.Services
                 return order != 0 ? order : CompareByPlace(left.Node, right.Node);
             }))
             {
+                listed.Add(hub.Node.Id);
                 var compact = ToCompact<GraphHubNode>(hub.Node);
                 compact.Dependents = hub.Dependents;
                 compact.DependentFiles = hub.DependentFiles;
@@ -362,6 +364,8 @@ namespace CodeContext.Core.Services
             {
                 response.Hint = $"None of the {considered} symbol(s) passing the filters has a recorded dependent.";
             }
+            // Dependents a project hid are missing from these counts too.
+            response.Coverage = CoverageOf(listed);
             response.Cache = CacheAfterReads(response.Cache);
             return response;
         }
@@ -493,11 +497,21 @@ namespace CodeContext.Core.Services
                 && string.Equals(left.Type, right.Type, StringComparison.Ordinal)
                 && string.Equals(left.Signature, right.Signature, StringComparison.Ordinal);
 
-        /// <summary>For an empty answer: which projects were analyzed without all they declare, if any.</summary>
-        private CoverageSummary? CoverageForEmptyAnswer()
+        /// <summary>
+        /// Which projects were not fully analyzed, if any, among those of the workers whose facts the answer is
+        /// about: the parsers that the node ids in <paramref name="about"/> start with, or every worker when it
+        /// names none (an answer of nothing). Such a project can hide users and dependents from any answer about
+        /// its worker's code, found or not, so an answer that lists some still says so.
+        /// </summary>
+        private CoverageSummary? CoverageOf(IEnumerable<string>? about = null)
         {
             if (_coverage is null) return null;
-            var projects = _coverage.GetProjects();
+            // Every worker-owned id starts with "<parserId>:".
+            var parsers = about?.Select(id => id[..Math.Max(0, id.IndexOf(':'))]).ToHashSet(StringComparer.Ordinal);
+            var projects = _coverage.GetProjectsByParser()
+                .Where(worker => parsers is not { Count: > 0 } || parsers.Contains(worker.Key))
+                .SelectMany(worker => worker)
+                .ToList();
             var incomplete = projects.Where(project => project.State != ProjectCoverageStates.Complete).ToList();
             return incomplete.Count == 0
                 ? null

@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeContext.CSharp.Worker;
 using CodeContext.Parser.Protocol;
+using CodeContext.Core.Workers;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 
@@ -565,6 +566,95 @@ public class CSharpWorkerProjectCompilationTests : IDisposable
         Assert.Equal("net10.0", coverage.TargetFramework);
         Assert.Equal(1, coverage.Files);
         Assert.Equal(0, coverage.UnresolvedNames);
+    }
+
+    /// <summary>A method body of <paramref name="count"/> calls, each to its own name.</summary>
+    private static string Calls(string prefix, int count)
+        => string.Concat(Enumerable.Range(0, count).Select(index => $"{prefix}{index}(); "));
+
+    [Fact]
+    public void AProjectThatFindsAllItDeclaresButLeavesManyNamesUnboundIsPartial()
+    {
+        // Every reference is found, so the project looks complete, but code a source generator
+        // would have written is missing: a large share of what the project says binds to nothing.
+        var result = Analyze(
+            ("App/App.csproj", Project()),
+            ("App/Code.cs", $"public partial class Code {{ public void Run() {{ {Calls("Generated", 60)} Known(); }} void Known() {{ }} }}"));
+
+        var coverage = Coverage(result, "App");
+        Assert.Equal(ProjectCoverageStates.Partial, coverage.State);
+        Assert.Null(coverage.MissingReferences);
+        Assert.Equal(60, coverage.UnresolvedNames);
+        Assert.Contains(coverage.Notes!, note => note.Contains("60 names did not bind, against 1 references that did", StringComparison.Ordinal)
+            && note.Contains("Generated0", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(49, ProjectCoverageStates.Complete)]
+    [InlineData(50, ProjectCoverageStates.Partial)]
+    public void FiftyUnboundNamesIsWhereManyStarts(int unbound, string expected)
+    {
+        var result = Analyze(
+            ("App/App.csproj", Project()),
+            ("App/Code.cs", $"public class Code {{ public void Run() {{ {Calls("Generated", unbound)} }} }}"));
+
+        Assert.Equal(expected, Coverage(result, "App").State);
+    }
+
+    [Theory]
+    // 50 unbound against 950 bound is 5.0% of the 1,000; against 951 it is just under.
+    [InlineData(950, ProjectCoverageStates.Partial)]
+    [InlineData(951, ProjectCoverageStates.Complete)]
+    public void FivePercentOfReferencesIsWhereManyStarts(int known, string expected)
+    {
+        var calls = string.Concat(Enumerable.Range(0, known).Select(_ => "Known(); "));
+        var result = Analyze(
+            ("App/App.csproj", Project()),
+            ("App/Code.cs", $"public class Code {{ public void Run() {{ {Calls("Generated", 50)} {calls} }} void Known() {{ }} }}"));
+
+        Assert.Equal(expected, Coverage(result, "App").State);
+    }
+
+    [Fact]
+    public void AnUnrestoredProjectIsNotAlsoBlamedOnGenerators()
+    {
+        // Its missing package explains its misses; the generator note would point the wrong way.
+        var result = Analyze(
+            ("App/App.csproj", Project("""<PackageReference Include="No.Such.Package" Version="1.0.0" />""")),
+            ("App/Code.cs", $"public class Code {{ public void Run() {{ {Calls("Widget", 60)} }} }}"));
+
+        var coverage = Coverage(result, "App");
+        Assert.Equal(ProjectCoverageStates.Partial, coverage.State);
+        Assert.DoesNotContain(coverage.Notes!, note => note.Contains("did not bind", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void AFewUnboundNamesAmongManyBoundLeaveAProjectComplete()
+    {
+        // The same 60 misses among 1,500 bound uses: what a restored project with a generator or
+        // two looks like, and not a reason to doubt its answers.
+        var known = string.Concat(Enumerable.Range(0, 1500).Select(_ => "Known(); "));
+        var result = Analyze(
+            ("App/App.csproj", Project()),
+            ("App/Code.cs", $"public partial class Code {{ public void Run() {{ {Calls("Generated", 60)} {known} }} void Known() {{ }} }}"));
+
+        var coverage = Coverage(result, "App");
+        Assert.Equal(ProjectCoverageStates.Complete, coverage.State);
+        Assert.Equal(60, coverage.UnresolvedNames);
+        Assert.Null(coverage.Notes);
+    }
+
+    [Fact]
+    public void ASmallProjectWithAFewUnboundNamesStaysComplete()
+    {
+        // A high share of very few names is noise, not a missing reference.
+        var result = Analyze(
+            ("App/App.csproj", Project()),
+            ("App/Code.cs", $"public class Code {{ public void Run() {{ {Calls("Generated", 10)} }} }}"));
+
+        var coverage = Coverage(result, "App");
+        Assert.Equal(ProjectCoverageStates.Complete, coverage.State);
+        Assert.Equal(10, coverage.UnresolvedNames);
     }
 
     [Fact]

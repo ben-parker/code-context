@@ -432,8 +432,8 @@ public class QueryCommandHandlerTests
     }
 
     [Theory]
-    [InlineData(false, "coverage\tpartial\t2 of 9 projects analyzed without all they declare: Game, Tools.")]
-    [InlineData(true, "Coverage (partial): 2 of 9 projects analyzed without all they declare: Game, Tools.")]
+    [InlineData(false, "coverage\tpartial\t2 of 9 projects not fully analyzed: Game, Tools.")]
+    [InlineData(true, "Coverage (partial): 2 of 9 projects not fully analyzed: Game, Tools.")]
     public async Task AMissingResultSaysWhatWasNotSeen(bool human, string expected)
     {
         var response = JsonSerializer.Serialize(new

@@ -115,10 +115,13 @@ internal sealed class GraphTestGraph
         return this;
     }
 
+    /// <summary>What the workers said they could see, for answers that report it.</summary>
+    public CodeContext.Core.Workers.IAnalysisCoverageRegistry? Coverage { get; set; }
+
     public ContextService Build()
     {
         Assert.True(Database.TryCommitGeneration(Database.LastCommittedGeneration + 1, _nodes, _edges, scope: null));
-        return Service(Database, _root, Freshness, Files, Workers, Selector);
+        return Service(Database, _root, Freshness, Files, Workers, Selector, Coverage);
     }
 
     /// <summary>The nodes and edges added so far, to commit elsewhere.</summary>
@@ -129,13 +132,15 @@ internal sealed class GraphTestGraph
 
     public static ContextService Service(InMemoryDatabase database, string root = Root, IIndexFreshness? freshness = null,
         CodeContext.Core.Repositories.IFileMetadataRepository? files = null,
-        CodeContext.Core.Workers.ILanguageWorkerService? workers = null, IRepositoryFileSelector? selector = null)
+        CodeContext.Core.Workers.ILanguageWorkerService? workers = null, IRepositoryFileSelector? selector = null,
+        CodeContext.Core.Workers.IAnalysisCoverageRegistry? coverage = null)
         => new(
             new InMemoryNodeRepository(database),
             new InMemoryEdgeRepository(database),
             files ?? new CodeContext.Core.Repositories.InMemoryFileMetadataRepository(),
             Options.Create(new CodeContextOptions { RootPath = root }),
             workerService: workers,
+            coverage: coverage,
             freshness: freshness,
             fileSelector: selector);
 }

@@ -53,10 +53,10 @@ public class CacheOrderingTests
 
         public void Report(string parserId, string workspaceId, IReadOnlyList<ProjectCoverage> projects) => inner.Report(parserId, workspaceId, projects);
 
-        public IReadOnlyList<ProjectCoverage> GetProjects()
+        public ILookup<string, ProjectCoverage> GetProjectsByParser()
         {
             if (Interlocked.Increment(ref _reads) == 1) BeforeFirstRead?.Invoke();
-            return inner.GetProjects();
+            return inner.GetProjectsByParser();
         }
     }
 

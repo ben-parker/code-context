@@ -14,7 +14,18 @@ public interface IAnalysisCoverageRegistry
 {
     void Report(string parserId, string workspaceId, IReadOnlyList<ProjectCoverage> projects);
 
-    IReadOnlyList<ProjectCoverage> GetProjects();
+    /// <summary>
+    /// Every project, by the parser that reported it, in parser then workspace order. A worker's gaps can
+    /// only hide that worker's facts, so an answer about one language is judged against its own projects.
+    /// </summary>
+    ILookup<string, ProjectCoverage> GetProjectsByParser();
+}
+
+public static class AnalysisCoverageRegistryExtensions
+{
+    /// <summary>Every project, in parser then workspace order.</summary>
+    public static IReadOnlyList<ProjectCoverage> GetProjects(this IAnalysisCoverageRegistry registry)
+        => registry.GetProjectsByParser().SelectMany(projects => projects).ToList();
 }
 
 /// <summary>
@@ -27,13 +38,13 @@ public interface IAnalysisCoverageRegistry
 public sealed class AnalysisCoverageRegistry : IAnalysisCoverageRegistry
 {
     private readonly ConcurrentDictionary<(string ParserId, string WorkspaceId), IReadOnlyList<ProjectCoverage>> _reports = new();
-    private readonly Func<IReadOnlyList<ProjectCoverage>>? _published;
+    private readonly Func<ILookup<string, ProjectCoverage>>? _published;
 
     public AnalysisCoverageRegistry()
     {
     }
 
-    internal AnalysisCoverageRegistry(Func<IReadOnlyList<ProjectCoverage>> published) => _published = published;
+    internal AnalysisCoverageRegistry(Func<ILookup<string, ProjectCoverage>> published) => _published = published;
 
     /// <summary>The registry for a host's store: read through the published annotations when it is the in-memory store.</summary>
     public static IAnalysisCoverageRegistry ForStore(IRepositoryFactory factory)
@@ -44,10 +55,10 @@ public sealed class AnalysisCoverageRegistry : IAnalysisCoverageRegistry
     public void Report(string parserId, string workspaceId, IReadOnlyList<ProjectCoverage> projects)
         => _reports[(parserId, workspaceId)] = projects;
 
-    public IReadOnlyList<ProjectCoverage> GetProjects()
+    public ILookup<string, ProjectCoverage> GetProjectsByParser()
         => _published?.Invoke()
             ?? _reports.OrderBy(report => report.Key.ParserId, StringComparer.Ordinal)
                 .ThenBy(report => report.Key.WorkspaceId, StringComparer.Ordinal)
-                .SelectMany(report => report.Value)
-                .ToList();
+                .SelectMany(report => report.Value.Select(project => (report.Key.ParserId, project)))
+                .ToLookup(entry => entry.ParserId, entry => entry.project, StringComparer.Ordinal);
 }

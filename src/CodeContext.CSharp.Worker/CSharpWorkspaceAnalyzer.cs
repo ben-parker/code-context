@@ -53,6 +53,18 @@ public sealed class CSharpWorkspaceAnalyzer
 
     private const int MaxCommonUnresolvedNames = 5;
 
+    /// <summary>
+    /// A project whose names fail to bind this often is missing something even when every
+    /// reference it declares was found: at least this many unbound names, and at least
+    /// <see cref="ManyUnboundShare"/> of its unbound names and located references together.
+    /// A restored repository with a source generator or two stays well under it (this one:
+    /// 0.3% to 3.7% per project).
+    /// </summary>
+    private const int ManyUnboundMinimum = 50;
+
+    /// <inheritdoc cref="ManyUnboundMinimum"/>
+    private const double ManyUnboundShare = 0.05;
+
     /// <summary>Binding parallelizes well to here; past it, threads mostly wait on each other.</summary>
     private const int MaxWalkThreads = 8;
 
@@ -994,8 +1006,11 @@ public sealed class CSharpWorkspaceAnalyzer
     {
         var files = _owners.Values.GroupBy(unit => unit).ToDictionary(group => group.Key, group => group.Count());
         var unresolved = new Dictionary<ProjectCompilation, Dictionary<string, int>>();
+        // What the misses are weighed against: located edges, the references that bound, to project code or a library.
+        var bound = new Dictionary<ProjectCompilation, int>();
         foreach (var walked in _walked.Values)
         {
+            bound[walked.Unit] = bound.GetValueOrDefault(walked.Unit) + walked.Edges.Count(edge => edge.Line >= 0);
             if (walked.UnresolvedNames is not { } own) continue;
             if (!unresolved.TryGetValue(walked.Unit, out var names))
             {
@@ -1040,15 +1055,29 @@ public sealed class CSharpWorkspaceAnalyzer
                     + "and only the owning project's view of them is indexed.");
             }
 
+            var state = project.State switch
+            {
+                ProjectCoverageState.Complete => ProjectCoverageStates.Complete,
+                ProjectCoverageState.Partial => ProjectCoverageStates.Partial,
+                _ => ProjectCoverageStates.Fallback,
+            };
+            var references = bound.GetValueOrDefault(unit);
+            if (state == ProjectCoverageStates.Complete
+                && total >= ManyUnboundMinimum && total >= ManyUnboundShare * (total + references))
+            {
+                // Finding everything it declares is not seeing everything: code a source generator
+                // writes, or a reference the project never declares, binds to nothing. A project already
+                // partial has its missing references to explain its misses.
+                state = ProjectCoverageStates.Partial;
+                projectNotes.Add($"{total} names did not bind, against {references} references that did "
+                    + $"(most often {string.Join(", ", common!)}). Code a source generator writes, or a reference "
+                    + "the project does not declare, looks like this; uses through those names are missing from its answers.");
+            }
+
             coverage.Add(new ProjectCoverage(
                 project.Name,
                 project.RelativePath,
-                project.State switch
-                {
-                    ProjectCoverageState.Complete => ProjectCoverageStates.Complete,
-                    ProjectCoverageState.Partial => ProjectCoverageStates.Partial,
-                    _ => ProjectCoverageStates.Fallback,
-                },
+                state,
                 count,
                 project.TargetFramework,
                 NullIfEmpty(project.InactiveTargetFrameworks),
