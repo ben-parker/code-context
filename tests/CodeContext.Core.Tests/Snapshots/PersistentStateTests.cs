@@ -464,6 +464,98 @@ public sealed class PersistentStateTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task TouchedWithTheSameContent_AStopWhileTheLoadedSnapshotIsChecked_StillWritesTheStore()
+    {
+        // The check of the loaded snapshot runs off the coordinator after the verifying scan; a host stopped while it
+        // runs (a short-lived instance, or a slow disk) must still write the store it found older than its files.
+        await FirstRunAsync();
+        AgeTheFiles();
+        File.SetLastWriteTimeUtc(Path.Combine(Root, "a.fake"), DateTime.UtcNow);
+        using var checking = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+
+        await using (var second = Start("persistent-state", checkFileTimes: true))
+        {
+            second.BeforeFileTimeCheck = () =>
+            {
+                checking.Set();
+                release.Wait(TimeSpan.FromSeconds(30));
+            };
+            await second.StartAsync();
+            await second.WaitForAsync(() => checking.IsSet, "the check of the loaded snapshot");
+            var stop = second.StopAsync();
+            // The check finishes only once the stop is under way (or done, if the stop does not wait for it).
+            await Task.WhenAny(stop, Task.Delay(500));
+            release.Set();
+            await stop;
+            Assert.Equal(1, second.Snapshots.Status.WritesCompleted);
+        }
+        Assert.Equal(2UL, NewestSequence());
+        AgeTheFiles();
+        Assert.NotNull(OpenOneShot().Snapshot);
+    }
+
+    [Fact]
+    public async Task TouchedWithTheSameContent_AStopBeforeTheObserverSeesTheScanEnd_StillWritesTheStore()
+    {
+        // The scan's phase reads Ready before the coordinator tells the snapshot service its work ended; a stop in
+        // between must still see the verified scan and check the loaded snapshot. The observer here never arrives.
+        await FirstRunAsync();
+        AgeTheFiles();
+        File.SetLastWriteTimeUtc(Path.Combine(Root, "a.fake"), DateTime.UtcNow);
+        using var arrived = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+
+        await using (var second = Start("persistent-state", checkFileTimes: true))
+        {
+            second.Sink.OnDelta = _ =>
+            {
+                arrived.Set();
+                release.Wait(TimeSpan.FromSeconds(30));
+            };
+            await second.StartAsync();
+            await second.WaitForAsync(() => arrived.IsSet, "the verification scan's delta");
+            second.Coordinator.SetMutationObserver(() => { });
+            release.Set();
+            await second.WaitForAsync(() => second.ScanState.Phase == ScanPhase.Ready && !second.Coordinator.IsBusy, "the verification scan");
+            await second.StopAsync();
+            Assert.Equal(1, second.Snapshots.Status.WritesCompleted);
+        }
+        Assert.Equal(2UL, NewestSequence());
+        AgeTheFiles();
+        Assert.NotNull(OpenOneShot().Snapshot);
+    }
+
+    [Fact]
+    public async Task AStopWithAChangedStore_DoesNotWaitForTheCheckOfTheLoadedSnapshot()
+    {
+        // The store changed, so the stop writes it whatever the check says: a slow check must not spend the stop's
+        // budget (here 2 s, the check held for 30) and leave the change unwritten.
+        await FirstRunAsync();
+        AgeTheFiles();
+        File.WriteAllText(Path.Combine(Root, "added.fake"), "new facts");
+        using var checking = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+
+        await using (var second = Start("persistent-state",
+            settings => settings with { QuietPeriod = TimeSpan.FromHours(1), ShutdownFlushTimeout = TimeSpan.FromSeconds(2) },
+            checkFileTimes: true))
+        {
+            second.BeforeFileTimeCheck = () =>
+            {
+                checking.Set();
+                release.Wait(TimeSpan.FromSeconds(30));
+            };
+            await second.StartAsync();
+            await second.WaitForAsync(() => checking.IsSet, "the check of the loaded snapshot");
+            await second.StopAsync();
+            release.Set();
+            Assert.Equal(1, second.Snapshots.Status.WritesCompleted);
+        }
+        Assert.Equal(2UL, NewestSequence());
+    }
+
+    [Fact]
     public async Task NothingTouched_WithTheFileTimeCheck_StillWritesNothing()
     {
         await FirstRunAsync();
@@ -627,11 +719,18 @@ public sealed class PersistentStateTests : IAsyncLifetime
             Snapshots = new SnapshotService(Coordinator, Factory.Database, ScanState, settings, Startup, TimeProvider.System,
                 SnapshotLog, CacheState, Workers,
                 filesSince: checkFileTimes
-                    ? (captured, inputs, rootTicks) => SnapshotFreshness.For(options.Value, Workers, captured, inputs, rootTicks, TimeSpan.Zero)
+                    ? (captured, inputs, rootTicks) =>
+                    {
+                        BeforeFileTimeCheck?.Invoke();
+                        return SnapshotFreshness.For(options.Value, Workers, captured, inputs, rootTicks, TimeSpan.Zero);
+                    }
                     : null);
             Status = new StatusService(Factory.CreateNodeRepository(), Factory.CreateEdgeRepository(), metadata, Factory, options,
                 ScanState, Sessions, new ApiMetrics(), coverage: coverage, cacheState: CacheState);
         }
+
+        /// <summary>Runs as the host's check of the loaded snapshot against file times begins (with <c>checkFileTimes</c>).</summary>
+        public Action? BeforeFileTimeCheck { get; set; }
 
         public InMemoryRepositoryFactory Factory { get; }
         public StaticWorkerCatalog Catalog { get; }

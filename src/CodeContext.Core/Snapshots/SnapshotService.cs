@@ -217,6 +217,8 @@ namespace CodeContext.Core.Snapshots
         // Guarded by _gate. A snapshot was loaded and not yet checked against the files: checked off the start-up path,
         // in the background, once the scan has verified the store.
         private (DateTime CapturedUtc, long RootTimeTicks)? _checkLoaded;
+        // Guarded by _gate. That check once started, so that a stop waits for its answer before its final capture.
+        private Task _loadedCheck = Task.CompletedTask;
         // The root's time once the cache directory existed, recorded in every snapshot (SnapshotHeader.RootTimeTicks).
         private long _rootTimeTicks;
 
@@ -252,7 +254,7 @@ namespace CodeContext.Core.Snapshots
         /// Without this a file touched with the same content (a checkout and back) would keep every later one-shot query
         /// from using the snapshot, since an unchanged store is never rewritten. A time in the future is not a reason:
         /// no snapshot written now would be newer. Run in the background after the verifying scan, so a cached start
-        /// does not walk the tree before it scans.
+        /// does not walk the tree before it scans; a stop waits for it (<see cref="StopAsync"/>). Called under _gate.
         /// </summary>
         private void CheckLoadedInBackground(DateTime capturedUtc, long rootTimeTicks, SnapshotView view)
         {
@@ -269,7 +271,7 @@ namespace CodeContext.Core.Snapshots
                 .Select(shard => new ReportedInputs(
                     shard.Annotation!.Inputs!, ReportedInputs.ReadTime(shard.Annotation.InputsReadUtcTicks)))
                 .ToList();
-            _ = Task.Run(() =>
+            _loadedCheck = Task.Run(() =>
             {
                 try
                 {
@@ -289,7 +291,8 @@ namespace CodeContext.Core.Snapshots
             _logger.LogInformation("{Why}; the verified graph will be written again for one-shot queries.", why);
             lock (_gate)
             {
-                if (_status.Mode != SnapshotCacheMode.Writer || _stopping || !_written.SameAs(view)) return;
+                // While stopping too: the stop waits for the check and then writes what this marked.
+                if (_status.Mode != SnapshotCacheMode.Writer || !_written.SameAs(view)) return;
                 _written = SnapshotView.Empty;
                 _lastChangeAt = _time.GetUtcNow();
             }
@@ -450,18 +453,7 @@ namespace CodeContext.Core.Snapshots
                 {
                     if (_status.Mode != SnapshotCacheMode.Writer || _stopping) return;
                     var now = _time.GetUtcNow();
-                    if (_rewriteWhenVerified && _scanState.Phase == ScanPhase.Ready)
-                    {
-                        _rewriteWhenVerified = false;
-                        _checkLoaded = null;
-                        _written = SnapshotView.Empty;
-                        _lastChangeAt = now;
-                    }
-                    if (_checkLoaded is { } loaded && _scanState.Phase == ScanPhase.Ready)
-                    {
-                        _checkLoaded = null;
-                        CheckLoadedInBackground(loaded.CapturedUtc, loaded.RootTimeTicks, _written);
-                    }
+                    OnVerifiedLocked(now);
                     if (!view.SameAs(_lastSeen))
                     {
                         _lastSeen = view;
@@ -474,6 +466,28 @@ namespace CodeContext.Core.Snapshots
             catch (Exception exception)
             {
                 _logger.LogError(exception, "Snapshot scheduling failed.");
+            }
+        }
+
+        /// <summary>
+        /// Once a scan has verified the store: an unverified snapshot counts as unwritten, and a loaded one is checked
+        /// against the files. Run by the mutation observer and by a stop, which may come before the observer sees the
+        /// scan end. Called under _gate.
+        /// </summary>
+        private void OnVerifiedLocked(DateTimeOffset now)
+        {
+            if (_scanState.Phase != ScanPhase.Ready) return;
+            if (_rewriteWhenVerified)
+            {
+                _rewriteWhenVerified = false;
+                _checkLoaded = null;
+                _written = SnapshotView.Empty;
+                _lastChangeAt = now;
+            }
+            if (_checkLoaded is { } loaded)
+            {
+                _checkLoaded = null;
+                CheckLoadedInBackground(loaded.CapturedUtc, loaded.RootTimeTicks, _written);
             }
         }
 
@@ -1158,6 +1172,17 @@ namespace CodeContext.Core.Snapshots
                 // what it recorded for the final capture below, which then asks no worker to save again.
                 await requested.WaitAsync(stop).ConfigureAwait(false);
                 await inFlight.WaitAsync(stop).ConfigureAwait(false);
+                // A verifying scan that ended just before the stop may not have reached the observer yet, and the check
+                // of the loaded snapshot may still be running: both decide whether the store is written below. The check
+                // is waited for only when nothing else would write the store, so a slow one never spends the budget of
+                // a write that is due anyway.
+                Task loadedCheck;
+                lock (_gate)
+                {
+                    OnVerifiedLocked(_time.GetUtcNow());
+                    loadedCheck = _loadedCheck;
+                }
+                if (!loadedCheck.IsCompleted && Observe().SameAs(Written())) await loadedCheck.WaitAsync(stop).ConfigureAwait(false);
                 if (_scanState.Phase == ScanPhase.Scanning)
                 {
                     _logger.LogInformation("Shutting down during a scan: no final snapshot.");
