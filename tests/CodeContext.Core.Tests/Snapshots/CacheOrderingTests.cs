@@ -58,6 +58,12 @@ public class CacheOrderingTests
             if (Interlocked.Increment(ref _reads) == 1) BeforeFirstRead?.Invoke();
             return inner.GetProjects();
         }
+
+        public IReadOnlyList<KeyValuePair<string, IReadOnlyList<ProjectCoverage>>> GetProjectsByParser()
+        {
+            if (Interlocked.Increment(ref _reads) == 1) BeforeFirstRead?.Invoke();
+            return inner.GetProjectsByParser();
+        }
     }
 
     [Fact]

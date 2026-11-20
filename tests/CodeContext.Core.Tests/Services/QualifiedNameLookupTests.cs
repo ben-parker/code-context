@@ -87,6 +87,31 @@ namespace CodeContext.Core.Tests.Services
         }
 
         [Fact]
+        public async Task AnAnswerWithMatches_StillSaysAProjectWasNotFullySeen()
+        {
+            // Users in an unrestored project are missing from every answer, not only from an empty one.
+            Stub("Run", Member("csharp:App.A.Run()", "Run"), Member("csharp:App.B.Run()", "Run"));
+
+            var response = await WithCoverage(Complete, Partial).GetCompactContextAsync("Run");
+
+            Assert.Equal(2, response.TotalMatches);
+            Assert.Equal("partial", response.Coverage!.State);
+            Assert.Equal(["B"], response.Coverage.Names);
+        }
+
+        [Fact]
+        public async Task AnotherWorkersIncompleteProject_IsNotThisAnswersDoubt()
+        {
+            // A C# project's gaps cannot hide users of TypeScript code, so a TypeScript answer stays quiet.
+            Stub("Run", Member("typescript:default:web/a.ts#Run", "Run"), Member("typescript:default:web/b.ts#Run", "Run"));
+
+            var response = await WithCoverage(Partial).GetCompactContextAsync("Run");
+
+            Assert.Equal(2, response.TotalMatches);
+            Assert.Null(response.Coverage);
+        }
+
+        [Fact]
         public async Task EverythingSeen_AddsNothing()
         {
             var response = await WithCoverage(Complete).GetCompactContextAsync("Node3D");

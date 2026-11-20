@@ -1,3 +1,4 @@
+using CodeContext.Parser.Protocol;
 using CodeContext.Core.Services;
 
 namespace CodeContext.Core.Tests.Services;
@@ -34,6 +35,26 @@ public class GraphAffectedTests
         Assert.Equal(3, response.TotalCount);
         Assert.False(response.Truncated);
         Assert.False(response.DepthLimited);
+    }
+
+    [Fact]
+    public async Task DependentsFound_StillSayAProjectOfTheirWorkerWasNotFullySeen()
+    {
+        // An unrestored project's uses are missing from the list whether or not it is empty.
+        var coverage = new CodeContext.Core.Workers.AnalysisCoverageRegistry();
+        coverage.Report("csharp", "a", [new ProjectCoverage("Api", "src/Api/Api.csproj", ProjectCoverageStates.Partial, 4, MissingReferences: ["Lib"])]);
+        coverage.Report("typescript", "web", [new ProjectCoverage("web", null, ProjectCoverageStates.Fallback, 2)]);
+        var service = new GraphTestGraph { Coverage = coverage }
+            .Node("Seed").Node("Direct")
+            .Edge("Direct", "Seed")
+            .Build();
+
+        var response = await Affected(service, I("Seed"));
+
+        Assert.Equal(["Direct@1"], Listed(response));
+        Assert.Equal("partial", response.Coverage!.State);
+        Assert.Equal(["Api"], response.Coverage.Names);
+        Assert.Equal(1, response.Coverage.TotalProjects);
     }
 
     [Theory]

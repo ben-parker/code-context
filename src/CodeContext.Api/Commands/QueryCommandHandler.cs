@@ -637,7 +637,7 @@ public static partial class QueryCommandHandler
         }
     }
 
-    /// <summary>Why an empty answer may not mean nothing is there.</summary>
+    /// <summary>Why an answer, empty or not, may be short: a project of its worker was not fully seen.</summary>
     private static void WriteCoverage(CoverageSummary? coverage, string prefix, CacheNotice? cache, TextWriter output)
     {
         if (coverage is null) return;

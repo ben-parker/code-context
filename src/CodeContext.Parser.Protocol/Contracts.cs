@@ -293,10 +293,14 @@ public static class EdgeDispatch
 
 public static class ProjectCoverageStates
 {
-    /// <summary>Everything the project declares was found.</summary>
+    /// <summary>Everything the project declares was found, and its code binds.</summary>
     public const string Complete = "complete";
 
-    /// <summary>Analyzed as its own project, but some of what it declares was not found.</summary>
+    /// <summary>
+    /// Analyzed as its own project, but some of what it declares was not found, or much of its
+    /// code fails to bind although every declared reference was (code a source generator writes
+    /// looks like this). Either way its answers can be short.
+    /// </summary>
     public const string Partial = "partial";
 
     /// <summary>Analyzed without knowing its project, against the worker's own defaults.</summary>

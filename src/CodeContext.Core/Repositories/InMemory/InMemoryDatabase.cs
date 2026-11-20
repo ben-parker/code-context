@@ -1140,26 +1140,39 @@ namespace CodeContext.Core.Repositories.InMemory
         /// readers see were built from. A staged reconciliation's coverage is not here until it commits, and
         /// is gone with it when it rolls back.
         /// </summary>
-        internal IReadOnlyList<CodeContext.Parser.Protocol.ProjectCoverage> PublishedCoverage()
+        internal IReadOnlyList<CodeContext.Parser.Protocol.ProjectCoverage> PublishedCoverage() => CoverageOfPublished().Projects;
+
+        /// <summary>The published coverage of each worker, by parser id, in the order of <see cref="PublishedCoverage"/>.</summary>
+        internal IReadOnlyList<KeyValuePair<string, IReadOnlyList<CodeContext.Parser.Protocol.ProjectCoverage>>> PublishedCoverageByParser()
+            => CoverageOfPublished().ByParser;
+
+        private CachedCoverage CoverageOfPublished()
         {
             // One volatile read of the published annotations, no lock: a commit's build can take a while, and the
             // reference it publishes at its end is either the one read here or the next.
             var annotations = _annotations;
             var cached = _cachedCoverage;
-            if (cached is not null && ReferenceEquals(cached.Annotations, annotations)) return cached.Projects;
-            var projects = annotations
+            if (cached is not null && ReferenceEquals(cached.Annotations, annotations)) return cached;
+            var ordered = annotations
                 .OrderBy(annotation => annotation.Key.ParserId, StringComparer.Ordinal)
                 .ThenBy(annotation => annotation.Key.WorkspaceId, StringComparer.Ordinal)
-                .SelectMany(annotation => annotation.Value.Coverage ?? [])
+                .ToList();
+            var projects = ordered.SelectMany(annotation => annotation.Value.Coverage ?? []).ToList().AsReadOnly();
+            var byParser = ordered
+                .GroupBy(annotation => annotation.Key.ParserId, StringComparer.Ordinal)
+                .Select(group => new KeyValuePair<string, IReadOnlyList<CodeContext.Parser.Protocol.ProjectCoverage>>(
+                    group.Key, group.SelectMany(annotation => annotation.Value.Coverage ?? []).ToList().AsReadOnly()))
                 .ToList()
                 .AsReadOnly();
-            _cachedCoverage = new CachedCoverage(annotations, projects);
-            return projects;
+            cached = new CachedCoverage(annotations, projects, byParser);
+            _cachedCoverage = cached;
+            return cached;
         }
 
         private sealed record CachedCoverage(
             ImmutableSortedDictionary<ShardKey, ShardAnnotation> Annotations,
-            IReadOnlyList<CodeContext.Parser.Protocol.ProjectCoverage> Projects);
+            IReadOnlyList<CodeContext.Parser.Protocol.ProjectCoverage> Projects,
+            IReadOnlyList<KeyValuePair<string, IReadOnlyList<CodeContext.Parser.Protocol.ProjectCoverage>>> ByParser);
 
         private volatile CachedCoverage? _cachedCoverage;
 

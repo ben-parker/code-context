@@ -61,18 +61,6 @@ namespace CodeContext.Core.Services
                 : projects.Any(project => project.State == ProjectCoverageStates.Partial) ? ProjectCoverageStates.Partial
                 : ProjectCoverageStates.Complete;
 
-        /// <summary>
-        /// An answer of nothing means something only if the code was all seen. Where a project
-        /// was not, say which, so "no users" cannot be read as a fact it is not.
-        /// </summary>
-        private CoverageSummary? CoverageFor(CompactContextResponse response)
-        {
-            var nothingFound = response.TotalMatches == 0
-                || response.Matches.Exists(match => match.Relationships is { } relationships
-                    && (relationships.UsedByCount ?? 0) == 0);
-            return nothingFound ? CoverageForEmptyAnswer() : null;
-        }
-
         public async Task<CompleteContextResponse> GetCompleteContextAsync(
             string identifier,
             string? type = null,
@@ -269,7 +257,7 @@ namespace CodeContext.Core.Services
                 response.DisambiguationHint = await BuildNoMatchHintAsync(
                     identifier, matchMode == "exact", type, containingType, @namespace, signature, sourceFile);
                 // Coverage is a store read too: it comes before the last cache reading.
-                response.Coverage = CoverageFor(response);
+                response.Coverage = CoverageOf();
                 response.Cache = CacheAfterReads(response.Cache);
                 return response;
             }
@@ -297,7 +285,7 @@ namespace CodeContext.Core.Services
 
             response.ReturnedMatches = response.Matches.Count;
             response.Truncated = response.ReturnedMatches < response.TotalMatches;
-            response.Coverage = CoverageFor(response);
+            response.Coverage = CoverageOf(candidates.Take(maxMatches).Select(candidate => candidate.Id));
             response.Cache = CacheAfterReads(response.Cache);
             return response;
         }

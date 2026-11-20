@@ -107,7 +107,7 @@ namespace CodeContext.Core.Services
             {
                 response.DepthLimited = depthLimited;
                 (response.ExcludedBy, response.Explanation) = ExplainNoPath(request, walk, from, to, depthLimited);
-                response.Coverage = CoverageForEmptyAnswer();
+                response.Coverage = CoverageOf(from.Seeds.Concat(to.Seeds));
             }
             response.Cache = CacheAfterReads(response.Cache);
             return response;
@@ -292,8 +292,8 @@ namespace CodeContext.Core.Services
                     ? $"Only symbols in test files depend on it ({response.TestsHidden}); includeTests (--tests) lists them."
                     : $"Nothing recorded depends on it{(walk.FiltersRelations ? $" through relation={request.Relation!.Trim()}" : string.Empty)}. "
                         + "Relationships are static evidence: cross-check with rg before concluding it is unused.";
-                response.Coverage = CoverageForEmptyAnswer();
             }
+            response.Coverage = CoverageOf(seed.Seeds);
             response.Cache = CacheAfterReads(response.Cache);
             return response;
         }
@@ -362,6 +362,8 @@ namespace CodeContext.Core.Services
             {
                 response.Hint = $"None of the {considered} symbol(s) passing the filters has a recorded dependent.";
             }
+            // Dependents a project hid are missing from these counts too.
+            response.Coverage = CoverageOf(hubs.Count > 0 ? hubs.Select(hub => hub.Node.Id) : null);
             response.Cache = CacheAfterReads(response.Cache);
             return response;
         }
@@ -493,11 +495,23 @@ namespace CodeContext.Core.Services
                 && string.Equals(left.Type, right.Type, StringComparison.Ordinal)
                 && string.Equals(left.Signature, right.Signature, StringComparison.Ordinal);
 
-        /// <summary>For an empty answer: which projects were analyzed without all they declare, if any.</summary>
-        private CoverageSummary? CoverageForEmptyAnswer()
+        /// <summary>
+        /// Which projects were analyzed without all they declare, if any, among the projects of the workers whose
+        /// facts the answer is about: those whose node ids <paramref name="about"/> names, or every worker when it
+        /// names none (an answer of nothing). A project that was not fully seen can hide users and dependents
+        /// from any answer about its worker's code, found or not, so an answer that lists some still says so.
+        /// </summary>
+        private CoverageSummary? CoverageOf(IEnumerable<string>? about = null)
         {
             if (_coverage is null) return null;
-            var projects = _coverage.GetProjects();
+            var byParser = _coverage.GetProjectsByParser();
+            var ids = about as IReadOnlyCollection<string> ?? about?.ToList();
+            var projects = new List<ProjectCoverage>();
+            foreach (var (parserId, reported) in byParser)
+            {
+                if (ids is { Count: > 0 } && !ids.Any(id => IsOfParser(id, parserId))) continue;
+                projects.AddRange(reported);
+            }
             var incomplete = projects.Where(project => project.State != ProjectCoverageStates.Complete).ToList();
             return incomplete.Count == 0
                 ? null
@@ -509,6 +523,10 @@ namespace CodeContext.Core.Services
                     Names = incomplete.Take(MaxCoverageNames).Select(project => project.Name).ToList(),
                 };
         }
+
+        /// <summary>Every worker-owned id starts with <c>&lt;parserId&gt;:</c>.</summary>
+        private static bool IsOfParser(string id, string parserId)
+            => id.Length > parserId.Length && id[parserId.Length] == ':' && id.StartsWith(parserId, StringComparison.Ordinal);
 
         private static void RequireIdentifier(string? value, string name)
         {
