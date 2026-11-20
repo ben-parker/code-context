@@ -736,8 +736,8 @@ namespace CodeContext.Core.Services
                     var familyEdges = (await _edgeRepository.GetBySourceIdAsync(familyId))
                         .Concat(await _edgeRepository.GetByTargetIdAsync(familyId))
                         .Where(edge => edge.Type is not null && MethodFamilyEdgeKinds.Contains(edge.Type));
-                    // The role of the member a call names, not how the call binds: a base.M() or super.m() call
-                    // names an overridden member too, and differs only in being listed for that member alone.
+                    // The role of the member a call names. A call the worker marks statically bound, as
+                    // base.M() and super.m() are, is labelled static instead (below): it reaches that member alone.
                     var label = "exact";
                     foreach (var edge in familyEdges)
                     {
@@ -808,8 +808,8 @@ namespace CodeContext.Core.Services
                     if (!outgoing && family.Count > 0)
                     {
                         compact.Bindings = item.Edges
-                            .Select(edge => edge.TargetId is not null
-                                ? bindingByTarget.GetValueOrDefault(edge.TargetId, "exact")
+                            .Select(edge => IsStaticallyBound(edge) ? "static"
+                                : edge.TargetId is not null ? bindingByTarget.GetValueOrDefault(edge.TargetId, "exact")
                                 : "exact")
                             .Distinct(StringComparer.Ordinal)
                             .Order(StringComparer.Ordinal)
@@ -1225,8 +1225,11 @@ namespace CodeContext.Core.Services
         /// the member it names alone, so it counts only when that is the queried method.
         /// </summary>
         private static bool ReachesQueriedMethod(CodeEdge edge, string selfId)
-            => edge.TargetId == selfId
-                || edge.Metadata?.GetValueOrDefault(EdgeMetadataKeys.Dispatch) != EdgeDispatch.Static;
+            => edge.TargetId == selfId || !IsStaticallyBound(edge);
+
+        /// <summary>Whether the worker marked a usage as bound to its target alone, as <c>base.M()</c> and <c>super.m()</c> are.</summary>
+        private static bool IsStaticallyBound(CodeEdge edge)
+            => edge.Metadata?.GetValueOrDefault(EdgeMetadataKeys.Dispatch) == EdgeDispatch.Static;
 
         /// <summary>
         /// What reaches any member of <paramref name="familyIds"/>, the method family of
