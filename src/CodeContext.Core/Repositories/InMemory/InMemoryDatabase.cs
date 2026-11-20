@@ -850,6 +850,7 @@ namespace CodeContext.Core.Repositories.InMemory
                     if (!ReferenceEquals(next, _shards))
                     {
                         _shards = next;
+                        AfterPublishForTests?.Invoke();
                         NotifyMutation();
                     }
                     Interlocked.Exchange(ref _lastCommittedGeneration, generation);
@@ -1165,6 +1166,12 @@ namespace CodeContext.Core.Repositories.InMemory
         /// <summary>Test seam: runs inside the commit lock of every generation commit, after its state is built.</summary>
         internal Action? InsideCommitLock { get; set; }
 
+        /// <summary>Test seam: runs when a generation commit has published its map and not yet bumped the version.</summary>
+        internal Action? AfterPublishForTests { get; set; }
+
+        /// <summary>Test seam: runs when a read finds no composite adjacency cached for the version, before it reads the map.</summary>
+        internal Action? AdjacencyMissForTests { get; set; }
+
         /// <summary>
         /// Latches the published shard map, the shards' annotations and the generation they were committed
         /// at, from one hold of the commit lock: one consistent cut. Returns false, latching nothing usable,
@@ -1225,15 +1232,34 @@ namespace CodeContext.Core.Repositories.InMemory
         /// </summary>
         internal CompositeAdjacency GetAdjacency()
         {
+            if (_pinned.Value is { } pinned) return pinned;
             var version = Interlocked.Read(ref _version);
             var cached = _cachedAdjacency;
             if (cached is { } c && c.Version == version) return c.Value;
+            AdjacencyMissForTests?.Invoke();
 
             var shards = _shards;
             var composite = CompositeAdjacency.Build(shards);
             // Not cached when a commit ran meanwhile: it would hold that commit's replaced shards.
             if (Interlocked.Read(ref _version) == version) _cachedAdjacency = new CachedAdjacency(version, composite);
             return composite;
+        }
+
+        // A composite this async flow reads instead of the published one (see Pin).
+        private readonly AsyncLocal<CompositeAdjacency?> _pinned = new();
+
+        /// <summary>
+        /// Makes every read of this store in the current async flow (the repositories included) answer from
+        /// <paramref name="adjacency"/>, one published map, until the previous pin is restored with the value returned.
+        /// A reader that makes several reads (resolving names, then walking) then reads one generation whatever commits
+        /// land meanwhile: the composite holds that map's shards, and committed shards are never changed in place. Only
+        /// the legacy in-place writes change a shard where it stands. Null unpins.
+        /// </summary>
+        internal CompositeAdjacency? Pin(CompositeAdjacency? adjacency)
+        {
+            var previous = _pinned.Value;
+            _pinned.Value = adjacency;
+            return previous;
         }
 
         // ---- Internal test accessors (shard-level identity assertions) ----

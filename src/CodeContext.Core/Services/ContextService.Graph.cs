@@ -51,10 +51,12 @@ namespace CodeContext.Core.Services
         }
 
         /// <summary>
-        /// Runs <paramref name="read"/> over the shards of the published map and returns its answer only if no commit
-        /// landed while it ran. The shards themselves never change once published, but identifier resolution reads
-        /// through the repositories, which follow the newest map, and a legacy in-place write changes a shard where it
-        /// stands: either would mix two generations into one answer. A changed generation is read again.
+        /// Runs <paramref name="read"/> over one published map: its shards for the walk, and the same map, pinned, for
+        /// every repository read the query makes (resolving names and files, the copies of a declaration). So an answer
+        /// holds one generation by construction, whatever commits land while it is computed. The answer is still kept
+        /// only if the store's mutation version did not move meanwhile: a commit makes the query read again, so it answers
+        /// from the newest generation when the graph holds still long enough, and a legacy in-place write, which changes a
+        /// shard where it stands, is not read half done once its version is counted.
         /// </summary>
         private async Task<T> ReadOneGenerationAsync<T>(Func<IGraphShard[], Task<T>> read, CancellationToken cancellationToken)
         {
@@ -63,7 +65,17 @@ namespace CodeContext.Core.Services
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 var version = database.MutationVersion;
-                var result = await read(database.GetAdjacency().Shards);
+                var adjacency = database.GetAdjacency();
+                var previous = database.Pin(adjacency);
+                T result;
+                try
+                {
+                    result = await read(adjacency.Shards);
+                }
+                finally
+                {
+                    database.Pin(previous);
+                }
                 if (AfterGraphReadForTests is { } hook) await hook(attempt);
                 if (database.MutationVersion == version) return result;
             }
