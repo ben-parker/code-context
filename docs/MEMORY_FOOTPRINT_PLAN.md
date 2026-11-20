@@ -356,10 +356,13 @@ Decisions where the backlog was silent:
    and `_`, and the file is a test when a piece is `test`, `tests`, `spec` or `specs` in any case (`tests/`,
    `__tests__/`, `Widget.Tests/`, `widget.test.ts`, `widget.spec.ts`, `widget_test.go`, `test_widget.py`,
    `widget_spec.rb`), ends in camel-case `Test` or `Tests` (`WidgetTests.cs`, `WidgetTest.java`,
-   `Widget.UnitTests/`), or the file is pytest's `conftest`. Covered: .NET (xunit/NUnit/MSTest project and class
-   names), Jest/Vitest/Jasmine/Mocha, Go, pytest/unittest, RSpec/minitest, Maven and Gradle layouts. Left out on
-   purpose: a camel-case `Spec` suffix and `Test` prefix, which production code uses (`WorkerLaunchSpec.cs`,
-   `TestConnection.cs`); `testing/`, `testdata/`, `fixtures/`, `__mocks__/`, `*.cy.ts`, `*IT.java`. This changes
+   `Widget.UnitTests/`), or the file is pytest's `conftest`. Also, after the final review: a whole directory name
+   `testdata`, `unittests` or `__mocks__` in any case (Go fixtures, lowercase C++ `unittests/`, Jest manual mocks;
+   `testdatabase/`, `testdata.json`, `mocks/` are not), and Cypress's `*.cy.*`, `cy` in any case between two dots of
+   the file name and not at its start (`login.cy.ts`; `cy.ts`, `cy/`, `login-cy.ts`, `.cy.ts` are not). Covered: .NET (xunit/NUnit/MSTest project and class
+   names), Jest/Vitest/Jasmine/Mocha, Cypress, Go, pytest/unittest, RSpec/minitest, Maven and Gradle layouts. Left out
+   on purpose: a camel-case `Spec` suffix and `Test` prefix, which production code uses (`WorkerLaunchSpec.cs`,
+   `TestConnection.cs`); `testing/` (it would catch `ab-testing/`), `fixtures/`, `*IT.java`. This changes
    existing `--tests` answers: a file that only contained the letters (`WorkerLaunchSpec.cs`, `Inspector.cs`,
    `Latest.ts`) is no longer test evidence, a candidate test file, or ranked after production code, and with the
    graph queries it is ranked by `hubs` and passed through by `path`. On this repository one file changes side

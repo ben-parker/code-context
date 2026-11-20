@@ -125,9 +125,11 @@ codecontext query hubs --within src/CodeContext.Core        # the most depended-
   on its path under the root: a directory or file-name part (between `.`, `-`, `_`) that
   is `test`, `tests`, `spec` or `specs` (`tests/`, `__tests__/`, `Widget.Tests/`,
   `widget.test.ts`, `widget.spec.ts`, `widget_test.go`, `test_widget.py`), or that ends in
-  `Test` or `Tests` (`WidgetTests.cs`, `Widget.UnitTests/`), or `conftest.py`. A name that
-  only contains the letters (`Latest.cs`, `WorkerLaunchSpec.cs`, `inspector.ts`) is not
-  one; test code named otherwise (`TestHelpers.cs` outside a test directory) is not
+  `Test` or `Tests` (`WidgetTests.cs`, `Widget.UnitTests/`); a whole directory named
+  `testdata`, `unittests` or `__mocks__`; a Cypress `*.cy.*` file (`login.cy.ts`); or
+  `conftest.py`. A name that only contains the letters (`Latest.cs`, `WorkerLaunchSpec.cs`,
+  `inspector.ts`, `ab-testing/`, `testdatabase/`, `cy.ts`, `cy/`) is not one; test code named
+  otherwise (`testing/`, `fixtures/`, `TestHelpers.cs` outside a test directory) is not
   recognized, so check with `rg` when the split matters.
 - To query a symbol named `path`, `affected`, `hubs` or `multi`, put it after `--`:
   `codecontext query --depth 2 -- path`.
