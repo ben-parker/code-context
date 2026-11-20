@@ -46,6 +46,35 @@ public class DiffMapperTests
     }
 
     [Fact]
+    public void ADeclarationThatIsAllOfItsFirstOrLastLine_LeavesThatLineToWhatItHoldsThere()
+    {
+        // A module is the whole file: it starts where its first function starts and ends where the text ends, so it
+        // has no header and no closing line of its own. (1-based: helper 1-3, a blank line, added 5-7.)
+        var nodes = new[]
+        {
+            Node("Module", 0, 0, 7, 0, "Module"),
+            Node("helper", 0, 0, 2, 1, "Function"),
+            Node("added", 4, 0, 6, 1, "Function"),
+        };
+
+        // A function appended at the end, and the first line of the first one: the functions' alone.
+        Assert.Equal(["added"], Touched(DiffMapper.Map(nodes, Container, [new DiffLineRange(5, 7)], [])));
+        Assert.Equal(["helper"], Touched(DiffMapper.Map(nodes, Container, [new DiffLineRange(1, 1)], [])));
+        // The line between them is the module's.
+        Assert.Equal(["Module"], Touched(DiffMapper.Map(nodes, Container, [new DiffLineRange(4, 4)], [])));
+
+        // The same file without a newline at its end: the module ends with its last function, to the column.
+        nodes[0] = Node("Module", 0, 0, 6, 1, "Module");
+        Assert.Equal(["added"], Touched(DiffMapper.Map(nodes, Container, [new DiffLineRange(7, 7)], [])));
+        Assert.Equal(["added"], Touched(DiffMapper.Map(nodes, Container, [], [], comments: [new DiffLineRange(7, 7)])));
+
+        // A type with a closing line of its own keeps it, and a type on one line with its members changes with them.
+        var type = new[] { Node("Type", 0, 0, 4, 1, "Class"), Node("Type.M", 1, 4, 3, 5) };
+        Assert.Equal(["Type"], Touched(DiffMapper.Map(type, Container, [new DiffLineRange(5, 5)], [])));
+        Assert.Equal(["Type"], Touched(DiffMapper.Map(type, Container, [new DiffLineRange(1, 1)], [])));
+    }
+
+    [Fact]
     public void ASpanEndingAtColumnZero_DoesNotHoldThatLine()
     {
         // An end-exclusive span that stops at the start of 1-based line 6 holds lines 1-5.
@@ -104,7 +133,8 @@ public class DiffMapperTests
                     var end = Math.Min(to - random.Next(2), next + random.Next(8));
                     if (end < next) break;
                     if (random.Next(4) > 0) Declare($"{id}.{child}", next, end, depth + 1);
-                    next = end + random.Next(3);
+                    // Siblings share no line: their columns are all the same here, so on one line they would overlap.
+                    next = end + 1 + random.Next(2);
                 }
             }
             for (int top = 0, at = random.Next(3); at < 120; top++)
@@ -131,9 +161,13 @@ public class DiffMapperTests
                 if (holding.Count == 0) outside.Add(line);
                 foreach (var node in holding)
                 {
-                    var nested = holding.Exists(other => other != node && other.StartLine >= node.StartLine && other.EndLine <= node.EndLine
-                        && (other.StartLine, other.EndLine) != (node.StartLine, node.EndLine));
-                    if (line == node.StartLine + 1 || line == node.EndLine + 1 || !nested)
+                    var inside = holding.Where(other => other != node && other.StartLine >= node.StartLine && other.EndLine <= node.EndLine
+                        && (other.StartLine, other.EndLine) != (node.StartLine, node.EndLine)).ToList();
+                    // Every span here starts at column 0 and ends at column 200: a nested declaration that starts on its
+                    // holder's first line starts where the holder does, and one that ends on its last line ends with it.
+                    var ownFirst = line == node.StartLine + 1 && !inside.Exists(other => other.StartLine == node.StartLine);
+                    var ownLast = line == node.EndLine + 1 && !inside.Exists(other => other.EndLine == node.EndLine);
+                    if (ownFirst || ownLast || inside.Count == 0)
                     {
                         // Declarations with one span are one group, named by its first node in id order.
                         var first = nodes.Where(same => (same.StartLine, same.EndLine) == (node.StartLine, node.EndLine)).MinBy(same => same.Id, StringComparer.Ordinal)!;

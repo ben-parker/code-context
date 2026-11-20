@@ -6,7 +6,8 @@ namespace CodeContext.Core.Diffs
     /// Maps the changed lines of one file to the declarations of the index whose spans hold them. A line belongs to the
     /// innermost declarations containing it: those with no nested declaration of their own on that line. A
     /// declaration's first and last lines (its header, its closing line) are its own as well, so a change there reaches
-    /// the declaration and not only what it contains. Declarations with the same span count as one.
+    /// the declaration and not only what it contains; unless the declaration has no text of its own there (a module
+    /// starts with its first declaration and ends with the file). Declarations with the same span count as one.
     ///
     /// A removed run belongs to the innermost declaration around it (one holding the new lines on both sides of the
     /// block) when that declaration is a member, which then changed. When it lies between or at the edge of members, in
@@ -81,6 +82,15 @@ namespace CodeContext.Core.Diffs
 
             /// <summary>Whether it holds declarations; asked once.</summary>
             public bool? Container;
+
+            /// <summary>
+            /// Whether its first line holds text of its own before anything nested (a header), and its last line text of
+            /// its own after anything nested (a closing line). A span that starts exactly where a nested declaration
+            /// starts, ends exactly where one ends, or ends at the very start of the next line (a module, which is the
+            /// whole file) has neither.
+            /// </summary>
+            public bool OwnsFirstLine = true;
+            public bool OwnsLastLine = true;
         }
 
         /// <param name="nodes">Every node of the index in the file.</param>
@@ -260,7 +270,7 @@ namespace CodeContext.Core.Diffs
         /// <summary>Whether <paramref name="line"/>, which <paramref name="group"/> holds, is its own: its first or last line, or one no nested declaration holds.</summary>
         private static bool Owns(Group group, int line)
         {
-            if (line == group.Start || line == group.End || group.Children is not { } children) return true;
+            if ((line == group.Start && group.OwnsFirstLine) || (line == group.End && group.OwnsLastLine) || group.Children is not { } children) return true;
             for (var index = FirstReaching(children, line); index < children.Count && children[index].Start <= line; index++)
             {
                 if (children[index].End >= line) return false;
@@ -277,8 +287,8 @@ namespace CodeContext.Core.Diffs
             if (lo > hi) return;
             if (group.Children is { } children) Uncovered(children, lo, hi, into);
             else into.Add(new DiffLineRange(lo, hi));
-            if (group.Start >= lo && group.Start <= hi) into.Add(new DiffLineRange(group.Start, group.Start));
-            if (group.End >= lo && group.End <= hi && group.End != group.Start) into.Add(new DiffLineRange(group.End, group.End));
+            if (group.OwnsFirstLine && group.Start >= lo && group.Start <= hi) into.Add(new DiffLineRange(group.Start, group.Start));
+            if (group.OwnsLastLine && group.End >= lo && group.End <= hi && group.End != group.Start) into.Add(new DiffLineRange(group.End, group.End));
         }
 
         /// <summary>Adds to <paramref name="into"/> the parts of <c>[lo, hi]</c> that none of <paramref name="covering"/> (siblings, ordered by start) holds.</summary>
@@ -342,7 +352,12 @@ namespace CodeContext.Core.Diffs
                     continue;
                 }
                 var endLine = node.EndCol == 0 && node.EndLine > node.StartLine ? node.EndLine - 1 : Math.Max(node.EndLine, node.StartLine);
-                groups.Add(new Group { Node = node, Start = node.StartLine + 1, End = endLine + 1, From = From(node), To = To(node) });
+                groups.Add(new Group
+                {
+                    Node = node, Start = node.StartLine + 1, End = endLine + 1, From = From(node), To = To(node),
+                    // A span that ends at the start of a line holds whole lines: none of them closes it.
+                    OwnsLastLine = endLine == Math.Max(node.EndLine, node.StartLine),
+                });
             }
 
             var open = new Stack<Group>();
@@ -355,6 +370,8 @@ namespace CodeContext.Core.Diffs
                 {
                     group.Parent = parent;
                     group.Depth = parent.Depth + 1;
+                    if (group.From == parent.From) parent.OwnsFirstLine = false;
+                    if (group.To == parent.To) parent.OwnsLastLine = false;
                     before = parent.Children is { Count: > 0 } siblings ? siblings[^1] : null;
                     (parent.Children ??= []).Add(group);
                 }
