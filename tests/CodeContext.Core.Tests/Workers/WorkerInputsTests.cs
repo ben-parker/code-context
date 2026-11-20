@@ -144,7 +144,13 @@ public sealed class CSharpWorkerInputsTests : IAsyncLifetime
         // copy replaces the file instead (macOS clones a new one), its folder has changed as well and says so first.
         File.Copy(typeof(Xunit.Assert).Assembly.Location, library, overwrite: true);
 
-        Assert.Contains(Check(inputs, captured).FirstMoved, new[] { "lib/Library.dll", "lib" });
+        var firstMoved = Check(inputs, captured).FirstMoved;
+        // Temporary: what the check saw, for the first Windows runs.
+        var read = FileChangeTime.TryRead(library, out var seen);
+        var folderRead = FileChangeTime.TryRead(Path.GetDirectoryName(library)!, out var folderSeen);
+        Assert.True(firstMoved is "lib/Library.dll" or "lib",
+            $"moved '{firstMoved}'; captured {captured:O}; change times read: {FileChangeTime.ReadsChangeTime}; file read {read} {seen:O}, " +
+            $"write {File.GetLastWriteTimeUtc(library):O}, creation {File.GetCreationTimeUtc(library):O}; folder read {folderRead} {folderSeen:O}");
         // Where a change time is read (Linux, Windows), the file's own time says it was rewritten.
         if (FileChangeTime.ReadsChangeTime) Assert.True(FileChangeTime.TryRead(library, out var time) && time > captured, $"{time:O} against {captured:O}");
     }
