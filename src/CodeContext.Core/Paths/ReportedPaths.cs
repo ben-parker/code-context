@@ -32,7 +32,9 @@ internal static class ReportedPaths
     /// <summary>
     /// The whole rule, for the moment a path is about to be looked at: its spelling, then the links the repository
     /// holds on the way to it, asked of the disk without following any. One instance remembers what it learned of the
-    /// disk, so it serves one check.
+    /// disk, so it serves one check. The host's own walkers ask it too, before they look at a path that a watcher event,
+    /// a refresh or a changed directory names, so that watcher events and refreshes select what a scan does: a scan
+    /// skips each link it lists.
     /// </summary>
     public static Func<string, bool> RefusedOnDisk(string? root)
     {

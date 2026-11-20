@@ -1,5 +1,7 @@
+using CodeContext.Core.Repositories;
 using CodeContext.Core.Repositories.InMemory;
 using CodeContext.Core.Services;
+using Microsoft.Extensions.Options;
 
 namespace CodeContext.Core.Tests.Services;
 
@@ -143,5 +145,98 @@ public class GraphGenerationTests
 
         Assert.Equal(2, attempts);
         Assert.Equal([I("A"), I("C")], affected.Items.Select(item => item.Identifier).Order());
+    }
+
+    [Fact]
+    public async Task ACommitPublishedButNotYetCounted_IsNeverMixedIntoAnAnswer()
+    {
+        // The window between a commit publishing its map and bumping the store's version: two readers building the
+        // composite adjacency at once can leave the newer map cached under the older version, so the query's own
+        // version check cannot see it. Resolution must still read the generation the walk reads.
+        var database = new InMemoryDatabase();
+        CodeNode Node(string id, string identifier) => new()
+        {
+            Id = id, Identifier = identifier, Name = identifier.Split('.')[^1], Type = "Method", FilePath = "/repo/src/X.cs",
+            Metadata = new Dictionary<string, string> { ["parserId"] = "csharp", ["workspaceId"] = "a" },
+        };
+        CodeEdge Edge(string source, string target) => new()
+        {
+            Id = $"{source}>{target}", SourceId = source, TargetId = target, Type = "CALLS",
+            Metadata = new Dictionary<string, string> { ["parserId"] = "csharp", ["workspaceId"] = "a" },
+        };
+        // B keeps its identifier and changes its id: resolved in one generation and walked in the other, it has no users.
+        Assert.True(database.TryCommitGeneration(1,
+            [Node("csharp:a:b1", "csharp:Demo.B"), Node("csharp:a:A", "csharp:Demo.A")], [Edge("csharp:a:A", "csharp:a:b1")], scope: null));
+
+        using var otherReaderMissed = new ManualResetEventSlim();
+        using var otherReaderGo = new ManualResetEventSlim();
+        using var published = new ManualResetEventSlim();
+        using var writerGo = new ManualResetEventSlim();
+        Thread? otherReaderThread = null;
+        database.AdjacencyMissForTests = () =>
+        {
+            if (Thread.CurrentThread != otherReaderThread) return;
+            otherReaderMissed.Set();
+            otherReaderGo.Wait(TimeSpan.FromSeconds(30));
+        };
+        database.AfterPublishForTests = () =>
+        {
+            published.Set();
+            writerGo.Wait(TimeSpan.FromSeconds(30));
+        };
+
+        // Another reader finds nothing cached for this version and stops before it reads the map.
+        otherReaderThread = new Thread(() => database.GetAdjacency()) { IsBackground = true };
+        otherReaderThread.Start();
+        Assert.True(otherReaderMissed.Wait(TimeSpan.FromSeconds(30)));
+
+        Thread? writerThread = null;
+        var nodes = new SteppingNodeRepository(new InMemoryNodeRepository(database), beforeFirstRead: () =>
+        {
+            // The query holds the map it walks. Now a commit publishes generation 2 and stops before counting it, and
+            // the other reader builds over the new map, still under the old version, and caches it.
+            writerThread = new Thread(() => database.TryCommitGeneration(2,
+                [Node("csharp:a:b2", "csharp:Demo.B"), Node("csharp:a:C", "csharp:Demo.C")], [Edge("csharp:a:C", "csharp:a:b2")], scope: null))
+            { IsBackground = true };
+            writerThread.Start();
+            Assert.True(published.Wait(TimeSpan.FromSeconds(30)));
+            otherReaderGo.Set();
+            Assert.True(otherReaderThread.Join(TimeSpan.FromSeconds(30)));
+        });
+        var service = new ContextService(nodes, new InMemoryEdgeRepository(database), new InMemoryFileMetadataRepository(),
+            Options.Create(new CodeContextOptions { RootPath = "/repo" }));
+
+        try
+        {
+            var affected = await service.GetAffectedAsync(new GraphAffectedRequest { Identifier = "csharp:Demo.B" });
+            var users = string.Join(",", affected.Items.Select(item => item.Identifier));
+            Assert.True(users is "csharp:Demo.A" or "csharp:Demo.C", $"An answer mixed generations: [{users}].");
+        }
+        finally
+        {
+            writerGo.Set();
+            otherReaderGo.Set();
+            writerThread?.Join(TimeSpan.FromSeconds(30));
+        }
+    }
+
+    /// <summary>A node repository that runs a step before the first read it is asked for, then answers as the store does.</summary>
+    private sealed class SteppingNodeRepository(ICodeNodeRepository inner, Action beforeFirstRead) : ICodeNodeRepository
+    {
+        private int _reads;
+
+        private void Step()
+        {
+            if (Interlocked.Increment(ref _reads) == 1) beforeFirstRead();
+        }
+
+        public Task<CodeNode?> GetByIdAsync(string id) { Step(); return inner.GetByIdAsync(id); }
+        public Task<CodeNode?> GetByIdentifierAsync(string identifier) { Step(); return inner.GetByIdentifierAsync(identifier); }
+        public Task<IReadOnlyList<CodeNode>> FindByNameAsync(string name, string? type = null, bool exact = false) { Step(); return inner.FindByNameAsync(name, type, exact); }
+        public Task<IReadOnlyList<CodeNode>> FindByFilePathAsync(string filePath, string? type = null) { Step(); return inner.FindByFilePathAsync(filePath, type); }
+        public Task<IReadOnlyList<CodeNode>> GetAllAsync() { Step(); return inner.GetAllAsync(); }
+        public Task<IReadOnlyList<string>> GetFilePathsAsync() { Step(); return inner.GetFilePathsAsync(); }
+        public Task UpsertAsync(CodeNode node) => inner.UpsertAsync(node);
+        public Task DeleteAsync(string id, CancellationToken cancellationToken) => inner.DeleteAsync(id, cancellationToken);
     }
 }

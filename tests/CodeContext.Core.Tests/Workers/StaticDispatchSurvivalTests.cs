@@ -64,6 +64,7 @@ public sealed class StaticDispatchSurvivalTests : IDisposable
             AssertStaticBaseCall(first.Database.EnumerateEdges());
             served = await AnswersAsync(Context(first));
             AssertBaseCallListedOnlyForItsTarget(served);
+            await AssertBindingsAsync(Context(first));
             await first.StopAsync();
         }
 
@@ -170,6 +171,14 @@ public sealed class StaticDispatchSurvivalTests : IDisposable
         Assert.Contains("Demo.Refresher.Refresh(Demo.Folder)", answers[0], StringComparison.Ordinal);
         Assert.DoesNotContain("Demo.AggregateFolder.Validate()", answers[1], StringComparison.Ordinal);
         Assert.Contains("Demo.Refresher.Refresh(Demo.Folder)", answers[1], StringComparison.Ordinal);
+    }
+
+    /// <summary>The base call is shown as bound to the method it names; the call through the base type as one that may dispatch.</summary>
+    private static async Task AssertBindingsAsync(IContextService context)
+    {
+        var usedBy = Assert.Single((await context.GetCompactContextAsync(Base, depth: 1, maxRelationships: 10)).Matches).Relationships!.UsedBy!;
+        Assert.Equal(["static"], usedBy.Single(node => node.Identifier == "csharp:Demo.AggregateFolder.Validate()").Bindings);
+        Assert.Equal(["overridden"], usedBy.Single(node => node.Identifier == "csharp:Demo.Refresher.Refresh(Demo.Folder)").Bindings);
     }
 
     /// <summary>The host's context service over an instance's store, as a served query answers (no cache label).</summary>

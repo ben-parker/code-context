@@ -553,6 +553,7 @@ namespace CodeContext.Core.Snapshots
                 {
                     Fingerprints = fingerprints,
                     Inputs = inputs,
+                    InputsReadUtcTicks = inputs is null ? 0 : shard.Info.InputsReadUtcTicks,
                     State = state,
                     Anchor = state is null ? null : ShardAnchor.Of(shard.Shard),
                 }));

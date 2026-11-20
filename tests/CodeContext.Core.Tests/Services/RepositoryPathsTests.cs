@@ -34,6 +34,12 @@ public class RepositoryPathsTests
     [InlineData("src\\Widget.IntegrationTests\\Helpers.cs", true)]
     [InlineData("e2e-tests/login.ts", true)]
     [InlineData("WidgetTests/Helpers.cs", true)]
+    [InlineData("pkg/parse/testdata/input.json", true)]
+    [InlineData("pkg/TestData/input.json", true)]
+    [InlineData("unittests/widget.cpp", true)]
+    [InlineData("src/UnitTests/Widget.cs", true)]
+    [InlineData("src/__mocks__/fs.js", true)]
+    [InlineData("src\\__mocks__\\fs.js", true)]
     // File names.
     [InlineData("src/widget.test.ts", true)]
     [InlineData("src/widget.spec.tsx", true)]
@@ -49,6 +55,38 @@ public class RepositoryPathsTests
     [InlineData("test.js", true)]
     [InlineData("conftest.py", true)]
     [InlineData("pkg/conftest.py", true)]
+    [InlineData("cypress/e2e/login.cy.ts", true)]
+    [InlineData("login.cy.js", true)]
+    [InlineData("src/Login.CY.tsx", true)]
+    [InlineData("src/admin.login.cy.ts", true)]
+    // Near the additions, and kept production: the directory names count only whole, and cy only as a middle
+    // file-name piece between dots.
+    [InlineData("src/ab-testing/x.ts", false)]
+    [InlineData("src/testing/harness.ts", false)]
+    [InlineData("testdatabase/schema.sql", false)]
+    [InlineData("src/testdata.json", false)]
+    [InlineData("src/my-testdata/x.json", false)]
+    [InlineData("src/unittests.py", false)]
+    [InlineData("src/unittest/x.py", false)]
+    [InlineData("mockser/a.ts", false)]
+    [InlineData("src/mocks/a.ts", false)]
+    [InlineData("src/__mock__/a.ts", false)]
+    [InlineData("src/__mocks__.ts", false)]
+    [InlineData("src/__mocks__x/a.ts", false)]
+    [InlineData("cy.ts", false)]
+    [InlineData("src/cy/a.ts", false)]
+    [InlineData("src/a.cy/b.ts", false)]
+    [InlineData("src/login.cy", false)]
+    [InlineData("src/.cy.ts", false)]
+    [InlineData("src/login-cy.ts", false)]
+    [InlineData("src/login_cy.ts", false)]
+    [InlineData("src/login.cy-old.ts", false)]
+    [InlineData("src/login.cyp.ts", false)]
+    [InlineData("cypress/support/commands.ts", false)]
+    [InlineData("src/Fancy.cs", false)]
+    // Deliberately not tests: a camel-case Spec suffix and a Test prefix.
+    [InlineData("src/WidgetSpec.cs", false)]
+    [InlineData("src/TestRunner.cs", false)]
     // Words that only contain the letters, and what production code names so.
     [InlineData("src/Workers/WorkerLaunchSpec.cs", false)]
     [InlineData("src/Inspector.cs", false)]
@@ -71,16 +109,26 @@ public class RepositoryPathsTests
     [Fact]
     public void IsTestFile_AllocatesNothing()
     {
-        const string path = "/repo/src/CodeContext.Core/Services/Widgets/WidgetLaunchSpecification.cs";
-        RepositoryPaths.IsTestFile(path, "/repo");
+        string[] paths =
+        [
+            "/repo/src/CodeContext.Core/Services/Widgets/WidgetLaunchSpecification.cs",
+            "/repo/src/__mocks__x/testdatabase/unittest/login.cy-old.ts",
+            "/repo/src/__mocks__/fs.js",
+            "/repo/pkg/testdata/input.json",
+            "/repo/cypress/e2e/login.cy.ts",
+        ];
+        foreach (var path in paths) RepositoryPaths.IsTestFile(path, "/repo");
         var before = GC.GetAllocatedBytesForCurrentThread();
         var tests = 0;
         for (var i = 0; i < 1000; i++)
         {
-            if (RepositoryPaths.IsTestFile(path, "/repo")) tests++;
+            foreach (var path in paths)
+            {
+                if (RepositoryPaths.IsTestFile(path, "/repo")) tests++;
+            }
         }
         Assert.Equal(0, GC.GetAllocatedBytesForCurrentThread() - before);
-        Assert.Equal(0, tests);
+        Assert.Equal(3000, tests);
     }
 
     [Theory]

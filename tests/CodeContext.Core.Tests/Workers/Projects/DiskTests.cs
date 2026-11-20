@@ -463,28 +463,47 @@ public sealed class DiskTests : IDisposable
         if (OperatingSystem.IsLinux()) Assert.DoesNotContain(path, OpenFiles());
     }
 
-    [Fact]
-    public void AnAssemblyOfSeveralModulesOutsideTheRepositoryStillBindsEveryModule()
+    /// <summary>
+    /// An assembly of several modules, in the repository or outside it, binds every module, and its modules are read
+    /// as its manifest is: into memory, through the guard, with no handle left on any of them (a handle kept on a
+    /// build's output blocks its next build on Windows). What was read besides the manifest is reported as read.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AnAssemblyOfSeveralModulesBindsEveryModule_WithNoHandleLeftOnAny(bool inRepository)
     {
         var outside = Directory.CreateTempSubdirectory("cc-disk-modules-").FullName;
+        var at = inRepository ? Directory.CreateDirectory(Path.Combine(_directory, "lib")).FullName : outside;
         try
         {
             var options = new Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions(Microsoft.CodeAnalysis.OutputKind.NetModule);
             var core = Microsoft.CodeAnalysis.MetadataReference.CreateFromFile(typeof(object).Assembly.Location);
             var module = Microsoft.CodeAnalysis.CSharp.CSharpCompilation.Create(
                 "Part", [Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText("public class InModule { public int Value => 1; }")], [core], options);
-            var modulePath = Path.Combine(outside, "Part.netmodule");
+            var modulePath = Path.Combine(at, "Part.netmodule");
             using (var written = File.Create(modulePath)) Assert.True(module.Emit(written).Success);
-            var whole = Microsoft.CodeAnalysis.CSharp.CSharpCompilation.Create(
-                "Whole",
-                [Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText("public class InMain { }")],
-                [core, Microsoft.CodeAnalysis.ModuleMetadata.CreateFromFile(modulePath).GetReference()],
-                options.WithOutputKind(Microsoft.CodeAnalysis.OutputKind.DynamicallyLinkedLibrary));
-            var wholePath = Path.Combine(outside, "Whole.dll");
-            using (var written = File.Create(wholePath)) Assert.True(whole.Emit(written).Success);
+            var wholePath = Path.Combine(at, "Whole.dll");
+            using (var part = Microsoft.CodeAnalysis.ModuleMetadata.CreateFromFile(modulePath))
+            {
+                var whole = Microsoft.CodeAnalysis.CSharp.CSharpCompilation.Create(
+                    "Whole",
+                    [Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText("public class InMain { }")],
+                    [core, part.GetReference()],
+                    options.WithOutputKind(Microsoft.CodeAnalysis.OutputKind.DynamicallyLinkedLibrary));
+                using var written = File.Create(wholePath);
+                Assert.True(whole.Emit(written).Success);
+            }
+            var disk = On(_directory);
 
-            var reference = On(_directory).Reference(wholePath);
+            var reference = disk.Reference(wholePath);
 
+            if (OperatingSystem.IsLinux()) Assert.DoesNotContain(OpenFiles(), open => open == wholePath || open == modulePath);
+            var (files, absent) = Lookups(disk, wholePath);
+            Assert.Equal([modulePath], files);
+            Assert.Empty(absent);
+            File.Delete(modulePath);
+            File.Delete(wholePath);
             var uses = Microsoft.CodeAnalysis.CSharp.CSharpCompilation.Create(
                 "Uses",
                 [Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText("class C { int M() => new InModule().Value; InMain Main; }")],
@@ -495,6 +514,58 @@ public sealed class DiskTests : IDisposable
         finally
         {
             Directory.Delete(outside, recursive: true);
+        }
+    }
+
+    private static (string[] Files, string[] Absent) Lookups(Disk disk, string assembly)
+    {
+        var lookups = disk.ModuleLookupsFor(assembly);
+        return (lookups.Files.ToArray(), lookups.Absent.ToArray());
+    }
+
+    /// <summary>
+    /// A module that could not be bound is reported as looked for all the same, so restoring or repairing it is seen:
+    /// one that is missing as absent, one that is there and does not read as a module as a file that was read.
+    /// </summary>
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("malformed")]
+    public void AModuleThatIsNotBound_IsStillReportedAsLookedFor(string how)
+    {
+        var at = Directory.CreateTempSubdirectory("cc-disk-modules-").FullName;
+        try
+        {
+            var options = new Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions(Microsoft.CodeAnalysis.OutputKind.NetModule);
+            var core = Microsoft.CodeAnalysis.MetadataReference.CreateFromFile(typeof(object).Assembly.Location);
+            var modulePath = Path.Combine(at, "Part.netmodule");
+            using (var written = File.Create(modulePath))
+            {
+                Assert.True(Microsoft.CodeAnalysis.CSharp.CSharpCompilation.Create(
+                    "Part", [Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText("public class InModule { }")], [core], options)
+                    .Emit(written).Success);
+            }
+            var wholePath = Path.Combine(at, "Whole.dll");
+            using (var part = Microsoft.CodeAnalysis.ModuleMetadata.CreateFromFile(modulePath))
+            using (var written = File.Create(wholePath))
+            {
+                Assert.True(Microsoft.CodeAnalysis.CSharp.CSharpCompilation.Create(
+                    "Whole", [Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText("public class InMain { }")],
+                    [core, part.GetReference()], options.WithOutputKind(Microsoft.CodeAnalysis.OutputKind.DynamicallyLinkedLibrary))
+                    .Emit(written).Success);
+            }
+            if (how == "missing") File.Delete(modulePath);
+            else File.WriteAllText(modulePath, "not a module");
+            var disk = On(_directory);
+
+            disk.Reference(wholePath);
+
+            var (files, absent) = Lookups(disk, wholePath);
+            Assert.Equal(how == "missing" ? [] : [modulePath], files);
+            Assert.Equal(how == "missing" ? [modulePath] : [], absent);
+        }
+        finally
+        {
+            Directory.Delete(at, recursive: true);
         }
     }
 

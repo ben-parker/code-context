@@ -1333,9 +1333,9 @@ public sealed class CSharpWorkspaceAnalyzer
     /// Everything the facts depend on besides the approved files, for the host's check of a snapshot without a worker:
     /// the files the project model was read from (absent where they were looked for and not found), the directories
     /// listed to find projects and restore data, the repository markers looked for above the root, and every assembly
-    /// a unit compiles against. These are what this worker itself checks before it reuses what it read (the model's
-    /// stamps, the references' times in each unit's signature), so a snapshot judged current by them is one this worker
-    /// would not have read differently. A path the disk guard refuses is left out: it reads as absent and stays so.
+    /// a unit compiles against, with the further modules looked for beside it (absent where missing). These are what
+    /// this worker itself checks before it reuses what it read (the model's stamps, the references' times in each
+    /// unit's signature), so a snapshot judged current by them is one this worker would not have read differently. A path the disk guard refuses is left out: it reads as absent and stays so.
     /// </summary>
     private WorkerInputs Inputs()
     {
@@ -1346,7 +1346,16 @@ public sealed class CSharpWorkspaceAnalyzer
             foreach (var (path, stamp) in model.InputStamps) (ProjectModel.IsMissingStamp(stamp) ? absent : files).Add(path);
             files.UnionWith(model.ListedDirectories);
             absent.UnionWith(model.AbsentBoundaryMarkers);
-            foreach (var project in model.Projects) files.UnionWith(project.MetadataReferences);
+            foreach (var project in model.Projects)
+            {
+                files.UnionWith(project.MetadataReferences);
+                foreach (var reference in project.MetadataReferences)
+                {
+                    var modules = _disk.ModuleLookupsFor(reference);
+                    files.UnionWith(modules.Files);
+                    absent.UnionWith(modules.Absent);
+                }
+            }
         }
 
         // Only once a unit has taken them: asking here would load them for a workspace that binds nothing against them.

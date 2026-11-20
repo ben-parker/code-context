@@ -70,8 +70,14 @@ Reading results:
 - `cache snapshot` (only with `--snapshot`; `--json`: `"cache":{"state":"snapshot",...}`)
   means no instance was running and the answer was read from the saved index after a
   check by file times of what it was made from (see [operations](references/operations.md));
-  no worker re-analysed anything. It can miss a change that check cannot see. Before
-  editing on it or concluding absence, confirm with `rg` or query without `--snapshot`.
+  no worker re-analysed anything. It can miss a change that check cannot see: on Windows,
+  a file replaced by a copy of the same size that keeps older times; on macOS, content
+  rewritten in place with its old modification time put back. A running instance does
+  not rely on these times: it follows source and project file edits as they happen.
+  Before editing on it or concluding absence, confirm with `rg` or query without
+  `--snapshot`.
+- An answer is read from one state of the index, even while it is re-indexing: never
+  half of one commit and half of the next. The answers of one `query multi` share it.
 - `relationships not loaded` means nothing was fetched: the name was ambiguous
   (re-query with a target's identifier) or the depth was 0. It says nothing about
   whether the symbol has users.
@@ -181,9 +187,11 @@ git diff $(git merge-base main HEAD) | codecontext query impact   # what this br
   on its path under the root: a directory or file-name part (between `.`, `-`, `_`) that
   is `test`, `tests`, `spec` or `specs` (`tests/`, `__tests__/`, `Widget.Tests/`,
   `widget.test.ts`, `widget.spec.ts`, `widget_test.go`, `test_widget.py`), or that ends in
-  `Test` or `Tests` (`WidgetTests.cs`, `Widget.UnitTests/`), or `conftest.py`. A name that
-  only contains the letters (`Latest.cs`, `WorkerLaunchSpec.cs`, `inspector.ts`) is not
-  one; test code named otherwise (`TestHelpers.cs` outside a test directory) is not
+  `Test` or `Tests` (`WidgetTests.cs`, `Widget.UnitTests/`); a whole directory named
+  `testdata`, `unittests` or `__mocks__`; a Cypress `*.cy.*` file (`login.cy.ts`); or
+  `conftest.py`. A name that only contains the letters (`Latest.cs`, `WorkerLaunchSpec.cs`,
+  `inspector.ts`, `ab-testing/`, `testdatabase/`, `cy.ts`, `cy/`) is not one; test code named
+  otherwise (`testing/`, `fixtures/`, `TestHelpers.cs` outside a test directory) is not
   recognized, so check with `rg` when the split matters.
 - To query a symbol named `path`, `affected`, `hubs`, `impact` or `multi`, put it after `--`:
   `codecontext query --depth 2 -- path`.
@@ -199,8 +207,21 @@ git diff $(git merge-base main HEAD) | codecontext query impact   # what this br
 - `uses` is the selected symbol's own outgoing behavior; sibling implementations do
   not lend it theirs.
 - Method `usedBy` unifies statically known interface, implementation, and override
-  callers; `bindings` identifies the called family role. This is potential
+  callers: a call counts for every member it may dispatch to. This is potential
   dispatch, not runtime certainty.
+- `bindings` (in `--json` only; the text output omits it) says, per caller, how its
+  call sites reach the queried method's family. A caller with several kinds of call
+  site lists each kind:
+  - `interface`: the call names an interface member and may dispatch to any
+    implementation of it.
+  - `overridden`: the call names a method that others override and may dispatch to
+    any override of it.
+  - `implementation`: the call names an implementation or override that nothing
+    indexed overrides, and lands on that one member.
+  - `exact`: the call names a method with no implementation or override relation.
+  - `static`: the call is written `base.M()` (C#) or `super.m()` (TypeScript), or
+    takes such a member as a value. It is bound to the method it names and cannot
+    dispatch to an override, so it is listed only in that method's `usedBy`.
 - `fileDependencies` / `fileDependents` aggregate resolved semantic edges crossing
   the selected file, excluding unresolved, same-file, and proximity-only links.
   They describe the whole file named after `of`, not the queried member: a file

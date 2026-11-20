@@ -1,6 +1,5 @@
 using CodeContext.Core.Repositories.InMemory;
 using System.Runtime.InteropServices;
-using CodeContext.Parser.Protocol;
 
 namespace CodeContext.Core.Services
 {
@@ -85,8 +84,7 @@ namespace CodeContext.Core.Services
 
         internal static bool IsContainment(CodeEdge edge) => ContextService.RoleOf(edge.Type) == ContextService.EdgeRole.Containment;
 
-        internal static bool IsStaticDispatch(CodeEdge edge)
-            => edge.Metadata?.GetValueOrDefault(EdgeMetadataKeys.Dispatch) == EdgeDispatch.Static;
+        internal static bool IsStaticDispatch(CodeEdge edge) => ContextService.IsStaticallyBound(edge);
 
         internal static string Kind(CodeEdge edge) => edge.Type ?? "USES";
 

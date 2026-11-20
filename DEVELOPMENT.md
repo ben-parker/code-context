@@ -139,8 +139,12 @@ instance running reads the newest snapshot in its own process (`OneShotSnapshot`
 answers from it, labelled `cache snapshot`, when nothing it was made from changed since
 by file time (`SnapshotFreshness`): the files and folders a scan walks, plus exactly what
 each worker reported it read (`inputs` in `analysis/delta`, stored in the snapshot): files
-that must be there and no newer, paths that must still be absent. Times come from
-`FileChangeTime` (the status change time on Linux). It creates, locks and writes nothing
+that must be there and no newer than when the host asked the worker for the index or project
+reread that read them (recorded beside each shard, `inputsReadUtcTicks`; a snapshot without it
+is not answered from and is written again), paths that must still be absent. Times come from
+`FileChangeTime` (the status change time on Linux, the file system's change time read
+from the entry itself on Windows, the later of write and creation time on macOS; the
+limits each leaves are in `FileChangeTime` and the skill's operations reference). It creates, locks and writes nothing
 and starts no worker; anything else (changed files, no key, a refused snapshot, a shard
 whose worker reported no inputs or saved no state, a snapshot written unverified, the
 cache off) starts an instance as before. After a verification, a host rewrites, in the

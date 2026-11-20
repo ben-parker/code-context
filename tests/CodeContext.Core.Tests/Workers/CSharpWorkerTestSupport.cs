@@ -67,7 +67,8 @@ public sealed class CSharpWorkerPipeline : IAsyncDisposable
         var store = (IGenerationalGraphStore)RepositoryFactory.CreateGraphRepository();
         // The applier is the real commit path; tests that assert delta shape wrap it with
         // a recording decorator so they observe exactly what the worker emitted.
-        IAnalysisDeltaSink sink = new AnalysisDeltaApplier(store, NullLogger<AnalysisDeltaApplier>.Instance, coverage);
+        var applier = new AnalysisDeltaApplier(store, NullLogger<AnalysisDeltaApplier>.Instance, coverage);
+        IAnalysisDeltaSink sink = applier;
         if (decorateSink is not null)
         {
             sink = decorateSink(sink);
@@ -80,6 +81,8 @@ public sealed class CSharpWorkerPipeline : IAsyncDisposable
             options,
             NullLoggerFactory.Instance,
             TestWorkerOptions.Patient());
+        // Behind a decorator the worker service does not find the applier itself.
+        applier.InputsReadBoundary = WorkerService.InputsReadBoundary;
 
         GraphUpdateService = new GraphUpdateService(
             RepositoryFactory,

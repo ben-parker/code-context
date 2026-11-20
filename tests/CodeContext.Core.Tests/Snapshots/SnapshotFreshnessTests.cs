@@ -66,14 +66,15 @@ public sealed class SnapshotFreshnessTests : IDisposable
         [PathOf("src/Lib.csproj"), PathOf("src/obj/project.assets.json"), PathOf("web/tsconfig.json"), Path.Combine(_base, "Directory.Build.props")],
         [PathOf("src/Directory.Build.props"), PathOf("Directory.Packages.props"), Path.Combine(_base, "global.json")]);
 
+    /// <param name="read">When the inputs were read; the capture unless given.</param>
     private SnapshotFreshnessResult Check(DateTime captured, TimeSpan? tolerance = null, WorkerInputs? inputs = null, long rootTicks = 0, DateTime? now = null,
-        Func<string, bool>? refused = null)
+        Func<string, bool>? refused = null, DateTime? read = null)
         => SnapshotFreshness.Check(
             new RepositoryFileSelector(Options.Create(new CodeContextOptions { RootPath = Root })),
             Root,
             captured,
             Claimed.Contains,
-            [inputs ?? Reported()],
+            [new ReportedInputs(inputs ?? Reported(), read ?? captured)],
             rootTicks,
             now,
             tolerance ?? TimeSpan.Zero,
@@ -129,6 +130,37 @@ public sealed class SnapshotFreshnessTests : IDisposable
         Assert.Null(result.FirstMoved);
         // Root, src, web; a.cs, b.cs, app.ts, .gitignore; four reported files and three absent paths.
         Assert.True(result.Checked >= 14, $"checked {result.Checked}");
+    }
+
+    /// <summary>
+    /// A reported file edited after its worker read it and before the capture: the walk would call it older than the
+    /// capture, but the facts are as old as the read.
+    /// </summary>
+    [Fact]
+    public void AReportedFileEditedBetweenTheReadAndTheCapture_HasMoved()
+    {
+        Build();
+        var read = Capture();
+        File.AppendAllText(Path.Combine(_base, "Directory.Build.props"), "<!-- edit -->");
+        var captured = Capture();
+
+        Assert.True(Check(captured, read: captured).Unchanged, "measured from the capture, the edit is older");
+        var result = Check(captured, read: read);
+        Assert.Equal(Path.Combine(_base, "Directory.Build.props"), result.FirstMoved);
+        Assert.Contains("after its worker read it", result.Why);
+    }
+
+    /// <summary>Reported inputs with no read time recorded (a snapshot written before it was) are not known, never unchanged.</summary>
+    [Fact]
+    public void ReportedInputsWithNoReadTime_AreNotKnown()
+    {
+        var captured = BuildAndCapture();
+
+        var result = Check(captured, read: DateTime.MinValue);
+
+        Assert.False(result.Unchanged);
+        Assert.True(result.NotChecked);
+        Assert.True(Check(captured, inputs: new WorkerInputs([], []), read: DateTime.MinValue).Unchanged, "nothing reported, nothing to date");
     }
 
     [Fact]

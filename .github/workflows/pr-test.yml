@@ -1,0 +1,67 @@
+name: PR Test
+
+# Runs the tests on every pull request, whatever its base branch (pull requests here
+# are often stacked, and only the first of a stack targets main), on Windows, macOS
+# and Linux. The Windows leg runs what auto-tag.yml's and release.yml's test jobs run,
+# set up the same way, so a pull request that passes here passes the post-merge gate;
+# the other legs run the same commands on the platforms users run. This workflow only
+# reads: it tags, releases, uploads and writes nothing, and uses no secrets.
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to the same pull request supersedes the run in progress.
+concurrency:
+  group: pr-test-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      # fetch-depth: 0 because Nerdbank.GitVersioning runs in every project build
+      # (Directory.Build.props) and throws on shallow clones ("lacks the objects
+      # required to calculate version height"), as in auto-tag.yml and release.yml.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26.13.1'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install TypeScript worker dependencies
+        run: npm ci --prefix src/CodeContext.TypeScript.Worker
+      # The release gate's own invocation: every test but the external-tooling and
+      # benchmark categories.
+      - name: Run tests
+        run: >
+          dotnet test tests/CodeContext.Core.Tests/CodeContext.Core.Tests.csproj
+          --filter "Category!=ExternalTooling&Category!=Benchmark"
+      # The release gate runs TypeScriptWorkerProtocolTests here; that class is all in
+      # the ExternalTooling category, so this runs it with the rest of the category
+      # (the tests that need Node.js and the installed worker dependencies).
+      - name: Run external-tooling tests
+        run: >
+          dotnet test tests/CodeContext.Core.Tests/CodeContext.Core.Tests.csproj
+          --filter "Category=ExternalTooling"
+      # The worker SDK suites release.yml's sdk job runs before it packs them.
+      - name: Test npm worker SDK
+        run: npm test --prefix sdk/npm
+      - name: Test Python worker SDK
+        env:
+          PYTHONPATH: sdk/python/src
+        run: python -m unittest discover -s sdk/python/tests

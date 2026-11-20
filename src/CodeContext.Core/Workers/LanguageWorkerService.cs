@@ -85,6 +85,12 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
     {
         public RegisteredWorker Registration { get; } = registration;
         public ParserProcessSupervisor? Supervisor { get; set; }
+
+        /// <summary>When the last operation that read all the worker's inputs and succeeded began (UTC ticks; 0: none).</summary>
+        public long InputsRead;
+
+        /// <summary>When the operation in flight that reads all the worker's inputs began (UTC ticks; 0: none in flight).</summary>
+        public long InputsReading;
         public long Generation { get; set; }
         public bool EverIndexed { get; set; }
 
@@ -157,6 +163,36 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
             // this parser". The supervisor overwrites this on first use.
             _sessionRegistry.Report(new ParserSessionSnapshot(
                 worker.Manifest.ParserId, worker.Manifest.DisplayName, ParserSessionState.NotNeeded));
+        }
+        if (deltaSink is AnalysisDeltaApplier applier) applier.InputsReadBoundary = InputsReadBoundary;
+    }
+
+    /// <summary>
+    /// When the worker of <paramref name="parserId"/> last began reading all its inputs: the operation in flight that
+    /// does, or else the last such operation that succeeded; 0 before any. Conservative: the start of the operation,
+    /// and only an index or a reread of the projects counts, since a batch of file changes re-reads those files alone.
+    /// </summary>
+    internal long InputsReadBoundary(string parserId)
+    {
+        if (!_workers.TryGetValue(parserId, out var state)) return 0;
+        var reading = Interlocked.Read(ref state.InputsReading);
+        return reading != 0 ? reading : Interlocked.Read(ref state.InputsRead);
+    }
+
+    /// <summary>Runs an operation that reads all the worker's inputs, recording when it began once it succeeds.</summary>
+    private async Task<T> ReadingInputsAsync<T>(WorkerState state, Func<Task<T>> operation)
+    {
+        var started = Time.GetUtcNow().UtcTicks;
+        Interlocked.Exchange(ref state.InputsReading, started);
+        try
+        {
+            var result = await operation().ConfigureAwait(false);
+            Interlocked.Exchange(ref state.InputsRead, started);
+            return result;
+        }
+        finally
+        {
+            Interlocked.Exchange(ref state.InputsReading, 0);
         }
     }
 
@@ -327,13 +363,16 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
             // A re-index that replaced the workspace has read the projects as they are now.
             if (state.NeedsWake && !await WakeCoreAsync(state, state.ApprovedFiles.ToList(), ct).ConfigureAwait(false)) return;
 
-            var supervisor = EnsureSupervisor(state);
-            var generation = ++state.Generation;
-            await supervisor.OpenWorkspaceAsync(new OpenWorkspaceParams(
-                DefaultWorkspaceId, _options.RootPath,
-                state.Registration.Manifest.ProjectMarkers ?? [], state.ApprovedFiles.ToList()), ct).ConfigureAwait(false);
-            await supervisor.ApplyChangesAsync(new ApplyChangesParams(
-                DefaultWorkspaceId, generation, []), ct).ConfigureAwait(false);
+            await ReadingInputsAsync(state, async () =>
+            {
+                var supervisor = EnsureSupervisor(state);
+                var generation = ++state.Generation;
+                await supervisor.OpenWorkspaceAsync(new OpenWorkspaceParams(
+                    DefaultWorkspaceId, _options.RootPath,
+                    state.Registration.Manifest.ProjectMarkers ?? [], state.ApprovedFiles.ToList()), ct).ConfigureAwait(false);
+                return await supervisor.ApplyChangesAsync(new ApplyChangesParams(
+                    DefaultWorkspaceId, generation, []), ct).ConfigureAwait(false);
+            }).ConfigureAwait(false);
         }
         finally
         {
@@ -523,8 +562,12 @@ public sealed class LanguageWorkerService : ILanguageWorkerService, IHostedServi
     /// A worker that needed a wake is no longer hibernated from the start, since a process may run whatever happens,
     /// and its wake stays incomplete until the index succeeds, so after a failure the next operation re-indexes.
     /// </summary>
-    private async Task<IndexWorkspaceResult> IndexCoreAsync(
+    private Task<IndexWorkspaceResult> IndexCoreAsync(
         WorkerState state, IReadOnlyList<string> files, CancellationToken ct, Action<AnalysisProgress>? progressHandler = null)
+        => ReadingInputsAsync(state, () => IndexReadingInputsAsync(state, files, ct, progressHandler));
+
+    private async Task<IndexWorkspaceResult> IndexReadingInputsAsync(
+        WorkerState state, IReadOnlyList<string> files, CancellationToken ct, Action<AnalysisProgress>? progressHandler)
     {
         if (state.NeedsWake)
         {
