@@ -164,6 +164,42 @@ public partial class GraphQueryCommandTests
     }
 
     [Fact]
+    public async Task Impact_ShowsTheFilesSetAside_AndTheChangesThatUseAChange_InBothForms()
+    {
+        const string answer = """
+            {"maxDepth":5,"complete":true,"diffFiles":4,"contentChecked":2,"changeCount":2,"changesReturned":2,
+             "changes":[
+              {"level":"member","changedLines":"3","dependents":0,"usedByChangeCount":7,"usedByChanges":["csharp:B.Use()","csharp:C.Use()"],"name":"Run","type":"Method","file":"src/A.cs","line":1,"identifier":"csharp:A.Run()"},
+              {"level":"member","changedLines":"9","dependents":0,"name":"Use","type":"Method","file":"src/B.cs","line":8,"identifier":"csharp:B.Use()"}],
+             "unmappedCount":0,"unmappedReturned":0,"unmappedLines":0,"unmapped":[],
+             "setAsideFileCount":3,"setAsideFilesTruncated":true,"setAsideFiles":["docs/guide.md","README.md"],
+             "totalCount":0,"returnedCount":0,"fileCount":0,"items":[],"testFileCount":0,"testFiles":[]}
+            """;
+        var handler = new RecordingHandler(request => request.RequestUri!.AbsolutePath == "/api/status" ? Json(Status()) : Json(answer));
+
+        var (runtime, output, _) = Runtime(handler, ImpactDiff);
+        Assert.Equal(0, await QueryCommandHandler.ExecuteAsync(Parse("query", "impact", "--path", Root), runtime, CancellationToken.None));
+        Assert.Equal(
+            "impact\tcomplete\t2 changed\t0 affected in 0 file(s)\tdepth 5\t4 file(s) in the diff\n"
+            + "content\t2 file(s) match the working tree\n"
+            + "changed\t2/2\n"
+            + "\tmember\tlines 3\t0 dependents\tcsharp:A.Run()\tMethod\tsrc/A.cs:1\tused by 7 other change(s): csharp:B.Use(), csharp:C.Use(), ...\n"
+            + "\tmember\tlines 9\t0 dependents\tcsharp:B.Use()\tMethod\tsrc/B.cs:8\n"
+            + "setAside\t2/3\ttruncated\tfile(s) no worker reads: they change nothing indexed\n"
+            + "\tdocs/guide.md\n"
+            + "\tREADME.md\n"
+            + "affected\t0/0\tdepth 5\t0 file(s)\n",
+            output.ToString().Replace("\r\n", "\n"));
+
+        (runtime, output, _) = Runtime(handler, ImpactDiff);
+        Assert.Equal(0, await QueryCommandHandler.ExecuteAsync(Parse("query", "impact", "--human", "--path", Root), runtime, CancellationToken.None));
+        var human = output.ToString().Replace("\r\n", "\n");
+        Assert.StartsWith("Every changed line of the 4 file(s) in the diff maps to a declaration, or lies in one of 3 file(s) no worker reads.\n", human);
+        Assert.Contains("     used by 7 other change(s) of this diff: csharp:B.Use(), csharp:C.Use(), ...\n", human);
+        Assert.Contains("Set aside (no worker reads them, so they change nothing indexed): 2/3, truncated\n  - docs/guide.md\n  - README.md\n", human);
+    }
+
+    [Fact]
     public void Impact_TakesNoIdentifier()
         => Assert.NotEmpty(Program.CreateRootCommand().Parse(["query", "impact", "X"]).Errors);
 

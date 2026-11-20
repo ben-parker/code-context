@@ -474,7 +474,10 @@ public static partial class QueryCommandHandler
             var removed = change.RemovedLines > 0 ? $", {change.RemovedLines} removed" : string.Empty;
             var tests = change.TestsHidden > 0 ? $" +{change.TestsHidden} in tests" : string.Empty;
             WriteAgentNode($"\t{change.Level}\t{lines}{removed}\t{change.Dependents} dependents{tests}\t", change, output,
-                change.SameDeclaration is { Count: > 0 } copies ? $"same declaration as {string.Join(", ", copies)}" : null);
+                change.SameDeclaration is { Count: > 0 } copies ? $"same declaration as {string.Join(", ", copies)}" : null,
+                change.UsedByChanges is { } users
+                    ? $"used by {change.UsedByChangeCount} other change(s): {string.Join(", ", users)}{(change.UsedByChangeCount > users.Count ? ", ..." : string.Empty)}"
+                    : null);
         }
 
         if (response.UnmappedCount > 0)
@@ -608,6 +611,11 @@ public static partial class QueryCommandHandler
             output.WriteLine($"     {(change.Level == "container" ? "its own lines (not its members)" : "member")}: {lines}"
                 + (change.RemovedLines > 0 ? $", {change.RemovedLines} removed" : string.Empty)
                 + $"; {change.Dependents} dependent(s){(change.TestsHidden > 0 ? $" and {change.TestsHidden} in test files" : string.Empty)}");
+            if (change.UsedByChanges is { } users)
+            {
+                output.WriteLine($"     used by {change.UsedByChangeCount} other change(s) of this diff: {string.Join(", ", users)}"
+                    + (change.UsedByChangeCount > users.Count ? ", ..." : string.Empty));
+            }
         }
         if (response.UnmappedCount > 0)
         {

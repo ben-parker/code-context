@@ -49,6 +49,18 @@ namespace CodeContext.Core.Services
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
         public int TestsHidden { get; set; }
 
+        /// <summary>
+        /// Other changed declarations that use this one directly, as a dependent at distance 1 does (a call, a reference,
+        /// an implementation, a call through a declaration it implements; the relation filter applies). A changed
+        /// declaration is never listed among the dependents, so zero <see cref="Dependents"/> does not mean nothing uses
+        /// this: these do, and they changed with it. Counted whether or not they are in test files.
+        /// </summary>
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+        public int UsedByChangeCount { get; set; }
+
+        /// <summary>The first <see cref="GraphQueryLimits.MaxUsedByChanges"/> of them by identifier, in file and line order; absent when there is none.</summary>
+        public List<string>? UsedByChanges { get; set; }
+
         /// <summary>Other nodes of the same span (one declaration indexed more than once); all were walked from.</summary>
         public List<string>? SameDeclaration { get; set; }
     }

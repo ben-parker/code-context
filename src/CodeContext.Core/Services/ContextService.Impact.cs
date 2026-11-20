@@ -54,6 +54,12 @@ namespace CodeContext.Core.Services
             public int RemovedLines;
             public int Dependents;
             public int TestsHidden;
+
+            /// <summary>Its place among the changes in file and line order.</summary>
+            public int Order;
+
+            /// <summary>The other changes that use it directly.</summary>
+            public HashSet<ChangeEntry>? UsedBy;
         }
 
         private async Task<GraphImpactResponse> GetImpactOnceAsync(
@@ -311,11 +317,20 @@ namespace CodeContext.Core.Services
             // One walk from every changed declaration, as affected walks from one, the changes in file and line order: a
             // dependent two changes reach at one distance is the first one's.
             changes.Sort(static (left, right) => CompareByPlace(left.Node, right.Node));
-            var seeds = changes.SelectMany(change => change.Copies).Select(node => node.Id!).ToList();
+            var seeds = new List<string>(changes.Count);
+            for (var index = 0; index < changes.Count; index++)
+            {
+                changes[index].Order = index;
+                foreach (var copy in changes[index].Copies) seeds.Add(copy.Id!);
+            }
             var affected = new List<GraphWalk.Affected>();
             if (seeds.Count > 0)
             {
-                affected = walk.AffectedBy(seeds, request.MaxDepth, out var depthLimited);
+                // A change is never a dependent, so a change that uses another is recorded with the one it uses.
+                affected = walk.AffectedBy(seeds, request.MaxDepth, out var depthLimited, (user, used) =>
+                {
+                    if (changeOf[user] is var by && changeOf[used] is var of && by != of) (of.UsedBy ??= []).Add(by);
+                });
                 response.DepthLimited = depthLimited;
             }
 
@@ -357,6 +372,12 @@ namespace CodeContext.Core.Services
                 compact.Dependents = change.Dependents;
                 compact.TestsHidden = change.TestsHidden;
                 compact.SameDeclaration = change.Copies.Count > 1 ? change.Copies.Skip(1).Select(PublicIdentifier).ToList() : null;
+                if (change.UsedBy is { } users)
+                {
+                    compact.UsedByChangeCount = users.Count;
+                    compact.UsedByChanges = users.OrderBy(user => user.Order).Take(GraphQueryLimits.MaxUsedByChanges)
+                        .Select(user => PublicIdentifier(user.Node)).ToList();
+                }
                 response.Changes.Add(compact);
             }
             response.ChangesReturned = response.Changes.Count;

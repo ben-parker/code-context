@@ -36,6 +36,9 @@ namespace CodeContext.Core.Services
         public const int DefaultAffectedDepth = 5;
         public const int MaxLimit = 100;
         public const int DefaultLimit = 20;
+
+        /// <summary>Most other changes named for one changed declaration of a diff as using it.</summary>
+        public const int MaxUsedByChanges = 5;
     }
 
     /// <summary>The shortest chain of recorded relationships from <see cref="From"/> to <see cref="To"/>.</summary>

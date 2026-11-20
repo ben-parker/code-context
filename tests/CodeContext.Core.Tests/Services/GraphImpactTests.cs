@@ -963,6 +963,60 @@ public sealed class GraphImpactTests : IDisposable
     }
 
     [Fact]
+    public async Task AChangeThatAnotherChangeUses_SaysSo_ThoughNoChangeIsListedAsADependent()
+    {
+        var service = Sample().Build();
+
+        // Run changes, and so does Caller, which calls it: Caller is a change, not a dependent, so Run lists nothing.
+        var impact = await Impact(service, Diff("src/Foo.cs", Blob("src/Foo.cs"), Replace(8)) + Diff("src/Caller.cs", Blob("src/Caller.cs"), Replace(3)));
+
+        var changes = impact.Changes.ToDictionary(change => change.Name!);
+        Assert.Equal(0, changes["Run"].Dependents);
+        Assert.Equal(1, changes["Run"].UsedByChangeCount);
+        Assert.Equal([I("Caller")], changes["Run"].UsedByChanges);
+        // Caller is used by Far, which did not change: an ordinary dependent, and no change uses Caller.
+        Assert.Equal((1, 0), (changes["Caller"].Dependents, changes["Caller"].UsedByChangeCount));
+        Assert.Null(changes["Caller"].UsedByChanges);
+        Assert.DoesNotContain("Caller", impact.Items.Select(item => item.Name));
+
+        // A relation filter that leaves the call out leaves the use out, as it leaves a dependent out.
+        var filtered = await Impact(service,
+            Diff("src/Foo.cs", Blob("src/Foo.cs"), Replace(8)) + Diff("src/Caller.cs", Blob("src/Caller.cs"), Replace(3)), relation: "REFERENCES");
+        Assert.All(filtered.Changes, change => Assert.Null(change.UsedByChanges));
+    }
+
+    [Fact]
+    public async Task AChangeUsedThroughADeclarationItImplements_OrInATestFile_SaysSoToo_AndTheListIsBounded()
+    {
+        // ThroughInterface calls IFoo.Run, which Foo.Run (by way of Base.Run) and Bar.Run implement; all three change, with a test's stub.
+        var service = Dispatching().Build();
+        string One(string file) => Diff(file, Blob(file), Replace(3));
+
+        var impact = await Impact(service, One("src/Foo.cs") + One("src/Bar.cs") + One("src/A.cs") + One("src/D.cs") + One("tests/StubTests.cs") + One("tests/StubFoo.cs"));
+
+        var changes = impact.Changes.ToDictionary(change => change.Identifier);
+        // Foo.Run: Refers references it, ThroughInterface reaches it through IFoo.Run.
+        Assert.Equal([I("ThroughInterface"), I("Refers")], changes[I("Foo.Run")].UsedByChanges);
+        // Bar.Run implements the same declaration: the same caller, though the walk took that declaration's callers once.
+        Assert.Equal([I("ThroughInterface")], changes[I("Bar.Run")].UsedByChanges);
+        // A change in a test file that uses another is named as any other, tests listed or not.
+        Assert.Contains(I("StubTests.Check"), changes[I("StubFoo.Run")].UsedByChanges!);
+
+        // Seven changed callers of one changed member: the first five in file order, and the count of all.
+        var graph = Sample();
+        var diff = new StringBuilder(Diff("src/Foo.cs", Blob("src/Foo.cs"), Replace(8)));
+        for (var caller = 0; caller < 7; caller++)
+        {
+            WriteFile($"src/C{caller}.cs", 3);
+            graph.Node($"C{caller}", file: $"src/C{caller}.cs", line: 0, endLine: 2).Edge($"C{caller}", "Foo.Run");
+            diff.Append(Diff($"src/C{caller}.cs", Blob($"src/C{caller}.cs"), Replace(2)));
+        }
+        var many = (await Impact(graph.Build(), diff.ToString())).Changes.Single(change => change.Name == "Run");
+        Assert.Equal(7, many.UsedByChangeCount);
+        Assert.Equal(Enumerable.Range(0, 5).Select(caller => I($"C{caller}")), many.UsedByChanges);
+    }
+
+    [Fact]
     public async Task DeclarationsWithOneSpan_AreOneChange()
     {
         WriteFile("src/Shared.cs", 5);
