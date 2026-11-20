@@ -751,6 +751,27 @@ public sealed class GraphImpactTests : IDisposable
     }
 
     [Fact]
+    public async Task AFileTheDiffNamesWithoutAChangedLine_IsReported_NotCountedAsChecked()
+    {
+        var service = Sample().Build();
+
+        // A diff cut short after a file's header, or made with -w over a change in whitespace alone: the file differs
+        // (its blob ids say so) and no changed line is shown.
+        var cut = await Impact(service, Diff("src/Caller.cs", Blob("src/Caller.cs"), Replace(3))
+            + $"diff --git a/src/Foo.cs b/src/Foo.cs\nindex 1234567..{Blob("src/Foo.cs")} 100644\n");
+        Assert.Equal([I("Caller")], cut.Changes.Select(change => change.Identifier));
+        var entry = Assert.Single(cut.Unmapped);
+        Assert.Equal(("src/Foo.cs", "noChangedLines", 0), (entry.File, entry.Reason, entry.LineCount));
+        Assert.False(cut.Complete);
+
+        // An added file with content and no line shown is the same; an added empty file shows none and is whole.
+        WriteText("src/Empty.txt", string.Empty);
+        var added = await Impact(service, "diff --git a/src/New.cs b/src/New.cs\nnew file mode 100644\nindex 0000000..1234567\n"
+            + "diff --git a/src/Empty.txt b/src/Empty.txt\nnew file mode 100644\nindex 0000000..e69de29\n");
+        Assert.Equal(["src/Empty.txt:notIndexed", "src/New.cs:noChangedLines"], added.Unmapped.Select(unmapped => $"{unmapped.File}:{unmapped.Reason}"));
+    }
+
+    [Fact]
     public async Task ADiffWithNoBlobIds_IsMappedButNotComplete()
     {
         var service = Sample().Build();

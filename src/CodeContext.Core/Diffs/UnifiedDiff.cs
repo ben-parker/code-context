@@ -102,7 +102,21 @@ namespace CodeContext.Core.Diffs
         public int DiffLine { get; internal set; }
 
         /// <summary>Only the file mode changed: no line, no content.</summary>
-        public bool ModeOnly => ModeChanged && !HasHunks && !Binary && Status == DiffFileStatus.Modified;
+        public bool ModeOnly => ModeChanged && !HasHunks && !Binary && Status == DiffFileStatus.Modified && OldBlob == NewBlob;
+
+        /// <summary>
+        /// The diff names the file as modified or added with content and shows no changed line of it: it was cut short
+        /// after the file's header, or made with an option that hides changes (<c>-w</c>). An added empty file shows
+        /// none either and is whole.
+        /// </summary>
+        public bool NoChangedLines
+            => !HasHunks && !Binary && !ModeOnly
+                && (Status == DiffFileStatus.Modified || (Status == DiffFileStatus.Added && !IsEmptyBlob(NewBlob)));
+
+        /// <summary>Whether an id (maybe abbreviated) is git's id of the empty blob, SHA-1 or SHA-256.</summary>
+        private static bool IsEmptyBlob(string? blob)
+            => blob is not null && ("e69de29bb2d1d6434b8b29ae775ad8c2e48c5391".StartsWith(blob, StringComparison.Ordinal)
+                || "473a0f4c3be8a93681a267e3b1e9a7dcda1185436fe141f7749120a303721813".StartsWith(blob, StringComparison.Ordinal));
 
         /// <summary>The path the file has after the change, or before it for a deletion.</summary>
         public string? Path => NewPath ?? OldPath;

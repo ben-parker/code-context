@@ -172,6 +172,14 @@ namespace CodeContext.Core.Services
                     Unmapped("binary", "A binary change; nothing in it maps to a declaration.");
                     return;
                 }
+                if (file.NoChangedLines)
+                {
+                    Unmapped("noChangedLines",
+                        "The diff names this file and shows no changed line of it: the diff was cut short after the file's header, or "
+                        + "made with an option that hides changes (-w, --ignore-blank-lines). Nothing of it is mapped; make the diff again.",
+                        count: 0);
+                    return;
+                }
 
                 if (file.Status == DiffFileStatus.Deleted)
                 {
@@ -475,18 +483,20 @@ namespace CodeContext.Core.Services
         private static bool IsContainer(CodeNode node, GraphWalk walk)
             => (node.Type is { } type && ContainerTypes.Contains(type)) || walk.HoldsMembers(node.Id!);
 
-        /// <summary>The lines of ordered, disjoint <paramref name="ranges"/> that none of <paramref name="removed"/> holds.</summary>
+        /// <summary>The lines of <paramref name="ranges"/> that none of <paramref name="removed"/> holds; both ordered and disjoint.</summary>
         private static List<DiffLineRange> Subtract(List<DiffLineRange> ranges, List<DiffLineRange> removed)
         {
             var left = new List<DiffLineRange>();
+            var cut = 0;
             foreach (var range in ranges)
             {
                 var next = range.Start;
-                foreach (var cut in removed)
+                while (cut < removed.Count && removed[cut].End < next) cut++;
+                // A cut that reaches past this range is looked at again for the next one.
+                for (var at = cut; at < removed.Count && removed[at].Start <= range.End; at++)
                 {
-                    if (cut.End < next || cut.Start > range.End) continue;
-                    if (cut.Start > next) left.Add(new DiffLineRange(next, cut.Start - 1));
-                    next = cut.End + 1;
+                    if (removed[at].Start > next) left.Add(new DiffLineRange(next, removed[at].Start - 1));
+                    next = Math.Max(next, removed[at].End + 1);
                 }
                 if (next <= range.End) left.Add(new DiffLineRange(next, range.End));
             }
