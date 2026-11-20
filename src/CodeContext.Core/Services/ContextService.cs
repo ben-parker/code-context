@@ -25,6 +25,7 @@ namespace CodeContext.Core.Services
         private readonly IAnalysisCoverageRegistry? _coverage;
         private readonly ICacheStateProvider? _cacheState;
         private readonly IIndexFreshness? _freshness;
+        private readonly IRepositoryFileSelector? _fileSelector;
 
         /// <summary>The store behind in-memory repositories, which the graph queries traverse directly; null for others.</summary>
         private readonly InMemoryDatabase? _database;
@@ -39,7 +40,8 @@ namespace CodeContext.Core.Services
             ILanguageWorkerService? workerService = null,
             IAnalysisCoverageRegistry? coverage = null,
             ICacheStateProvider? cacheState = null,
-            IIndexFreshness? freshness = null)
+            IIndexFreshness? freshness = null,
+            IRepositoryFileSelector? fileSelector = null)
         {
             _nodeRepository = nodeRepository;
             _edgeRepository = edgeRepository;
@@ -49,6 +51,7 @@ namespace CodeContext.Core.Services
             _coverage = coverage;
             _cacheState = cacheState;
             _freshness = freshness;
+            _fileSelector = fileSelector;
             _database = (edgeRepository as InMemoryEdgeRepository)?.Database;
         }
 

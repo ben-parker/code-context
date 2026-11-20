@@ -564,6 +564,178 @@ public sealed class GraphImpactTests : IDisposable
         Assert.Equal(3, impact.DiffFiles);
     }
 
+    /// <summary>A C# worker by its manifest alone: it parses .cs, and names .csproj, .props and global.json as project files.</summary>
+    private sealed class ManifestOnly : CodeContext.Core.Workers.ILanguageWorkerService
+    {
+        public IReadOnlyCollection<string> OwnedExtensions => [".cs"];
+
+        public bool TryGetParserForExtension(string extension, out string parserId)
+        {
+            parserId = "csharp";
+            return string.Equals(extension, ".cs", StringComparison.OrdinalIgnoreCase);
+        }
+
+        public string? ParserNaming(string path)
+            => Path.GetExtension(path) is ".cs" or ".csproj" or ".props" || Path.GetFileName(path) == "global.json" ? "csharp" : null;
+
+        public bool TryGetParserForProjectInput(string path, bool isIncluded, out string parserId) => throw new NotSupportedException();
+        public Task RefreshProjectsAsync(string parserId, CancellationToken ct = default) => throw new NotSupportedException();
+        public Task IndexWorkspaceAsync(string parserId, IReadOnlyList<string> files, CancellationToken ct = default,
+            Action<CodeContext.Parser.Protocol.AnalysisProgress>? progressHandler = null) => throw new NotSupportedException();
+        public Task ApplyChangesAsync(string parserId, IReadOnlyList<FileChange> changes, IReadOnlyList<string> approvedFiles,
+            CancellationToken ct = default) => throw new NotSupportedException();
+        public Task<CodeContext.Parser.Protocol.NativeSyntaxTreeResult> GetNativeSyntaxTreeAsync(string filePath, int? start = null, int? length = null,
+            int maxDepth = 8, CancellationToken ct = default) => throw new NotSupportedException();
+    }
+
+    private string Full(string relative) => Path.Combine(_root, relative.Replace('/', Path.DirectorySeparatorChar));
+
+    /// <summary>
+    /// The sample with a worker and a selection policy, both shards reporting what they read: <paramref name="files"/>
+    /// and <paramref name="absent"/> (root-relative) for the first, nothing more for the second.
+    /// </summary>
+    private ContextService WithReports(string[]? files = null, string[]? absent = null, bool secondReports = true)
+    {
+        var graph = Sample();
+        graph.Workers = new ManifestOnly();
+        graph.Selector = new RepositoryFileSelector(Microsoft.Extensions.Options.Options.Create(new CodeContextOptions { RootPath = _root, IgnorePatterns = ["node_modules/**"] }));
+        var service = graph.Build();
+        graph.ReportInputs(
+            new CodeContext.Parser.Protocol.WorkerInputs((files ?? []).Select(Full).ToList(), (absent ?? []).Select(Full).ToList()),
+            secondReports ? new CodeContext.Parser.Protocol.WorkerInputs([], []) : null);
+        return service;
+    }
+
+    private static string Modified(string path) => Diff(path, "1234567", "@@ -1 +1 @@\n-old\n+new");
+
+    private static string Added(string path) => $"diff --git a/{path} b/{path}\nnew file mode 100644\nindex 0000000..1234567\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1 @@\n+new\n";
+
+    private static string Deleted(string path) => $"diff --git a/{path} b/{path}\ndeleted file mode 100644\nindex 1234567..0000000\n--- a/{path}\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n";
+
+    [Fact]
+    public async Task AChangedFileNoWorkerReads_IsSetAside_AndDoesNotMakeTheAnswerIncomplete()
+    {
+        var service = WithReports();
+        WriteFile("README.md", 3);
+        WriteFile("docs/guide.md", 3);
+
+        // Whether the working tree holds them as the diff has them does not matter: nothing indexed is read from them.
+        var impact = await Impact(service,
+            Modified("README.md") + Modified("docs/missing.md") + Added("docs/guide.md") + Deleted("docs/old.md")
+            + "diff --git a/docs/logo.png b/docs/logo.png\nindex 1234567..89abcde 100644\nBinary files a/docs/logo.png and b/docs/logo.png differ\n"
+            + Diff("src/Foo.cs", Blob("src/Foo.cs"), Replace(8)));
+
+        Assert.Equal([I("Foo.Run")], impact.Changes.Select(change => change.Identifier));
+        Assert.Empty(impact.Unmapped);
+        Assert.True(impact.Complete);
+        Assert.Equal(6, impact.DiffFiles);
+        Assert.Equal(5, impact.SetAsideFileCount);
+        Assert.Equal(["docs/guide.md", "docs/logo.png", "docs/missing.md", "docs/old.md", "README.md"], impact.SetAsideFiles);
+
+        // The list is capped as every list is; the count is not.
+        var capped = await Impact(service, Modified("README.md") + Modified("docs/missing.md") + Modified("docs/guide.md"), limit: 2);
+        Assert.Equal((3, 2, true), (capped.SetAsideFileCount, capped.SetAsideFiles!.Count, capped.SetAsideFilesTruncated));
+    }
+
+    [Theory]
+    // A worker parses its kind, or its manifest names it as a project file.
+    [InlineData("src/Empty.cs", "modified", "parses files of its kind")]
+    [InlineData("src/App.csproj", "modified", "project file")]
+    [InlineData("Directory.Build.props", "added", "project file")]
+    [InlineData("global.json", "deleted", "project file")]
+    // What the host itself reads, or leaves out, and what packages follow.
+    [InlineData(".gitignore", "modified", "ignore file")]
+    [InlineData("web/node_modules/pkg/readme.md", "modified", "selection policy")]
+    [InlineData("web/package-lock.json", "modified", "lock file")]
+    // What a worker reported: read, looked for, looked for above it, or found by listing its directory.
+    [InlineData("config/settings.json", "modified", "reported reading it")]
+    [InlineData("config/wanted.json", "added", "looked for it")]
+    [InlineData("vendor/lib/notes.md", "added", "looked for vendor")]
+    [InlineData("listed/new.md", "added", "listing")]
+    [InlineData("listed/gone.md", "deleted", "listing")]
+    [InlineData("listed/removed/dir/gone.md", "deleted", "listing")]
+    public async Task AFileThatMayFeedTheIndex_StaysNotIndexed_AndSaysWhy(string path, string status, string why)
+    {
+        var service = WithReports(files: ["config/settings.json", "listed"], absent: ["config/wanted.json", "vendor"]);
+        Directory.CreateDirectory(Full("listed"));
+        if (status != "deleted") WriteFile(path, 2);
+
+        var impact = await Impact(service, status switch { "added" => Added(path), "deleted" => Deleted(path), _ => Modified(path) });
+
+        var entry = Assert.Single(impact.Unmapped);
+        Assert.True(entry.Reason is "notIndexed" or "contentMismatch" or "deletedFile", entry.Reason);
+        if (entry.Reason == "notIndexed") Assert.Contains(why, entry.Detail);
+        Assert.Equal(0, impact.SetAsideFileCount);
+        Assert.Null(impact.SetAsideFiles);
+        Assert.False(impact.Complete);
+    }
+
+    [Fact]
+    public async Task AFileModifiedInAListedDirectory_IsSetAside_AsItsListingDidNotChange()
+    {
+        var service = WithReports(files: ["listed"]);
+        WriteFile("listed/notes.md", 2);
+
+        var impact = await Impact(service, Modified("listed/notes.md"));
+
+        Assert.Equal(["listed/notes.md"], impact.SetAsideFiles);
+        Assert.True(impact.Complete);
+    }
+
+    [Fact]
+    public async Task ARenameFromOrToAFileAWorkerParses_ALink_AndASubmodule_AreNotSetAside()
+    {
+        var service = WithReports();
+        WriteFile("docs/was-code.txt", 2);
+        const string rename = "diff --git a/src/Gone.cs b/docs/was-code.txt\nsimilarity index 100%\nrename from src/Gone.cs\nrename to docs/was-code.txt\n";
+        const string link = "diff --git a/docs/link.md b/docs/link.md\nnew file mode 120000\nindex 0000000..1234567\n--- /dev/null\n+++ b/docs/link.md\n@@ -0,0 +1 @@\n+../src\n";
+        const string submodule = "diff --git a/vendored b/vendored\nindex 1234567..89abcde 160000\n--- a/vendored\n+++ b/vendored\n@@ -1 +1 @@\n-Subproject commit 1234567\n+Subproject commit 89abcde\n";
+
+        var impact = await Impact(service, rename + link + submodule);
+
+        Assert.Equal(0, impact.SetAsideFileCount);
+        Assert.Equal(3, impact.UnmappedCount);
+        Assert.False(impact.Complete);
+    }
+
+    [Fact]
+    public async Task WhenAWorkerDoesNotReportWhatItReads_NothingIsSetAside()
+    {
+        // A worker need not report inputs: nothing then says a file is not among what it reads.
+        var silent = WithReports(secondReports: false);
+        WriteFile("README.md", 3);
+
+        var impact = await Impact(silent, Modified("README.md"));
+
+        var entry = Assert.Single(impact.Unmapped);
+        Assert.Equal("notIndexed", entry.Reason);
+        Assert.Contains("does not report what it reads", entry.Detail);
+        Assert.Equal(0, impact.SetAsideFileCount);
+        Assert.False(impact.Complete);
+
+        // Nor without the workers and the selection policy to ask.
+        var bare = Sample().Build();
+        Assert.Equal("notIndexed", Assert.Single((await Impact(bare, Modified("README.md"))).Unmapped).Reason);
+    }
+
+    [Fact]
+    public async Task AFileNoWorkerIsToldOf_IsNeverSaidToBeNotYetIndexed()
+    {
+        // It changed after the index last read the files, but no worker is told when it changes: retrying changes nothing.
+        var graph = Sample(indexedAsOf: DateTime.UtcNow.AddHours(-1));
+        graph.Workers = new ManifestOnly();
+        graph.Selector = new RepositoryFileSelector(Microsoft.Extensions.Options.Options.Create(new CodeContextOptions { RootPath = _root }));
+        var service = graph.Build();
+        graph.ReportInputs(new CodeContext.Parser.Protocol.WorkerInputs([Full("config/settings.json")], []), new CodeContext.Parser.Protocol.WorkerInputs([], []));
+        WriteFile("README.md", 3);
+        WriteFile("config/settings.json", 3);
+
+        var impact = await Impact(service, Modified("README.md") + Modified("config/settings.json"));
+
+        Assert.Equal(["README.md"], impact.SetAsideFiles);
+        Assert.Equal("notIndexed", Assert.Single(impact.Unmapped).Reason);
+    }
+
     [Fact]
     public async Task ADiffWhoseNewSideIsNotCheckedOut_MapsNothing_AndSaysSo()
     {

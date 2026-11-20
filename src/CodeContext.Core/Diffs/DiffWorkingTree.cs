@@ -83,6 +83,9 @@ namespace CodeContext.Core.Diffs
                     ? diffPath[RootPrefix.Length..]
                     : null;
 
+        /// <summary>Whether the host may not look at <paramref name="fullPath"/>: it is reached through a link the repository holds, or by a refused spelling.</summary>
+        public bool Refused(string fullPath) => _refused(fullPath);
+
         public string FullPath(string rootRelative) => Path.Combine(_root, rootRelative.Replace('/', Path.DirectorySeparatorChar));
 
         /// <summary>What the working tree holds at <paramref name="fullPath"/>, compared with <paramref name="blob"/> when given.</summary>

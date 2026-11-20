@@ -42,6 +42,21 @@ namespace CodeContext.Core.Diffs
         /// <summary>The file mode the new side has, when the diff says (<c>160000</c> is a submodule).</summary>
         public string? NewMode { get; internal set; }
         public bool ModeChanged { get; internal set; }
+
+        /// <summary>
+        /// Whether the diff gives the file a mode, and only that of a regular file (<c>100644</c>, <c>100755</c>) on
+        /// either side: not a symbolic link (<c>120000</c>) nor a submodule (<c>160000</c>). False when it gives none.
+        /// </summary>
+        public bool RegularFileMode => _modeSeen && !_otherModeSeen;
+        private bool _modeSeen;
+        private bool _otherModeSeen;
+
+        internal void SeeMode(ReadOnlySpan<char> mode)
+        {
+            mode = mode.Trim();
+            _modeSeen = true;
+            if (mode is not ("100644" or "100755")) _otherModeSeen = true;
+        }
         public bool Binary { get; internal set; }
 
         /// <summary>A combined diff of a merge (<c>diff --cc</c>), whose hunks are against several parents.</summary>
@@ -324,25 +339,33 @@ namespace CodeContext.Core.Diffs
                     if (dots < 0) throw Malformed("an index line without old..new");
                     file.OldBlob = Blob(value[..dots]);
                     file.NewBlob = Blob(value[(dots + 2)..]);
-                    if (space >= 0) file.NewMode ??= line["index ".Length..][(space + 1)..].Trim();
+                    if (space >= 0)
+                    {
+                        file.NewMode ??= line["index ".Length..][(space + 1)..].Trim();
+                        file.SeeMode(line.AsSpan("index ".Length + space + 1));
+                    }
                 }
                 else if (line.StartsWith("new file mode ", StringComparison.Ordinal))
                 {
                     file.Status = DiffFileStatus.Added;
                     file.NewMode = line["new file mode ".Length..].Trim();
+                    file.SeeMode(file.NewMode);
                 }
                 else if (line.StartsWith("deleted file mode ", StringComparison.Ordinal))
                 {
                     file.Status = DiffFileStatus.Deleted;
+                    file.SeeMode(line.AsSpan("deleted file mode ".Length));
                 }
                 else if (line.StartsWith("old mode ", StringComparison.Ordinal))
                 {
                     file.ModeChanged = true;
+                    file.SeeMode(line.AsSpan("old mode ".Length));
                 }
                 else if (line.StartsWith("new mode ", StringComparison.Ordinal))
                 {
                     file.ModeChanged = true;
                     file.NewMode = line["new mode ".Length..].Trim();
+                    file.SeeMode(file.NewMode);
                 }
                 else if (line.StartsWith("rename from ", StringComparison.Ordinal) || line.StartsWith("copy from ", StringComparison.Ordinal))
                 {

@@ -148,6 +148,20 @@ namespace CodeContext.Core.Services
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
         public int IgnoredLines { get; set; }
 
+        /// <summary>
+        /// Changed files that cannot change an indexed fact and are left out of <see cref="Unmapped"/>: no declaration is
+        /// in them, no worker's manifest names them (by extension or as a project file), the selection policy does not
+        /// leave them out, and no worker reported reading them, looking for them or listing the directory they entered
+        /// or left. A README, documentation, an image. They do not make the answer incomplete.
+        /// </summary>
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+        public int SetAsideFileCount { get; set; }
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+        public bool SetAsideFilesTruncated { get; set; }
+
+        /// <summary>The files set aside, repository-relative, in path order; absent when there is none.</summary>
+        public List<string>? SetAsideFiles { get; set; }
+
         /// <summary>Files whose mode alone changed.</summary>
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
         public int ModeOnlyFiles { get; set; }

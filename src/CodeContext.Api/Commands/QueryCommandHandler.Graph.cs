@@ -495,6 +495,12 @@ public static partial class QueryCommandHandler
         }
         if (response.IgnoredLines > 0 || response.ModeOnlyFiles > 0)
             output.WriteLine($"ignored\t{response.IgnoredLines} line(s) that change no declaration\t{response.ModeOnlyFiles} mode-only file(s)");
+        if (response.SetAsideFiles is { } setAside)
+        {
+            output.WriteLine($"setAside\t{setAside.Count}/{response.SetAsideFileCount}" + (response.SetAsideFilesTruncated ? "\ttruncated" : string.Empty)
+                + "\tfile(s) no worker reads: they change nothing indexed");
+            foreach (var file in setAside) output.WriteLine($"\t{Clean(file)}");
+        }
 
         output.WriteLine($"affected\t{response.ReturnedCount}/{response.TotalCount}" + (response.Truncated ? "\ttruncated" : string.Empty)
             + $"\tdepth {response.MaxDepth}" + (response.DepthLimited ? ", more beyond" : string.Empty) + $"\t{response.FileCount} file(s)");
@@ -589,7 +595,8 @@ public static partial class QueryCommandHandler
     {
         WriteHumanCache(response.Cache, output);
         output.WriteLine(response.Complete
-            ? $"Every changed line of the {response.DiffFiles} file(s) in the diff maps to a declaration."
+            ? $"Every changed line of the {response.DiffFiles} file(s) in the diff maps to a declaration"
+                + (response.SetAsideFileCount > 0 ? $", or lies in one of {response.SetAsideFileCount} file(s) no worker reads." : ".")
             : $"Incomplete: part of the {response.DiffFiles} file(s) in the diff maps to no declaration; see Not mapped.");
         output.WriteLine($"Files matching the working tree: {response.ContentChecked}"
             + (response.ContentUnchecked > 0 ? $"; mapped unchecked (no blob id in the diff): {response.ContentUnchecked}" : string.Empty));
@@ -616,6 +623,12 @@ public static partial class QueryCommandHandler
         }
         if (response.IgnoredLines > 0 || response.ModeOnlyFiles > 0)
             output.WriteLine($"Ignored: {response.IgnoredLines} line(s) that change no declaration (blank, comment, or an added file's own usings), {response.ModeOnlyFiles} mode-only file(s)");
+        if (response.SetAsideFiles is { } setAside)
+        {
+            output.WriteLine($"Set aside (no worker reads them, so they change nothing indexed): {setAside.Count}/{response.SetAsideFileCount}"
+                + (response.SetAsideFilesTruncated ? ", truncated" : string.Empty));
+            foreach (var file in setAside) output.WriteLine($"  - {file}");
+        }
         output.WriteLine($"Affected: {response.ReturnedCount}/{response.TotalCount}{(response.Truncated ? ", truncated" : string.Empty)}, "
             + $"within {response.MaxDepth} hop(s){(response.DepthLimited ? " (more beyond)" : string.Empty)}, in {response.FileCount} file(s)");
         if (response.TestsHidden > 0) output.WriteLine($"Test-file symbols affected: {response.TestsHidden} (--tests lists them)");

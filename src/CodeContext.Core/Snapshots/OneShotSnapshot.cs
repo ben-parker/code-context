@@ -157,7 +157,7 @@ namespace CodeContext.Core.Snapshots
                     factory.CreateNodeRepository(), factory.CreateEdgeRepository(), factory.CreateFileMetadataRepository(),
                     Options.Create(options), workers, coverage, new FixedNotice(notice),
                     // The freshness check above found nothing it was made from newer than the capture.
-                    new FixedFreshness(capturedUtc));
+                    new FixedFreshness(capturedUtc), new RepositoryFileSelector(Options.Create(options)));
                 return new OneShotSnapshotOpen(
                     new OneShotSnapshot(context, capturedUtc,
                         new OneShotTimings(keyAndDirectory, open, freshness.Elapsed, freshness.Checked, materialize)),

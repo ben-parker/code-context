@@ -66,14 +66,69 @@ namespace CodeContext.Core.Services
             var changeOf = new Dictionary<string, ChangeEntry>(StringComparer.Ordinal);
             var mismatched = 0;
 
+            // Files that cannot change an indexed fact are set aside; the rest are mapped. What the workers reported
+            // reading is consulted once, after the files whose names say nothing have been collected.
+            var noWorkerReads = _workerService is not null && _fileSelector is not null && _database is not null
+                ? new ChangedFilesNoWorkerReads(_workerService, _fileSelector, tree.Refused)
+                : null;
             foreach (var file in files)
+            {
+                if (noWorkerReads is not null && !file.ModeOnly && file.PathProblem is null && !file.Combined && Placed(file) is { } placed)
+                {
+                    switch (noWorkerReads.Ask(file, placed.Display, placed.Paths, path => NodesIn(shards, path).Count > 0, out var why))
+                    {
+                        case ChangedFilesNoWorkerReads.ByName.Deferred:
+                            continue;
+                        case ChangedFilesNoWorkerReads.ByName.Kept:
+                            await MapAsync(file, why, keptAsItIs: true);
+                            continue;
+                        default:
+                            await MapAsync(file, why, keptAsItIs: false);
+                            continue;
+                    }
+                }
+                await MapAsync(file, null, keptAsItIs: false);
+            }
+            if (noWorkerReads is { Candidates.Count: > 0 })
+            {
+                var (published, annotations) = _database!.LatchPublished();
+                noWorkerReads.Resolve(published, annotations);
+                var setAside = new List<string>();
+                foreach (var candidate in noWorkerReads.Candidates)
+                {
+                    if (candidate.Kept is null) setAside.Add(candidate.Display);
+                    else await MapAsync(candidate.File, candidate.Kept, keptAsItIs: true);
+                }
+                setAside.Sort(GraphAdjacency.ComparePaths);
+                response.SetAsideFileCount = setAside.Count;
+                if (setAside.Count > 0) response.SetAsideFiles = setAside.Take(request.Limit).ToList();
+                response.SetAsideFilesTruncated = setAside.Count > request.Limit;
+            }
+
+            // The file's paths under the root (new, then old when the diff names another), or null when one is outside it.
+            (string Display, string[] Paths)? Placed(DiffFile file)
+            {
+                if (tree.RootRelative(file.Path!) is not { } relative) return null;
+                if (file.OldPath is null || file.NewPath is null || file.OldPath == file.NewPath) return (relative, [tree.FullPath(relative)]);
+                return tree.RootRelative(file.OldPath) is { } old ? (relative, [tree.FullPath(relative), tree.FullPath(old)]) : null;
+            }
+
+            static string NotIndexed(string? kept)
+                => kept is null
+                    ? "No declaration of the index is in this file: the workers do not parse it, the selection policy leaves it out, "
+                        + "or it declares nothing. A project, build or configuration file can still change how everything binds."
+                    : $"No declaration of the index is in this file, and it may change what is indexed all the same: {kept}.";
+
+            // Maps one file. kept says why a file with no declaration may feed the index; keptAsItIs that no worker is
+            // told when it changes, so the working tree says nothing of whether the index has it.
+            async Task MapAsync(DiffFile file, string? kept, bool keptAsItIs)
             {
                 var status = file.Status.ToString().ToLowerInvariant();
                 response.IgnoredLines += file.IgnoredLines;
                 if (file.ModeOnly)
                 {
                     response.ModeOnlyFiles++;
-                    continue;
+                    return;
                 }
 
                 var display = file.Path!;
@@ -88,23 +143,28 @@ namespace CodeContext.Core.Services
                 if (file.PathProblem is { } problem)
                 {
                     Unmapped("invalidPath", $"The diff names {problem}; it is not looked at.");
-                    continue;
+                    return;
                 }
                 if (file.Combined)
                 {
                     Unmapped("combinedDiff", "A combined diff of a merge (diff --cc) is against several parents; pass git diff <one parent> <merge>.");
-                    continue;
+                    return;
                 }
                 if (tree.RootRelative(display) is not { } relative)
                 {
                     Unmapped("outsideRoot", $"Outside the indexed root {Path.GetFileName(_rootPath)} ({tree.RootPrefix.TrimEnd('/')} under the repository).");
-                    continue;
+                    return;
                 }
                 display = relative;
+                if (keptAsItIs)
+                {
+                    Unmapped("notIndexed", NotIndexed(kept));
+                    return;
+                }
                 if (file.Binary)
                 {
                     Unmapped("binary", "A binary change; nothing in it maps to a declaration.");
-                    continue;
+                    return;
                 }
 
                 if (file.Status == DiffFileStatus.Deleted)
@@ -127,7 +187,7 @@ namespace CodeContext.Core.Services
                             + "still name them no longer resolve). Search their names with rg.",
                             oldLines: file.RemovedLineCount > 0 ? $"1-{file.RemovedLineCount}" : null, count: file.RemovedLineCount);
                     }
-                    continue;
+                    return;
                 }
 
                 var fullPath = tree.FullPath(relative);
@@ -137,22 +197,20 @@ namespace CodeContext.Core.Services
                     case DiffWorkingTree.Verdict.Missing:
                         mismatched++;
                         Unmapped("contentMismatch", "Not in the working tree: the diff's new side is not what is checked out.");
-                        continue;
+                        return;
                     case DiffWorkingTree.Verdict.ChangedSinceIndexed:
                         Unmapped("notYetIndexed", "Changed on disk after the index last read the files; retry once the instance has re-indexed it.");
-                        continue;
+                        return;
                     case DiffWorkingTree.Verdict.Refused:
                         Unmapped("unreadable", $"Not compared with the working tree: {why}.");
-                        continue;
+                        return;
                 }
 
                 var nodes = NodesIn(shards, fullPath);
                 if (nodes.Count == 0)
                 {
-                    Unmapped("notIndexed",
-                        "No declaration of the index is in this file: the workers do not parse it, the selection policy leaves it out, "
-                        + "or it declares nothing. A project, build or configuration file can still change how everything binds.");
-                    continue;
+                    Unmapped("notIndexed", NotIndexed(kept));
+                    return;
                 }
                 if (verdict == DiffWorkingTree.Verdict.Mismatch)
                 {
@@ -162,7 +220,7 @@ namespace CodeContext.Core.Services
                         + "are not checked out, the file changed since the diff was made, or a .gitattributes filter (LFS, ident, "
                         + "working-tree-encoding) rewrites it on checkout. Its line numbers would point at the wrong declarations, so "
                         + "none is mapped.");
-                    continue;
+                    return;
                 }
                 // The file's content and time say what is on disk; whether the worker's last read of it succeeded is the
                 // file table's to say. A read that failed, or has not finished, left the declarations as they were.
@@ -172,7 +230,7 @@ namespace CodeContext.Core.Services
                         ? $"The index failed to read it as it is now ({unread.ErrorMessage ?? "no reason recorded"}) and holds its "
                             + "declarations as they were before; codecontext status shows the worker's state. Retry once it has been re-indexed."
                         : "The index has not finished reading it as it is now; retry once the instance has re-indexed it.");
-                    continue;
+                    return;
                 }
                 if (verdict == DiffWorkingTree.Verdict.Match) response.ContentChecked++;
                 else response.ContentUnchecked++;

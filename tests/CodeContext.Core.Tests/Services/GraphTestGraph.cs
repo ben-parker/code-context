@@ -27,7 +27,27 @@ internal sealed class GraphTestGraph
     /// <summary>The file table given to the service; a new, empty one when null.</summary>
     public CodeContext.Core.Repositories.IFileMetadataRepository? Files { get; set; }
 
+    /// <summary>The workers and the selection policy given to the service (diff impact asks them which files feed the index).</summary>
+    public CodeContext.Core.Workers.ILanguageWorkerService? Workers { get; set; }
+    public IRepositoryFileSelector? Selector { get; set; }
+
     public InMemoryDatabase Database { get; } = new();
+
+    /// <summary>
+    /// Records, for each of the two shards, what its worker reported reading besides its files (null: it reported
+    /// nothing), as a commit that carries the report and changes no fact.
+    /// </summary>
+    public void ReportInputs(WorkerInputs? a, WorkerInputs? b)
+    {
+        foreach (var (workspace, inputs) in new[] { ("a", a), ("b", b) })
+        {
+            Assert.True(Database.TryCommitGeneration(++_generation, [], [],
+                new CodeContext.Core.Repositories.CommitScope("csharp", workspace, [])
+                {
+                    Annotation = new CodeContext.Core.Repositories.ShardAnnotation(null, null) { Inputs = inputs },
+                }));
+        }
+    }
 
     public static string Id(string name) => $"csharp:{Workspace(name)}:{name}";
 
@@ -89,18 +109,21 @@ internal sealed class GraphTestGraph
     public ContextService Build()
     {
         Assert.True(Database.TryCommitGeneration(++_generation, _nodes, _edges, scope: null));
-        return Service(Database, _root, Freshness, Files);
+        return Service(Database, _root, Freshness, Files, Workers, Selector);
     }
 
     /// <summary>Commits the graph as it is now as a new generation.</summary>
     public void Commit() => Assert.True(Database.TryCommitGeneration(++_generation, _nodes.ToList(), _edges.ToList(), scope: null));
 
     public static ContextService Service(InMemoryDatabase database, string root = Root, IIndexFreshness? freshness = null,
-        CodeContext.Core.Repositories.IFileMetadataRepository? files = null)
+        CodeContext.Core.Repositories.IFileMetadataRepository? files = null,
+        CodeContext.Core.Workers.ILanguageWorkerService? workers = null, IRepositoryFileSelector? selector = null)
         => new(
             new InMemoryNodeRepository(database),
             new InMemoryEdgeRepository(database),
             files ?? new CodeContext.Core.Repositories.InMemoryFileMetadataRepository(),
             Options.Create(new CodeContextOptions { RootPath = root }),
-            freshness: freshness);
+            workerService: workers,
+            freshness: freshness,
+            fileSelector: selector);
 }
