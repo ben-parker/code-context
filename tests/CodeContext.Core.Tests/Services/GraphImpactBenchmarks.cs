@@ -125,5 +125,87 @@ public sealed class GraphImpactBenchmarks(ITestOutputHelper output) : IDisposabl
             + $"{(retainedAfter - retainedBefore) / 1024.0:F0} KB");
     }
 
+    /// <summary>
+    /// The diff at its limits: <paramref name="files"/> files of <paramref name="members"/> eight-line methods each, every
+    /// one with a doc comment above it, and a diff that changes a line and the doc comment of
+    /// <paramref name="changedPerFile"/> of them in every file. Reports the same figures.
+    /// </summary>
+    [Theory]
+    [InlineData(10_000, 4, 1)]      // the most files a diff may name
+    [InlineData(46, 5_000, 2_000)]  // about 16 MB of diff, 184,000 hunks
+    [InlineData(1, 5_000, 5_000)]   // one type of 5,000 members, every doc comment changed
+    public async Task ADiffAtItsLimits_IsAnswered(int files, int members, int changedPerFile)
+    {
+        const int MemberLines = 8;
+        var graph = new GraphTestGraph(_root) { Freshness = new Fresh() };
+        var diff = new StringBuilder();
+        var content = new StringBuilder();
+        content.Append("namespace Bench;\nclass F\n{\n");
+        for (var m = 0; m < members; m++)
+        {
+            content.Append("    /// <summary>Doc.</summary>\n    void M()\n    {\n");
+            for (var line = 0; line < MemberLines - 4; line++) content.Append("        Call();\n");
+            content.Append("    }\n");
+        }
+        content.Append("}\n");
+        var text = content.ToString();
+        var blob = DiffWorkingTree.BlobId(Encoding.UTF8.GetBytes(text), sha256: false)[..9];
+        var step = members / changedPerFile;
+        for (var f = 0; f < files; f++)
+        {
+            var file = $"src/M{f % 100}/F{f}.cs";
+            var path = Path.Combine(_root, file.Replace('/', Path.DirectorySeparatorChar));
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.WriteAllText(path, text);
+            graph.Node($"F{f}", "Class", file: file, line: 1, endLine: 3 + members * MemberLines);
+            for (var m = 0; m < members; m++)
+            {
+                // 1-based: the doc comment at 4 + 8m, the member from the line after it for seven lines.
+                graph.Node($"F{f}.M{m}", file: file, line: 4 + m * MemberLines, endLine: 4 + m * MemberLines + MemberLines - 2);
+            }
+            if (f > 0) graph.Edge($"F{f}.M0", $"F{f - 1}.M0");
+            diff.Append($"diff --git a/{file} b/{file}\nindex 123456789..{blob} 100644\n--- a/{file}\n+++ b/{file}\n");
+            for (var m = 0; m < members; m += step)
+            {
+                var doc = 4 + m * MemberLines;
+                diff.Append($"@@ -{doc} +{doc} @@\n-    /// <summary>Old.</summary>\n+    /// <summary>Doc.</summary>\n");
+                diff.Append($"@@ -{doc + 3} +{doc + 3} @@\n-        Old();\n+        Call();\n");
+            }
+        }
+        var service = graph.Build();
+        var request = new GraphImpactRequest { Diff = diff.ToString(), MaxDepth = 5, Limit = 20 };
+        output.WriteLine($"graph: {files * (members + 1):N0} symbols; diff: {files:N0} files, {request.Diff.Length:N0} characters");
+
+        var started = Stopwatch.GetTimestamp();
+        var parsed = UnifiedDiff.Parse(request.Diff);
+        var parse = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+        Assert.Equal(files, parsed.Count);
+        parsed = null;
+
+        var warm = await service.GetImpactAsync(request);
+        output.WriteLine($"answer: {warm.ChangeCount:N0} changed, {warm.TotalCount:N0} affected, {warm.IgnoredLines:N0} ignored, complete {warm.Complete}, "
+            + $"unmapped {warm.UnmappedCount}");
+        Assert.Equal(files * ((members + step - 1) / step), warm.ChangeCount);
+        Assert.True(warm.Complete);
+
+        var whole = new List<double>();
+        for (var run = 0; run < 3; run++)
+        {
+            started = Stopwatch.GetTimestamp();
+            await service.GetImpactAsync(request);
+            whole.Add(Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+        }
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        var retainedBefore = GC.GetTotalMemory(forceFullCollection: true);
+        var before = GC.GetTotalAllocatedBytes(precise: true);
+        await service.GetImpactAsync(request);
+        var allocated = GC.GetTotalAllocatedBytes(precise: true) - before;
+        var retainedAfter = GC.GetTotalMemory(forceFullCollection: true);
+        output.WriteLine($"parse: {parse:F0} ms; impact: median {Median(whole):F0} ms [{string.Join(", ", whole.Select(ms => ms.ToString("F0")))}]");
+        output.WriteLine($"allocated by one call: {allocated / (1024.0 * 1024):F1} MB; heap after a call minus before: "
+            + $"{(retainedAfter - retainedBefore) / 1024.0:F0} KB");
+    }
+
     private static double Median(List<double> values) => values.Order().ElementAt(values.Count / 2);
 }
