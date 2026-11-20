@@ -86,4 +86,71 @@ public class DiffMapperTests
         Assert.Empty(result.Touched);
         Assert.Equal([null, null], result.RemovedBetween.Select(removed => removed.Container));
     }
+
+    [Fact]
+    public void ChangedLines_GoToTheSameDeclarations_AsAScanOfEveryDeclarationForEveryLine()
+    {
+        var random = new Random(20261120);
+        for (var round = 0; round < 200; round++)
+        {
+            // A random tree of declarations over 120 lines: each splits its inside among children, with gaps.
+            var nodes = new List<CodeNode>();
+            void Declare(string id, int from, int to, int depth)
+            {
+                nodes.Add(Node(id, from, 0, to, 200, depth < 2 && random.Next(2) == 0 ? "Class" : "Method"));
+                var next = from + random.Next(2);
+                for (var child = 0; depth < 4 && next < to; child++)
+                {
+                    var end = Math.Min(to - random.Next(2), next + random.Next(8));
+                    if (end < next) break;
+                    if (random.Next(4) > 0) Declare($"{id}.{child}", next, end, depth + 1);
+                    next = end + random.Next(3);
+                }
+            }
+            for (int top = 0, at = random.Next(3); at < 120; top++)
+            {
+                var end = Math.Min(119, at + random.Next(40));
+                Declare($"T{top}", at, end, 0);
+                at = end + 1 + random.Next(3);
+            }
+            var added = new List<DiffLineRange>();
+            for (var at = 1 + random.Next(6); at <= 125; at += 1 + random.Next(12))
+            {
+                var end = at + random.Next(5);
+                added.Add(new DiffLineRange(at, end));
+                at = end + 1;
+            }
+
+            var result = DiffMapper.Map(nodes, Container, added, []);
+
+            var expected = new SortedDictionary<string, List<int>>(StringComparer.Ordinal);
+            var outside = new List<int>();
+            foreach (var line in added.SelectMany(range => Enumerable.Range(range.Start, range.Count)))
+            {
+                var holding = nodes.Where(node => node.StartLine + 1 <= line && line <= node.EndLine + 1).ToList();
+                if (holding.Count == 0) outside.Add(line);
+                foreach (var node in holding)
+                {
+                    var nested = holding.Exists(other => other != node && other.StartLine >= node.StartLine && other.EndLine <= node.EndLine
+                        && (other.StartLine, other.EndLine) != (node.StartLine, node.EndLine));
+                    if (line == node.StartLine + 1 || line == node.EndLine + 1 || !nested)
+                    {
+                        // Declarations with one span are one group, named by its first node in id order.
+                        var first = nodes.Where(same => (same.StartLine, same.EndLine) == (node.StartLine, node.EndLine)).MinBy(same => same.Id, StringComparer.Ordinal)!;
+                        if (!expected.TryGetValue(first.Id!, out var lines)) expected[first.Id!] = lines = [];
+                        if (!lines.Contains(line)) lines.Add(line);
+                    }
+                }
+            }
+            var actual = new SortedDictionary<string, List<int>>(StringComparer.Ordinal);
+            foreach (var touch in result.Touched)
+            {
+                actual[touch.Nodes[0].Id!] = touch.Lines.SelectMany(range => Enumerable.Range(range.Start, range.Count)).ToList();
+                Assert.True(touch.Lines.Zip(touch.Lines.Skip(1)).All(pair => pair.First.End + 1 < pair.Second.Start), "ranges are ordered and apart");
+            }
+            Assert.Equal(expected.Keys, actual.Keys);
+            foreach (var (id, lines) in expected) Assert.Equal(lines.Order(), actual[id]);
+            Assert.Equal(outside, result.Outside.SelectMany(range => Enumerable.Range(range.Start, range.Count)));
+        }
+    }
 }

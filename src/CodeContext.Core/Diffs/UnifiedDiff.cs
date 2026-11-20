@@ -15,9 +15,12 @@ namespace CodeContext.Core.Diffs
     /// Removed lines that are not all blank: <see cref="Old"/> on the old side, and the new-side lines around the change
     /// block they belong to: <see cref="NewBefore"/> is the last new-side line before it (0 at the top of the file) and
     /// <see cref="NewAfter"/> the first after it, past any lines the block adds. <see cref="CommentsOnly"/> when every
-    /// removed line that is not blank is a comment line (see <see cref="SourceLines.IsCommentLine"/>).
+    /// removed line that is not blank is a comment line (see <see cref="SourceLines.IsCommentLine"/>);
+    /// <see cref="ContinuesBlockComment"/> when such a run starts like the inside or the end of a block comment
+    /// (<c>* text</c>, <c>*/</c>), so that it was a comment only if one was open above it.
     /// </summary>
-    public readonly record struct DiffRemoval(DiffLineRange Old, int NewBefore, int NewAfter, bool CommentsOnly = false);
+    public readonly record struct DiffRemoval(
+        DiffLineRange Old, int NewBefore, int NewAfter, bool CommentsOnly = false, bool ContinuesBlockComment = false);
 
     /// <summary>
     /// One file of a unified diff, as data. Paths are as the diff names them, relative, <c>/</c>-separated, with git's
@@ -124,17 +127,18 @@ namespace CodeContext.Core.Diffs
 
             public List<DiffFile> Read()
             {
-                while (NextLine() is { } line)
+                // Lines are looked at where they lie: only a header line is copied out of the text.
+                while (NextSpan(out var line))
                 {
-                    if (line.StartsWith("diff --git ", StringComparison.Ordinal))
+                    if (line.StartsWith("diff --git "))
                     {
                         StartFile(gitHeader: true);
-                        ReadGitHeaderPaths(line["diff --git ".Length..]);
+                        ReadGitHeaderPaths(line["diff --git ".Length..].ToString());
                     }
-                    else if (line.StartsWith("diff --cc ", StringComparison.Ordinal) || line.StartsWith("diff --combined ", StringComparison.Ordinal))
+                    else if (line.StartsWith("diff --cc ") || line.StartsWith("diff --combined "))
                     {
                         StartFile(gitHeader: true);
-                        var path = line[(line.IndexOf(' ', 5) + 1)..];
+                        var path = line[(line[5..].IndexOf(' ') + 6)..].ToString();
                         _file!.NewPath = _file.OldPath = Path(path, stripPrefix: false);
                         _file.Combined = true;
                         _skipping = true;
@@ -143,25 +147,26 @@ namespace CodeContext.Core.Diffs
                     {
                         continue;
                     }
-                    else if (line.StartsWith("--- ", StringComparison.Ordinal) && PeekLine() is { } next && next.StartsWith("+++ ", StringComparison.Ordinal))
+                    else if (line.StartsWith("--- ") && PeekLine() is { } next && next.StartsWith("+++ ", StringComparison.Ordinal))
                     {
                         // A plain diff -u starts a file here; a git diff names its paths again.
                         if (_file is null || _file.HasHunks || !_gitHeader) StartFile(gitHeader: false);
+                        var minus = line[4..].ToString();
                         NextLine();
-                        ReadMinusPlus(line[4..], next[4..]);
+                        ReadMinusPlus(minus, next[4..]);
                     }
-                    else if (line.StartsWith("@@ ", StringComparison.Ordinal))
+                    else if (line.StartsWith("@@ "))
                     {
                         if (_file is null) throw Malformed("a hunk with no file header before it");
                         ReadHunk(line);
                     }
-                    else if (line.StartsWith("@@@", StringComparison.Ordinal))
+                    else if (line.StartsWith("@@@"))
                     {
                         throw Malformed("a combined-diff hunk outside a combined diff");
                     }
                     else if (_file is not null && !_file.HasHunks)
                     {
-                        ReadExtendedHeader(line);
+                        ReadExtendedHeader(line.ToString());
                     }
                     // Anything else (a commit message, a mail signature, text between files) is not part of a change.
                 }
@@ -179,6 +184,20 @@ namespace CodeContext.Core.Diffs
                 _position = end < 0 ? text.Length : end + 1;
                 _lineNumber++;
                 return line.EndsWith('\r') ? line[..^1] : line;
+            }
+
+            /// <summary>The next line without a copy of it, for a hunk's lines; false at the end.</summary>
+            private bool NextSpan(out ReadOnlySpan<char> line)
+            {
+                line = default;
+                if (_position >= text.Length) return false;
+                var rest = text.AsSpan(_position);
+                var end = rest.IndexOf('\n');
+                line = end < 0 ? rest : rest[..end];
+                _position = end < 0 ? text.Length : _position + end + 1;
+                _lineNumber++;
+                if (line.EndsWith("\r")) line = line[..^1];
+                return true;
             }
 
             private string? PeekLine()
@@ -214,6 +233,7 @@ namespace CodeContext.Core.Diffs
                     else if (file.NewPath is null) file.Status = DiffFileStatus.Deleted;
                 }
                 // A header names both paths; the status says which side does not exist.
+                DiffMapper.Normalize(file.FileScopedDirectives);
                 if (file.Status == DiffFileStatus.Added) file.OldPath = null;
                 if (file.Status == DiffFileStatus.Deleted) file.NewPath = null;
                 if (file.PathProblem is null && file.Path is { } key && !_seen.Add(key))
@@ -340,18 +360,19 @@ namespace CodeContext.Core.Diffs
                 return value.All(digit => digit == '0') ? null : value.ToLowerInvariant();
             }
 
-            private void ReadHunk(string header)
+            private void ReadHunk(ReadOnlySpan<char> header)
             {
                 var file = _file!;
                 // @@ -oldStart[,oldCount] +newStart[,newCount] @@[ section]
-                var end = header.IndexOf(" @@", 3, StringComparison.Ordinal);
-                if (end < 0) throw Malformed($"a hunk header that does not close with '@@' ('{Shorten(header)}')");
-                var ranges = header[3..end].Split(' ');
-                if (ranges.Length != 2 || !ranges[0].StartsWith('-') || !ranges[1].StartsWith('+')
-                    || !TryRange(ranges[0][1..], out var oldStart, out var oldCount)
-                    || !TryRange(ranges[1][1..], out var newStart, out var newCount))
+                var end = header[3..].IndexOf(" @@");
+                if (end < 0) throw Malformed($"a hunk header that does not close with '@@' ('{Shorten(header.ToString())}')");
+                var ranges = header.Slice(3, end);
+                var space = ranges.IndexOf(' ');
+                if (space < 1 || space + 1 >= ranges.Length || ranges[(space + 1)..].Contains(' ') || ranges[0] != '-' || ranges[space + 1] != '+'
+                    || !TryRange(ranges[1..space], out var oldStart, out var oldCount)
+                    || !TryRange(ranges[(space + 2)..], out var newStart, out var newCount))
                 {
-                    throw Malformed($"a hunk header that is not '@@ -start,count +start,count @@' ('{Shorten(header)}')");
+                    throw Malformed($"a hunk header that is not '@@ -start,count +start,count @@' ('{Shorten(header.ToString())}')");
                 }
                 file.HasHunks = true;
 
@@ -367,6 +388,7 @@ namespace CodeContext.Core.Diffs
                 var removedEnd = 0;
                 var removedCode = false;
                 var removedComment = false;
+                var removedContinues = false;
                 var removedBlank = 0;
                 var addStart = 0;
                 var commentStart = 0;
@@ -377,9 +399,10 @@ namespace CodeContext.Core.Diffs
 
                 while (oldLeft > 0 || newLeft > 0)
                 {
-                    var line = NextLine() ?? throw new ArgumentException(
+                    if (!NextSpan(out var line)) throw new ArgumentException(
                         $"diff line {hunkLine}: the hunk ends early: {oldLeft} old and {newLeft} new line(s) of its header are missing (a truncated diff?); the diff is refused rather than read in part.");
                     var kind = line.Length == 0 ? ' ' : line[0];
+                    var content = line.Length == 0 ? line : line[1..];
                     switch (kind)
                     {
                         case ' ':
@@ -395,11 +418,12 @@ namespace CodeContext.Core.Diffs
                             OpenBlock();
                             if (removedStart == 0) removedStart = nextOld;
                             removedEnd = nextOld;
-                            if (IsBlank(line)) removedBlank++;
-                            else if (SourceLines.IsCommentLine(line.AsSpan(1)))
+                            if (SourceLines.IsBlank(content)) removedBlank++;
+                            else if (SourceLines.IsCommentLine(content))
                             {
+                                if (!removedMarks.Open && content.TrimStart()[0] == '*') removedContinues = true;
                                 removedComment = true;
-                                removedMarks.Follow(line.AsSpan(1));
+                                removedMarks.Follow(content);
                             }
                             else removedCode = true;
                             file.RemovedLineCount++;
@@ -410,23 +434,23 @@ namespace CodeContext.Core.Diffs
                             if (newLeft == 0) throw Malformed("an added line beyond the hunk's new count");
                             OpenBlock();
                             file.AddedLineCount++;
-                            if (IsBlank(line))
+                            if (SourceLines.IsBlank(content))
                             {
                                 file.IgnoredLines++;
                                 CloseAdded();
                             }
-                            else if (SourceLines.IsCommentLine(line.AsSpan(1)))
+                            else if (SourceLines.IsCommentLine(content))
                             {
                                 CloseCode();
                                 if (commentStart == 0) commentStart = nextNew;
-                                if (addedMarks.Follow(line.AsSpan(1))) (markedLines ??= []).Add(nextNew);
+                                if (addedMarks.Follow(content)) (markedLines ??= []).Add(nextNew);
                             }
                             else
                             {
                                 CloseComments();
                                 if (addStart == 0) addStart = nextNew;
-                                if (file.Status == DiffFileStatus.Added && SourceLines.IsFileScopedDirective(line.AsSpan(1)))
-                                    DiffMapper.Merge(file.FileScopedDirectives, new DiffLineRange(nextNew, nextNew));
+                                if (file.Status == DiffFileStatus.Added && SourceLines.IsFileScopedDirective(content))
+                                    file.FileScopedDirectives.Add(new DiffLineRange(nextNew, nextNew));
                             }
                             newLeft--;
                             nextNew++;
@@ -435,12 +459,12 @@ namespace CodeContext.Core.Diffs
                             // "\ No newline at end of file": about the line before, counted by neither side.
                             break;
                         default:
-                            throw Malformed($"a line inside a hunk that is not context, '+' or '-' ('{Shorten(line)}')");
+                            throw Malformed($"a line inside a hunk that is not context, '+' or '-' ('{Shorten(line.ToString())}')");
                     }
                 }
                 CloseBlock();
                 // A marker may follow the last line.
-                while (PeekLine() is { } marker && marker.StartsWith('\\')) NextLine();
+                while (_position < text.Length && text[_position] == '\\') NextSpan(out _);
 
                 void OpenBlock()
                 {
@@ -485,26 +509,18 @@ namespace CodeContext.Core.Diffs
                         if (removedCode || removedComment)
                         {
                             file.Removals.Add(new DiffRemoval(
-                                new DiffLineRange(removedStart, removedEnd), blockNewBefore, nextNew, CommentsOnly: !removedCode));
+                                new DiffLineRange(removedStart, removedEnd), blockNewBefore, nextNew, CommentsOnly: !removedCode,
+                                ContinuesBlockComment: !removedCode && removedContinues));
                         }
                         else file.IgnoredLines += removedBlank;
                     }
                     blockNewBefore = -1;
                     removedStart = removedEnd = removedBlank = 0;
-                    removedCode = removedComment = false;
+                    removedCode = removedComment = removedContinues = false;
                 }
             }
 
-            private static bool IsBlank(string line)
-            {
-                for (var i = 1; i < line.Length; i++)
-                {
-                    if (!char.IsWhiteSpace(line[i])) return false;
-                }
-                return true;
-            }
-
-            private static bool TryRange(string value, out int start, out int count)
+            private static bool TryRange(ReadOnlySpan<char> value, out int start, out int count)
             {
                 count = 1;
                 var comma = value.IndexOf(',');

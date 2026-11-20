@@ -179,12 +179,12 @@ namespace CodeContext.Core.Services
                     : file.Added;
                 var newBlob = file.NewBlob;
                 var mapping = DiffMapper.Map(nodes, node => IsContainer(node, walk), added, file.Removals, file.CommentAdded, file.CommentBoundaries,
-                    HoldsStatements, () => tree.ReadLines(fullPath, newBlob));
+                    () => tree.ReadComments(fullPath, newBlob));
                 response.IgnoredLines += mapping.IgnoredComments;
 
                 foreach (var touch in mapping.Touched)
                 {
-                    var ordered = touch.Nodes.OrderBy(PublicIdentifier, StringComparer.Ordinal).ToList();
+                    var ordered = touch.Nodes.Count == 1 ? [touch.Nodes[0]] : touch.Nodes.OrderBy(PublicIdentifier, StringComparer.Ordinal).ToList();
                     var entry = new ChangeEntry
                     {
                         Node = ordered[0], Copies = ordered, Container = ordered.Exists(node => IsContainer(node, walk)),
@@ -384,9 +384,6 @@ namespace CodeContext.Core.Services
         private static bool IsContainer(CodeNode node, GraphWalk walk)
             => (node.Type is { } type && ContainerTypes.Contains(type)) || walk.HoldsMembers(node.Id!);
 
-        /// <summary>Whether a container holds statements beside its declarations, so that a line in it may lie in a string.</summary>
-        private static bool HoldsStatements(CodeNode node) => string.Equals(node.Type, "Module", StringComparison.OrdinalIgnoreCase);
-
         /// <summary>The lines of ordered, disjoint <paramref name="ranges"/> that none of <paramref name="removed"/> holds.</summary>
         private static List<DiffLineRange> Subtract(List<DiffLineRange> ranges, List<DiffLineRange> removed)
         {
@@ -408,8 +405,8 @@ namespace CodeContext.Core.Services
         /// <summary>Ranges as <c>12-14,20</c>.</summary>
         internal static string FormatRanges(IEnumerable<DiffLineRange> ranges)
         {
-            var merged = new List<DiffLineRange>();
-            foreach (var range in ranges) DiffMapper.Merge(merged, range);
+            var merged = ranges.ToList();
+            DiffMapper.Normalize(merged);
             var text = new StringBuilder();
             foreach (var range in merged)
             {

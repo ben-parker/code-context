@@ -115,8 +115,7 @@ namespace CodeContext.Core.Diffs
             if (info.Length > MaxHashedBytes) return (Verdict.Refused, $"it is larger than {MaxHashedBytes / (1024 * 1024)} MB, so its content was not compared");
             try
             {
-                using var stream = new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete,
-                    bufferSize: 1, FileOptions.SequentialScan);
+                using var stream = Open(fullPath);
                 return (Matches(stream, blob) ? Verdict.Match : Verdict.Mismatch, null);
             }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
@@ -214,27 +213,39 @@ namespace CodeContext.Core.Diffs
         }
 
         /// <summary>
-        /// The lines of the file at <paramref name="fullPath"/> (UTF-8, carriage returns dropped), read as <see cref="Inspect"/>
-        /// reads it and only when its content is still <paramref name="blob"/> (when given); null otherwise.
+        /// The comment lines of the file at <paramref name="fullPath"/>, read as <see cref="Inspect"/> reads it and only
+        /// when its content is still <paramref name="blob"/> (when given); null otherwise. The file is held whole only
+        /// while it is read, in a pooled buffer.
         /// </summary>
-        public IReadOnlyList<string>? ReadLines(string fullPath, string? blob)
+        public CommentRuns? ReadComments(string fullPath, string? blob)
         {
             if (_refused(fullPath)) return null;
-            byte[] content;
+            byte[]? buffer = null;
             try
             {
-                if (new FileInfo(fullPath) is not { Exists: true } info || info.Length > MaxHashedBytes) return null;
-                content = File.ReadAllBytes(fullPath);
+                using var stream = Open(fullPath);
+                if (stream.Length > MaxHashedBytes) return null;
+                var length = (int)stream.Length;
+                buffer = System.Buffers.ArrayPool<byte>.Shared.Rent(length + 1);
+                var total = 0;
+                int read;
+                while (total <= length && (read = stream.Read(buffer, total, length + 1 - total)) > 0) total += read;
+                if (total != length) return null;
+                if (blob is not null && !Matches(new MemoryStream(buffer, 0, length, writable: false), blob)) return null;
+                return CommentRuns.Read(buffer.AsSpan(0, length));
             }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
             {
                 return null;
             }
-            if (blob is not null && !Matches(new MemoryStream(content, writable: false), blob)) return null;
-            var text = new UTF8Encoding(false).GetString(content);
-            if (text.EndsWith('\n')) text = text[..^1];
-            return text.Split('\n').Select(line => line.EndsWith('\r') ? line[..^1] : line).ToArray();
+            finally
+            {
+                if (buffer is not null) System.Buffers.ArrayPool<byte>.Shared.Return(buffer);
+            }
         }
+
+        private static FileStream Open(string fullPath)
+            => new(fullPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, bufferSize: 1, FileOptions.SequentialScan);
 
         /// <summary>git's object id of a blob: the hash of <c>blob &lt;size&gt;\0</c> followed by the content.</summary>
         internal static string BlobId(byte[] content, bool sha256)

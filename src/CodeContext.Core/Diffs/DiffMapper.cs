@@ -1,3 +1,5 @@
+using System.Runtime.InteropServices;
+
 namespace CodeContext.Core.Diffs
 {
     /// <summary>
@@ -12,14 +14,15 @@ namespace CodeContext.Core.Diffs
     /// deletion, a rename, a changed signature), which exists only on the old side: that is reported, never mapped.
     /// Lines no declaration holds at all (imports, a namespace line, a file header) are reported too.
     ///
-    /// Comment lines (<see cref="SourceLines.IsCommentLine"/>) change a member that holds them, as any line does; where
-    /// no member holds them (a doc comment above a member, which a declaration's span leaves out, or a file header) they
-    /// change nothing and are only counted, and a removed run of comments only is no removed declaration. A comment line
-    /// that opens or closes a block comment around unchanged lines (<see cref="DiffFile.CommentBoundaries"/>) is the
-    /// exception: where no member holds it, what it commented out or back in is reported, never counted. In a container
-    /// that also holds statements no declaration does (a module), a line that looks like a comment may lie in a string:
-    /// there the file is read, and only a line of the comment just above a declaration, or of the file's leading comment,
-    /// changes nothing; any other changes the container.
+    /// Comment lines (<see cref="SourceLines.IsCommentLine"/>) change a member that holds them, as any line does. Where
+    /// no member holds one (a doc comment above a member, which a declaration's span leaves out; a file header; a line
+    /// of a string that only looks like a comment) the file itself is read (<see cref="CommentRuns"/>): a line of the
+    /// comment just above a declaration, or of the file's leading comment, changes nothing and is only counted; any
+    /// other is a line of whatever holds it, as a line of code there would be. A removed run of comments only is judged
+    /// the same way, by where it stood (and, when it starts like the inside of a block comment, by one being open
+    /// there). A comment line that opens or closes a block comment around unchanged lines
+    /// (<see cref="DiffFile.CommentBoundaries"/>) is the exception: where no member holds it, what it commented out or
+    /// back in is reported, never counted.
     /// </summary>
     public static class DiffMapper
     {
@@ -28,7 +31,7 @@ namespace CodeContext.Core.Diffs
         {
             public required IReadOnlyList<CodeNode> Nodes { get; init; }
 
-            /// <summary>Changed new-side lines that are its own, 1-based.</summary>
+            /// <summary>Changed new-side lines that are its own, 1-based, ordered and disjoint.</summary>
             public List<DiffLineRange> Lines { get; } = new();
 
             /// <summary>Removed lines inside it.</summary>
@@ -41,10 +44,12 @@ namespace CodeContext.Core.Diffs
         public sealed class Result
         {
             public List<Touch> Touched { get; } = new();
+
+            /// <summary>Changed lines no declaration holds, ordered and disjoint.</summary>
             public List<DiffLineRange> Outside { get; } = new();
             public List<RemovedBetween> RemovedBetween { get; } = new();
 
-            /// <summary>Comment lines no member holds, added or removed: counted, not mapped.</summary>
+            /// <summary>Comment lines above a declaration or at the head of the file, added or removed: counted, not mapped.</summary>
             public int IgnoredComments { get; set; }
 
             /// <summary>Block-comment boundaries no member holds: the unchanged lines next to them may hold a declaration.</summary>
@@ -53,7 +58,10 @@ namespace CodeContext.Core.Diffs
 
         private sealed class Group
         {
-            public required List<CodeNode> Nodes;
+            public required CodeNode Node;
+
+            /// <summary>Other nodes with the same span.</summary>
+            public List<CodeNode>? More;
             public int Start;
             public int End;
             public (int Line, int Col) From;
@@ -61,77 +69,85 @@ namespace CodeContext.Core.Diffs
             public Group? Parent;
             public List<Group>? Children;
             public Touch? Touch;
+            public int Depth;
+
+            /// <summary>The last line this group or a sibling before it holds: siblings are ordered by start, so this never falls.</summary>
+            public int Reach;
+
+            /// <summary>Whether it holds declarations; asked once.</summary>
+            public bool? Container;
         }
 
         /// <param name="nodes">Every node of the index in the file.</param>
         /// <param name="isContainer">Whether a node holds declarations (a type, a module): a removal between its members is not mapped.</param>
         /// <param name="added">Changed new-side lines; <paramref name="comments"/> changed comment lines; <paramref name="removals"/> the removed runs.</param>
         /// <param name="boundaries">The comment lines among <paramref name="comments"/> that open or close a block comment around unchanged lines.</param>
-        /// <param name="holdsStatements">Whether a container holds statements as well as declarations (a module).</param>
-        /// <param name="readLines">The file's new-side lines, read when a comment line lies in such a container; null when they cannot be read.</param>
+        /// <param name="readComments">Reads the file's new side, asked once and only when a comment line lies where no member holds it; null when it cannot be read.</param>
         public static Result Map(
             IReadOnlyList<CodeNode> nodes, Func<CodeNode, bool> isContainer,
             IReadOnlyList<DiffLineRange> added, IReadOnlyList<DiffRemoval> removals, IReadOnlyList<DiffLineRange>? comments = null,
-            IReadOnlyList<DiffLineRange>? boundaries = null,
-            Func<CodeNode, bool>? holdsStatements = null, Func<IReadOnlyList<string>?>? readLines = null)
+            IReadOnlyList<DiffLineRange>? boundaries = null, Func<CommentRuns?>? readComments = null)
         {
             var result = new Result();
             var groups = Groups(nodes);
             var roots = groups.Where(group => group.Parent is null).ToList();
-            QuietRuns? text = null;
-            var textRead = false;
-            HashSet<int>? starts = null;
+            var holding = new List<Group>();
+            var gaps = new List<DiffLineRange>();
 
             foreach (var range in added)
             {
-                foreach (var group in Overlapping(roots, range.Start, range.End))
+                Holding(roots, range.Start, range.End, holding);
+                foreach (var group in holding)
                 {
-                    var lo = Math.Max(range.Start, group.Start);
-                    var hi = Math.Min(range.End, group.End);
-                    if (lo > hi) continue;
-                    var owned = Owned(group, lo, hi);
-                    if (owned.Count == 0) continue;
-                    var touch = TouchOf(group, result);
-                    foreach (var line in owned) Merge(touch.Lines, line);
+                    gaps.Clear();
+                    Owned(group, Math.Max(range.Start, group.Start), Math.Min(range.End, group.End), gaps);
+                    if (gaps.Count > 0) TouchOf(group, result).Lines.AddRange(gaps);
                 }
-                foreach (var outside in Uncovered(roots, range.Start, range.End)) Merge(result.Outside, outside);
+                Uncovered(roots, range.Start, range.End, result.Outside);
             }
 
-            // A comment line is a member's when a member is innermost there; otherwise it changes nothing.
+            CommentRuns? text = null;
+            var textRead = false;
+            HashSet<int>? starts = null;
+            // Whether the file shows a comment between two of its lines to be the one just above a declaration or its leading one.
+            bool AboveADeclarationOrAtTheHead(int before, int after, bool continuesBlockComment = false)
+            {
+                if (!textRead)
+                {
+                    text = readComments?.Invoke();
+                    textRead = true;
+                }
+                if (text is null || (continuesBlockComment && !text.IsOpenAfter(before))) return false;
+                starts ??= groups.Select(group => group.Start).ToHashSet();
+                return text.IsDocCommentOrHeader(before, after, starts);
+            }
+
+            HashSet<int>? boundaryLines = null;
+            foreach (var boundary in boundaries ?? [])
+            {
+                for (var line = boundary.Start; line <= boundary.End; line++) (boundaryLines ??= []).Add(line);
+            }
+
             foreach (var range in comments ?? [])
             {
                 for (var line = range.Start; line <= range.End; line++)
                 {
+                    var here = new DiffLineRange(line, line);
+                    Holding(roots, line, line, holding);
                     var member = false;
-                    var holding = Overlapping(roots, line, line);
+                    Group? innermost = null;
                     foreach (var group in holding)
                     {
-                        if (group.Nodes.Exists(node => isContainer(node))) continue;
-                        if (Owned(group, line, line).Count == 0) continue;
-                        Merge(TouchOf(group, result).Lines, new DiffLineRange(line, line));
+                        if (innermost is null || group.Depth > innermost.Depth) innermost = group;
+                        if (IsContainer(group, isContainer) || !Owns(group, line)) continue;
+                        TouchOf(group, result).Lines.Add(here);
                         member = true;
                     }
                     if (member) continue;
-                    if (boundaries?.Any(boundary => boundary.Start <= line && line <= boundary.End) == true)
-                    {
-                        Merge(result.CommentBoundaries, new DiffLineRange(line, line));
-                        continue;
-                    }
-                    if (holdsStatements is not null && Innermost(holding) is { } holder && holder.Nodes.Exists(node => holdsStatements(node)))
-                    {
-                        if (!textRead)
-                        {
-                            text = readLines?.Invoke() is { } read ? new QuietRuns(read) : null;
-                            textRead = true;
-                        }
-                        starts ??= groups.Select(group => group.Start).ToHashSet();
-                        if (text is null || !text.IsComment(line) || !text.IsDocCommentOrHeader(line - 1, line + 1, starts))
-                        {
-                            Merge(TouchOf(holder, result).Lines, new DiffLineRange(line, line));
-                            continue;
-                        }
-                    }
-                    result.IgnoredComments++;
+                    if (boundaryLines?.Contains(line) == true) result.CommentBoundaries.Add(here);
+                    else if (AboveADeclarationOrAtTheHead(line - 1, line + 1) && text!.IsComment(line)) result.IgnoredComments++;
+                    else if (innermost is not null) TouchOf(innermost, result).Lines.Add(here);
+                    else result.Outside.Add(here);
                 }
             }
 
@@ -141,41 +157,22 @@ namespace CodeContext.Core.Diffs
                 Group? around = null;
                 if (removal.NewBefore >= 1)
                 {
-                    foreach (var group in Overlapping(roots, removal.NewBefore, removal.NewBefore))
+                    Holding(roots, removal.NewBefore, removal.NewBefore, holding);
+                    foreach (var group in holding)
                     {
-                        if (removal.NewAfter <= group.End && (around is null || Depth(group) > Depth(around)))
-                        {
-                            around = group;
-                        }
+                        if (removal.NewAfter <= group.End && (around is null || group.Depth > around.Depth)) around = group;
                     }
                 }
-                if (around is not null && !around.Nodes.Exists(node => isContainer(node)))
-                {
-                    TouchOf(around, result).RemovedLines += removal.Old.Count;
-                    continue;
-                }
-                if (removal.CommentsOnly && around is not null && around.Nodes.Exists(node => holdsStatements?.Invoke(node) == true))
-                {
-                    if (!textRead)
-                    {
-                        text = readLines?.Invoke() is { } read ? new QuietRuns(read) : null;
-                        textRead = true;
-                    }
-                    starts ??= groups.Select(group => group.Start).ToHashSet();
-                    if (text is null || !text.IsDocCommentOrHeader(removal.NewBefore, removal.NewAfter, starts))
-                    {
-                        TouchOf(around, result).RemovedLines += removal.Old.Count;
-                        continue;
-                    }
-                }
-                if (removal.CommentsOnly)
-                {
-                    result.IgnoredComments += removal.Old.Count;
-                    continue;
-                }
-                result.RemovedBetween.Add(new RemovedBetween(removal.Old, around?.Nodes));
+                if (around is not null && !IsContainer(around, isContainer)) TouchOf(around, result).RemovedLines += removal.Old.Count;
+                else if (!removal.CommentsOnly) result.RemovedBetween.Add(new RemovedBetween(removal.Old, around is null ? null : NodesOf(around)));
+                else if (AboveADeclarationOrAtTheHead(removal.NewBefore, removal.NewAfter, removal.ContinuesBlockComment)) result.IgnoredComments += removal.Old.Count;
+                else if (around is not null) TouchOf(around, result).RemovedLines += removal.Old.Count;
+                else result.RemovedBetween.Add(new RemovedBetween(removal.Old, null));
             }
 
+            foreach (var touch in result.Touched) Normalize(touch.Lines);
+            Normalize(result.Outside);
+            Normalize(result.CommentBoundaries);
             result.Touched.Sort(static (left, right) =>
             {
                 var order = left.Nodes[0].StartLine.CompareTo(right.Nodes[0].StartLine);
@@ -184,32 +181,57 @@ namespace CodeContext.Core.Diffs
             return result;
         }
 
-        /// <summary>The deepest of <paramref name="holding"/> (the groups holding one line), or null.</summary>
-        private static Group? Innermost(List<Group> holding)
+        private static bool IsContainer(Group group, Func<CodeNode, bool> isContainer)
         {
-            Group? innermost = null;
-            foreach (var group in holding)
+            if (group.Container is { } known) return known;
+            var container = isContainer(group.Node);
+            for (var index = 0; !container && index < (group.More?.Count ?? 0); index++) container = isContainer(group.More![index]);
+            group.Container = container;
+            return container;
+        }
+
+        private static IReadOnlyList<CodeNode> NodesOf(Group group) => group.More is null ? [group.Node] : [group.Node, .. group.More];
+
+        private static Touch TouchOf(Group group, Result result)
+        {
+            if (group.Touch is null)
             {
-                if (innermost is null || Depth(group) > Depth(innermost)) innermost = group;
+                group.Touch = new Touch { Nodes = NodesOf(group) };
+                result.Touched.Add(group.Touch);
             }
-            return innermost;
+            return group.Touch;
         }
 
         /// <summary>
-        /// The groups whose lines meet <c>[lo, hi]</c>, found by descending from <paramref name="level"/> (ordered by start):
-        /// a group's parent holds every line it does, so no other group can meet the range.
+        /// The first of <paramref name="level"/> (siblings, ordered by start) that can hold line <paramref name="lo"/> or
+        /// a later one: every group before it ends earlier.
         /// </summary>
-        private static List<Group> Overlapping(List<Group> level, int lo, int hi)
+        private static int FirstReaching(List<Group> level, int lo)
         {
-            var found = new List<Group>();
-            Descend(level);
-            return found;
-
-            void Descend(List<Group> groups)
+            int low = 0, high = level.Count;
+            while (low < high)
             {
-                foreach (var group in groups)
+                var middle = (low + high) >>> 1;
+                if (level[middle].Reach < lo) low = middle + 1;
+                else high = middle;
+            }
+            return low;
+        }
+
+        /// <summary>
+        /// Fills <paramref name="found"/> with the groups whose lines meet <c>[lo, hi]</c>, found by descending from
+        /// <paramref name="roots"/>: a group's parent holds every line it does, so no other group can meet the range.
+        /// </summary>
+        private static void Holding(List<Group> roots, int lo, int hi, List<Group> found)
+        {
+            found.Clear();
+            Descend(roots);
+
+            void Descend(List<Group> level)
+            {
+                for (var index = FirstReaching(level, lo); index < level.Count && level[index].Start <= hi; index++)
                 {
-                    if (group.Start > hi) break;
+                    var group = level[index];
                     if (group.End < lo) continue;
                     found.Add(group);
                     if (group.Children is { } children) Descend(children);
@@ -217,116 +239,61 @@ namespace CodeContext.Core.Diffs
             }
         }
 
-        /// <summary>
-        /// A file's lines read once: which are comment lines, and for each where the run of comment and blank lines it is
-        /// in begins and ends, so that every question about a line is answered without walking the file again.
-        /// </summary>
-        private sealed class QuietRuns
+        /// <summary>Whether <paramref name="line"/>, which <paramref name="group"/> holds, is its own: its first or last line, or one no nested declaration holds.</summary>
+        private static bool Owns(Group group, int line)
         {
-            private readonly bool[] _comment;
-
-            /// <summary>For 1-based line i: the first line of its quiet run (i + 1 when line i is not quiet).</summary>
-            private readonly int[] _runStart;
-
-            /// <summary>For 1-based line i: the last line of its quiet run (i - 1 when line i is not quiet).</summary>
-            private readonly int[] _runEnd;
-
-            public QuietRuns(IReadOnlyList<string> lines)
+            if (line == group.Start || line == group.End || group.Children is not { } children) return true;
+            for (var index = FirstReaching(children, line); index < children.Count && children[index].Start <= line; index++)
             {
-                var count = lines.Count;
-                _comment = new bool[count + 2];
-                _runStart = new int[count + 2];
-                _runEnd = new int[count + 2];
-                var quiet = new bool[count + 2];
-                for (var i = 1; i <= count; i++)
-                {
-                    _comment[i] = SourceLines.IsCommentLine(lines[i - 1]);
-                    quiet[i] = _comment[i] || string.IsNullOrWhiteSpace(lines[i - 1]);
-                }
-                for (var i = 1; i <= count; i++) _runStart[i] = quiet[i] ? (quiet[i - 1] ? _runStart[i - 1] : i) : i + 1;
-                _runEnd[count + 1] = count;
-                for (var i = count; i >= 1; i--) _runEnd[i] = quiet[i] ? (quiet[i + 1] ? _runEnd[i + 1] : i) : i - 1;
-                Count = count;
+                if (children[index].End >= line) return false;
             }
-
-            public int Count { get; }
-
-            public bool IsComment(int line) => line >= 1 && line <= Count && _comment[line];
-
-            /// <summary>
-            /// Whether a comment between 1-based lines <paramref name="before"/> and <paramref name="after"/> is, with the
-            /// comment and blank lines around it, the file's leading comment or the comment just above a declaration (one
-            /// of <paramref name="starts"/>).
-            /// </summary>
-            public bool IsDocCommentOrHeader(int before, int after, HashSet<int> starts)
-            {
-                before = Math.Min(before, Count);
-                if (before <= 0 || _runStart[before] == 1) return true;
-                if (after < 1 || after > Count) return false;
-                return starts.Contains(_runEnd[after] + 1);
-            }
-        }
-
-        private static Touch TouchOf(Group group, Result result)
-        {
-            if (group.Touch is null)
-            {
-                group.Touch = new Touch { Nodes = group.Nodes };
-                result.Touched.Add(group.Touch);
-            }
-            return group.Touch;
-        }
-
-        private static int Depth(Group group)
-        {
-            var depth = 0;
-            for (var parent = group.Parent; parent is not null; parent = parent.Parent) depth++;
-            return depth;
+            return true;
         }
 
         /// <summary>
-        /// The lines of <c>[lo, hi]</c> that are <paramref name="group"/>'s own: its first and last lines, and every line no
-        /// nested declaration holds.
+        /// Adds to <paramref name="into"/> the lines of <c>[lo, hi]</c> that are <paramref name="group"/>'s own: every
+        /// line no nested declaration holds, and its first and last lines.
         /// </summary>
-        private static List<DiffLineRange> Owned(Group group, int lo, int hi)
+        private static void Owned(Group group, int lo, int hi, List<DiffLineRange> into)
         {
-            var owned = Uncovered(group.Children, lo, hi);
-            if (group.Start >= lo && group.Start <= hi) owned.Add(new DiffLineRange(group.Start, group.Start));
-            if (group.End >= lo && group.End <= hi && group.End != group.Start) owned.Add(new DiffLineRange(group.End, group.End));
-            return owned;
+            if (lo > hi) return;
+            if (group.Children is { } children) Uncovered(children, lo, hi, into);
+            else into.Add(new DiffLineRange(lo, hi));
+            if (group.Start >= lo && group.Start <= hi) into.Add(new DiffLineRange(group.Start, group.Start));
+            if (group.End >= lo && group.End <= hi && group.End != group.Start) into.Add(new DiffLineRange(group.End, group.End));
         }
 
-        /// <summary>The parts of <c>[lo, hi]</c> that none of <paramref name="covering"/> (ordered by start) holds.</summary>
-        private static List<DiffLineRange> Uncovered(List<Group>? covering, int lo, int hi)
+        /// <summary>Adds to <paramref name="into"/> the parts of <c>[lo, hi]</c> that none of <paramref name="covering"/> (siblings, ordered by start) holds.</summary>
+        private static void Uncovered(List<Group> covering, int lo, int hi, List<DiffLineRange> into)
         {
-            var gaps = new List<DiffLineRange>();
             var next = lo;
-            foreach (var group in covering ?? [])
+            for (var index = FirstReaching(covering, lo); index < covering.Count && next <= hi; index++)
             {
-                if (next > hi) break;
-                if (group.End < next) continue;
+                var group = covering[index];
                 if (group.Start > hi) break;
-                if (group.Start > next) gaps.Add(new DiffLineRange(next, group.Start - 1));
+                if (group.End < next) continue;
+                if (group.Start > next) into.Add(new DiffLineRange(next, group.Start - 1));
                 next = Math.Max(next, group.End + 1);
             }
-            if (next <= hi) gaps.Add(new DiffLineRange(next, hi));
-            return gaps;
+            if (next <= hi) into.Add(new DiffLineRange(next, hi));
         }
 
-        /// <summary>Adds <paramref name="range"/> to ordered, disjoint <paramref name="ranges"/>, joining what touches it.</summary>
-        internal static void Merge(List<DiffLineRange> ranges, DiffLineRange range)
+        /// <summary>Orders <paramref name="ranges"/> and joins those that meet or touch.</summary>
+        internal static void Normalize(List<DiffLineRange> ranges)
         {
-            var at = 0;
-            while (at < ranges.Count && ranges[at].End + 1 < range.Start) at++;
-            var start = range.Start;
-            var end = range.End;
-            while (at < ranges.Count && ranges[at].Start <= end + 1)
+            if (ranges.Count < 2) return;
+            var span = CollectionsMarshal.AsSpan(ranges);
+            var ordered = true;
+            for (var index = 1; index < span.Length && ordered; index++) ordered = span[index - 1].End + 1 < span[index].Start;
+            if (ordered) return;
+            span.Sort(static (left, right) => left.Start != right.Start ? left.Start.CompareTo(right.Start) : left.End.CompareTo(right.End));
+            var kept = 0;
+            for (var index = 1; index < span.Length; index++)
             {
-                start = Math.Min(start, ranges[at].Start);
-                end = Math.Max(end, ranges[at].End);
-                ranges.RemoveAt(at);
+                if (span[index].Start <= span[kept].End + 1) span[kept] = new DiffLineRange(span[kept].Start, Math.Max(span[kept].End, span[index].End));
+                else span[++kept] = span[index];
             }
-            ranges.Insert(at, new DiffLineRange(start, end));
+            ranges.RemoveRange(kept + 1, ranges.Count - kept - 1);
         }
 
         /// <summary>
@@ -336,47 +303,56 @@ namespace CodeContext.Core.Diffs
         /// </summary>
         private static List<Group> Groups(IReadOnlyList<CodeNode> nodes)
         {
-            var byspan = new Dictionary<(int, int, int, int), Group>();
-            var groups = new List<Group>();
-            foreach (var node in nodes)
+            // Outermost first at one start, so that a parent precedes what it holds and nodes with one span lie together.
+            var ordered = new CodeNode[nodes.Count];
+            for (var index = 0; index < ordered.Length; index++) ordered[index] = nodes[index];
+            Array.Sort(ordered, static (left, right) =>
             {
-                var key = (node.StartLine, node.StartCol, node.EndLine, node.EndCol);
-                if (byspan.TryGetValue(key, out var existing))
+                var order = From(left).CompareTo(From(right));
+                if (order == 0) order = To(right).CompareTo(To(left));
+                // The end as it was sent tells spans apart that hold the same lines; the id orders the nodes of one span.
+                if (order == 0) order = (left.EndLine, left.EndCol).CompareTo((right.EndLine, right.EndCol));
+                return order != 0 ? order : string.CompareOrdinal(left.Id, right.Id);
+            });
+            var groups = new List<Group>(ordered.Length);
+            foreach (var node in ordered)
+            {
+                if (groups.Count > 0 && groups[^1].Node is var last
+                    && (last.StartLine, last.StartCol, last.EndLine, last.EndCol) == (node.StartLine, node.StartCol, node.EndLine, node.EndCol))
                 {
-                    existing.Nodes.Add(node);
+                    (groups[^1].More ??= []).Add(node);
                     continue;
                 }
                 var endLine = node.EndCol == 0 && node.EndLine > node.StartLine ? node.EndLine - 1 : Math.Max(node.EndLine, node.StartLine);
-                var group = new Group
-                {
-                    Nodes = [node],
-                    Start = node.StartLine + 1,
-                    End = endLine + 1,
-                    From = (node.StartLine, node.StartCol),
-                    To = (Math.Max(node.EndLine, node.StartLine), node.EndLine < node.StartLine ? node.StartCol : node.EndCol),
-                };
-                byspan[key] = group;
-                groups.Add(group);
+                groups.Add(new Group { Node = node, Start = node.StartLine + 1, End = endLine + 1, From = From(node), To = To(node) });
             }
 
-            // Outermost first at one start: a parent precedes what it holds.
-            groups.Sort(static (left, right) =>
-            {
-                var order = left.From.CompareTo(right.From);
-                return order != 0 ? order : right.To.CompareTo(left.To);
-            });
             var open = new Stack<Group>();
+            Group? lastRoot = null;
             foreach (var group in groups)
             {
                 while (open.Count > 0 && !(open.Peek().From.CompareTo(group.From) <= 0 && group.To.CompareTo(open.Peek().To) <= 0)) open.Pop();
+                Group? before;
                 if (open.TryPeek(out var parent))
                 {
                     group.Parent = parent;
+                    group.Depth = parent.Depth + 1;
+                    before = parent.Children is { Count: > 0 } siblings ? siblings[^1] : null;
                     (parent.Children ??= []).Add(group);
                 }
+                else
+                {
+                    before = lastRoot;
+                    lastRoot = group;
+                }
+                group.Reach = Math.Max(group.End, before?.Reach ?? 0);
                 open.Push(group);
             }
             return groups;
+
+            static (int Line, int Col) From(CodeNode node) => (node.StartLine, node.StartCol);
+            static (int Line, int Col) To(CodeNode node)
+                => (Math.Max(node.EndLine, node.StartLine), node.EndLine < node.StartLine ? node.StartCol : node.EndCol);
         }
     }
 }

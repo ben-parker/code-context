@@ -8,6 +8,9 @@ namespace CodeContext.Core.Diffs
     /// </summary>
     public static partial class SourceLines
     {
+        /// <summary>Whether a line holds only whitespace.</summary>
+        public static bool IsBlank(ReadOnlySpan<char> line) => line.IsWhiteSpace();
+
         /// <summary>
         /// Whether a line holds only comments in the C-family syntax every bundled worker reads: it starts, after
         /// whitespace, with <c>//</c>, <c>/*</c>, <c>*/</c> or a block comment's <c>*</c> (followed by a space or nothing),
@@ -53,7 +56,7 @@ namespace CodeContext.Core.Diffs
     /// Where a run of comment lines leaves a block comment, read from outside one: whether one is open at its end,
     /// and how many <c>*/</c> it holds that close a comment it did not open. Lexical, as <see cref="IsCommentLine"/>.
     /// </summary>
-    internal record struct CommentMarks(bool Open, int StrayCloses)
+    public record struct CommentMarks(bool Open, int StrayCloses)
     {
         /// <summary>Reads one comment line; true when it holds a block-comment marker.</summary>
         public bool Follow(ReadOnlySpan<char> text)
@@ -75,6 +78,117 @@ namespace CodeContext.Core.Diffs
                 i++;
             }
             return marked;
+        }
+    }
+
+    /// <summary>
+    /// A file's comment lines, read once from its text: which lines are comments, and for each line where the run of
+    /// comment and blank lines it is in begins and ends. Here the whole file is at hand, so a line that starts like the
+    /// inside or the end of a block comment (<c>* text</c>, <c>*/</c>) is a comment only while a comment line above it
+    /// left one open: a Markdown bullet in a string is not. Still lexical: a string that holds <c>//</c> or <c>/*</c>
+    /// at the start of a line reads as a comment.
+    /// </summary>
+    public sealed class CommentRuns
+    {
+        private const byte Comment = 1, Open = 2, Quiet = 4;
+
+        /// <summary>For 1-based line i: whether it is a comment, whether a block comment is open at its end, whether it is a comment or blank.</summary>
+        private readonly byte[] _kind;
+
+        /// <summary>For 1-based line i: the first line of its run (i + 1 when line i is neither comment nor blank).</summary>
+        private readonly int[] _runStart;
+
+        /// <summary>For 1-based line i: the last line of its run (i - 1 when line i is neither).</summary>
+        private readonly int[] _runEnd;
+
+        private CommentMarks _marks;
+
+        public int Count { get; private set; }
+
+        private CommentRuns(int lines)
+        {
+            _kind = new byte[lines + 2];
+            _runStart = new int[lines + 2];
+            _runEnd = new int[lines + 2];
+        }
+
+        /// <summary>The runs of UTF-8 <paramref name="text"/>, its lines ended by LF or CRLF.</summary>
+        public static CommentRuns Read(ReadOnlySpan<byte> text)
+        {
+            if (text.StartsWith("\uFEFF"u8)) text = text[3..];
+            var runs = new CommentRuns(text.Count((byte)'\n') + 1);
+            var buffer = System.Buffers.ArrayPool<char>.Shared.Rent(256);
+            try
+            {
+                while (!text.IsEmpty)
+                {
+                    var end = text.IndexOf((byte)'\n');
+                    var line = end < 0 ? text : text[..end];
+                    text = end < 0 ? default : text[(end + 1)..];
+                    if (line.Length > buffer.Length)
+                    {
+                        System.Buffers.ArrayPool<char>.Shared.Return(buffer);
+                        buffer = System.Buffers.ArrayPool<char>.Shared.Rent(line.Length);
+                    }
+                    runs.Add(buffer.AsSpan(0, System.Text.Encoding.UTF8.GetChars(line, buffer)));
+                }
+            }
+            finally
+            {
+                System.Buffers.ArrayPool<char>.Shared.Return(buffer);
+            }
+            runs.Close();
+            return runs;
+        }
+
+        /// <summary>The runs of <paramref name="lines"/>.</summary>
+        public static CommentRuns Of(IReadOnlyCollection<string> lines)
+        {
+            var runs = new CommentRuns(lines.Count);
+            foreach (var line in lines) runs.Add(line);
+            runs.Close();
+            return runs;
+        }
+
+        private void Add(ReadOnlySpan<char> line)
+        {
+            var text = line.Trim();
+            var comment = SourceLines.IsCommentLine(text);
+            // The inside or the end of a block comment only under a comment line that opened one.
+            if (comment && text[0] == '*' && !_marks.Open) comment = false;
+            if (comment) _marks.Follow(text);
+            var quiet = comment || text.IsEmpty;
+            var index = ++Count;
+            _kind[index] = (byte)((comment ? Comment : 0) | (_marks.Open ? Open : 0) | (quiet ? Quiet : 0));
+            _runStart[index] = !quiet ? index + 1 : (_kind[index - 1] & Quiet) != 0 ? _runStart[index - 1] : index;
+        }
+
+        private void Close()
+        {
+            _runEnd[Count + 1] = Count;
+            for (var index = Count; index >= 1; index--)
+            {
+                var quiet = (_kind[index] & Quiet) != 0;
+                _runEnd[index] = !quiet ? index - 1 : index < Count && (_kind[index + 1] & Quiet) != 0 ? _runEnd[index + 1] : index;
+            }
+        }
+
+        public bool IsComment(int line) => line >= 1 && line <= Count && (_kind[line] & Comment) != 0;
+
+        /// <summary>Whether a block comment that a comment line opened is still open after 1-based <paramref name="line"/>.</summary>
+        public bool IsOpenAfter(int line) => line >= 1 && line <= Count && (_kind[line] & Open) != 0;
+
+        /// <summary>
+        /// Whether a comment between 1-based lines <paramref name="before"/> and <paramref name="after"/> is, with the
+        /// comment and blank lines around it, the file's leading comment or the comment just above a declaration (one
+        /// that starts at a line of <paramref name="starts"/>).
+        /// </summary>
+        public bool IsDocCommentOrHeader(int before, int after, HashSet<int> starts)
+        {
+            before = Math.Min(before, Count);
+            if (before <= 0 || _runStart[before] == 1) return true;
+            if (after < 1 || after > Count) return false;
+            return starts.Contains(_runEnd[after] + 1);
         }
     }
 }

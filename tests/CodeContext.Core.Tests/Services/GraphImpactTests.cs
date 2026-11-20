@@ -46,6 +46,15 @@ public sealed class GraphImpactTests : IDisposable
         return DiffWorkingTree.BlobId(Encoding.UTF8.GetBytes(content), sha256: false);
     }
 
+    /// <summary>A file holding <paramref name="content"/> under the root; returns its abbreviated git blob id.</summary>
+    private string WriteText(string relative, string content)
+    {
+        var path = Path.Combine(_root, relative.Replace('/', Path.DirectorySeparatorChar));
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(path, content);
+        return DiffWorkingTree.BlobId(Encoding.UTF8.GetBytes(content), sha256: false)[..7];
+    }
+
     /// <summary>
     /// The sample: src/Foo.cs (30 lines) holds class Foo at 3-28 with Run at 6-12 and Other at 16-24; Caller (src/Caller.cs)
     /// calls Run, Far calls Caller, UsesFoo references Foo, OtherCaller calls Other, FooTests (a test file) calls Run.
@@ -261,28 +270,113 @@ public sealed class GraphImpactTests : IDisposable
         Assert.Equal(0, impact.TotalCount);
     }
 
-    [Fact]
-    public async Task CommentLines_ChangeTheMemberHoldingThem_AndNothingWhereNoMemberDoes()
+    /// <summary>
+    /// src/Doc.cs as it is on disk: a header, a using, class Doc (4-16) with Run (7-10) under a doc comment and Other
+    /// (13-15) under a block comment, and a comment at the end of the class that stands above no declaration.
+    /// </summary>
+    private (ContextService Service, string Blob) Documented()
     {
-        var service = Sample().Build();
+        var blob = WriteText("src/Doc.cs", string.Join("\n",
+            "// header",                          // 1
+            "using System;",                      // 2
+            "",                                   // 3
+            "class Doc",                          // 4
+            "{",                                  // 5
+            "    /// <summary>Runs.</summary>",   // 6
+            "    void Run()",                     // 7
+            "    {",                              // 8
+            "        // inside",                  // 9
+            "    }",                              // 10
+            "    /* Other,",                      // 11
+            "     * explained. */",               // 12
+            "    void Other()",                   // 13
+            "    {",                              // 14
+            "    }",                              // 15
+            "    // nothing follows",             // 16
+            "}") + "\n");                         // 17
+        var service = new GraphTestGraph(_root) { Freshness = new Fresh(DateTime.UtcNow.AddHours(1)) }
+            .Node("Doc", "Class", file: "src/Doc.cs", line: 3, endLine: 16)
+            .Node("Doc.Run", file: "src/Doc.cs", line: 6, endLine: 9)
+            .Node("Doc.Other", file: "src/Doc.cs", line: 12, endLine: 14)
+            .Node("UsesDoc", file: "src/Uses.cs")
+            .Edge("Doc", "Doc.Run", "HAS_METHOD").Edge("Doc", "Doc.Other", "HAS_METHOD").Edge("UsesDoc", "Doc", "REFERENCES")
+            .Build();
+        return (service, blob);
+    }
 
-        // A doc comment above Other (lines 13-15 lie between Run and Other) and a file header: nothing changes.
-        var above = await Impact(service, Diff("src/Foo.cs", Blob("src/Foo.cs"),
-            "@@ -1 +1 @@\n-// old header\n+// new header",
-            "@@ -14,2 +14,2 @@\n-    /// <summary>Old.</summary>\n-    /// </remarks>\n+    /// <summary>New.</summary>\n+    /* and */"));
+    [Fact]
+    public async Task CommentLines_ChangeTheMemberHoldingThem_AndNothingAboveADeclarationOrAtTheHeadOfTheFile()
+    {
+        var (service, blob) = Documented();
+
+        // The file header, the doc comment above Run and the block comment above Other: nothing changes.
+        var above = await Impact(service, Diff("src/Doc.cs", blob,
+            "@@ -1 +1 @@\n-// old header\n+// header",
+            "@@ -6 +6 @@\n-    /// <summary>Old.</summary>\n+    /// <summary>Runs.</summary>",
+            "@@ -11,2 +11,2 @@\n-    /* Old,\n-     * old. */\n+    /* Other,\n+     * explained. */"));
         Assert.Empty(above.Changes);
         Assert.Empty(above.Unmapped);
-        Assert.Equal(6, above.IgnoredLines);
+        Assert.Equal(8, above.IgnoredLines);
         Assert.True(above.Complete);
 
         // The same comment inside Run is Run's.
-        var inside = await Impact(service, Diff("src/Foo.cs", Blob("src/Foo.cs"), "@@ -8 +8 @@\n-        // old\n+        * new"));
-        Assert.Equal([(I("Foo.Run"), "8")], inside.Changes.Select(change => (change.Identifier, change.ChangedLines)));
+        var inside = await Impact(service, Diff("src/Doc.cs", blob, "@@ -9 +9 @@\n-        // old\n+        // inside"));
+        Assert.Equal([(I("Doc.Run"), "9")], inside.Changes.Select(change => (change.Identifier, change.ChangedLines)));
 
         // A code line replaced by a comment between members may have held a declaration.
-        var replaced = await Impact(service, Diff("src/Foo.cs", Blob("src/Foo.cs"), "@@ -14 +14 @@\n-    int Removed;\n+    // gone"));
-        Assert.Empty(replaced.Changes);
+        var replaced = await Impact(service, Diff("src/Doc.cs", blob, "@@ -16 +16 @@\n-    int Removed;\n+    // nothing follows"));
         Assert.Equal("removedBetweenDeclarations", Assert.Single(replaced.Unmapped).Reason);
+    }
+
+    [Fact]
+    public async Task ACommentLookingLineThatStandsAboveNoDeclaration_ChangesWhatHoldsIt()
+    {
+        var (service, blob) = Documented();
+
+        // Line 16 is a comment at the end of the class: nothing in the file says what it belongs to, so it is the class's.
+        var trailing = await Impact(service, Diff("src/Doc.cs", blob, "@@ -15,0 +16 @@\n+    // nothing follows"));
+        Assert.Equal([(I("Doc"), "container", "16")], trailing.Changes.Select(change => (change.Identifier, change.Level, change.ChangedLines)));
+        Assert.Equal(0, trailing.IgnoredLines);
+        Assert.True(trailing.Complete);
+
+        // Removed there, it is the class's removed line.
+        var removed = await Impact(service, Diff("src/Doc.cs", blob, "@@ -17 +16,0 @@\n-    // gone"));
+        var change = Assert.Single(removed.Changes);
+        Assert.Equal((I("Doc"), "container", 1), (change.Identifier, change.Level, change.RemovedLines));
+    }
+
+    [Fact]
+    public async Task ACommentLookingLineOfAStringInANamespace_ChangesTheNamespace()
+    {
+        // A namespace holds statements no declaration does, as a module does: a line of its template literal reads as
+        // a comment and is not one. Neither is a line that ends a literal just above a declaration.
+        var blob = WriteText("src/n.ts", string.Join("\n",
+            "export namespace Inner {",            // 1
+            "  const text = `",                    // 2
+            "   * item",                           // 3
+            "  `;",                                // 4
+            "  const more = `",                    // 5
+            "   * last`;",                         // 6
+            "  export function inside() {",        // 7
+            "    return 2;",                       // 8
+            "  }",                                 // 9
+            "}") + "\n");                          // 10
+        var service = new GraphTestGraph(_root) { Freshness = new Fresh(DateTime.UtcNow.AddHours(1)) }
+            .Node("Module", "Module", file: "src/n.ts", line: 0, endLine: 10)
+            .Node("Inner", "Namespace", file: "src/n.ts", line: 0, endLine: 9)
+            .Node("Inner.inside", "Function", file: "src/n.ts", line: 6, endLine: 8)
+            .Node("Importer", file: "src/b.ts")
+            .Edge("Importer", "Inner", "REFERENCES")
+            .Build();
+
+        var inString = await Impact(service, Diff("src/n.ts", blob, "@@ -3 +3 @@\n-   * old\n+   * item"));
+        Assert.Equal([(I("Inner"), "container", "3")], inString.Changes.Select(change => (change.Identifier, change.Level, change.ChangedLines)));
+        Assert.Equal(["Importer"], inString.Items.Select(item => item.Name));
+        Assert.Equal(0, inString.IgnoredLines);
+
+        var endsAboveADeclaration = await Impact(service, Diff("src/n.ts", blob, "@@ -6 +6 @@\n-   * first`;\n+   * last`;"));
+        Assert.Equal([(I("Inner"), "container", "6")], endsAboveADeclaration.Changes.Select(change => (change.Identifier, change.Level, change.ChangedLines)));
+        Assert.Equal(0, endsAboveADeclaration.IgnoredLines);
     }
 
     [Fact]
