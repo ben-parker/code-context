@@ -494,7 +494,7 @@ public static partial class QueryCommandHandler
             }
         }
         if (response.IgnoredLines > 0 || response.ModeOnlyFiles > 0)
-            output.WriteLine($"ignored\t{response.IgnoredLines} blank or comment-only line(s)\t{response.ModeOnlyFiles} mode-only file(s)");
+            output.WriteLine($"ignored\t{response.IgnoredLines} line(s) that change no declaration\t{response.ModeOnlyFiles} mode-only file(s)");
 
         output.WriteLine($"affected\t{response.ReturnedCount}/{response.TotalCount}" + (response.Truncated ? "\ttruncated" : string.Empty)
             + $"\tdepth {response.MaxDepth}" + (response.DepthLimited ? ", more beyond" : string.Empty) + $"\t{response.FileCount} file(s)");
@@ -615,7 +615,7 @@ public static partial class QueryCommandHandler
             }
         }
         if (response.IgnoredLines > 0 || response.ModeOnlyFiles > 0)
-            output.WriteLine($"Ignored: {response.IgnoredLines} blank or comment-only line(s), {response.ModeOnlyFiles} mode-only file(s)");
+            output.WriteLine($"Ignored: {response.IgnoredLines} line(s) that change no declaration (blank, comment, or an added file's own usings), {response.ModeOnlyFiles} mode-only file(s)");
         output.WriteLine($"Affected: {response.ReturnedCount}/{response.TotalCount}{(response.Truncated ? ", truncated" : string.Empty)}, "
             + $"within {response.MaxDepth} hop(s){(response.DepthLimited ? " (more beyond)" : string.Empty)}, in {response.FileCount} file(s)");
         if (response.TestsHidden > 0) output.WriteLine($"Test-file symbols affected: {response.TestsHidden} (--tests lists them)");
