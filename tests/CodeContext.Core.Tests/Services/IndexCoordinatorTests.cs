@@ -225,6 +225,158 @@ namespace CodeContext.Core.Tests.Services
             }
         }
 
+        // ---- What a batch may do to the time, by the state the coordinator is in ----
+
+        private const string OneLineDiff = "--- a/A.cs\n+++ b/A.cs\n@@ -1 +1 @@\n-a\n+b\n";
+
+        /// <summary>Diff impact over an empty index of this root, dated by <paramref name="freshness"/>.</summary>
+        private ContextService ImpactService(IIndexFreshness freshness)
+            => GraphTestGraph.Service(new CodeContext.Core.Repositories.InMemory.InMemoryDatabase(), _tempDir, freshness);
+
+        private async Task<string> ImpactRefusalAsync(IIndexFreshness freshness)
+            => (await Assert.ThrowsAsync<IndexNotReadyException>(
+                () => ImpactService(freshness).GetImpactAsync(new GraphImpactRequest { Diff = OneLineDiff }))).Message;
+
+        /// <summary>A batch that succeeds: one file of a worker, processed, then the loop idle again.</summary>
+        private async Task RunBatchAsync(IndexCoordinator coordinator, string name)
+        {
+            var path = Path.Combine(_tempDir, name);
+            await coordinator.NotifyFileChangedAsync(path, FileChangeType.Changed);
+            await WaitForAsync(() => AllProcessedChanges().Any(c => c.Path == path), $"{name} to be processed");
+            await WaitForAsync(() => !coordinator.IsBusy, "the batch to end");
+        }
+
+        [Fact]
+        public async Task AfterAStartupScanThatFailed_NoBatchMakesTheFilesRead_AndImpactSaysWhy()
+        {
+            // One worker failed the startup scan (the reconciliation rolled back to the loaded or empty store); a
+            // batch another worker handles says nothing of the files that worker never read.
+            var failing = Substitute.For<IGraphUpdateService>();
+            failing.PerformResumableScanAsync(Arg.Any<string>(), Arg.Any<IScanProgressReporter>(), Arg.Any<CancellationToken>())
+                .ThrowsAsync(new InvalidOperationException("worker 'csharp' failed"));
+            failing.ProcessFileChangesAsync(Arg.Any<IReadOnlyList<FileChange>>(), Arg.Any<CancellationToken>())
+                .Returns(callInfo =>
+                {
+                    _batches.Enqueue(callInfo.ArgAt<IReadOnlyList<FileChange>>(0));
+                    return Task.CompletedTask;
+                });
+            var scanState = new ScanStateService();
+            var coordinator = new IndexCoordinator(failing, scanState,
+                Options.Create(new CodeContextOptions { RootPath = _tempDir }), NullLoggerFactory.Instance);
+            await coordinator.StartAsync(CancellationToken.None);
+            try
+            {
+                await WaitForAsync(() => scanState.Phase == ScanPhase.Error, "the scan to fail");
+                await RunBatchAsync(coordinator, "Other.ts");
+
+                Assert.Null(coordinator.FilesReadAsOfUtc);
+                var refusal = await ImpactRefusalAsync(coordinator);
+                Assert.Contains("worker 'csharp' failed", refusal);
+                Assert.Contains("/api/index/refresh", refusal);
+            }
+            finally
+            {
+                await coordinator.StopAsync(CancellationToken.None);
+            }
+        }
+
+        [Fact]
+        public async Task AFullRescanThatFails_LeavesTheTimeUnknownUntilOneSucceeds()
+        {
+            var afterStartup = _coordinator.FilesReadAsOfUtc;
+            Assert.NotNull(afterStartup);
+            _graphUpdateService
+                .PerformInitialScanAsync(Arg.Any<string>(), Arg.Any<IScanProgressReporter>(), Arg.Any<CancellationToken>())
+                .ThrowsAsync(new InvalidOperationException("worker 'typescript' exited"));
+
+            Assert.NotNull(await _coordinator.TryRequestFullRescanAsync());
+            await WaitForAsync(() => _scanState.Phase == ScanPhase.Error, "the rescan to fail");
+            await RunBatchAsync(_coordinator, "Changed.cs");
+
+            Assert.Null(_coordinator.FilesReadAsOfUtc);
+            Assert.Contains("worker 'typescript' exited", await ImpactRefusalAsync(_coordinator));
+
+            _graphUpdateService
+                .PerformInitialScanAsync(Arg.Any<string>(), Arg.Any<IScanProgressReporter>(), Arg.Any<CancellationToken>())
+                .Returns(Task.CompletedTask);
+            Assert.NotNull(await _coordinator.TryRequestFullRescanAsync());
+            await WaitForAsync(() => _coordinator.FilesReadAsOfUtc > afterStartup, "a rescan that succeeds to set the time");
+            Assert.Null(_coordinator.FilesReadNote);
+        }
+
+        [Fact]
+        public async Task AfterABatchAWorkerFailed_LaterBatchesDoNotMoveTheTime_UntilAFullRescan()
+        {
+            var afterStartup = _coordinator.FilesReadAsOfUtc;
+            var broken = Path.Combine(_tempDir, "Broken.cs");
+            _graphUpdateService
+                .ProcessFileChangesAsync(Arg.Any<IReadOnlyList<FileChange>>(), Arg.Any<CancellationToken>())
+                .Returns(callInfo =>
+                {
+                    var batch = callInfo.ArgAt<IReadOnlyList<FileChange>>(0);
+                    _batches.Enqueue(batch);
+                    return batch.Any(change => change.Path == broken)
+                        ? Task.FromException(new InvalidOperationException("worker 'csharp' crashed"))
+                        : Task.CompletedTask;
+                });
+
+            await RunBatchAsync(_coordinator, "Broken.cs");
+            await RunBatchAsync(_coordinator, "Fine.ts");
+
+            // The failed worker's facts are as fresh as before the batch it failed, not as the later one.
+            Assert.Equal(afterStartup, _coordinator.FilesReadAsOfUtc);
+            Assert.Contains("worker 'csharp' crashed", _coordinator.FilesReadNote);
+            // A file changed since is not mapped, and the answer says why it will not be read by itself.
+            File.WriteAllText(Path.Combine(_tempDir, "A.cs"), "b\n");
+            var impact = await ImpactService(_coordinator).GetImpactAsync(new GraphImpactRequest { Diff = OneLineDiff });
+            var entry = Assert.Single(impact.Unmapped);
+            Assert.Equal("notYetIndexed", entry.Reason);
+            Assert.Contains("worker 'csharp' crashed", entry.Detail);
+
+            Assert.NotNull(await _coordinator.TryRequestFullRescanAsync());
+            await WaitForAsync(() => _coordinator.FilesReadAsOfUtc > afterStartup, "the rescan to move the time");
+            Assert.Null(_coordinator.FilesReadNote);
+        }
+
+        [Fact]
+        public async Task AfterABatchWhoseDirectoriesCouldNotBeListed_LaterBatchesDoNotMoveTheTime()
+        {
+            var afterStartup = _coordinator.FilesReadAsOfUtc;
+            _graphUpdateService.ExpandSubtreesAsync(Arg.Any<IReadOnlyCollection<string>>(), Arg.Any<CancellationToken>())
+                .ThrowsAsync(new IOException("the directory cannot be listed"));
+            await _coordinator.NotifySubtreeChangedAsync(Path.Combine(_tempDir, "moved"));
+            await RunBatchAsync(_coordinator, "First.cs");
+
+            await RunBatchAsync(_coordinator, "Later.cs");
+
+            // What the unlisted directory holds was never read: a later batch must not vouch for it.
+            Assert.Equal(afterStartup, _coordinator.FilesReadAsOfUtc);
+            Assert.Contains("could not be listed", _coordinator.FilesReadNote);
+        }
+
+        [Fact]
+        public async Task AFailedRefreshOfOneFile_StopsTheTimeToo()
+        {
+            var afterStartup = _coordinator.FilesReadAsOfUtc;
+            var broken = Path.Combine(_tempDir, "Broken.cs");
+            _graphUpdateService
+                .ProcessFileChangesAsync(Arg.Any<IReadOnlyList<FileChange>>(), Arg.Any<CancellationToken>())
+                .Returns(callInfo =>
+                {
+                    var batch = callInfo.ArgAt<IReadOnlyList<FileChange>>(0);
+                    _batches.Enqueue(batch);
+                    return batch.Any(change => change.Path == broken)
+                        ? Task.FromException(new InvalidOperationException("worker 'csharp' crashed"))
+                        : Task.CompletedTask;
+                });
+
+            await Assert.ThrowsAsync<InvalidOperationException>(() => _coordinator.RefreshFileAsync(broken));
+            await RunBatchAsync(_coordinator, "Fine.ts");
+
+            Assert.Equal(afterStartup, _coordinator.FilesReadAsOfUtc);
+            Assert.NotNull(_coordinator.FilesReadNote);
+        }
+
         [Fact]
         public async Task CreateThenDelete_CoalescesToDelete()
         {

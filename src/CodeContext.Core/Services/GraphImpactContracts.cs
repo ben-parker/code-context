@@ -213,6 +213,12 @@ namespace CodeContext.Core.Services
     public interface IIndexFreshness
     {
         DateTime? FilesReadAsOfUtc { get; }
+
+        /// <summary>
+        /// Why <see cref="FilesReadAsOfUtc"/> is not known, or why it has stopped moving (a failure since the last full read
+        /// that only a full read repairs), with what would repair it; null when neither.
+        /// </summary>
+        string? FilesReadNote => null;
     }
 
     /// <summary>A diff cannot be matched to the index now; the caller may retry once indexing settles.</summary>

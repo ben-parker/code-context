@@ -33,10 +33,12 @@ namespace CodeContext.Core.Services
             DateTime? indexedAsOf = null;
             if (_freshness is not null)
             {
-                indexedAsOf = _freshness.FilesReadAsOfUtc ?? throw new IndexNotReadyException(
-                    "No scan of the files has finished in this instance yet (it is indexing, or answering from a saved index while it "
-                    + "re-checks the files, or that check failed): changed lines cannot be matched to declarations until one has. "
-                    + "Retry when codecontext status shows indexing ready.");
+                indexedAsOf = _freshness.FilesReadAsOfUtc ?? throw new IndexNotReadyException(_freshness.FilesReadNote is { } why
+                    ? $"No read of every file is known to have succeeded in this instance: {why}. Changed lines cannot be matched to "
+                        + "declarations until one has."
+                    : "No scan of the files has finished in this instance yet (it is indexing, or answering from a saved index while it "
+                        + "re-checks the files): changed lines cannot be matched to declarations until one has. "
+                        + "Retry when codecontext status shows indexing ready.");
             }
             // Read before the generation is pinned: the coordinator moves it only once the commit of the read it stands
             // for is published, so every generation pinned after it holds at least that read. A retry pins a newer
@@ -227,7 +229,9 @@ namespace CodeContext.Core.Services
                         Unmapped("contentMismatch", "Not in the working tree: the diff's new side is not what is checked out.");
                         return;
                     case DiffWorkingTree.Verdict.ChangedSinceIndexed:
-                        Unmapped("notYetIndexed", "Changed on disk after the index last read the files; retry once the instance has re-indexed it.");
+                        Unmapped("notYetIndexed", _freshness?.FilesReadNote is { } stopped
+                            ? $"Changed on disk after the index last read every file, and it will not be known to be indexed by itself: {stopped}."
+                            : "Changed on disk after the index last read the files; retry once the instance has re-indexed it.");
                         return;
                     case DiffWorkingTree.Verdict.Refused:
                         Unmapped("unreadable", $"Not compared with the working tree: {why}.");

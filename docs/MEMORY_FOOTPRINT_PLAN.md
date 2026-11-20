@@ -443,20 +443,29 @@ Decisions where the backlog was silent:
    host (SHA-1 and SHA-256, as git computes them), never asked of git. The CLI reads and checks the diff before an
    instance is asked or started.
 2. The diff must describe the index's own file contents, and where that cannot be shown nothing is mapped:
-   - Until a read of every file has finished in this instance (first scan running, `cache verifying`, or a failed
-     verification) the request is refused: REST 503 `INDEX_NOT_READY`, MCP `isError`; the CLI waits for a finished
-     scan instead of accepting a cached answer. `IndexCoordinator.FilesReadAsOfUtc` is when the last such read
-     began, less 20 ms (a file system stamps a change with a clock that moves once a timer tick, so a file changed
-     just after a read began can carry a time just before it): a scan's commit, or a watcher batch that took every
-     change notified before it. A single-file refresh, a batch with notifications still queued behind it, a batch
-     that failed and a batch that could not list a changed directory do not move it. `query --snapshot` uses the
-     capture time, after its freshness check.
+   - Until a full scan has succeeded in this instance (first scan running, `cache verifying`, or a failed
+     verification or scan) the request is refused: REST 503 `INDEX_NOT_READY`, MCP `isError`; the CLI waits for a
+     finished scan instead of accepting a cached answer. `IndexCoordinator.FilesReadAsOfUtc` means one thing: every
+     file that changed before it is held as it was read then or since, by every worker. Only a full scan that
+     succeeded sets it, to when it began less 20 ms (a file system stamps a change with a clock that moves once a
+     timer tick, so a file changed just after a read began can carry a time just before it). A watcher batch moves an
+     established time on to its own start only when it took every change notified before it began, listed every
+     changed directory and succeeded; it never sets one, since it reads only what it names (a batch one worker handles
+     says nothing of another worker whose full read failed). A full scan that fails (it rolls back) makes the time
+     unknown again: impact refuses, saying what failed and that `POST /api/index/refresh` (or a restart) reads every
+     file again. A batch or refresh that failed (a worker crashed, its apply was refused) or could not list a changed
+     directory leaves the time where it is until a full scan succeeds, since what it left unread is not read again by
+     itself: files changed since are `notYetIndexed`, and the detail says why and that a refresh repairs it. A
+     single-file refresh and a batch with notifications still queued behind it do not move it. A hibernated worker
+     needs nothing: its facts are its last read's, no file of it has changed unseen, and a change wakes it with a
+     re-index on the coordinator's path before the batch. `query --snapshot` uses the capture time, after its
+     freshness check.
    - A file whose change time is later than that is `notYetIndexed` (mid-reindex, edited since): retry. The time is
      read again after the content is hashed and must be the one first seen, so a file rewritten in between does
      not pass.
    - A file the file table does not hold as completed is `notYetIndexed` too, with the failure it recorded: when a
-     worker fails on a batch the index keeps the file's old declarations, and a later batch of other files moves
-     the read time past it.
+     worker fails on a batch the index keeps the file's old declarations. The time also stops then (above), so this
+     now matters for a file whose time is older than the read, such as a Windows copy.
    - A file whose content is not the diff's new-side blob id is `contentMismatch` (a diff between commits not
      checked out, or edited since the diff was made, or a `.gitattributes` filter such as LFS, `ident` or
      `working-tree-encoding` rewrites it on checkout); a CRLF checkout is compared without its carriage returns. A

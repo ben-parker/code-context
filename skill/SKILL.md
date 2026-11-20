@@ -140,8 +140,11 @@ git diff $(git merge-base main HEAD) | codecontext query impact   # what this br
   its content is the diff's new side (its blob id, so keep git's `index` lines; a CRLF
   checkout matches) and the instance read it after it last changed (on Windows a file
   copied over another keeps the source's older times, so until the instance has re-read
-  it such a copy passes this check); `impact` waits for a finished scan. The first line says `complete` or `incomplete`, and `incomplete` exits 2:
-  every part that maps to nothing is listed under `unmapped` with its reason:
+  it such a copy passes this check). `impact` refuses until a full scan has succeeded in
+  the instance; after a failed scan, or a change the instance failed to index, it says
+  what failed, and `POST /api/index/refresh` (or a restart) reads every file again. The
+  first line says `complete` or `incomplete`, and `incomplete` exits 2: every part that
+  maps to nothing is listed under `unmapped` with its reason:
   `outsideDeclarations` (imports, usings, a namespace line: they can rebind every symbol
   of the file, so `query affected <file>`; in an added file only a `global using`, an
   assembly attribute or a statement), `removedBetweenDeclarations` (removed or replaced
@@ -165,20 +168,20 @@ git diff $(git merge-base main HEAD) | codecontext query impact   # what this br
   member changes the type or module holding it. Text shows the first 8 ranges of a long
   line list and how many there are (`--json` keeps them all). `--depth`, `--limit` (per
   list), `--tests` and `--relation` mean what they mean for `affected`. The tool never
-  runs git: you run it. That matters only where the repository's `.git` is not yours (received as a
-  directory or an archive rather than cloned): there git runs what `.git/config` names,
-  an external diff, a textconv, a clean or smudge filter, an fsmonitor hook, and `git
-  add`, `git commit`, `git stash` and `git checkout` run filters and hooks as well. One
-  form was checked (git 2.43) to run none of it, a diff between two commits: `git
-  -c core.fsmonitor=false diff --no-ext-diff --no-textconv --no-color --no-relative
-  --src-prefix=a/ --dst-prefix=b/ --full-index <base> HEAD`, which describes the working
-  tree only when `HEAD` is checked out with nothing uncommitted. Uncommitted work there
-  has no form that is safe by flags alone: any git command that reads the working tree
-  runs the clean filters the config names. Look first (`git config --local --includes
-  --get-regexp '^(filter|include|includeif)\.'` runs nothing); if it prints nothing, the
-  same flags without `HEAD` (`... --full-index <base>`) were checked to run nothing, and
-  `git -c core.fsmonitor=false add -N` likewise. If it names a filter, do not diff the
-  working tree with git: say so and leave the uncommitted part out.
+  runs git: you run it. That matters only where the repository's `.git` is not yours
+  (received as a directory or an archive rather than cloned): there git runs what
+  `.git/config` names, an external diff, a textconv, a clean or smudge filter, an
+  fsmonitor hook, and `git add`, `git commit`, `git stash` and `git checkout` run filters
+  and hooks as well. One form was checked (git 2.43) to run none of it, a diff between two
+  commits: `git -c core.fsmonitor=false diff --no-ext-diff --no-textconv --no-color
+  --no-relative --src-prefix=a/ --dst-prefix=b/ --full-index <base> HEAD`, which describes
+  the working tree only when `HEAD` is checked out with nothing uncommitted. Uncommitted
+  work there has no form that is safe by flags alone: any git command that reads the
+  working tree runs the clean filters the config names. Look first (`git config --local
+  --includes --get-regexp '^(filter|include|includeif)\.'` runs nothing); if it prints
+  nothing, the same flags without `HEAD` (`... --full-index <base>`) were checked to run
+  nothing, and `git -c core.fsmonitor=false add -N` likewise. If it names a filter, do not
+  diff the working tree with git: say so and leave the uncommitted part out.
 - **`hubs`** ranks symbols by distinct direct dependents, then by their files. A type's
   count is uses of the type itself, not of its members (`--type Method` ranks members).
   `--within DIR` (repository-relative), `--type`, `--limit`, `--relation` (kinds counted),

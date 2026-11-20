@@ -123,6 +123,8 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator, IIn
 
     /// <summary><see cref="FilesReadAsOfUtc"/> in ticks; 0 until a read of every file has finished.</summary>
     private long _filesReadAsOfTicks;
+    private bool _filesReadStopped;
+    private string? _filesReadNote;
     private Action? _mutationObserver;
 
     public IndexCoordinator(
@@ -151,11 +153,15 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator, IIn
     }
 
     /// <summary>
-    /// When the last read of every file that finished began (less <see cref="FileTimeCoarseness"/>): a scan, or a
-    /// batch that took every change notified before it began. A file whose last change is later may be held as it was.
-    /// A refresh of one file, a batch with notifications still queued behind it, and a batch that failed or could not
-    /// list a changed directory do not move it. A change the watcher has not yet delivered is not
-    /// seen (the window is the watcher's own latency).
+    /// When the last read of every file began (less <see cref="FileTimeCoarseness"/>): every file that changed before it is
+    /// held as it was then read or since, by every worker. Only a full scan that succeeded sets it; a batch that took
+    /// every change notified before it began, listed every changed directory and succeeded moves it on to its own start.
+    /// Null until a full scan has succeeded, and again once one fails (it rolls back, and a worker's facts are then not
+    /// known to be read at all), until one succeeds: no batch sets it, since a batch reads only what it names. A batch
+    /// or refresh that failed, or could not list a changed directory, keeps it where it is until a full scan succeeds
+    /// (<see cref="FilesReadNote"/> says so): what it left unread is not read again by itself. A refresh of one file
+    /// and a batch with notifications still queued behind it do not move it. A change the watcher has not yet
+    /// delivered is not seen (the window is the watcher's own latency). Written only on the coordinator's loop.
     /// </summary>
     public DateTime? FilesReadAsOfUtc
         => Volatile.Read(ref _filesReadAsOfTicks) is var ticks and > 0 ? new DateTime(ticks, DateTimeKind.Utc) : null;
@@ -166,16 +172,45 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator, IIn
     /// </summary>
     internal static readonly TimeSpan FileTimeCoarseness = TimeSpan.FromMilliseconds(20);
 
-    private void FilesReadAsOf(DateTime startedUtc)
+    /// <summary>Why <see cref="FilesReadAsOfUtc"/> is unknown after a failed full scan, or has stopped; null otherwise.</summary>
+    public string? FilesReadNote => Volatile.Read(ref _filesReadNote);
+
+    private const string RepairByFullRead = "POST /api/index/refresh (or a restart) reads every file again once codecontext status shows the cause fixed";
+
+    /// <summary>A full scan that began at <paramref name="startedUtc"/> succeeded: every file was read as of then.</summary>
+    private void FullReadSucceeded(DateTime startedUtc)
     {
+        Volatile.Write(ref _filesReadStopped, false);
+        Volatile.Write(ref _filesReadNote, null);
+        Volatile.Write(ref _filesReadAsOfTicks, (startedUtc - FileTimeCoarseness).Ticks);
+    }
+
+    /// <summary>A full scan failed: it rolled back, and what the workers hold is not known to be read.</summary>
+    private void FullReadFailed(string reason)
+    {
+        Volatile.Write(ref _filesReadAsOfTicks, 0);
+        Volatile.Write(ref _filesReadStopped, false);
+        Volatile.Write(ref _filesReadNote, $"the last full scan of the files failed ({reason}); {RepairByFullRead}");
+    }
+
+    /// <summary>A batch or refresh left changes unread: the time stays where it is until a full scan succeeds.</summary>
+    private void BatchLeftChangesUnread(string reason)
+    {
+        if (Volatile.Read(ref _filesReadAsOfTicks) == 0 || Volatile.Read(ref _filesReadStopped)) return;
+        Volatile.Write(ref _filesReadStopped, true);
+        Volatile.Write(ref _filesReadNote,
+            $"a change made after {FilesReadAsOfUtc:O} was not indexed ({reason}), so no change since is known to be indexed "
+            + $"until every file is read again: {RepairByFullRead}");
+    }
+
+    /// <summary>A batch that began at <paramref name="startedUtc"/> read every change notified before it.</summary>
+    private void BatchReadEveryChange(DateTime startedUtc)
+    {
+        if (Volatile.Read(ref _filesReadStopped)) return;
+        var current = Volatile.Read(ref _filesReadAsOfTicks);
         var ticks = (startedUtc - FileTimeCoarseness).Ticks;
-        long current;
-        do
-        {
-            current = Volatile.Read(ref _filesReadAsOfTicks);
-            if (current >= ticks) return;
-        }
-        while (Interlocked.CompareExchange(ref _filesReadAsOfTicks, ticks, current) != current);
+        // Only a time a full scan established moves: a batch reads what it names, not every file.
+        if (current > 0 && ticks > current) Volatile.Write(ref _filesReadAsOfTicks, ticks);
     }
 
     public bool IsBusy => Volatile.Read(ref _busy) == 1
@@ -424,6 +459,7 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator, IIn
                     }
                     catch (Exception ex)
                     {
+                        BatchLeftChangesUnread($"a refresh of {Path.GetFileName(refresh.Path)} failed: {ex.Message}");
                         refresh.Completion.TrySetException(ex);
                     }
                     return null;
@@ -564,6 +600,7 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator, IIn
             {
                 _logger.LogError(ex, "Failed to reconcile {Count} changed directories.", subtrees.Count);
                 tookEveryChange = false;
+                BatchLeftChangesUnread($"a changed directory could not be listed: {ex.Message}");
             }
         }
 
@@ -584,7 +621,7 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator, IIn
                 else
                 {
                     await _graphUpdateService.ProcessFileChangesAsync(batch, ct);
-                    if (tookEveryChange) FilesReadAsOf(startedUtc);
+                    if (tookEveryChange) BatchReadEveryChange(startedUtc);
                 }
             }
             catch (OperationCanceledException)
@@ -594,6 +631,7 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator, IIn
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to process file change batch.");
+                BatchLeftChangesUnread($"a batch of changes failed: {ex.Message}");
             }
         }
 
@@ -672,17 +710,19 @@ public sealed class IndexCoordinator : BackgroundService, IIndexCoordinator, IIn
             // The reconciliation has committed: from here no answer comes from an unchecked snapshot. Ready
             // only after that, so "ready" never shows the previous graph or a cached answer.
             _cacheState?.OnScanCommitted();
-            FilesReadAsOf(startedUtc);
+            FullReadSucceeded(startedUtc);
             _scanState.CompleteScan();
         }
         catch (OperationCanceledException)
         {
             _scanState.FailScan("Scan cancelled by shutdown.");
+            FullReadFailed("cancelled by shutdown");
             throw;
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Scan failed.");
+            FullReadFailed(ex.Message);
             _cacheState?.OnScanFailed();
             _scanState.FailScan(ex.Message);
         }
