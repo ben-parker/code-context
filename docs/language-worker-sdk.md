@@ -318,8 +318,8 @@ caller for every member of the target's method family (the `IMPLEMENTS_MEMBER` a
 `OVERRIDES_MEMBER` edges you emit). Mark a call that is bound to its target alone, such
 as `base.M()` in C# or `super.m()` in TypeScript, with edge metadata
 `"dispatch": "static"`; the host then lists it only for the method it names, with the
-binding `static`. A worker
-that does not mark such calls is read as if every call dispatches.
+binding `static`. A worker that does not mark such calls is read as if every call
+dispatches.
 
 Optionally advertise `nativeSyntaxTree` and implement `syntaxTree/get`. Return a
 parser-owned, versioned `format` plus a bounded JSON tree. Support `start`/`length`
