@@ -109,4 +109,142 @@ public sealed class ReportedPathsTests : IDisposable
         Assert.False(refused(Path.Combine(outside, "b.props")));
         Assert.False(refused(Path.Combine(_base, "owners", "real", "a.props")));
     }
+
+    /// <summary>
+    /// A file a node names is opened only under the root: not beside it, not above it by <c>..</c>, not through a link
+    /// the repository holds, and not through the owner's own link to the root, which is another spelling of it.
+    /// </summary>
+    [Fact]
+    public void AFileANodeNames_IsOpenedOnlyUnderTheRoot_ThroughNoLink()
+    {
+        var root = Path.Combine(_base, "repo");
+        var outside = Path.Combine(_base, "outside");
+        var beside = root + "-other";
+        Directory.CreateDirectory(Path.Combine(root, "src"));
+        Directory.CreateDirectory(outside);
+        Directory.CreateDirectory(beside);
+        File.WriteAllText(Path.Combine(root, "src", "a.cs"), "");
+        File.WriteAllText(Path.Combine(outside, "b.cs"), "");
+        File.WriteAllText(Path.Combine(beside, "b.cs"), "");
+
+        Assert.Equal(Path.Combine(root, "src", "a.cs"), ReportedPaths.FileInRoot(root, Path.Combine(root, "src", "a.cs")));
+        Assert.Equal(Path.Combine(root, "src", "a.cs"), ReportedPaths.FileInRoot(root + Path.DirectorySeparatorChar, Path.Combine(root, "src", ".", "a.cs")));
+        Assert.Equal(Path.Combine(root, "src", "a.cs"), ReportedPaths.FileInRoot(root, Path.Combine(root, "lib", "..", "src", "a.cs")));
+        // Whether the file is there is not this rule's question.
+        Assert.Equal(Path.Combine(root, "src", "missing.cs"), ReportedPaths.FileInRoot(root, Path.Combine(root, "src", "missing.cs")));
+
+        Assert.Null(ReportedPaths.FileInRoot(root, Path.Combine(outside, "b.cs")));
+        Assert.Null(ReportedPaths.FileInRoot(root, Path.Combine(root, "src", "..", "..", "outside", "b.cs")));
+        Assert.Null(ReportedPaths.FileInRoot(root, Path.Combine(beside, "b.cs")));
+        Assert.Null(ReportedPaths.FileInRoot(root, root));
+        Assert.Null(ReportedPaths.FileInRoot(root, _base));
+        Assert.Null(ReportedPaths.FileInRoot(root, ""));
+        Assert.Null(ReportedPaths.FileInRoot(root, null));
+        Assert.Null(ReportedPaths.FileInRoot(root, "a\0.cs"));
+        Assert.Null(ReportedPaths.FileInRoot(null, Path.Combine(root, "src", "a.cs")));
+        Assert.Null(ReportedPaths.FileInRoot("", Path.Combine(root, "src", "a.cs")));
+
+        try
+        {
+            Directory.CreateSymbolicLink(Path.Combine(root, "link"), outside);
+            File.CreateSymbolicLink(Path.Combine(root, "src", "leaf.cs"), Path.Combine(outside, "b.cs"));
+            Directory.CreateSymbolicLink(Path.Combine(_base, "owners"), root);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            // Windows without the privilege to make a link.
+            return;
+        }
+
+        Assert.Null(ReportedPaths.FileInRoot(root, Path.Combine(root, "link", "b.cs")));
+        Assert.Null(ReportedPaths.FileInRoot(root, Path.Combine(root, "src", "leaf.cs")));
+        Assert.Null(ReportedPaths.FileInRoot(root, Path.Combine(_base, "owners", "src", "a.cs")));
+        Assert.Equal(Path.Combine(root, "src", "a.cs"), ReportedPaths.FileInRoot(root, Path.Combine(root, "src", "a.cs")));
+    }
+
+    /// <summary>
+    /// Where the file system holds <c>repo</c> and <c>REPO</c> as two directories, the second is not under the first.
+    /// The guard alone compares the two without regard to case.
+    /// </summary>
+    [Fact]
+    public void WhereCaseIsToldApart_TheRootsNameInAnotherCaseIsNotTheRoot()
+    {
+        var root = Path.Combine(_base, "repo");
+        var otherCase = Path.Combine(_base, "REPO");
+        Directory.CreateDirectory(root);
+        var guard = new PathGuard(root, [], ReportedPaths.NoDisk, OperatingSystem.IsWindows());
+
+        Assert.True(guard.InRepository(Path.Combine(otherCase, "a.cs")));
+        Assert.Null(ReportedPaths.FileInRoot(guard, Path.Combine(otherCase, "a.cs"), tellsCaseApart: true));
+        Assert.Equal(Path.Combine(otherCase, "a.cs"), ReportedPaths.FileInRoot(guard, Path.Combine(otherCase, "a.cs"), tellsCaseApart: false));
+        Assert.Equal(Path.Combine(root, "a.cs"), ReportedPaths.FileInRoot(guard, Path.Combine(root, "a.cs"), tellsCaseApart: true));
+        if (OperatingSystem.IsLinux()) Assert.Null(ReportedPaths.FileInRoot(root, Path.Combine(otherCase, "a.cs")));
+    }
+
+    /// <summary>
+    /// On Windows a node's path on a share, a device or a stream is refused by its spelling, before the disk is asked
+    /// anything about it: a short name in a share's path is not written out, which would reach the share.
+    /// </summary>
+    [Fact]
+    public void OnWindows_AFileANodeNamesOnAShare_IsRefusedBeforeTheDiskIsAsked()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var disk = new RecordingDisk();
+        var guard = new PathGuard(@"C:\repo", [], disk, windows: true);
+
+        Assert.Equal(@"C:\repo\src\a.cs", ReportedPaths.FileInRoot(guard, @"C:\repo\src\a.cs", tellsCaseApart: false));
+        Assert.Equal(@"c:\REPO\src\a.cs", ReportedPaths.FileInRoot(guard, @"c:\REPO\src\a.cs", tellsCaseApart: false));
+        foreach (var refused in new[]
+        {
+            @"\\evil\share\a.cs",
+            @"\\evil\share\RUNNER~1\a.cs",
+            @"\\evil\share\repo\src\a.cs",
+            @"\\?\UNC\evil\share\a.cs",
+            @"\\?\C:\repo\src\a.cs",
+            @"\\.\C:\repo\src\a.cs",
+            @"C:\repo\src\a.cs:stream",
+            @"C:\repo\src::$INDEX_ALLOCATION\a.cs",
+            @"C:\repo\src\NUL",
+            @"C:\repo\src\COM1.cs",
+            @"C:\other\a.cs",
+            @"C:\repo\..\other\a.cs",
+            @"C:\repo-other\a.cs",
+            @"D:\repo\src\a.cs",
+        })
+        {
+            Assert.True(ReportedPaths.FileInRoot(guard, refused, tellsCaseApart: false) is null, refused);
+        }
+
+        Assert.DoesNotContain(disk.Asked, asked => !asked.StartsWith(@"C:\", StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>A disk with no links on it that remembers every path it was asked about.</summary>
+    private sealed class RecordingDisk : ILinkProbe
+    {
+        public List<string> Asked { get; } = [];
+
+        public Dictionary<string, bool>? ReparsePointsIn(string directory)
+        {
+            Asked.Add(directory);
+            return [];
+        }
+
+        public (bool IsReparsePoint, bool IsDirectory)? Entry(string path)
+        {
+            Asked.Add(path);
+            return (false, false);
+        }
+
+        public bool IsLink(string path, bool isDirectory)
+        {
+            Asked.Add(path);
+            return false;
+        }
+
+        public string Expand(string path)
+        {
+            Asked.Add(path);
+            return path;
+        }
+    }
 }

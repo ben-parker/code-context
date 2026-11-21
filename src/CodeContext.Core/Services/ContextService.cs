@@ -1,3 +1,4 @@
+using CodeContext.Core.Paths;
 using CodeContext.Core.Repositories;
 using CodeContext.Core.Repositories.InMemory;
 using CodeContext.Core.Workers;
@@ -1646,14 +1647,19 @@ namespace CodeContext.Core.Services
             };
         }
 
+        /// <summary>
+        /// The node's lines of its file, or null. The path is what a repository made its worker say, so the file is
+        /// opened only where <see cref="ReportedPaths.FileInRoot(string?, string?)"/> allows: under the indexed root,
+        /// through no link the repository holds, on no share. A node that names any other file has no content.
+        /// </summary>
         private async Task<string?> GetFileContentSnippetAsync(CodeNode targetNode)
         {
-            if (string.IsNullOrEmpty(targetNode.FilePath) || !File.Exists(targetNode.FilePath))
+            if (ReportedPaths.FileInRoot(_rootPath, targetNode.FilePath) is not { } path || !File.Exists(path))
                 return null;
 
             try
             {
-                var lines = await File.ReadAllLinesAsync(targetNode.FilePath);
+                var lines = await File.ReadAllLinesAsync(path);
                 var startLine = Math.Max(0, targetNode.StartLine - 1); // Convert to 0-based
                 var endLine = Math.Min(lines.Length - 1, targetNode.EndLine - 1);
 

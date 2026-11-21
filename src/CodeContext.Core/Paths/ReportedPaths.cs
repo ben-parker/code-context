@@ -42,6 +42,40 @@ internal static class ReportedPaths
         return path => guard.Refused(path) || guard.ThroughALink(path);
     }
 
+    /// <summary>
+    /// The full path of a file a node names (<c>filePath</c> on a node or on one of its <c>parts</c>), when the host
+    /// may open it; null when it may not. A node's path is as much what a repository made its worker say as a reported
+    /// input is, and here the file's content is about to be read and handed to whoever asked. So the path must lie
+    /// under the indexed root, after its <c>..</c> are taken out and as this platform's file system compares names,
+    /// and must pass the whole rule of <see cref="RefusedOnDisk"/>. With no root nothing is under it. The path
+    /// returned is the one that was judged: the caller opens that, not the node's own spelling.
+    /// </summary>
+    public static string? FileInRoot(string? root, string? path)
+    {
+        if (string.IsNullOrEmpty(root) || string.IsNullOrEmpty(path)) return null;
+        var guard = new PathGuard(root, [], new Links(), OperatingSystem.IsWindows());
+        return FileInRoot(guard, path, tellsCaseApart: OperatingSystem.IsLinux());
+    }
+
+    /// <param name="tellsCaseApart">
+    /// Whether the file system holds <c>Repo</c> and <c>repo</c> as two directories. The guard compares a path with its
+    /// root without regard to case, which only ever refuses more of what a worker reads; here it would allow more.
+    /// </param>
+    internal static string? FileInRoot(PathGuard guard, string path, bool tellsCaseApart)
+    {
+        if (guard.Root is not { } root || PathGuard.Lexical(path) is not { } full) return null;
+
+        // By its spelling before anything else: placing a path against the root can ask the disk to write out a short
+        // name above it, and a path on a share is one that nothing may be asked about.
+        if (guard.Refused(full) || !guard.InRepository(full)) return null;
+        if (tellsCaseApart)
+        {
+            var prefix = Path.EndsInDirectorySeparator(root) ? root : root + Path.DirectorySeparatorChar;
+            if (!full.StartsWith(prefix, StringComparison.Ordinal)) return null;
+        }
+        return guard.ThroughALink(full) ? null : full;
+    }
+
     private sealed class NoLinks : ILinkProbe
     {
         public Dictionary<string, bool>? ReparsePointsIn(string directory) => [];

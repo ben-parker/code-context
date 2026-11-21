@@ -198,6 +198,11 @@ files' facts. The contract:
   starting `external:`, which `replacesFiles` lists like any other file. The host keeps such
   a node out of file relationships and never prunes it as a missing file, so a worker must
   remove it when nothing uses it.
+- **The host reads a node's file only under the indexed root.** A query that asks for
+  content (`includeContent`) gets the node's lines from its `filePath` only when that path
+  lies under the root the host indexes, through no link the repository holds, and on
+  Windows on a drive or the root's own share. A node that names any other file is answered
+  without content.
 - **Project inputs are not source files.** `projectInputs` in the manifest lists file names,
   or extensions starting with a dot, that change what the worker's files mean. The host
   watches an exact name wherever it appears, including paths it would not index, and an

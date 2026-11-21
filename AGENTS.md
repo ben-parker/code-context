@@ -135,7 +135,10 @@ as far as its worker's reported `inputs` (protocol) say what the facts were read
   only share and no link the repository holds followed, on any platform. A report holding
   a path refused by its spelling is kept as none, and the freshness check answers "not
   known" for a refused path, never "unchanged". New host code that touches a path a
-  worker named goes through it.
+  worker named goes through it. A node's `filePath`, and that of each of its `parts`,
+  is such a path too: the host opens one only as `ReportedPaths.FileInRoot` returns it,
+  which also requires it to lie under the indexed root. `includeContent` reads a
+  node's file that way and gives no content otherwise; nothing opens a part's.
 - Every worker-owned node ID, edge ID, and edge source ID starts with
   `<parserId>:<workspaceId>:`. IDs are stable semantic identities, not source offsets.
   A worker must replace all facts whose meaning may change and reanalyze semantic

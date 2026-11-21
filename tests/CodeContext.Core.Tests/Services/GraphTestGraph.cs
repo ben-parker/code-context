@@ -64,8 +64,10 @@ internal sealed class GraphTestGraph
     /// to column 200 of its last line.
     /// </param>
     /// <param name="col">The 0-based start column; <paramref name="endCol"/> the end column (one past the start when null).</param>
+    /// <param name="path">The node's file path exactly as a worker might report it, wherever it leads; <paramref name="file"/> is then not used.</param>
     public GraphTestGraph Node(string name, string type = "Method", string? file = null, int line = 0, bool external = false,
-        int? endLine = null, string? id = null, (string File, int Line, int EndLine)[]? parts = null, int col = 0, int? endCol = null)
+        int? endLine = null, string? id = null, (string File, int Line, int EndLine)[]? parts = null, int col = 0, int? endCol = null,
+        string? path = null)
     {
         var metadata = Owner(name);
         if (external)
@@ -79,7 +81,8 @@ internal sealed class GraphTestGraph
             Identifier = Identifier(name),
             Name = name.Contains('.') ? name[(name.LastIndexOf('.') + 1)..] : name,
             Type = type,
-            FilePath = external ? null : Path.Combine(_root, (file ?? "src/" + name.Split('.')[0] + ".cs").Replace('/', Path.DirectorySeparatorChar)),
+            FilePath = external ? null
+                : path ?? Path.Combine(_root, (file ?? "src/" + name.Split('.')[0] + ".cs").Replace('/', Path.DirectorySeparatorChar)),
             StartLine = line,
             EndLine = endLine ?? line,
             StartCol = col,
