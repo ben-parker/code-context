@@ -73,6 +73,7 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
         public bool SawTerminalProgress { get; set; }
         public int DeltasReceived { get; set; }
         public bool SawLastDelta { get; set; }
+        public bool RequiresWorkspaceReplacement { get; init; }
         public bool SawWorkspaceReplacement { get; set; }
         public bool SawFileScopedDelta { get; set; }
 
@@ -508,6 +509,11 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
                 $"analysis/delta for request {delta.RequestId} reported workspace/generation " +
                 $"'{delta.WorkspaceId}'/{delta.Generation}, expected '{active.WorkspaceId}'/{active.Generation}.");
         }
+        if (active.RequiresWorkspaceReplacement && !delta.ReplacesWorkspace)
+        {
+            throw new ParserProtocolViolationException(
+                $"workspace/index without a baseline sent a file-scoped delta for request {delta.RequestId}.");
+        }
         if (active.SawLastDelta)
         {
             throw new ParserProtocolViolationException(
@@ -852,7 +858,10 @@ public sealed class ParserProcessSupervisor : IAsyncDisposable
                     parameters.WorkspaceId, parameters.Generation, origin, expectedFiles, progressHandler,
                     ex => _logger.LogWarning(ex,
                         "Progress observer failed for parser '{ParserId}', generation {Generation}.",
-                        _spec.ParserId, parameters.Generation));
+                        _spec.ParserId, parameters.Generation))
+                {
+                    RequiresWorkspaceReplacement = parameters.Baseline is null,
+                };
                 if (!_activeMutations.TryAdd(id, active))
                 {
                     throw new InvalidOperationException($"Request id {id} is already active.");

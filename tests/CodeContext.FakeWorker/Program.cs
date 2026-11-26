@@ -244,7 +244,7 @@ internal sealed class WorkerState(
         }
         else
         {
-            delta = BuildDelta(index.WorkspaceId, index.Generation, requestId, replacesWorkspace: true, index.Files);
+            delta = BuildDelta(index.WorkspaceId, index.Generation, requestId, replacesWorkspace: behavior != "index-with-file-scope", index.Files);
         }
         _files.Clear();
         _files.UnionWith(index.Files);
