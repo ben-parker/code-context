@@ -16,6 +16,39 @@ patch (a1f62fc) and largest-files-first walk (f4b16d8), so a 0.11 figure against
 shows what the cache bought, not what those patches bought. v0.10.0 is kept for history.
 v0.10.4 (enumeration patch only) is recorded for jellyfin cold start.
 
+## First edit after a cached start on 0.12
+
+Issue #39 asked whether the first-edit cost still warranted work. A Linux Release build of
+`4579d23` on .NET SDK 10.0.404 showed an extra 465–487 ms on the first body edit. The
+same edit reverted 10–16 ms more slowly. The historical Phase 11 runs saved 3–17 seconds
+on startup across three repositories. Accept the measured cost for this release.
+
+Median milliseconds over three new processes per cell:
+
+| Edited project | Start | First edit to visible graph | Write to worker request | Worker request through commit response | Revert to visible graph |
+|---|---|---:|---:|---:|---:|
+| Leaf | Cached | 1057 | 528 | 519 | 529 |
+| Leaf | Uncached | 570 | 531 | 34 | 519 |
+| Root | Cached | 1040 | 527 | 505 | 531 |
+| Root | Uncached | 575 | 529 | 37 | 515 |
+
+The fixture had two net10.0 projects with 60 source files each. Leaf referenced Root.
+Each file defined a class with two methods. The edit changed one method from returning
+a literal to calling a method in another class in the same project. In both start modes
+the edit ran two seconds after ready, then the same process reverted it. Both modes used
+the same checkout and executable. Cached runs required an accepted C# baseline; the
+uncached runs started with `--no-cache`. Startup order was reversed on the middle repeat.
+Background snapshot writes were delayed beyond the edit interval.
+
+The visible-graph time ended when a roughly 10 ms status poll observed the two new edges
+(a call and a reference), or their removal on revert. Host log receipt times bracketed the
+worker request from `session Indexing: applying` through `session Ready` for that generation.
+That interval includes dispatch, worker analysis, protocol traffic and host application of
+the delta. It accounts for the first-edit difference on this fixture. Attributing it to
+a specific Roslyn operation would require a worker CPU trace. These figures use a small
+synthetic workspace and a framework-dependent host; the Phase 11 comparison used published
+builds on Windows.
+
 ## Phase 11: v0.10.7 against the branch
 
 Taken 2026-11-06, 16:22-18:11, with the hardened harness (carried items 1-4, 8 and the

@@ -2614,6 +2614,9 @@ into the release.
 
 ## 9. Known items
 
+The 0.12 follow-up to the Phase 11 first-edit row below measured the cost on
+`4579d23`. We accept it for this release. See the [first-edit measurements](perf/persistent-fact-cache.md#first-edit-after-a-cached-start-on-012).
+
 | Item | Placement |
 |---|---|
 | CS8604 at `CSharpWorkspaceAnalyzer.cs:337` | Fixed in phase 6 |
@@ -2622,6 +2625,7 @@ into the release.
 | `JsonRpcConnectionTests.Notification_DispatchesToHandler` 30 s wait | Left as is; the cause of slow tests under suite load is unknown and out of scope. Phase 5 must not shorten it. |
 | Test worker starts needing `TestWorkerOptions.Patient()` | Rule for all phases; new real-worker tests use it |
 | `ParserProcessSupervisorTests` `CrashingRepeatedly...` and `MalformedOutput...` failed in 1 of 8 full-suite runs on `main` ("The pipe is being closed", state `Failed` where `Unavailable` is expected) | Predates this work: a race in how the supervisor classifies a dying worker. Phase 9 changes that code. If the hibernation work explains it, fix it with a test; if not, record what was seen. The assertion is not loosened. A failure of these two tests in a gate run before phase 9 is re-run once and recorded, not treated as a regression of the phase |
+| CI evidence for the three supervisor races in #39 | The PR-head test runs for #8–10, #31–32 and #40–42 showed no failure of `CrashingRepeatedly…`, `MalformedOutput…`, or `SlowProgressObserver…`. The [failed Ubuntu job on #40](https://github.com/ben-parker/code-context/actions/runs/45746678237/job/139664315551) reported a hibernation timeout and a seed-1 snapshot convergence failure. Keep the existing state assertions and 2 s response bound. Reopen diagnosis on a named failure with the OS, job log and test name. |
 | Dedicated skill pass | Done, closing step 2 |
 | First edit after a cached start, +0.33 to +0.50 s | Accepted for 0.11; tracing it moves to 0.12 with phase 10 |
 | `codecontext stop` kills the process tree after 5 s, while the final capture may take 10 s | Fixed. The CLI waits for the default final-flush budget plus 5 s for host shutdown before its identity-checked kill fallback. |
