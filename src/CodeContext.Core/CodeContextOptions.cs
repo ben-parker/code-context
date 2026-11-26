@@ -5,6 +5,9 @@ namespace CodeContext.Core
     {
         public const string SectionName = "CodeContext";
 
+        /// <summary>Time the host allows for its final snapshot during shutdown.</summary>
+        public static readonly TimeSpan DefaultSnapshotShutdownFlushTimeout = TimeSpan.FromSeconds(10);
+
         public string RootPath { get; set; } = string.Empty;
         /// <summary>Random identifier for this host instance; /api/shutdown requires it.</summary>
         public string InstanceId { get; set; } = string.Empty;
