@@ -136,6 +136,59 @@ public sealed class PersistentStateTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task WatcherBatchAheadOfStartupRefresh_RemainsVerifyingUntilTheFullScanRepairsTheGraph()
+    {
+        await FirstRunAsync();
+        File.Delete(Path.Combine(Root, "b.fake"));
+        var added = Path.Combine(Root, "c.fake");
+        File.WriteAllText(added, "new file");
+
+        await using var second = Start("persistent-state");
+        await second.Coordinator.NotifyFileChangedAsync(added, FileChangeType.Created);
+        // Maintenance dequeued while coalescing runs after the batch, before the queued refresh.
+        var between = second.Coordinator.RunMaintenanceAsync(_ =>
+        {
+            Assert.Contains(second.Database.EnumerateNodes(), node => node.FilePath == added);
+            Assert.Equal(CacheState.Verifying, second.CacheState.GetNotice()!.State);
+            Assert.Equal(ScanPhase.Scanning, second.ScanState.Phase);
+            return Task.CompletedTask;
+        });
+        Assert.NotNull(await second.Coordinator.TryRequestFullRescanAsync());
+        await second.StartAsync();
+        await between.WaitAsync(TimeSpan.FromSeconds(30));
+        await second.WaitForAsync(() => second.ScanState.Phase == ScanPhase.Ready, "the requested full scan");
+        Assert.Equal(CacheState.Verified, second.CacheState.GetStatus()!.State);
+
+        await using var fresh = Start("persistent-state", cache: false);
+        await fresh.StartAsync();
+        await fresh.WaitForAsync(() => fresh.ScanState.Phase == ScanPhase.Ready, "a fresh scan");
+        Assert.Equal(GraphFacts.Of(fresh.Database), GraphFacts.Of(second.Database));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task MissingCacheDirectoryEntry_RebuildsTheCurrentFacts(bool loseSnapshot)
+    {
+        await FirstRunAsync();
+        // Model the files visible on restart if one rename did not survive a power loss.
+        File.Delete(loseSnapshot ? NewestPath() : Path.Combine(Workspace, Assert.Single(StateFiles())));
+        File.Delete(Path.Combine(Root, "b.fake"));
+        File.WriteAllText(Path.Combine(Root, "c.fake"), "new file");
+
+        await using var second = Start("persistent-state");
+        await second.StartAsync();
+        await second.WaitForAsync(() => second.ScanState.Phase == ScanPhase.Ready, "the recovery scan");
+        Assert.True(Assert.Single(second.Sink.Deltas).ReplacesWorkspace);
+        await using var fresh = Start("persistent-state", cache: false);
+        await fresh.StartAsync();
+        await fresh.WaitForAsync(() => fresh.ScanState.Phase == ScanPhase.Ready, "a fresh scan");
+        Assert.Equal(GraphFacts.Of(fresh.Database), GraphFacts.Of(second.Database));
+        await second.StopAsync();
+        Assert.Equal(CacheState.Baseline, await NextVerificationAsync());
+    }
+
+    [Fact]
     public async Task EditedWhileDown_TheAcceptedBaselineCommitsOnlyWhatChanged_AndEqualsAFreshScan()
     {
         await FirstRunAsync();
