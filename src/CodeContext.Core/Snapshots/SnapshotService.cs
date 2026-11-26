@@ -933,7 +933,11 @@ namespace CodeContext.Core.Snapshots
                 {
                     if (file.Kind == CacheFileKind.WorkerState ? referenced.Contains(file.Name)
                         : file.Kind != CacheFileKind.WorkerStateTemp && SnapshotStartup.IsUsable(file.Sequence) && file.Sequence >= sequence) continue;
-                    if (!CacheDirectory.TryDelete(file)) busy++;
+                    lock (_gate)
+                    {
+                        if (!MayDeleteLocked()) return;
+                        if (!CacheDirectory.TryDelete(file)) busy++;
+                    }
                 }
                 if (busy > 0) _logger.LogDebug("{Count} older snapshot file(s) are in use and will be deleted later.", busy);
             }
@@ -1217,9 +1221,8 @@ namespace CodeContext.Core.Snapshots
                 {
                     if (_status.Mode == SnapshotCacheMode.Writer) _status = _status with { Mode = SnapshotCacheMode.Stopped };
                     // A write still running here (the flush timed out) keeps the lock only until Dispose,
-                    // which releases it at once whether or not that write has finished: the write may then
-                    // rename and retire without holding the lock. It touches only this code's names, and a
-                    // later writer's start-up cleanup removes whatever it leaves.
+                    // which releases it even if the write has not finished. The write may still rename
+                    // its snapshot, but only the current writer may retire files.
                     if (_writeTask.IsCompleted) ReleaseLockLocked();
                 }
             }
