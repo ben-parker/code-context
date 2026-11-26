@@ -1,10 +1,14 @@
 using System.Diagnostics;
+using CodeContext.Core;
 using CodeContext.Core.Instances;
 
 namespace CodeContext.Api.Commands;
 
 public static class StopCommandHandler
 {
+    // The shutdown endpoint acknowledges before stopping the host. Allow time on either side of the final flush.
+    internal static readonly TimeSpan GracefulExitTimeout = CodeContextOptions.DefaultSnapshotShutdownFlushTimeout + TimeSpan.FromSeconds(5);
+
     public static async Task<int> ExecuteAsync(string? path, bool all, CancellationToken ct)
     {
         var registry = new InstanceRegistry();
@@ -58,7 +62,7 @@ public static class StopCommandHandler
                 // instance not responding — fall through to the kill path
             }
 
-            if (!await WaitForExitAsync(instance.Pid, TimeSpan.FromSeconds(5), ct))
+            if (!await WaitForExitAsync(instance.Pid, GracefulExitTimeout, ct))
             {
                 try
                 {

@@ -22,7 +22,7 @@ namespace CodeContext.Core.Snapshots
 
         private readonly TimeSpan _quietPeriod = TimeSpan.FromSeconds(10);
         private readonly TimeSpan _maxDelay = TimeSpan.FromSeconds(120);
-        private readonly TimeSpan _shutdownFlushTimeout = TimeSpan.FromSeconds(10);
+        private readonly TimeSpan _shutdownFlushTimeout = CodeContextOptions.DefaultSnapshotShutdownFlushTimeout;
         private readonly TimeSpan _saveStateTimeout = TimeSpan.FromSeconds(5);
 
         public bool Enabled { get; init; }
