@@ -710,6 +710,28 @@ public class ParserProcessSupervisorTests
         Assert.False(supervisor.DeclaresPersistentState);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task IndexWithoutBaseline_RejectsFileScopeBeforeDispatch(bool empty)
+    {
+        await using var supervisor = CreateSupervisor(FakeWorkerSpec("--behavior", "index-with-file-scope"));
+        var deltas = Recording(supervisor);
+        await Assert.ThrowsAsync<ParserWorkerFailedException>(() =>
+            supervisor.IndexWorkspaceAsync(new IndexWorkspaceParams("ws-1", 1, empty ? [] : ["a.fake"])));
+        Assert.Empty(deltas);
+    }
+
+    [Fact]
+    public async Task EmptyIndexWithoutBaseline_AcceptsWorkspaceReplacement()
+    {
+        await using var supervisor = CreateSupervisor(FakeWorkerSpec());
+        var deltas = Recording(supervisor);
+        var result = await supervisor.IndexWorkspaceAsync(new IndexWorkspaceParams("ws-1", 1, []));
+        Assert.True(result.Complete);
+        Assert.True(Assert.Single(deltas).ReplacesWorkspace);
+    }
+
     [Fact]
     public async Task AcceptedBaseline_CommitsAFileScopedDelta()
     {
