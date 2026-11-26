@@ -779,5 +779,49 @@ public partial class SnapshotServiceTests
         Assert.Equal([orphan], harness.StateFiles());
     }
 
+    [Fact]
+    public async Task SuccessfulWrite_AfterWriterHandoff_PreservesTheNextWritersState()
+    {
+        var retiring = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var release = new System.Threading.ManualResetEventSlim();
+        await using var first = new SnapshotServiceHarness(configure: settings => settings with
+        {
+            BeforeRetire = () =>
+            {
+                retiring.SetResult();
+                release.Wait();
+            },
+        });
+        await first.StartAsync();
+        await first.CommitAsync();
+
+        var database = new InMemoryDatabase();
+        var saver = new StubStateSaver(database);
+        await using var next = new SnapshotServiceHarness(first.BasePath, database: database, workers: saver);
+        var stop = first.Service.StopAsync(default);
+        try
+        {
+            await retiring.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            first.Time.Advance(first.Settings.ShutdownFlushTimeout);
+            await stop.WaitAsync(TimeSpan.FromSeconds(10));
+            first.Service.Dispose();
+
+            await next.StartAsync();
+            Assert.Equal(SnapshotCacheMode.Writer, next.Service.Status.Mode);
+            await next.CommitAsync(() => next.CommitFacts(2, annotation: Produced(1)));
+            await next.AdvanceAsync(Quiet);
+        }
+        finally
+        {
+            release.Set();
+            await first.Service.CurrentWrite.WaitAsync(TimeSpan.FromSeconds(10));
+        }
+
+        Assert.Equal(1, first.Service.Status.WritesCompleted);
+        var stateName = Path.GetFileName(Assert.Single(saver.Calls).Parameters.StatePath);
+        Assert.Equal(stateName, FakeShardInfo(next).StateFileName);
+        Assert.Equal([stateName], next.StateFiles());
+    }
+
     private static string NewBase() => Path.Combine(Path.GetTempPath(), "ccsnap-" + Guid.NewGuid().ToString("N"));
 }
